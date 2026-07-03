@@ -1300,10 +1300,18 @@ impl CimApp {
         }
 
         // True value extent under the graph: min at left, max at right.
+        // Whole numbers (integer sources) print plainly; floats get 4 digits.
+        let fmt = |v: f32| -> String {
+            if v.fract() == 0.0 {
+                format!("{}", v as i64)
+            } else {
+                format!("{v:.4}")
+            }
+        };
         ui.horizontal(|ui| {
-            ui.monospace(format!("min {}", data.min));
+            ui.monospace(format!("min {}", fmt(data.min)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.monospace(format!("max {}", data.max));
+                ui.monospace(format!("max {}", fmt(data.max)));
             });
         });
     }
