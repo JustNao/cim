@@ -60,6 +60,9 @@ struct Pane {
     clip: bool,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
+    /// "Load all" requested: keep requesting missing + frontier frames until the
+    /// whole sequence is resident and its end is found.
+    eager: bool,
 }
 
 pub struct CimApp {
@@ -202,6 +205,7 @@ impl CimApp {
                         visible: true,
                         clip,
                         error: None,
+                        eager: false,
                     });
                 }
                 Err(e) => {
@@ -277,6 +281,24 @@ impl CimApp {
             .max(1)
     }
 
+    /// Whether the timeline-driving media's true end is known. Until it is, the
+    /// timeline holds at the last discovered frame rather than wrapping early.
+    fn current_at_end(&self) -> bool {
+        self.panes.get(self.current).map_or(true, |p| p.media.at_end())
+    }
+
+    /// Pixel size of the frame actually on screen for pane `i`. Pages in a
+    /// sequence may differ in resolution, so use the resident frame's own size,
+    /// falling back to the page-0 size before anything has decoded.
+    fn disp_size(&self, i: usize) -> [usize; 2] {
+        let f = self.frame_disp(i);
+        self.panes[i]
+            .media
+            .resident(f)
+            .map(|fr| fr.size)
+            .unwrap_or_else(|| self.panes[i].media.size())
+    }
+
     fn visible_indices(&self) -> Vec<usize> {
         (0..self.panes.len())
             .filter(|&i| self.panes[i].visible)
@@ -289,10 +311,16 @@ impl CimApp {
         for d in self.decoder.drain() {
             self.inflight.remove(&(d.id, d.frame));
             match d.result {
-                Ok(frame) => {
+                Ok(Some(frame)) => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
                         p.error = None; // a good frame clears any stale error
+                    }
+                }
+                Ok(None) => {
+                    // Frontier probe found no page here: the sequence ends before it.
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
+                        p.media.set_at_end();
                     }
                 }
                 Err(e) => {
@@ -316,21 +344,59 @@ impl CimApp {
     }
 
     fn load_all(&mut self) {
-        for i in 0..self.panes.len() {
-            let n = self.panes[i].media.frame_count();
-            for f in 0..n {
-                if self.panes[i].media.resident(f).is_none() {
-                    self.request(i, f);
-                }
-            }
+        for p in &mut self.panes {
+            p.eager = true;
         }
         self.status = "Queued all frames for background decoding…".into();
         self.decoding_all = true;
     }
 
+    /// While "Load all" is active, keep every eager pane requesting its missing
+    /// known frames plus one frontier probe, so an unknown-length sequence loads
+    /// fully and reveals its end. A pane clears its flag once every frame is
+    /// resident and its end has been found.
+    fn drive_eager(&mut self) {
+        for i in 0..self.panes.len() {
+            if !self.panes[i].eager {
+                continue;
+            }
+            let known = self.panes[i].media.frame_count();
+            let mut pending = false;
+            for f in 0..known {
+                if self.panes[i].media.resident(f).is_none() {
+                    self.request(i, f);
+                    pending = true;
+                }
+            }
+            if !self.panes[i].media.at_end() {
+                self.request(i, known); // probe for a next page
+                pending = true;
+            }
+            if !pending {
+                self.panes[i].eager = false;
+            }
+        }
+    }
+
+    /// Keep the next page discovered for panes the user is browsing, so stepping
+    /// forward and the timeline length stay ahead of the cursor without ever
+    /// decoding past what's actually being viewed.
+    fn ensure_lookahead(&mut self) {
+        for i in 0..self.panes.len() {
+            if self.panes[i].eager || self.panes[i].media.at_end() {
+                continue;
+            }
+            let known = self.panes[i].media.frame_count();
+            // Probe one page beyond the frame currently shown.
+            if self.frame_disp(i) + 2 > known {
+                self.request(i, known);
+            }
+        }
+    }
+
     /// Clear the "decoding…" status once the whole batch has landed.
     fn poll_decoding_all(&mut self) {
-        if self.decoding_all && self.inflight.is_empty() {
+        if self.decoding_all && !self.panes.iter().any(|p| p.eager) && self.inflight.is_empty() {
             self.decoding_all = false;
             if self.status == "Queued all frames for background decoding…" {
                 self.status.clear();
@@ -405,11 +471,20 @@ impl CimApp {
             Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
             Action::NextFrame => {
                 let tl = self.timeline_len();
-                self.shared_frame = (self.shared_frame + 1) % tl;
+                if self.shared_frame + 1 < tl {
+                    self.shared_frame += 1;
+                } else if self.current_at_end() {
+                    self.shared_frame = 0; // wrap only once the real length is known
+                }
+                // else hold at the frontier; lookahead extends it shortly
             }
             Action::PrevFrame => {
                 let tl = self.timeline_len();
-                self.shared_frame = (self.shared_frame + tl - 1) % tl;
+                if self.shared_frame > 0 {
+                    self.shared_frame -= 1;
+                } else if self.current_at_end() {
+                    self.shared_frame = tl - 1;
+                }
             }
             Action::ResetView => {
                 self.shared_view.needs_fit = true;
@@ -450,7 +525,8 @@ impl CimApp {
             return;
         }
         let tl = self.timeline_len();
-        if tl <= 1 {
+        let at_end = self.current_at_end();
+        if tl <= 1 && at_end {
             return;
         }
         let dt = ctx.input(|i| i.stable_dt).min(0.25);
@@ -458,11 +534,24 @@ impl CimApp {
         let step = 1.0 / self.fps.max(0.1);
         while self.play_accum >= step {
             self.play_accum -= step;
-            self.shared_frame = (self.shared_frame + 1) % tl;
+            if self.shared_frame + 1 < tl {
+                self.shared_frame += 1;
+            } else if at_end {
+                self.shared_frame = 0;
+            } else {
+                // At the discovered frontier — wait for the next page rather than
+                // wrapping early; drop the backlog so we don't burst afterwards.
+                self.play_accum = 0.0;
+                break;
+            }
             for p in &mut self.panes {
                 if !p.sync_temporal {
-                    let c = p.media.frame_count().max(1);
-                    p.frame = (p.frame + 1) % c;
+                    let c = p.media.frame_count();
+                    if p.frame + 1 < c {
+                        p.frame += 1;
+                    } else if p.media.at_end() {
+                        p.frame = 0;
+                    }
                 }
             }
         }
@@ -778,7 +867,7 @@ impl CimApp {
         painter.rect_filled(img_area, 0.0, Color32::from_gray(24));
         if let Some(id) = tex {
             let v = *self.view_ref(idx);
-            let rect = v.image_rect(size, img_area);
+            let rect = v.image_rect(self.disp_size(idx), img_area);
             painter.image(id, rect, uv(), Color32::WHITE);
         }
         if loading {
@@ -875,12 +964,19 @@ impl CimApp {
                 (true, false) => "  ⊘time",
                 (false, false) => "  ⊘pos ⊘time",
             };
+            // Until the real end is found, show the known count with a "+" so
+            // it's clear more frames may still be discovered.
+            let count_str = if self.panes[idx].media.at_end() {
+                format!("{count}")
+            } else {
+                format!("{count}+")
+            };
             format!(
                 "{}  {}   {}/{}  ({} in mem){}",
                 idx + 1,
                 name,
                 self.frame_disp(idx) + 1,
-                count,
+                count_str,
                 resident,
                 sync
             )
@@ -928,7 +1024,7 @@ impl CimApp {
         let fp = ui.painter_at(footer);
         fp.rect_filled(footer, 0.0, Color32::from_gray(28));
 
-        let [w, h] = self.panes[idx].media.size();
+        let [w, h] = self.disp_size(idx);
         let mut text = format!("{h}×{w}");
 
         if let Some(pos) = hover {
@@ -1063,8 +1159,7 @@ impl CimApp {
         let painter = ui.painter_at(clip);
         painter.rect_filled(clip, 0.0, Color32::from_gray(18));
         if let Some(id) = tex {
-            let size = self.panes[idx].media.size();
-            let rect = self.view_ref(idx).image_rect(size, area);
+            let rect = self.view_ref(idx).image_rect(self.disp_size(idx), area);
             painter.image(id, rect, uv(), Color32::WHITE);
         }
         if loading {
@@ -1748,9 +1843,14 @@ impl eframe::App for CimApp {
         }
 
         self.pump_decoder();
-        self.poll_decoding_all();
         self.handle_input(ctx);
         self.advance_playback(ctx);
+
+        // Discover sequence length lazily: eager "Load all" batches drive to the
+        // end, otherwise just keep one page ahead of the cursor.
+        self.drive_eager();
+        self.ensure_lookahead();
+        self.poll_decoding_all();
 
         // Keep the shared timeline within the selected media's range.
         let tl = self.timeline_len();

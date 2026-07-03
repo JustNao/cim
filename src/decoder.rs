@@ -22,7 +22,9 @@ struct Job {
 pub struct Done {
     pub id: u64,
     pub frame: usize,
-    pub result: Result<Arc<FrameData>>,
+    /// `Ok(Some)` decoded frame, `Ok(None)` the page was past the sequence end
+    /// (a frontier probe that found nothing), `Err` a genuine decode failure.
+    pub result: Result<Option<Arc<FrameData>>>,
 }
 
 pub struct BackgroundDecoder {
@@ -46,7 +48,7 @@ impl BackgroundDecoder {
                     Ok(job) => job,
                     Err(_) => break, // sender dropped: app is shutting down
                 };
-                let result = decode_tiff_page(&job.path, job.frame).map(Arc::new);
+                let result = decode_tiff_page(&job.path, job.frame).map(|f| f.map(Arc::new));
                 if done_tx
                     .send(Done {
                         id: job.id,

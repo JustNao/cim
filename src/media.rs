@@ -335,7 +335,11 @@ pub struct TiffSeq {
     path: PathBuf,
     size: [usize; 2],
     hi_depth: bool,
+    /// Frames known so far. Grows lazily as later pages are decoded — we never
+    /// walk the whole file to learn its length.
     cache: Vec<Option<Arc<FrameData>>>,
+    /// Set once a probe past `cache.len()` found no more pages: the real end.
+    at_end: bool,
 }
 
 impl Media {
@@ -384,9 +388,28 @@ impl Media {
 
     pub fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
         if let Media::TiffSeq(t) = self {
-            if let Some(slot) = t.cache.get_mut(idx) {
-                *slot = Some(frame);
+            if idx < t.cache.len() {
+                t.cache[idx] = Some(frame);
+            } else if idx == t.cache.len() {
+                // A frontier probe discovered the next page: extend the length.
+                t.cache.push(Some(frame));
             }
+        }
+    }
+
+    /// True once we've confirmed there is no page beyond what we already know
+    /// (always true for a still).
+    pub fn at_end(&self) -> bool {
+        match self {
+            Media::Still(_) => true,
+            Media::TiffSeq(t) => t.at_end,
+        }
+    }
+
+    /// Record that a frontier probe found no further page.
+    pub fn set_at_end(&mut self) {
+        if let Media::TiffSeq(t) = self {
+            t.at_end = true;
         }
     }
 
@@ -455,29 +478,31 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
     let (w, h) = dec.dimensions()?;
     let hi_depth = color_bits(dec.colortype()?) > 8;
 
-    // Count pages by walking IFDs (cheap: only metadata is read).
-    let mut pages = 1usize;
-    while dec.more_images() {
-        dec.next_image()?;
-        pages += 1;
-    }
-
+    // Only page 0 is inspected here. The page count is discovered lazily as
+    // later frames are shown — walking every IFD up front would stall opening a
+    // long sequence, and pages may even differ in resolution.
     Ok(Media::TiffSeq(TiffSeq {
         name,
         path: path.to_path_buf(),
         size: [w as usize, h as usize],
         hi_depth,
-        cache: vec![None; pages],
+        cache: vec![None],
+        at_end: false,
     }))
 }
 
 /// Decode a single TIFF page at native bit depth. Stateless / `Send`-safe.
-pub fn decode_tiff_page(path: &Path, idx: usize) -> Result<FrameData> {
+/// Returns `Ok(None)` when `idx` is past the last page — that's how the caller
+/// discovers the true length without counting pages ahead of time.
+pub fn decode_tiff_page(path: &Path, idx: usize) -> Result<Option<FrameData>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut dec = Decoder::new(BufReader::new(file))?;
-    dec.seek_to_image(idx)
-        .with_context(|| format!("seek to page {idx}"))?;
-    decode_current(&mut dec)
+    // A fresh decoder already sits on page 0; only seek for later pages. A seek
+    // failure means the page doesn't exist → end of sequence.
+    if idx > 0 && dec.seek_to_image(idx).is_err() {
+        return Ok(None);
+    }
+    decode_current(&mut dec).map(Some)
 }
 
 fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
@@ -524,6 +549,38 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
         channels,
         samples,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Opening a TIFF must not walk the whole file: the length starts at one
+    /// page and pages are discovered by decoding, with `Ok(None)` marking the
+    /// end. Skips gracefully when the fixture isn't present.
+    #[test]
+    fn tiff_length_is_discovered_lazily() {
+        let path = Path::new("examples/alpes_noisy_a.tif");
+        if !path.exists() {
+            return;
+        }
+        let m = load(path).expect("open tiff");
+        // Fresh open knows only the first page and hasn't confirmed the end.
+        assert_eq!(m.frame_count(), 1);
+        assert!(!m.at_end());
+
+        // Walk pages the way the app does until a probe finds nothing.
+        let mut pages = 0;
+        loop {
+            match decode_tiff_page(path, pages).expect("decode") {
+                Some(_) => pages += 1,
+                None => break,
+            }
+        }
+        assert!(pages >= 1, "at least one page must decode");
+        // Probing exactly at the end reports None, not an error.
+        assert!(decode_tiff_page(path, pages).unwrap().is_none());
+    }
 }
 
 /// Bits per sample carried by a TIFF colour type.

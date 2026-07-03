@@ -80,8 +80,9 @@ impl ExportPane {
         let frame = match &self.source {
             ExportSource::Still(f) => f.clone(),
             ExportSource::Seq { path, .. } => match decode_tiff_page(path, idx) {
-                Ok(f) => Arc::new(f),
-                Err(_) => return, // keep last good frame on error
+                Ok(Some(f)) => Arc::new(f),
+                // No page here (past the end) or a decode error: keep last frame.
+                Ok(None) | Err(_) => return,
             },
         };
         self.cur_size = frame.size;
@@ -300,7 +301,9 @@ mod tests {
             return; // fixtures not present
         }
         let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(320.0, 240.0));
-        let frame0 = decode_tiff_page(&src, 0).expect("decode page 0");
+        let frame0 = decode_tiff_page(&src, 0)
+            .expect("decode page 0")
+            .expect("page 0 exists");
         let mut view = ViewTransform::default();
         view.fit(frame0.size, area);
 
