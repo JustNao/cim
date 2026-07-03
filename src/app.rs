@@ -1,0 +1,1772 @@
+//! Application state and the egui update loop.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use eframe::egui::{
+    self, Align2, Color32, ColorImage, FontId, Id, Key, Pos2, Rect, Sense, Stroke, TextureHandle,
+    TextureId, TextureOptions, Vec2,
+};
+
+use crate::decoder::BackgroundDecoder;
+use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
+use crate::media::{self, HistData, Media};
+use crate::settings::{Action, Config, Interpolation};
+use crate::view::ViewTransform;
+
+/// An in-progress export: encoder + snapshotted plan + progress.
+struct ExportRun {
+    enc: Encoder,
+    plan: ExportPlan,
+    frame: usize,
+    total: usize,
+    path: String,
+}
+
+const HEADER_H: f32 = 24.0;
+const FOOTER_H: f32 = 20.0;
+const GAP: f32 = 6.0;
+const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Grid,
+    Single,
+    Ab,
+}
+
+struct CachedTex {
+    handle: TextureHandle,
+    shown: usize, // frame index currently uploaded
+}
+
+/// Cached histogram for the media shown in the Visualise panel.
+struct HistCache {
+    key: (u64, usize), // (pane id, frame) this was computed for
+    data: HistData,
+}
+
+/// One opened media plus its per-pane view/timeline state.
+struct Pane {
+    id: u64, // stable across reorder/close; matches background-decode results
+    media: Media,
+    tex: Option<CachedTex>,
+    transform: ViewTransform, // used only when !sync_spatial
+    frame: usize,             // used only when !sync_temporal
+    sync_spatial: bool,
+    sync_temporal: bool,
+    visible: bool,
+    /// Per-pane 0.01% percentile auto-contrast (independent of other panes).
+    clip: bool,
+}
+
+pub struct CimApp {
+    config: Config,
+    panes: Vec<Pane>,
+    next_id: u64,
+
+    // Shared view/timeline that every synced pane follows.
+    shared_view: ViewTransform,
+    shared_frame: usize,
+
+    mode: Mode,
+    current: usize, // focused pane (single view / keyboard target)
+    slot_a: usize,  // A/B view operands
+    slot_b: usize,
+    ab_split: f32, // 0..1 divider position
+    ab_handle_grabbed: bool,
+
+    playing: bool,
+    fps: f32,
+    play_accum: f32,
+
+    show_settings: bool,
+    show_manager: bool,
+    show_vis: bool,
+    hist: Option<HistCache>,
+    rebinding: Option<Action>,
+
+    // Export
+    show_export: bool,
+    export_mode: Mode,
+    export_region: Option<Rect>, // in central-area coords; None = full view
+    selecting_region: bool,
+    sel_start: Option<Pos2>,
+    out_height: u32,
+    crf: u32,
+    export_fps: f32,
+    export_path: Option<PathBuf>,
+    export_run: Option<ExportRun>,
+    cancel_export: bool,
+    export_status: String,
+    status: String,
+    last_area: Rect,
+    drag_src: Option<usize>,
+    pending_remove: Option<usize>,
+
+    decoder: BackgroundDecoder,
+    inflight: HashSet<(u64, usize)>,
+}
+
+impl CimApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, startup: Vec<PathBuf>) -> Self {
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.visuals = egui::Visuals::dark();
+        style.visuals.window_rounding = 8.0.into();
+        cc.egui_ctx.set_style(style);
+
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 6))
+            .unwrap_or(4);
+
+        let mut app = Self {
+            config: Config::load(),
+            panes: Vec::new(),
+            next_id: 0,
+            shared_view: ViewTransform::default(),
+            shared_frame: 0,
+            mode: Mode::Grid,
+            current: 0,
+            slot_a: 0,
+            slot_b: 0,
+            ab_split: 0.5,
+            ab_handle_grabbed: false,
+            playing: false,
+            fps: 12.0,
+            play_accum: 0.0,
+            show_settings: false,
+            show_manager: false,
+            show_vis: false,
+            hist: None,
+            rebinding: None,
+
+            show_export: false,
+            export_mode: Mode::Grid,
+            export_region: None,
+            selecting_region: false,
+            sel_start: None,
+            out_height: 720,
+            crf: 23,
+            export_fps: 12.0,
+            export_path: None,
+            export_run: None,
+            cancel_export: false,
+            export_status: String::new(),
+            status: String::new(),
+            last_area: Rect::NOTHING,
+            drag_src: None,
+            pending_remove: None,
+            decoder: BackgroundDecoder::new(threads),
+            inflight: HashSet::new(),
+        };
+        app.open_paths(startup);
+        app
+    }
+
+    // ---- loading ---------------------------------------------------------
+
+    fn open_dialog(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter(
+                "Images & sequences",
+                &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_files()
+        {
+            self.open_paths(paths);
+        }
+    }
+
+    fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        for p in paths {
+            match media::load(&p) {
+                Ok(m) => {
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    let clip = m.hi_depth(); // >8-bit sources auto-contrast by default
+                    self.panes.push(Pane {
+                        id,
+                        media: m,
+                        tex: None,
+                        transform: ViewTransform::default(),
+                        frame: 0,
+                        sync_spatial: true,
+                        sync_temporal: true,
+                        visible: true,
+                        clip,
+                    });
+                }
+                Err(e) => self.status = format!("Failed to open {}: {e}", p.display()),
+            }
+        }
+        let n = self.panes.len();
+        self.current = self.current.min(n.saturating_sub(1));
+        self.slot_a = self.slot_a.min(n.saturating_sub(1));
+        self.slot_b = self.slot_b.min(n.saturating_sub(1));
+        if n >= 2 && self.slot_a == self.slot_b {
+            self.slot_b = self.slot_a + 1;
+        }
+        self.shared_view.needs_fit = true;
+    }
+
+    fn remove_media(&mut self, i: usize) {
+        if i >= self.panes.len() {
+            return;
+        }
+        self.panes.remove(i);
+        let n = self.panes.len();
+        let fix = |v: &mut usize| {
+            if *v > i {
+                *v -= 1;
+            }
+            *v = (*v).min(n.saturating_sub(1));
+        };
+        fix(&mut self.current);
+        fix(&mut self.slot_a);
+        fix(&mut self.slot_b);
+    }
+
+    // ---- per-pane state resolution --------------------------------------
+
+    fn view_ref(&self, i: usize) -> &ViewTransform {
+        if self.panes[i].sync_spatial {
+            &self.shared_view
+        } else {
+            &self.panes[i].transform
+        }
+    }
+
+    fn view_mut(&mut self, i: usize) -> &mut ViewTransform {
+        if self.panes[i].sync_spatial {
+            &mut self.shared_view
+        } else {
+            &mut self.panes[i].transform
+        }
+    }
+
+    /// Frame actually shown. Synced media follow the shared timeline but a
+    /// shorter sequence *holds on its last frame* once the timeline runs past
+    /// its end (rather than wrapping early), then loops with the selected media.
+    /// Un-synced media wrap within their own length.
+    fn frame_disp(&self, i: usize) -> usize {
+        let c = self.panes[i].media.frame_count().max(1);
+        if self.panes[i].sync_temporal {
+            self.shared_frame.min(c - 1)
+        } else {
+            self.panes[i].frame % c
+        }
+    }
+
+    /// Length of the shared timeline: the currently selected media drives the
+    /// loop. Other synced sequences clamp/hold against this length.
+    fn timeline_len(&self) -> usize {
+        self.panes
+            .get(self.current)
+            .map(|p| p.media.frame_count())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn visible_indices(&self) -> Vec<usize> {
+        (0..self.panes.len())
+            .filter(|&i| self.panes[i].visible)
+            .collect()
+    }
+
+    // ---- background decode plumbing -------------------------------------
+
+    fn pump_decoder(&mut self) {
+        for d in self.decoder.drain() {
+            self.inflight.remove(&(d.id, d.frame));
+            match d.result {
+                Ok(frame) => {
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
+                        p.media.insert(d.frame, frame);
+                    }
+                }
+                Err(e) => self.status = format!("decode error: {e}"),
+            }
+        }
+    }
+
+    fn request(&mut self, idx: usize, frame: usize) {
+        let id = self.panes[idx].id;
+        if self.inflight.contains(&(id, frame)) {
+            return;
+        }
+        if let Some(path) = self.panes[idx].media.decode_job(frame) {
+            self.decoder.request(id, frame, path);
+            self.inflight.insert((id, frame));
+        }
+    }
+
+    fn load_all(&mut self) {
+        for i in 0..self.panes.len() {
+            let n = self.panes[i].media.frame_count();
+            for f in 0..n {
+                if self.panes[i].media.resident(f).is_none() {
+                    self.request(i, f);
+                }
+            }
+        }
+        self.status = "Queued all frames for background decoding…".into();
+    }
+
+    // ---- textures --------------------------------------------------------
+
+    fn tex_options(&self) -> TextureOptions {
+        let magnification = match self.config.vis.interp {
+            Interpolation::Nearest => egui::TextureFilter::Nearest,
+            Interpolation::Bilinear => egui::TextureFilter::Linear,
+        };
+        TextureOptions {
+            magnification,
+            minification: egui::TextureFilter::Linear,
+            ..Default::default()
+        }
+    }
+
+    /// Ensure pane `idx` shows the best texture available for its current frame.
+    /// Returns `(texture, loading)`: if the target frame is resident it uploads
+    /// and returns it (`loading = false`); otherwise it queues a decode and
+    /// returns the *previously shown* texture with `loading = true`, so the pane
+    /// keeps displaying the last frame while the new one decodes.
+    fn prepare(&mut self, ctx: &egui::Context, idx: usize) -> (Option<TextureId>, bool) {
+        let f = self.frame_disp(idx);
+        if let Some(frame) = self.panes[idx].media.resident(f) {
+            let need = match &self.panes[idx].tex {
+                Some(t) => t.shown != f,
+                None => true,
+            };
+            if need {
+                // Only run the (expensive) render + upload when the texture is stale.
+                let opts = self.tex_options();
+                let pixels = frame.render_rgba(self.panes[idx].clip);
+                let img = ColorImage::from_rgba_unmultiplied(frame.size, &pixels);
+                let p = &mut self.panes[idx];
+                match &mut p.tex {
+                    Some(t) => {
+                        t.handle.set(img, opts);
+                        t.shown = f;
+                    }
+                    None => {
+                        let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
+                        p.tex = Some(CachedTex { handle, shown: f });
+                    }
+                }
+            }
+            (Some(self.panes[idx].tex.as_ref().unwrap().handle.id()), false)
+        } else {
+            self.request(idx, f);
+            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
+            (last, true)
+        }
+    }
+
+    // ---- actions ---------------------------------------------------------
+
+    fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
+        let n = self.panes.len();
+        match action {
+            Action::ToggleView => {
+                self.mode = match self.mode {
+                    Mode::Grid => Mode::Single,
+                    Mode::Single => Mode::Ab,
+                    Mode::Ab => Mode::Grid,
+                };
+            }
+            Action::NextMedia if n > 0 => self.current = (self.current + 1) % n,
+            Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
+            Action::NextFrame => {
+                let tl = self.timeline_len();
+                self.shared_frame = (self.shared_frame + 1) % tl;
+            }
+            Action::PrevFrame => {
+                let tl = self.timeline_len();
+                self.shared_frame = (self.shared_frame + tl - 1) % tl;
+            }
+            Action::ResetView => {
+                self.shared_view.needs_fit = true;
+                for p in &mut self.panes {
+                    p.transform.needs_fit = true;
+                }
+            }
+            Action::ActualSize if n > 0 => {
+                let size = self.panes[self.current].media.size();
+                self.view_mut(self.current).actual_size(size);
+            }
+            Action::ZoomIn if n > 0 => {
+                let a = self.last_area;
+                self.view_mut(self.current).zoom_at(1.25, a.center(), a);
+            }
+            Action::ZoomOut if n > 0 => {
+                let a = self.last_area;
+                self.view_mut(self.current).zoom_at(1.0 / 1.25, a.center(), a);
+            }
+            Action::LoadAll => self.load_all(),
+            Action::OpenFiles => self.open_dialog(),
+            Action::ToggleSettings => self.show_settings = !self.show_settings,
+            Action::ToggleManager => self.show_manager = !self.show_manager,
+            Action::ToggleVis => self.show_vis = !self.show_vis,
+            Action::ToggleExport => self.toggle_export(),
+            Action::PlayPause => self.playing = !self.playing,
+            Action::SelectMedia(i) if i < n => {
+                self.current = i;
+                self.mode = Mode::Single;
+            }
+            _ => {}
+        }
+        ctx.request_repaint();
+    }
+
+    fn advance_playback(&mut self, ctx: &egui::Context) {
+        if !self.playing {
+            return;
+        }
+        let tl = self.timeline_len();
+        if tl <= 1 {
+            return;
+        }
+        let dt = ctx.input(|i| i.stable_dt).min(0.25);
+        self.play_accum += dt;
+        let step = 1.0 / self.fps.max(0.1);
+        while self.play_accum >= step {
+            self.play_accum -= step;
+            self.shared_frame = (self.shared_frame + 1) % tl;
+            for p in &mut self.panes {
+                if !p.sync_temporal {
+                    let c = p.media.frame_count().max(1);
+                    p.frame = (p.frame + 1) % c;
+                }
+            }
+        }
+    }
+
+    // ---- input -----------------------------------------------------------
+
+    fn handle_input(&mut self, ctx: &egui::Context) {
+        if let Some(action) = self.rebinding {
+            let key = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => Some(*key),
+                    _ => None,
+                })
+            });
+            if let Some(k) = key {
+                if k != Key::Escape {
+                    self.config.keybindings.set(action, k);
+                    self.config.save();
+                }
+                self.rebinding = None;
+            }
+            return;
+        }
+
+        for action in Action::all() {
+            if let Some(key) = self.config.keybindings.key_for(action) {
+                if ctx.input(|i| i.key_pressed(key)) {
+                    self.apply_action(action, ctx);
+                }
+            }
+        }
+
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.open_paths(dropped);
+        }
+    }
+
+    // ---- toolbar ---------------------------------------------------------
+
+    fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("📂 Open").clicked() {
+                self.open_dialog();
+            }
+            ui.separator();
+            for (mode, label) in [
+                (Mode::Grid, "▦ Grid"),
+                (Mode::Single, "▢ Single"),
+                (Mode::Ab, "◧ A/B"),
+            ] {
+                if ui.selectable_label(self.mode == mode, label).clicked() {
+                    self.mode = mode;
+                }
+            }
+            ui.separator();
+            if ui.button("Fit").clicked() {
+                self.apply_action_local(Action::ResetView);
+            }
+            if ui.button("100%").clicked() && !self.panes.is_empty() {
+                let size = self.panes[self.current].media.size();
+                self.view_mut(self.current).actual_size(size);
+            }
+            ui.label(format!("{:.0}%", self.view_zoom_label() * 100.0));
+
+            ui.separator();
+            let play = if self.playing { "⏸" } else { "▶" };
+            if ui.button(play).clicked() {
+                self.playing = !self.playing;
+            }
+            ui.add(
+                egui::Slider::new(&mut self.fps, 1.0..=60.0)
+                    .suffix(" fps")
+                    .fixed_decimals(0),
+            );
+
+            let tl = self.timeline_len();
+            if tl > 1 {
+                ui.label("frame");
+                ui.add(
+                    egui::Slider::new(&mut self.shared_frame, 0..=tl - 1)
+                        .clamping(egui::SliderClamping::Always),
+                );
+            }
+
+            ui.separator();
+            if ui.button("⤓ Load all").clicked() {
+                self.load_all();
+            }
+            if ui.selectable_label(self.show_manager, "☰ Media").clicked() {
+                self.show_manager = !self.show_manager;
+            }
+            if ui.selectable_label(self.show_vis, "Visualise").clicked() {
+                self.show_vis = !self.show_vis;
+            }
+            if ui.selectable_label(self.show_export, "Export").clicked() {
+                self.toggle_export();
+            }
+            if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
+                self.show_settings = !self.show_settings;
+            }
+        });
+
+        // A/B operand pickers.
+        if self.mode == Mode::Ab && self.panes.len() >= 1 {
+            ui.horizontal(|ui| {
+                self.ab_picker(ui, true);
+                ui.separator();
+                self.ab_picker(ui, false);
+            });
+        }
+
+        if !self.status.is_empty() {
+            ui.label(egui::RichText::new(&self.status).weak().small());
+        }
+    }
+
+    fn ab_picker(&mut self, ui: &mut egui::Ui, is_a: bool) {
+        let n = self.panes.len();
+        let slot = if is_a { &mut self.slot_a } else { &mut self.slot_b };
+        *slot = (*slot).min(n - 1);
+        ui.label(if is_a { "A:" } else { "B:" });
+        if ui.small_button("◀").clicked() {
+            *slot = (*slot + n - 1) % n;
+        }
+        let name = self.panes[*slot].media.name().to_string();
+        ui.monospace(format!("{}·{}", *slot + 1, ellipsize(&name, 16)));
+        if ui.small_button("▶").clicked() {
+            *slot = (*slot + 1) % n;
+        }
+    }
+
+    fn view_zoom_label(&self) -> f32 {
+        if self.panes.is_empty() {
+            1.0
+        } else {
+            self.view_ref(self.current.min(self.panes.len() - 1)).zoom
+        }
+    }
+
+    fn apply_action_local(&mut self, action: Action) {
+        if action == Action::ResetView {
+            self.shared_view.needs_fit = true;
+            for p in &mut self.panes {
+                p.transform.needs_fit = true;
+            }
+        }
+    }
+
+    // ---- central drawing -------------------------------------------------
+
+    fn draw_central(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let area = ui.available_rect_before_wrap();
+        self.last_area = area;
+
+        if self.panes.is_empty() {
+            ui.painter().text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                "Open images or drop files here\n(mp4/avi coming later)",
+                FontId::proportional(18.0),
+                Color32::from_gray(140),
+            );
+            return;
+        }
+
+        match self.mode {
+            Mode::Single => {
+                let idx = self.current.min(self.panes.len() - 1);
+                self.draw_pane(ui, ctx, idx, area);
+            }
+            Mode::Grid => {
+                let vis = self.visible_indices();
+                if vis.is_empty() {
+                    ui.painter().text(
+                        area.center(),
+                        Align2::CENTER_CENTER,
+                        "All media hidden — enable some in ☰ Media",
+                        FontId::proportional(16.0),
+                        Color32::from_gray(140),
+                    );
+                    return;
+                }
+                let cells = self.grid_cells(&vis, area);
+                for &(idx, cell) in &cells {
+                    self.draw_pane(ui, ctx, idx, cell);
+                }
+                self.finish_reorder(ctx, &cells);
+            }
+            Mode::Ab => self.draw_ab(ui, ctx, area),
+        }
+
+        self.region_overlay(ui, ctx, area);
+    }
+
+    /// Draw / edit the export region rectangle over the view.
+    fn region_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
+        if !self.show_export {
+            return;
+        }
+        let painter = ui.painter_at(area);
+
+        if self.selecting_region {
+            let resp = ui.interact(area, Id::new("region_sel"), Sense::drag());
+            let pos = ctx.input(|i| i.pointer.interact_pos());
+            if resp.drag_started() {
+                self.sel_start = pos;
+            }
+            if resp.dragged() {
+                if let (Some(s), Some(c)) = (self.sel_start, pos) {
+                    self.export_region = Some(Rect::from_two_pos(s, c).intersect(area));
+                }
+            }
+            if resp.drag_stopped() {
+                self.selecting_region = false;
+                self.sel_start = None;
+                // Discard a zero-size accidental click.
+                if let Some(r) = self.export_region {
+                    if r.width() < 4.0 || r.height() < 4.0 {
+                        self.export_region = None;
+                    }
+                }
+            }
+        }
+
+        if let Some(r) = self.export_region {
+            // Dim everything outside the region.
+            let dim = Color32::from_black_alpha(120);
+            painter.rect_filled(
+                Rect::from_min_max(area.min, Pos2::new(area.max.x, r.min.y)),
+                0.0,
+                dim,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(area.min.x, r.max.y), area.max),
+                0.0,
+                dim,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(area.min.x, r.min.y), Pos2::new(r.min.x, r.max.y)),
+                0.0,
+                dim,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(area.max.x, r.max.y)),
+                0.0,
+                dim,
+            );
+            painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(240, 200, 80)));
+        }
+    }
+
+    fn grid_cells(&self, vis: &[usize], area: Rect) -> Vec<(usize, Rect)> {
+        let n = vis.len();
+        let cols = self.config.max_columns.max(1).min(n).max(1);
+        let rows = (n + cols - 1) / cols;
+        let cw = (area.width() - GAP * (cols as f32 - 1.0)) / cols as f32;
+        let ch = (area.height() - GAP * (rows as f32 - 1.0)) / rows as f32;
+        let mut cells = Vec::with_capacity(n);
+        for (k, &idx) in vis.iter().enumerate() {
+            let r = k / cols;
+            let c = k % cols;
+            let min = Pos2::new(
+                area.min.x + c as f32 * (cw + GAP),
+                area.min.y + r as f32 * (ch + GAP),
+            );
+            cells.push((idx, Rect::from_min_size(min, Vec2::new(cw, ch))));
+        }
+        cells
+    }
+
+    fn finish_reorder(&mut self, ctx: &egui::Context, cells: &[(usize, Rect)]) {
+        let Some(src) = self.drag_src else { return };
+        if !ctx.input(|i| i.pointer.any_released()) {
+            return;
+        }
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            if let Some(&(dst, _)) = cells.iter().find(|(_, r)| r.contains(pos)) {
+                if dst != src {
+                    self.panes.swap(src, dst);
+                    remap(&mut self.current, src, dst);
+                    remap(&mut self.slot_a, src, dst);
+                    remap(&mut self.slot_b, src, dst);
+                }
+            }
+        }
+        self.drag_src = None;
+    }
+
+    fn draw_pane(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, idx: usize, cell: Rect) {
+        let img_area = image_area(cell);
+        let size = self.panes[idx].media.size();
+
+        // Fit this pane's effective view on first draw / after a reset.
+        {
+            let v = self.view_mut(idx);
+            if v.needs_fit {
+                v.fit(size, img_area);
+            }
+        }
+
+        let (tex, loading) = self.prepare(ctx, idx);
+        let painter = ui.painter_at(img_area);
+        painter.rect_filled(img_area, 0.0, Color32::from_gray(24));
+        if let Some(id) = tex {
+            let v = *self.view_ref(idx);
+            let rect = v.image_rect(size, img_area);
+            painter.image(id, rect, uv(), Color32::WHITE);
+        }
+        if loading {
+            draw_spinner(&painter, img_area, ctx.input(|i| i.time));
+        }
+
+        // Interaction: zoom / pan / ctrl-drag reorder. Disabled while the user
+        // is dragging out an export region (so that drag isn't stolen).
+        let sense = if self.selecting_region {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
+        let resp = ui.interact(img_area, Id::new(("pane", idx)), sense);
+        if !self.selecting_region {
+            let ctrl = ctx.input(|i| i.modifiers.ctrl);
+            if resp.hovered() {
+                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                if scroll != 0.0 {
+                    let anchor = ctx
+                        .input(|i| i.pointer.hover_pos())
+                        .unwrap_or(img_area.center());
+                    let speed = zoom_speed(ctx);
+                    self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
+                }
+            }
+            if resp.drag_started() && ctrl {
+                self.drag_src = Some(idx);
+            }
+            if resp.dragged() && self.drag_src.is_none() {
+                let d = resp.drag_delta();
+                self.view_mut(idx).pan(d);
+            }
+            if resp.clicked() {
+                self.current = idx;
+            }
+        }
+
+        self.draw_header(ui, idx, cell);
+        self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
+
+        if self.drag_src == Some(idx) {
+            ui.painter()
+                .rect_stroke(cell, 0.0, Stroke::new(2.0, Color32::from_rgb(120, 170, 240)));
+        } else if idx == self.current {
+            ui.painter()
+                .rect_stroke(cell, 0.0, Stroke::new(1.0, Color32::from_gray(80)));
+        }
+    }
+
+    fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, cell: Rect) {
+        let header = Rect::from_min_size(cell.min, Vec2::new(cell.width(), HEADER_H));
+        let hp = ui.painter_at(header);
+        let focused = idx == self.current;
+        hp.rect_filled(
+            header,
+            0.0,
+            if focused {
+                Color32::from_rgb(40, 70, 110)
+            } else {
+                Color32::from_gray(34)
+            },
+        );
+
+        let count = self.panes[idx].media.frame_count();
+        let name = self.panes[idx].media.name();
+        let title = if count > 1 {
+            let resident = self.panes[idx].media.resident_count();
+            let sync = match (
+                self.panes[idx].sync_spatial,
+                self.panes[idx].sync_temporal,
+            ) {
+                (true, true) => "",
+                (false, true) => "  ⊘pos",
+                (true, false) => "  ⊘time",
+                (false, false) => "  ⊘pos ⊘time",
+            };
+            format!(
+                "{}  {}   {}/{}  ({} in mem){}",
+                idx + 1,
+                name,
+                self.frame_disp(idx) + 1,
+                count,
+                resident,
+                sync
+            )
+        } else {
+            format!("{}  {}", idx + 1, name)
+        };
+        hp.text(
+            header.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            title,
+            FontId::proportional(13.0),
+            Color32::from_gray(220),
+        );
+
+        let close = Rect::from_min_size(
+            Pos2::new(header.max.x - HEADER_H, header.min.y),
+            Vec2::splat(HEADER_H),
+        );
+        let close_resp = ui.interact(close, Id::new(("close", idx)), Sense::click());
+        hp.text(
+            close.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            FontId::proportional(18.0),
+            if close_resp.hovered() {
+                Color32::from_rgb(230, 120, 120)
+            } else {
+                Color32::from_gray(160)
+            },
+        );
+        if close_resp.clicked() {
+            self.pending_remove = Some(idx);
+        }
+    }
+
+    /// Bottom status strip: resolution (h×w), cursor pixel, native value.
+    fn draw_footer(
+        &self,
+        ui: &egui::Ui,
+        idx: usize,
+        hover: Option<Pos2>,
+        img_area: Rect,
+        footer: Rect,
+    ) {
+        let fp = ui.painter_at(footer);
+        fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+
+        let [w, h] = self.panes[idx].media.size();
+        let mut text = format!("{h}×{w}");
+
+        if let Some(pos) = hover {
+            if img_area.contains(pos) {
+                let p = self.view_ref(idx).screen_to_img(pos, img_area);
+                let (x, y) = (p.x.floor() as i64, p.y.floor() as i64);
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    let (x, y) = (x as usize, y as usize);
+                    let f = self.frame_disp(idx);
+                    if let Some(frame) = self.panes[idx].media.resident(f) {
+                        text = format!("{h}×{w}    x {x}  y {y}    {}", frame.pixel_string(x, y));
+                    } else {
+                        text = format!("{h}×{w}    x {x}  y {y}");
+                    }
+                }
+            }
+        }
+
+        fp.text(
+            footer.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            text,
+            FontId::monospace(12.0),
+            Color32::from_gray(200),
+        );
+    }
+
+    // ---- A/B wipe view ---------------------------------------------------
+
+    fn draw_ab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
+        let n = self.panes.len();
+        let a = self.slot_a.min(n - 1);
+        let b = self.slot_b.min(n - 1);
+
+        // Reserve a footer strip; images live in `img`.
+        let img = Rect::from_min_max(
+            area.min,
+            Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
+        );
+        let footer = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - FOOTER_H), area.max);
+
+        for &idx in &[a, b] {
+            let size = self.panes[idx].media.size();
+            let v = self.view_mut(idx);
+            if v.needs_fit {
+                v.fit(size, img);
+            }
+        }
+
+        let (ta, la) = self.prepare(ctx, a);
+        let (tb, lb) = self.prepare(ctx, b);
+        let now = ctx.input(|i| i.time);
+        let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
+        let left = Rect::from_min_max(img.min, Pos2::new(split_x, img.max.y));
+        let right = Rect::from_min_max(Pos2::new(split_x, img.min.y), img.max);
+
+        self.draw_ab_side(ui, a, ta, la, img, left, true, now);
+        self.draw_ab_side(ui, b, tb, lb, img, right, false, now);
+
+        // Divider line + grab handle.
+        let p = ui.painter_at(img);
+        p.line_segment(
+            [Pos2::new(split_x, img.min.y), Pos2::new(split_x, img.max.y)],
+            Stroke::new(2.0, Color32::from_gray(240)),
+        );
+        let knob = Pos2::new(split_x, img.center().y);
+        p.circle_filled(knob, 9.0, Color32::from_gray(240));
+        p.text(
+            knob,
+            Align2::CENTER_CENTER,
+            "↔",
+            FontId::proportional(12.0),
+            Color32::from_gray(30),
+        );
+
+        // Interaction: divider drag, else pan/zoom the side under the cursor.
+        let sense = if self.selecting_region {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        };
+        let resp = ui.interact(img, Id::new("ab_area"), sense);
+        let ptr = ctx.input(|i| i.pointer.interact_pos());
+        if !self.selecting_region {
+            if resp.drag_started() {
+                self.ab_handle_grabbed = ptr.map_or(false, |p| (p.x - split_x).abs() <= HANDLE_HIT);
+            }
+            if resp.dragged() {
+                let d = resp.drag_delta();
+                if self.ab_handle_grabbed {
+                    self.ab_split = ((split_x + d.x - img.min.x) / img.width()).clamp(0.02, 0.98);
+                } else if let Some(pos) = ptr {
+                    let side = if pos.x < split_x { a } else { b };
+                    self.view_mut(side).pan(d);
+                }
+            }
+            if resp.drag_stopped() {
+                self.ab_handle_grabbed = false;
+            }
+            if resp.hovered() {
+                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                if scroll != 0.0 {
+                    if let Some(pos) = ptr {
+                        let side = if pos.x < split_x { a } else { b };
+                        let speed = zoom_speed(ctx);
+                        self.view_mut(side).zoom_at((scroll * speed).exp(), pos, img);
+                    }
+                }
+            }
+        }
+
+        // Footer readout for whichever side the cursor is over.
+        let hover = resp.hover_pos();
+        let side = hover.map(|pos| if pos.x < split_x { a } else { b });
+        self.draw_footer(ui, side.unwrap_or(a), hover, img, footer);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_ab_side(
+        &self,
+        ui: &egui::Ui,
+        idx: usize,
+        tex: Option<TextureId>,
+        loading: bool,
+        area: Rect,
+        clip: Rect,
+        is_a: bool,
+        now: f64,
+    ) {
+        let painter = ui.painter_at(clip);
+        painter.rect_filled(clip, 0.0, Color32::from_gray(18));
+        if let Some(id) = tex {
+            let size = self.panes[idx].media.size();
+            let rect = self.view_ref(idx).image_rect(size, area);
+            painter.image(id, rect, uv(), Color32::WHITE);
+        }
+        if loading {
+            draw_spinner(&painter, clip, now);
+        }
+        // Corner label.
+        let tag = format!(
+            "{}  {}",
+            if is_a { "A" } else { "B" },
+            self.panes[idx].media.name()
+        );
+        let anchor = if is_a {
+            (clip.left_top() + Vec2::new(8.0, 8.0), Align2::LEFT_TOP)
+        } else {
+            (clip.right_top() + Vec2::new(-8.0, 8.0), Align2::RIGHT_TOP)
+        };
+        painter.text(
+            anchor.0,
+            anchor.1,
+            tag,
+            FontId::proportional(13.0),
+            Color32::from_gray(230),
+        );
+    }
+
+    // ---- windows ---------------------------------------------------------
+
+    fn draw_manager(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_manager;
+        let shared_view = self.shared_view;
+        let shared_frame = self.shared_frame;
+
+        egui::Window::new("☰ Media")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                if self.panes.is_empty() {
+                    ui.label("No media open. Use 📂 Open or drop files onto the window.");
+                    return;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Show all").clicked() {
+                        for p in &mut self.panes {
+                            p.visible = true;
+                        }
+                    }
+                    if ui.button("Hide all").clicked() {
+                        for p in &mut self.panes {
+                            p.visible = false;
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("Sync all").clicked() {
+                        for p in &mut self.panes {
+                            p.sync_spatial = true;
+                            p.sync_temporal = true;
+                        }
+                    }
+                    if ui.button("Unsync all").clicked() {
+                        for p in &mut self.panes {
+                            if p.sync_spatial {
+                                p.transform = shared_view;
+                            }
+                            if p.sync_temporal {
+                                p.frame = shared_frame;
+                            }
+                            p.sync_spatial = false;
+                            p.sync_temporal = false;
+                        }
+                    }
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("media_table")
+                        .num_columns(9)
+                        .striped(true)
+                        .spacing([10.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Show");
+                            ui.label("#");
+                            ui.label("Name");
+                            ui.label("Frames");
+                            ui.label("Single");
+                            ui.label("A / B");
+                            ui.label("Sync");
+                            ui.label("Clip");
+                            ui.label("");
+                            ui.end_row();
+
+                            let mut to_remove = None;
+                            for i in 0..self.panes.len() {
+                                let count = self.panes[i].media.frame_count();
+                                let resident = self.panes[i].media.resident_count();
+
+                                ui.checkbox(&mut self.panes[i].visible, "");
+
+                                ui.monospace(format!("{}", i + 1));
+
+                                let name = self.panes[i].media.name().to_string();
+                                ui.label(ellipsize(&name, 26));
+
+                                if count > 1 {
+                                    ui.monospace(format!("{count}  ({resident}◈)"));
+                                } else {
+                                    ui.monospace("still");
+                                }
+
+                                if ui
+                                    .selectable_label(self.current == i, "▢")
+                                    .on_hover_text("Show alone in Single view")
+                                    .clicked()
+                                {
+                                    self.current = i;
+                                    self.mode = Mode::Single;
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(self.slot_a == i, "A").clicked() {
+                                        self.slot_a = i;
+                                    }
+                                    if ui.selectable_label(self.slot_b == i, "B").clicked() {
+                                        self.slot_b = i;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    let mut ss = self.panes[i].sync_spatial;
+                                    if ui.checkbox(&mut ss, "Pos").changed() {
+                                        if !ss {
+                                            self.panes[i].transform = shared_view;
+                                        }
+                                        self.panes[i].sync_spatial = ss;
+                                    }
+                                    let mut st = self.panes[i].sync_temporal;
+                                    if ui.checkbox(&mut st, "Time").changed() {
+                                        if !st {
+                                            self.panes[i].frame = shared_frame;
+                                        }
+                                        self.panes[i].sync_temporal = st;
+                                    }
+                                });
+
+                                let mut clip = self.panes[i].clip;
+                                if ui
+                                    .checkbox(&mut clip, "0.01%")
+                                    .on_hover_text("Percentile auto-contrast for this media")
+                                    .changed()
+                                {
+                                    self.panes[i].clip = clip;
+                                    self.panes[i].tex = None; // rebuild with new mapping
+                                }
+
+                                if ui.small_button("×").clicked() {
+                                    to_remove = Some(i);
+                                }
+                                ui.end_row();
+                            }
+
+                            if let Some(i) = to_remove {
+                                self.pending_remove = Some(i);
+                            }
+                        });
+                });
+            });
+        self.show_manager = open;
+    }
+
+    fn draw_vis(&mut self, ctx: &egui::Context) {
+        self.update_histogram();
+        let mut open = self.show_vis;
+        let mut changed = false;
+        egui::Window::new("Visualise")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Interpolation");
+                    egui::ComboBox::from_id_salt("interp")
+                        .selected_text(match self.config.vis.interp {
+                            Interpolation::Nearest => "Nearest",
+                            Interpolation::Bilinear => "Bilinear",
+                        })
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.vis.interp,
+                                    Interpolation::Nearest,
+                                    "Nearest",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.vis.interp,
+                                    Interpolation::Bilinear,
+                                    "Bilinear",
+                                )
+                                .changed();
+                        });
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.heading("Histogram");
+                self.draw_histogram(ui);
+            });
+
+        if changed {
+            // Rebuild textures so filter/clip changes are visible immediately.
+            for p in &mut self.panes {
+                p.tex = None;
+            }
+            self.config.save();
+        }
+        self.show_vis = open;
+    }
+
+    /// Recompute the histogram of the focused media/frame when it changes.
+    fn update_histogram(&mut self) {
+        if self.panes.is_empty() {
+            self.hist = None;
+            return;
+        }
+        let cur = self.current.min(self.panes.len() - 1);
+        let f = self.frame_disp(cur);
+        let key = (self.panes[cur].id, f);
+        if self.hist.as_ref().map(|h| h.key) == Some(key) {
+            return;
+        }
+        if let Some(frame) = self.panes[cur].media.resident(f) {
+            self.hist = Some(HistCache {
+                key,
+                data: frame.histogram_display(256),
+            });
+        }
+    }
+
+    fn draw_histogram(&self, ui: &mut egui::Ui) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 140.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_gray(16));
+
+        let Some(hist) = &self.hist else { return };
+        let data = &hist.data;
+
+        // Peak across every channel/bin; sqrt scaling makes tails legible.
+        let peak = data
+            .bins
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .max()
+            .unwrap_or(1)
+            .max(1) as f32;
+
+        let colors: &[Color32] = if data.mono {
+            &[Color32::from_gray(210)]
+        } else {
+            &[
+                Color32::from_rgb(230, 90, 90),
+                Color32::from_rgb(90, 210, 90),
+                Color32::from_rgb(100, 140, 240),
+            ]
+        };
+
+        for (ci, chan) in data.bins.iter().enumerate() {
+            let nb = chan.len().max(2);
+            let mut pts = Vec::with_capacity(nb);
+            for (v, &count) in chan.iter().enumerate() {
+                let x = rect.left() + (v as f32 / (nb - 1) as f32) * rect.width();
+                let h = (count as f32 / peak).sqrt();
+                let y = rect.bottom() - h * rect.height();
+                pts.push(Pos2::new(x, y));
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
+        }
+
+        // True value extent under the graph: min at left, max at right.
+        ui.horizontal(|ui| {
+            ui.monospace(format!("min {}", data.min));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.monospace(format!("max {}", data.max));
+            });
+        });
+    }
+
+    // ---- export ----------------------------------------------------------
+
+    fn toggle_export(&mut self) {
+        self.show_export = !self.show_export;
+        if self.show_export {
+            self.export_mode = self.mode; // default to what's on screen
+        }
+    }
+
+    /// Snapshot a participating pane for the export plan.
+    fn export_pane(&self, idx: usize) -> ExportPane {
+        let p = &self.panes[idx];
+        let source = match p.media.decode_job(0) {
+            Some(path) => ExportSource::Seq { path },
+            None => ExportSource::Still(
+                p.media.resident(0).expect("still frame always resident"),
+            ),
+        };
+        ExportPane::new(
+            *self.view_ref(idx),
+            p.clip,
+            p.media.frame_count(),
+            p.sync_temporal,
+            p.frame,
+            source,
+        )
+    }
+
+    fn build_export_plan(&self) -> Result<ExportPlan, String> {
+        if self.panes.is_empty() {
+            return Err("No media to export".into());
+        }
+        let area = self.last_area;
+        if area.width() < 2.0 {
+            return Err("View not ready yet".into());
+        }
+        let region = self.export_region.unwrap_or(area);
+        let (out_w, out_h) = export::out_dims(region, self.out_height);
+        let bilinear = matches!(self.config.vis.interp, Interpolation::Bilinear);
+        let total = self.timeline_len().max(1);
+
+        let mut panes = Vec::new();
+        let layout = match self.export_mode {
+            Mode::Grid => {
+                let vis = self.visible_indices();
+                if vis.is_empty() {
+                    return Err("No visible media (enable some in ☰ Media)".into());
+                }
+                let cells = self.grid_cells(&vis, area);
+                let mut v = Vec::new();
+                for (k, &(idx, cell)) in cells.iter().enumerate() {
+                    panes.push(self.export_pane(idx));
+                    v.push((k, image_area(cell)));
+                }
+                ExportLayout::Grid(v)
+            }
+            Mode::Single => {
+                let idx = self.current.min(self.panes.len() - 1);
+                panes.push(self.export_pane(idx));
+                ExportLayout::Single(0, image_area(area))
+            }
+            Mode::Ab => {
+                let n = self.panes.len();
+                let a = self.slot_a.min(n - 1);
+                let b = self.slot_b.min(n - 1);
+                panes.push(self.export_pane(a));
+                panes.push(self.export_pane(b));
+                let img = Rect::from_min_max(
+                    area.min,
+                    Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
+                );
+                let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
+                ExportLayout::Ab {
+                    a: 0,
+                    b: 1,
+                    img,
+                    split_x,
+                }
+            }
+        };
+
+        Ok(ExportPlan {
+            panes,
+            layout,
+            region,
+            out_w,
+            out_h,
+            total,
+            bilinear,
+        })
+    }
+
+    fn start_export(&mut self) {
+        let Some(path) = self.export_path.clone() else {
+            self.export_status = "Choose an output file first".into();
+            return;
+        };
+        let plan = match self.build_export_plan() {
+            Ok(p) => p,
+            Err(e) => {
+                self.export_status = e;
+                return;
+            }
+        };
+        let (w, h, total) = (plan.out_w, plan.out_h, plan.total);
+        match Encoder::start(&path, w, h, self.export_fps, self.crf) {
+            Ok(enc) => {
+                self.export_status = format!("Exporting {total} frames…");
+                self.export_run = Some(ExportRun {
+                    enc,
+                    plan,
+                    frame: 0,
+                    total,
+                    path: path.display().to_string(),
+                });
+            }
+            Err(e) => self.export_status = e,
+        }
+    }
+
+    /// Encode one frame per call; driven from `update` while a run is active.
+    fn export_tick(&mut self) {
+        let Some(mut run) = self.export_run.take() else {
+            return;
+        };
+        if self.cancel_export {
+            self.cancel_export = false;
+            run.enc.kill();
+            self.export_status = "Export cancelled".into();
+            return; // run dropped
+        }
+        if run.frame >= run.total {
+            self.export_status = match run.enc.finish() {
+                Ok(()) => format!("Exported {} frames → {}", run.total, run.path),
+                Err(e) => e,
+            };
+            return; // run dropped
+        }
+        let buf = run.plan.compose(run.frame);
+        match run.enc.write_frame(&buf) {
+            Ok(()) => {
+                run.frame += 1;
+                self.export_run = Some(run);
+            }
+            Err(e) => {
+                run.enc.kill();
+                self.export_status = format!("Export failed: {e}");
+            }
+        }
+    }
+
+    fn draw_export(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_export;
+        let running = self.export_run.is_some();
+        let area = self.last_area;
+        let region = self.export_region.unwrap_or(area);
+        let (out_w, out_h) = export::out_dims(region, self.out_height);
+        let total = self.timeline_len().max(1);
+
+        egui::Window::new("Export comparison")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.add_enabled_ui(!running, |ui| {
+                    egui::Grid::new("export_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Layout");
+                            egui::ComboBox::from_id_salt("exp_layout")
+                                .selected_text(match self.export_mode {
+                                    Mode::Grid => "Side by side",
+                                    Mode::Single => "Single",
+                                    Mode::Ab => "A / B wipe",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.export_mode, Mode::Grid, "Side by side");
+                                    ui.selectable_value(&mut self.export_mode, Mode::Single, "Single");
+                                    ui.selectable_value(&mut self.export_mode, Mode::Ab, "A / B wipe");
+                                });
+                            ui.end_row();
+
+                            ui.label("Region");
+                            ui.horizontal(|ui| {
+                                if ui.button("Select…").clicked() {
+                                    self.selecting_region = true;
+                                }
+                                let has = self.export_region.is_some();
+                                if ui.add_enabled(has, egui::Button::new("Full view")).clicked() {
+                                    self.export_region = None;
+                                }
+                                ui.label(if has { "custom" } else { "full" });
+                            });
+                            ui.end_row();
+
+                            ui.label("Output height");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut self.out_height).range(120..=2160));
+                                if ui.button("= view").clicked() {
+                                    self.out_height = region.height().round() as u32;
+                                }
+                                ui.monospace(format!("→ {out_w}×{out_h}"));
+                            });
+                            ui.end_row();
+
+                            ui.label("Compression");
+                            ui.add(
+                                egui::Slider::new(&mut self.crf, 0..=51)
+                                    .text("CRF")
+                                    .custom_formatter(|n, _| format!("{n:.0}")),
+                            );
+                            ui.end_row();
+
+                            ui.label("FPS");
+                            ui.add(egui::DragValue::new(&mut self.export_fps).range(1.0..=60.0));
+                            ui.end_row();
+                        });
+                });
+
+                let bytes = export::estimate_bytes(out_w, out_h, total, self.crf);
+                ui.label(format!(
+                    "{total} frames · {:.1}s · ≈ {}  (lower CRF = larger)",
+                    total as f32 / self.export_fps.max(1.0),
+                    export::human_size(bytes)
+                ));
+
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!running, egui::Button::new("Output…")).clicked() {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter("MP4 video", &["mp4"])
+                            .set_file_name("comparison.mp4")
+                            .save_file()
+                        {
+                            self.export_path = Some(p);
+                        }
+                    }
+                    if let Some(p) = &self.export_path {
+                        ui.monospace(ellipsize(&p.to_string_lossy(), 30));
+                    } else {
+                        ui.label("(no file chosen)");
+                    }
+                });
+
+                ui.separator();
+                if let Some(run) = &self.export_run {
+                    ui.add(
+                        egui::ProgressBar::new(run.frame as f32 / run.total.max(1) as f32)
+                            .text(format!("{}/{}", run.frame, run.total)),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_export = true;
+                    }
+                } else {
+                    let ready = self.export_path.is_some();
+                    if ui.add_enabled(ready, egui::Button::new("Export MP4")).clicked() {
+                        self.start_export();
+                    }
+                }
+
+                if !self.export_status.is_empty() {
+                    ui.label(&self.export_status);
+                }
+            });
+        self.show_export = open;
+    }
+
+    fn draw_settings(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        egui::Window::new("⚙ Settings")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.heading("Layout");
+                ui.horizontal(|ui| {
+                    ui.label("Max columns");
+                    ui.add(egui::Slider::new(&mut self.config.max_columns, 1..=8));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("UI scale");
+                    ui.add(
+                        egui::Slider::new(&mut self.config.ui_scale, 0.6..=2.0)
+                            .suffix("×")
+                            .fixed_decimals(2),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.heading("Keyboard shortcuts");
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    egui::Grid::new("keys")
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            for action in Action::all() {
+                                ui.label(action.label());
+                                let key_txt = self
+                                    .config
+                                    .keybindings
+                                    .key_for(action)
+                                    .map(|k| k.name().to_string())
+                                    .unwrap_or_else(|| "—".into());
+                                if self.rebinding == Some(action) {
+                                    ui.colored_label(
+                                        Color32::from_rgb(240, 200, 120),
+                                        "press a key…",
+                                    );
+                                } else {
+                                    ui.monospace(key_txt);
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Rebind").clicked() {
+                                        self.rebinding = Some(action);
+                                    }
+                                    if ui.small_button("Clear").clicked() {
+                                        self.config.keybindings.clear(action);
+                                        self.config.save();
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                if ui.button("Save settings").clicked() {
+                    self.config.save();
+                    self.status = "Settings saved".into();
+                }
+            });
+        self.show_settings = open;
+    }
+}
+
+impl eframe::App for CimApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Global UI scale (buttons/text).
+        let scale = self.config.ui_scale.clamp(0.5, 3.0);
+        if (ctx.zoom_factor() - scale).abs() > 1e-3 {
+            ctx.set_zoom_factor(scale);
+        }
+
+        self.pump_decoder();
+        self.handle_input(ctx);
+        self.advance_playback(ctx);
+
+        // Keep the shared timeline within the selected media's range.
+        let tl = self.timeline_len();
+        if self.shared_frame >= tl {
+            self.shared_frame = tl - 1;
+        }
+
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            self.draw_toolbar(ui);
+            ui.add_space(2.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.draw_central(ui, ctx);
+        });
+
+        if self.show_manager {
+            self.draw_manager(ctx);
+        }
+        if self.show_vis {
+            self.draw_vis(ctx);
+        }
+        if self.show_export {
+            self.draw_export(ctx);
+        }
+        if self.show_settings {
+            self.draw_settings(ctx);
+        }
+
+        if let Some(i) = self.pending_remove.take() {
+            self.remove_media(i);
+        }
+
+        // Encode one frame per frame while an export is running.
+        if self.export_run.is_some() || self.cancel_export {
+            self.export_tick();
+        }
+
+        // Keep animating while playing, decoding, or exporting.
+        if self.playing || !self.inflight.is_empty() || self.export_run.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.config.save();
+    }
+}
+
+// ---- helpers -------------------------------------------------------------
+
+/// The image sub-rect of a cell, between its header and footer strips.
+fn image_area(cell: Rect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(cell.min.x, cell.min.y + HEADER_H + 2.0),
+        Pos2::new(cell.max.x, cell.max.y - FOOTER_H - 2.0),
+    )
+}
+
+/// The footer strip at the bottom of a cell.
+fn footer_area(cell: Rect) -> Rect {
+    Rect::from_min_max(Pos2::new(cell.min.x, cell.max.y - FOOTER_H), cell.max)
+}
+
+fn uv() -> Rect {
+    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+}
+
+/// A small animated dot-spinner badge in the bottom-right of `area`.
+fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
+    let center = area.right_bottom() - Vec2::splat(20.0);
+    painter.circle_filled(center, 13.0, Color32::from_black_alpha(150));
+    let n = 8i32;
+    let phase = (now * 8.0) as i32;
+    for k in 0..n {
+        let ang = k as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let pos = center + Vec2::new(ang.cos(), ang.sin()) * 7.0;
+        let behind = (phase - k).rem_euclid(n);
+        let bright = 1.0 - behind as f32 / n as f32;
+        let alpha = (40.0 + 215.0 * bright) as u8;
+        painter.circle_filled(pos, 2.0, Color32::from_white_alpha(alpha));
+    }
+}
+
+/// Update an index after `panes.swap(src, dst)`.
+fn remap(v: &mut usize, src: usize, dst: usize) {
+    if *v == src {
+        *v = dst;
+    } else if *v == dst {
+        *v = src;
+    }
+}
+
+/// Zoom sensitivity per scroll unit; Shift doubles it.
+fn zoom_speed(ctx: &egui::Context) -> f32 {
+    if ctx.input(|i| i.modifiers.shift) {
+        0.003
+    } else {
+        0.0015
+    }
+}
+
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
