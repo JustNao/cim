@@ -1110,34 +1110,71 @@ impl CimApp {
                     return;
                 }
 
-                ui.horizontal(|ui| {
-                    if ui.button("Show all").clicked() {
+                // Apply-to-all controls, one group per per-media toggle column
+                // (Single / A / B are single-target selectors, so they have none).
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Apply to all —");
+
+                    ui.label("Show:");
+                    if ui.small_button("on").clicked() {
                         for p in &mut self.panes {
                             p.visible = true;
                         }
                     }
-                    if ui.button("Hide all").clicked() {
+                    if ui.small_button("off").clicked() {
                         for p in &mut self.panes {
                             p.visible = false;
                         }
                     }
                     ui.separator();
-                    if ui.button("Sync all").clicked() {
+
+                    ui.label("Pos:");
+                    if ui.small_button("on").clicked() {
                         for p in &mut self.panes {
                             p.sync_spatial = true;
-                            p.sync_temporal = true;
                         }
                     }
-                    if ui.button("Unsync all").clicked() {
+                    if ui.small_button("off").clicked() {
                         for p in &mut self.panes {
                             if p.sync_spatial {
                                 p.transform = shared_view;
                             }
+                            p.sync_spatial = false;
+                        }
+                    }
+                    ui.separator();
+
+                    ui.label("Time:");
+                    if ui.small_button("on").clicked() {
+                        for p in &mut self.panes {
+                            p.sync_temporal = true;
+                        }
+                    }
+                    if ui.small_button("off").clicked() {
+                        for p in &mut self.panes {
                             if p.sync_temporal {
                                 p.frame = shared_frame;
                             }
-                            p.sync_spatial = false;
                             p.sync_temporal = false;
+                        }
+                    }
+                    ui.separator();
+
+                    ui.label("Clip:");
+                    if ui.small_button("on").clicked() {
+                        for p in &mut self.panes {
+                            if !p.clip {
+                                p.clip = true;
+                                p.tex = None; // rebuild with new mapping
+                            }
+                        }
+                    }
+                    if ui.small_button("off").clicked() {
+                        for p in &mut self.panes {
+                            if p.clip {
+                                p.clip = false;
+                                p.tex = None;
+                            }
                         }
                     }
                 });
