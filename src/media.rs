@@ -92,6 +92,11 @@ impl FrameData {
         matches!(self.samples, Samples::F32(_))
     }
 
+    /// More than 8 bits per sample (16-bit or float) → clip-on-load default.
+    pub fn hi_depth(&self) -> bool {
+        !matches!(self.samples, Samples::U8(_))
+    }
+
     /// Largest representable value for the sample type (255 or 65535). For
     /// floats there is no fixed maximum, so display code uses the data extent
     /// instead — this returns the nominal scene-linear ceiling of `1.0`.
@@ -240,8 +245,10 @@ impl FrameData {
     /// (floats can't index a per-value histogram like integers do).
     fn percentile_bounds_float(&self, p: f32) -> (f32, f32) {
         const NB: usize = 4096;
+        // value_extent yields finite, ordered bounds (min ≤ max), so a plain
+        // comparison is unambiguous here.
         let (min, max) = self.value_extent();
-        if !(max > min) {
+        if max <= min {
             return (min, max);
         }
         let span = max - min;
@@ -330,7 +337,7 @@ impl FrameData {
                 fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
             }
             // Floats have no bounded domain to tabulate; map arithmetically.
-            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, |s| map_f(s)),
+            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
         }
     }
 
@@ -346,13 +353,13 @@ impl FrameData {
         let mut bins = vec![vec![0u32; nbins]; cc];
         for i in 0..px {
             let base = i * self.channels;
-            for c in 0..cc {
+            for (c, chan) in bins.iter_mut().enumerate() {
                 let s = self.sample_f(base + c);
                 if s.is_nan() {
                     continue;
                 }
                 let bin = (((s - min) / span) * last) as usize;
-                bins[c][bin.min(nbins - 1)] += 1;
+                chan[bin.min(nbins - 1)] += 1;
             }
         }
         HistData {
@@ -367,6 +374,26 @@ impl FrameData {
 pub enum Media {
     Still(Still),
     TiffSeq(TiffSeq),
+    FileSeq(FileSeq),
+    ConcatSeq(ConcatSeq),
+}
+
+/// A concatenation's frame files and its discovered `frame → (file, page)` map.
+pub type ConcatLayout = (Vec<PathBuf>, Vec<(usize, usize)>);
+
+/// How the background pool should decode one frame of a sequence.
+pub enum DecodeReq {
+    /// Seek `page` of the multi-page TIFF at `path`, via a reader keyed by
+    /// (pane id, `file`). A lone `TiffSeq` uses `file = 0` and `page = frame`;
+    /// a `ConcatSeq` uses `file` to pick which TIFF in the run and `page` the
+    /// page within it.
+    Tiff {
+        file: usize,
+        page: usize,
+        path: PathBuf,
+    },
+    /// Decode this standalone file — one frame of a numbered still sequence.
+    File(PathBuf),
 }
 
 pub struct Still {
@@ -375,21 +402,130 @@ pub struct Still {
     hi_depth: bool,
 }
 
+/// Frame residency plus LRU / memory-budget bookkeeping, shared by both
+/// sequence kinds (multi-page TIFF and numbered image files). Slots may be
+/// evicted back to `None` to stay within the cache budget without changing the
+/// known length.
+struct SeqCache {
+    /// One slot per known frame; `None` = not resident (never decoded or evicted).
+    cache: Vec<Option<Arc<FrameData>>>,
+    /// Recency tick per frame, parallel to `cache`; the budget evicts the
+    /// least-recently-used resident frames first.
+    last_used: Vec<u64>,
+    /// Running total of resident sample bytes (sum of `byte_len` over `Some`s).
+    resident_bytes: usize,
+}
+
+impl SeqCache {
+    /// A cache of `len` not-yet-resident frames.
+    fn new(len: usize) -> Self {
+        Self {
+            cache: vec![None; len],
+            last_used: vec![0; len],
+            resident_bytes: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    fn resident(&self, idx: usize) -> Option<Arc<FrameData>> {
+        self.cache.get(idx).and_then(|slot| slot.clone())
+    }
+
+    /// Store a decoded frame. Replacing an existing slot re-accounts its bytes;
+    /// inserting exactly at the end (`idx == len`) grows the known length by one
+    /// (how a TIFF frontier probe discovers the next page). Out-of-range inserts
+    /// are ignored.
+    fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
+        if idx < self.cache.len() {
+            if let Some(old) = &self.cache[idx] {
+                self.resident_bytes -= old.byte_len();
+            }
+            self.resident_bytes += frame.byte_len();
+            self.cache[idx] = Some(frame);
+        } else if idx == self.cache.len() {
+            self.resident_bytes += frame.byte_len();
+            self.cache.push(Some(frame));
+            self.last_used.push(0);
+        }
+    }
+
+    fn touch(&mut self, idx: usize, clock: u64) {
+        if let Some(u) = self.last_used.get_mut(idx) {
+            *u = clock;
+        }
+    }
+
+    fn evict(&mut self, idx: usize) {
+        if let Some(slot) = self.cache.get_mut(idx) {
+            if let Some(old) = slot.take() {
+                self.resident_bytes -= old.byte_len();
+            }
+        }
+    }
+
+    fn resident_frames(&self) -> Vec<(usize, u64, usize)> {
+        self.cache
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|f| (i, self.last_used[i], f.byte_len())))
+            .collect()
+    }
+
+    fn resident_count(&self) -> usize {
+        self.cache.iter().filter(|f| f.is_some()).count()
+    }
+}
+
 pub struct TiffSeq {
     name: String,
     path: PathBuf,
     size: [usize; 2],
     hi_depth: bool,
     /// Frames known so far. Grows lazily as later pages are decoded — we never
-    /// walk the whole file to learn its length. Slots may be evicted back to
-    /// `None` to stay within the cache budget; the length is still preserved.
-    cache: Vec<Option<Arc<FrameData>>>,
-    /// Recency tick per frame, parallel to `cache`. The budget evicts the
-    /// least-recently-used resident frames first.
-    last_used: Vec<u64>,
-    /// Running total of resident sample bytes (sum of `byte_len` over `Some`s).
-    resident_bytes: usize,
-    /// Set once a probe past `cache.len()` found no more pages: the real end.
+    /// walk the whole file to learn its length.
+    frames: SeqCache,
+    /// Set once a probe past `frames.len()` found no more pages: the real end.
+    at_end: bool,
+}
+
+/// A sequence whose frames are individual numbered image files (one file per
+/// frame) — e.g. `frame_000.png … frame_011.png`, given on the command line as
+/// a compact `PREFIX%0Nd,START,END.EXT` token. Unlike a TIFF its length is
+/// known up front (the file list), so there is no lazy discovery and it is
+/// always "at end".
+pub struct FileSeq {
+    name: String,
+    paths: Vec<PathBuf>,
+    size: [usize; 2],
+    hi_depth: bool,
+    frames: SeqCache,
+}
+
+/// Several multi-page TIFFs presented as **one** continuous timeline: when
+/// `movie_000.tif` runs out of pages the timeline rolls straight into
+/// `movie_001.tif`, and so on. Opened from a compact `PREFIX%0Nd,…tif` token.
+///
+/// Page counts per file aren't known up front (a TIFF's length is discovered
+/// lazily, §4), so the global length grows one page at a time: the frontier
+/// probe walks pages within the current file, and when a probe finds no page it
+/// rolls over to the next file rather than ending the sequence — only the last
+/// file's end is the real end.
+pub struct ConcatSeq {
+    name: String,
+    files: Vec<PathBuf>,
+    size: [usize; 2],
+    hi_depth: bool,
+    frames: SeqCache,
+    /// Global frame → (file index, page within that file). `map.len()` always
+    /// equals `frames.len()` (the known length).
+    map: Vec<(usize, usize)>,
+    /// The next (file, page) the frontier probe will try — not yet in `map`.
+    disc_file: usize,
+    disc_page: usize,
+    /// Set once the *last* file has been exhausted: the real end.
     at_end: bool,
 }
 
@@ -398,13 +534,17 @@ impl Media {
         match self {
             Media::Still(s) => &s.name,
             Media::TiffSeq(t) => &t.name,
+            Media::FileSeq(f) => &f.name,
+            Media::ConcatSeq(c) => &c.name,
         }
     }
 
     pub fn frame_count(&self) -> usize {
         match self {
             Media::Still(_) => 1,
-            Media::TiffSeq(t) => t.cache.len(),
+            Media::TiffSeq(t) => t.frames.len(),
+            Media::FileSeq(f) => f.frames.len(),
+            Media::ConcatSeq(c) => c.frames.len(),
         }
     }
 
@@ -412,6 +552,8 @@ impl Media {
         match self {
             Media::Still(s) => s.frame.size,
             Media::TiffSeq(t) => t.size,
+            Media::FileSeq(f) => f.size,
+            Media::ConcatSeq(c) => c.size,
         }
     }
 
@@ -420,58 +562,64 @@ impl Media {
         match self {
             Media::Still(s) => s.hi_depth,
             Media::TiffSeq(t) => t.hi_depth,
+            Media::FileSeq(f) => f.hi_depth,
+            Media::ConcatSeq(c) => c.hi_depth,
         }
     }
 
     pub fn resident(&self, idx: usize) -> Option<Arc<FrameData>> {
         match self {
             Media::Still(s) => Some(s.frame.clone()),
-            Media::TiffSeq(t) => t.cache.get(idx).and_then(|slot| slot.clone()),
+            Media::TiffSeq(t) => t.frames.resident(idx),
+            Media::FileSeq(f) => f.frames.resident(idx),
+            Media::ConcatSeq(c) => c.frames.resident(idx),
         }
     }
 
-    pub fn decode_job(&self, _idx: usize) -> Option<PathBuf> {
+    /// How the pool should decode frame `idx`, or `None` for an always-resident
+    /// still. A TIFF page seeks in the persistent per-id reader; a numbered
+    /// still sequence decodes that frame's own file; a concatenation maps the
+    /// global frame to (file, page) — or, at the frontier, probes the next page.
+    pub fn decode_job(&self, idx: usize) -> Option<DecodeReq> {
         match self {
             Media::Still(_) => None,
-            Media::TiffSeq(t) => Some(t.path.clone()),
+            Media::TiffSeq(t) => Some(DecodeReq::Tiff {
+                file: 0,
+                page: idx,
+                path: t.path.clone(),
+            }),
+            Media::FileSeq(f) => f.paths.get(idx).cloned().map(DecodeReq::File),
+            Media::ConcatSeq(c) => c.decode_job(idx),
         }
     }
 
     pub fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
-        if let Media::TiffSeq(t) = self {
-            if idx < t.cache.len() {
-                if let Some(old) = &t.cache[idx] {
-                    t.resident_bytes -= old.byte_len();
-                }
-                t.resident_bytes += frame.byte_len();
-                t.cache[idx] = Some(frame);
-            } else if idx == t.cache.len() {
-                // A frontier probe discovered the next page: extend the length.
-                t.resident_bytes += frame.byte_len();
-                t.cache.push(Some(frame));
-                t.last_used.push(0);
-            }
+        match self {
+            Media::Still(_) => {}
+            Media::TiffSeq(t) => t.frames.insert(idx, frame),
+            Media::FileSeq(f) => f.frames.insert(idx, frame),
+            Media::ConcatSeq(c) => c.insert(idx, frame),
         }
     }
 
     /// Mark frame `idx` as used at `clock`, so the budget evicts it last.
     pub fn touch(&mut self, idx: usize, clock: u64) {
-        if let Media::TiffSeq(t) = self {
-            if let Some(u) = t.last_used.get_mut(idx) {
-                *u = clock;
-            }
+        match self {
+            Media::Still(_) => {}
+            Media::TiffSeq(t) => t.frames.touch(idx, clock),
+            Media::FileSeq(f) => f.frames.touch(idx, clock),
+            Media::ConcatSeq(c) => c.frames.touch(idx, clock),
         }
     }
 
     /// Drop a resident frame to reclaim memory. The known length is unchanged;
     /// the frame simply re-decodes on demand if shown again.
     pub fn evict(&mut self, idx: usize) {
-        if let Media::TiffSeq(t) = self {
-            if let Some(slot) = t.cache.get_mut(idx) {
-                if let Some(old) = slot.take() {
-                    t.resident_bytes -= old.byte_len();
-                }
-            }
+        match self {
+            Media::Still(_) => {}
+            Media::TiffSeq(t) => t.frames.evict(idx),
+            Media::FileSeq(f) => f.frames.evict(idx),
+            Media::ConcatSeq(c) => c.frames.evict(idx),
         }
     }
 
@@ -479,7 +627,9 @@ impl Media {
     pub fn resident_bytes(&self) -> usize {
         match self {
             Media::Still(s) => s.frame.byte_len(),
-            Media::TiffSeq(t) => t.resident_bytes,
+            Media::TiffSeq(t) => t.frames.resident_bytes,
+            Media::FileSeq(f) => f.frames.resident_bytes,
+            Media::ConcatSeq(c) => c.frames.resident_bytes,
         }
     }
 
@@ -488,35 +638,89 @@ impl Media {
     pub fn resident_frames(&self) -> Vec<(usize, u64, usize)> {
         match self {
             Media::Still(_) => Vec::new(),
-            Media::TiffSeq(t) => t
-                .cache
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| s.as_ref().map(|f| (i, t.last_used[i], f.byte_len())))
-                .collect(),
+            Media::TiffSeq(t) => t.frames.resident_frames(),
+            Media::FileSeq(f) => f.frames.resident_frames(),
+            Media::ConcatSeq(c) => c.frames.resident_frames(),
         }
     }
 
-    /// True once we've confirmed there is no page beyond what we already know
-    /// (always true for a still).
+    /// True once we've confirmed there is no page beyond what we already know.
+    /// Always true for a still or a numbered still sequence (length is known);
+    /// discovered lazily for a TIFF or a concatenation.
     pub fn at_end(&self) -> bool {
         match self {
-            Media::Still(_) => true,
+            Media::Still(_) | Media::FileSeq(_) => true,
             Media::TiffSeq(t) => t.at_end,
+            Media::ConcatSeq(c) => c.at_end,
         }
     }
 
-    /// Record that a frontier probe found no further page.
-    pub fn set_at_end(&mut self) {
-        if let Media::TiffSeq(t) = self {
-            t.at_end = true;
+    /// A frontier probe found no page where one was expected. A `TiffSeq` has
+    /// reached its real end; a `ConcatSeq` has finished the current file and
+    /// rolls over to the next (only the last file's end is the real end).
+    pub fn frontier_ended(&mut self) {
+        match self {
+            Media::TiffSeq(t) => t.at_end = true,
+            Media::ConcatSeq(c) => c.roll_to_next_file(),
+            _ => {}
         }
     }
 
     pub fn resident_count(&self) -> usize {
         match self {
             Media::Still(_) => 1,
-            Media::TiffSeq(t) => t.cache.iter().filter(|f| f.is_some()).count(),
+            Media::TiffSeq(t) => t.frames.resident_count(),
+            Media::FileSeq(f) => f.frames.resident_count(),
+            Media::ConcatSeq(c) => c.frames.resident_count(),
+        }
+    }
+
+    /// For a concatenation, the file list plus the discovered global→(file,page)
+    /// map, so an export can snapshot it. `None` for other media.
+    pub fn concat_layout(&self) -> Option<ConcatLayout> {
+        match self {
+            Media::ConcatSeq(c) => Some((c.files.clone(), c.map.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl ConcatSeq {
+    /// Map global frame `idx` to a decode request. Frames already in `map`
+    /// resolve directly; the frontier (`idx == map.len()`) probes the next
+    /// (file, page) to discover.
+    fn decode_job(&self, idx: usize) -> Option<DecodeReq> {
+        let (file, page) = if idx < self.map.len() {
+            self.map[idx]
+        } else if idx == self.map.len() {
+            (self.disc_file, self.disc_page)
+        } else {
+            return None;
+        };
+        self.files.get(file).map(|path| DecodeReq::Tiff {
+            file,
+            page,
+            path: path.clone(),
+        })
+    }
+
+    fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
+        if idx == self.frames.len() {
+            // Frontier confirmed: record where this global frame lives and step
+            // the probe to the next page of the same file.
+            self.map.push((self.disc_file, self.disc_page));
+            self.disc_page += 1;
+        }
+        self.frames.insert(idx, frame);
+    }
+
+    /// The current file has no more pages: continue the timeline at the start of
+    /// the next file, or mark the real end if this was the last file.
+    fn roll_to_next_file(&mut self) {
+        self.disc_file += 1;
+        self.disc_page = 0;
+        if self.disc_file >= self.files.len() {
+            self.at_end = true;
         }
     }
 }
@@ -540,29 +744,11 @@ pub fn load(path: &Path) -> Result<Media> {
 }
 
 fn open_still(path: &Path, name: String) -> Result<Media> {
-    use image::ColorType as C;
-    let dynimg = image::open(path).with_context(|| format!("decode image {}", path.display()))?;
-    let color = dynimg.color();
-    let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
-
-    let (samples, channels) = match color {
-        C::L8 | C::La8 => (Samples::U8(dynimg.to_luma8().into_raw()), 1),
-        C::L16 | C::La16 => (Samples::U16(dynimg.to_luma16().into_raw()), 1),
-        C::Rgb16 => (Samples::U16(dynimg.to_rgb16().into_raw()), 3),
-        C::Rgba16 => (Samples::U16(dynimg.to_rgba16().into_raw()), 4),
-        C::Rgb8 => (Samples::U8(dynimg.to_rgb8().into_raw()), 3),
-        C::Rgb32F => (Samples::F32(dynimg.to_rgb32f().into_raw()), 3),
-        C::Rgba32F => (Samples::F32(dynimg.to_rgba32f().into_raw()), 4),
-        _ => (Samples::U8(dynimg.to_rgba8().into_raw()), 4),
-    };
-    let hi_depth = matches!(
-        color,
-        C::L16 | C::La16 | C::Rgb16 | C::Rgba16 | C::Rgb32F | C::Rgba32F
-    );
-
+    let frame = decode_still_frame(path)?;
+    let hi_depth = frame.hi_depth();
     Ok(Media::Still(Still {
         name,
-        frame: Arc::new(FrameData::new([w, h], channels, samples)),
+        frame: Arc::new(frame),
         hi_depth,
     }))
 }
@@ -582,11 +768,116 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
         path: path.to_path_buf(),
         size: [w as usize, h as usize],
         hi_depth,
-        cache: vec![None],
-        last_used: vec![0],
-        resident_bytes: 0,
+        frames: SeqCache::new(1),
         at_end: false,
     }))
+}
+
+/// Open a numbered file run (a compact `PREFIX%0Nd,…` token) as a single media.
+/// Multi-page TIFFs are **concatenated** into one continuous timeline
+/// (`ConcatSeq`); any other extension is a still-per-file sequence (`FileSeq`).
+/// `name` is the display label (typically the token itself).
+pub fn load_sequence(files: &[PathBuf], name: String) -> Result<Media> {
+    let first = files
+        .first()
+        .ok_or_else(|| anyhow!("empty image sequence"))?;
+    let is_tiff = first
+        .extension()
+        .map(|e| {
+            let e = e.to_string_lossy().to_lowercase();
+            e == "tif" || e == "tiff"
+        })
+        .unwrap_or(false);
+    if is_tiff {
+        load_concat(files, name)
+    } else {
+        load_file_seq(files, name)
+    }
+}
+
+/// A numbered still sequence — one image file per frame. The first file is
+/// decoded up front for the size / bit depth and kept resident so the pane
+/// shows something immediately; the rest decode on demand.
+fn load_file_seq(files: &[PathBuf], name: String) -> Result<Media> {
+    let f0 = decode_file(&files[0])?;
+    let size = f0.size;
+    let hi_depth = f0.hi_depth();
+
+    let mut frames = SeqCache::new(files.len());
+    frames.insert(0, Arc::new(f0));
+
+    Ok(Media::FileSeq(FileSeq {
+        name,
+        paths: files.to_vec(),
+        size,
+        hi_depth,
+        frames,
+    }))
+}
+
+/// Several multi-page TIFFs concatenated into one timeline. Only the first
+/// page of the first file is read up front (size / depth + an instant first
+/// frame); page counts per file are discovered lazily while browsing, rolling
+/// from one file to the next at each file's end.
+fn load_concat(files: &[PathBuf], name: String) -> Result<Media> {
+    let f0 = decode_file(&files[0])?; // page 0 of the first TIFF
+    let size = f0.size;
+    let hi_depth = f0.hi_depth();
+
+    let mut frames = SeqCache::new(1);
+    frames.insert(0, Arc::new(f0));
+
+    Ok(Media::ConcatSeq(ConcatSeq {
+        name,
+        files: files.to_vec(),
+        size,
+        hi_depth,
+        frames,
+        map: vec![(0, 0)],  // global frame 0 = file 0, page 0
+        disc_file: 0,
+        disc_page: 1, // next frontier probe: page 1 of file 0
+        at_end: false,
+    }))
+}
+
+/// Decode one standalone file (a still, or one frame of a numbered sequence) at
+/// native bit depth. Dispatches by extension like [`load`]: multi-page TIFFs
+/// go through the `tiff` crate (page 0), everything else through the `image`
+/// crate.
+pub fn decode_file(path: &Path) -> Result<FrameData> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "tif" | "tiff" => {
+            let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+            let mut dec = Decoder::new(BufReader::new(file))?;
+            decode_current(&mut dec)
+        }
+        _ => decode_still_frame(path),
+    }
+}
+
+/// Decode a still image file into a `FrameData` via the `image` crate, mapping
+/// its colour type to native `Samples`.
+fn decode_still_frame(path: &Path) -> Result<FrameData> {
+    use image::ColorType as C;
+    let dynimg = image::open(path).with_context(|| format!("decode image {}", path.display()))?;
+    let color = dynimg.color();
+    let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
+
+    let (samples, channels) = match color {
+        C::L8 | C::La8 => (Samples::U8(dynimg.to_luma8().into_raw()), 1),
+        C::L16 | C::La16 => (Samples::U16(dynimg.to_luma16().into_raw()), 1),
+        C::Rgb16 => (Samples::U16(dynimg.to_rgb16().into_raw()), 3),
+        C::Rgba16 => (Samples::U16(dynimg.to_rgba16().into_raw()), 4),
+        C::Rgb8 => (Samples::U8(dynimg.to_rgb8().into_raw()), 3),
+        C::Rgb32F => (Samples::F32(dynimg.to_rgb32f().into_raw()), 3),
+        C::Rgba32F => (Samples::F32(dynimg.to_rgba32f().into_raw()), 4),
+        _ => (Samples::U8(dynimg.to_rgba8().into_raw()), 4),
+    };
+    Ok(FrameData::new([w, h], channels, samples))
 }
 
 /// A persistent TIFF reader for one sequence.
@@ -691,6 +982,66 @@ mod tests {
         assert!(pages >= 1, "at least one page must decode");
         // Probing exactly at the end reports None, not an error.
         assert!(reader.decode(pages).unwrap().is_none());
+    }
+
+    /// A numbered still run opens as one `FileSeq` media whose length is the
+    /// file count (known up front, so it is immediately "at end"), with the
+    /// first frame decoded eagerly and later frames decodable per file.
+    #[test]
+    fn file_sequence_opens_as_one_media() {
+        let files: Vec<PathBuf> = (0..=11)
+            .map(|i| PathBuf::from(format!("examples/frame_{i:03}.png")))
+            .collect();
+        if !files[0].exists() {
+            return;
+        }
+        let m = load_sequence(&files, "frame".into()).expect("open sequence");
+        assert_eq!(m.frame_count(), 12);
+        assert!(m.at_end(), "a file sequence knows its length up front");
+        assert!(m.resident(0).is_some(), "first frame decoded eagerly");
+        // A later frame decodes standalone from its own file.
+        let f7 = decode_file(&files[7]).expect("decode frame 7");
+        assert!(f7.size[0] > 0 && f7.size[1] > 0);
+    }
+
+    /// A run of multi-page TIFFs opens as one `ConcatSeq` whose length is the
+    /// **sum** of the files' page counts, discovered lazily by rolling from one
+    /// file to the next. Drives discovery exactly as the app does: probe the
+    /// frontier, `insert` a decoded page or `frontier_ended` on a miss.
+    #[test]
+    fn concat_sequence_concatenates_pages() {
+        let files = vec![
+            PathBuf::from("examples/clip_000.tif"), // 4 pages
+            PathBuf::from("examples/clip_001.tif"), // 3 pages
+        ];
+        if !files[0].exists() || !files[1].exists() {
+            return;
+        }
+        let mut m = load_sequence(&files, "clip".into()).expect("open concat");
+        assert!(matches!(m, Media::ConcatSeq(_)), "tiff run → ConcatSeq");
+        assert_eq!(m.frame_count(), 1); // only the first page known at open
+
+        // Walk the frontier until the real end, opening a fresh reader per probe.
+        let mut guard = 0;
+        while !m.at_end() {
+            guard += 1;
+            assert!(guard < 100, "discovery should terminate");
+            let known = m.frame_count();
+            let Some(DecodeReq::Tiff { page, path, .. }) = m.decode_job(known) else {
+                break;
+            };
+            match SeqReader::open(&path).unwrap().decode(page).unwrap() {
+                Some(frame) => m.insert(known, Arc::new(frame)),
+                None => m.frontier_ended(),
+            }
+        }
+
+        assert_eq!(m.frame_count(), 7, "4 + 3 pages concatenated");
+        let (_, map) = m.concat_layout().expect("concat layout");
+        assert_eq!(map[0], (0, 0), "frame 0 = file 0 page 0");
+        assert_eq!(map[3], (0, 3), "frame 3 = file 0 page 3 (last of clip_000)");
+        assert_eq!(map[4], (1, 0), "frame 4 rolls into file 1 page 0");
+        assert_eq!(map[6], (1, 2), "frame 6 = file 1 page 2 (last of clip_001)");
     }
 
     /// Inserting a frame accounts its bytes; evicting frees them and keeps the

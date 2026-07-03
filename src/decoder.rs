@@ -12,18 +12,17 @@
 //! file is read sequentially anyway).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use anyhow::Result;
 
-use crate::media::{FrameData, SeqReader};
+use crate::media::{self, DecodeReq, FrameData, SeqReader};
 
 struct Job {
     id: u64,
     frame: usize,
-    path: PathBuf,
+    req: DecodeReq,
 }
 
 pub struct Done {
@@ -34,9 +33,11 @@ pub struct Done {
     pub result: Result<Option<Arc<FrameData>>>,
 }
 
-/// Persistent readers, one per sequence id. The outer mutex guards the map
-/// (held only briefly), the inner one serialises decodes of one sequence.
-type Readers = Arc<Mutex<HashMap<u64, Arc<Mutex<SeqReader>>>>>;
+/// Persistent readers, keyed by `(pane id, file index)`. A lone TIFF uses file
+/// index 0; a concatenation keeps one reader per file so each file's IFD offset
+/// cache stays warm. The outer mutex guards the map (held only briefly), the
+/// inner one serialises decodes of one file.
+type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Mutex<SeqReader>>>>>;
 
 pub struct BackgroundDecoder {
     job_tx: mpsc::Sender<Job>,
@@ -63,21 +64,33 @@ impl BackgroundDecoder {
                     Err(_) => break, // sender dropped: app is shutting down
                 };
 
-                // Fetch (or open) this sequence's persistent reader.
-                let reader = {
-                    let mut map = readers.lock().unwrap();
-                    match map.get(&job.id) {
-                        Some(r) => Ok(Arc::clone(r)),
-                        None => SeqReader::open(&job.path).map(|r| {
-                            let r = Arc::new(Mutex::new(r));
-                            map.insert(job.id, Arc::clone(&r));
-                            r
-                        }),
+                let result = match &job.req {
+                    // Multi-page TIFF: decode `page` through the file's persistent
+                    // reader (keyed by pane id + file) so seeks reuse cached IFD
+                    // offsets.
+                    DecodeReq::Tiff { file, page, path } => {
+                        let key = (job.id, *file);
+                        let reader = {
+                            let mut map = readers.lock().unwrap();
+                            match map.get(&key) {
+                                Some(r) => Ok(Arc::clone(r)),
+                                None => SeqReader::open(path).map(|r| {
+                                    let r = Arc::new(Mutex::new(r));
+                                    map.insert(key, Arc::clone(&r));
+                                    r
+                                }),
+                            }
+                        };
+                        match reader {
+                            Ok(r) => r.lock().unwrap().decode(*page).map(|f| f.map(Arc::new)),
+                            Err(e) => Err(e),
+                        }
                     }
-                };
-                let result = match reader {
-                    Ok(r) => r.lock().unwrap().decode(job.frame).map(|f| f.map(Arc::new)),
-                    Err(e) => Err(e),
+                    // Numbered still sequence: each frame is its own file, so
+                    // decode it standalone (no persistent reader to keep warm).
+                    DecodeReq::File(path) => {
+                        media::decode_file(path).map(|f| Some(Arc::new(f)))
+                    }
                 };
                 if done_tx
                     .send(Done {
@@ -99,14 +112,14 @@ impl BackgroundDecoder {
         }
     }
 
-    pub fn request(&self, id: u64, frame: usize, path: PathBuf) {
-        let _ = self.job_tx.send(Job { id, frame, path });
+    pub fn request(&self, id: u64, frame: usize, req: DecodeReq) {
+        let _ = self.job_tx.send(Job { id, frame, req });
     }
 
-    /// Drop the persistent reader for `id` so the next decode reopens the file.
-    /// Call when a sequence is reloaded from disk or removed.
+    /// Drop every persistent reader for `id` (all of a concatenation's files) so
+    /// the next decode reopens them. Call when a sequence is reloaded or removed.
     pub fn forget(&self, id: u64) {
-        self.readers.lock().unwrap().remove(&id);
+        self.readers.lock().unwrap().retain(|(k, _), _| *k != id);
     }
 
     /// Take every finished frame available right now (non-blocking).

@@ -23,6 +23,13 @@ const BG: [u8; 4] = [24, 24, 24, 255];
 pub enum ExportSource {
     Still(Arc<FrameData>),
     Seq { path: std::path::PathBuf },
+    /// A numbered still sequence: one file per frame.
+    Files { paths: Vec<std::path::PathBuf> },
+    /// Several multi-page TIFFs concatenated: `map[frame] = (file, page)`.
+    Concat {
+        files: Vec<std::path::PathBuf>,
+        map: Vec<(usize, usize)>,
+    },
 }
 
 /// One pane, snapshotted for export, plus a small decode/render cache.
@@ -34,9 +41,12 @@ pub struct ExportPane {
     pub own_frame: usize,
     pub source: ExportSource,
 
-    /// Persistent reader for `Seq` sources, opened on first use, so a long
-    /// export doesn't re-walk the IFD chain for every frame.
+    /// Persistent reader for `Seq`/`Concat` sources, opened on first use, so a
+    /// long export doesn't re-walk the IFD chain for every frame.
     reader: Option<SeqReader>,
+    /// Which concatenated file `reader` is currently open on (reopened when the
+    /// timeline crosses into the next file).
+    cur_file: Option<usize>,
     cur_idx: Option<usize>,
     cur_display: Option<Vec<u8>>,
     cur_size: [usize; 2],
@@ -59,6 +69,7 @@ impl ExportPane {
             own_frame,
             source,
             reader: None,
+            cur_file: None,
             cur_idx: None,
             cur_display: None,
             cur_size: [0, 0],
@@ -93,6 +104,33 @@ impl ExportPane {
                 match self.reader.as_mut().unwrap().decode(idx) {
                     Ok(Some(f)) => Arc::new(f),
                     // No page here (past the end) or a decode error: keep last.
+                    Ok(None) | Err(_) => return,
+                }
+            }
+            ExportSource::Files { paths } => match paths.get(idx) {
+                // Each frame is its own file; decode it standalone.
+                Some(p) => match crate::media::decode_file(p) {
+                    Ok(f) => Arc::new(f),
+                    Err(_) => return, // keep last frame on decode failure
+                },
+                None => return,
+            },
+            ExportSource::Concat { files, map } => {
+                let Some(&(file, page)) = map.get(idx) else {
+                    return;
+                };
+                // Reopen the reader when the timeline crosses into a new file.
+                if self.cur_file != Some(file) {
+                    match files.get(file).and_then(|p| SeqReader::open(p).ok()) {
+                        Some(r) => {
+                            self.reader = Some(r);
+                            self.cur_file = Some(file);
+                        }
+                        None => return, // keep last frame on open failure
+                    }
+                }
+                match self.reader.as_mut().unwrap().decode(page) {
+                    Ok(Some(f)) => Arc::new(f),
                     Ok(None) | Err(_) => return,
                 }
             }

@@ -183,18 +183,13 @@ impl Keybindings {
 }
 
 /// Texture magnification filter used when zooming past 100%.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Interpolation {
     /// Nearest-neighbour: exact square samples, no blending.
+    #[default]
     Nearest,
     /// Bilinear: linear interpolation between the 4 nearest texels.
     Bilinear,
-}
-
-impl Default for Interpolation {
-    fn default() -> Self {
-        Interpolation::Nearest
-    }
 }
 
 /// Global visualisation settings. Grows over time. (Intensity clip is per-pane,

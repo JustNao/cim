@@ -19,6 +19,7 @@ impl CimApp {
             Action::NextMedia if n > 0 => self.current = (self.current + 1) % n,
             Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
             Action::NextFrame => {
+                self.pending_seek = None; // manual step cancels an automatic seek
                 let tl = self.timeline_len();
                 if self.shared_frame + 1 < tl {
                     self.shared_frame += 1;
@@ -28,6 +29,7 @@ impl CimApp {
                 // else hold at the frontier; lookahead extends it shortly
             }
             Action::PrevFrame => {
+                self.pending_seek = None; // manual step cancels an automatic seek
                 let tl = self.timeline_len();
                 if self.shared_frame > 0 {
                     self.shared_frame -= 1;

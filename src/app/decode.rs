@@ -20,9 +20,10 @@ impl CimApp {
                     }
                 }
                 Ok(None) => {
-                    // Frontier probe found no page here: the sequence ends before it.
+                    // Frontier probe found no page here: a TIFF has reached its
+                    // end; a concatenation rolls over to the next file.
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
-                        p.media.set_at_end();
+                        p.media.frontier_ended();
                     }
                 }
                 Err(e) => {
@@ -39,8 +40,8 @@ impl CimApp {
         if self.inflight.contains(&(id, frame)) {
             return;
         }
-        if let Some(path) = self.panes[idx].media.decode_job(frame) {
-            self.decoder.request(id, frame, path);
+        if let Some(req) = self.panes[idx].media.decode_job(frame) {
+            self.decoder.request(id, frame, req);
             self.inflight.insert((id, frame));
         }
     }
@@ -77,6 +78,39 @@ impl CimApp {
             if !pending {
                 self.panes[i].eager = false;
             }
+        }
+    }
+
+    /// Walk lazy length-discovery forward until a pending `--frame`/replay seek
+    /// becomes reachable, then land the shared timeline on it. Frames are only
+    /// discovered contiguously (one page past the frontier at a time), so a
+    /// requested frame beyond the known end can't be shown until every page up
+    /// to it has been probed. Until then the timeline rides the frontier so the
+    /// user sees load progress; once the length passes the target (or the real
+    /// end is found first) it snaps to the requested frame.
+    pub(super) fn drive_seek(&mut self) {
+        let Some(target) = self.pending_seek else {
+            return;
+        };
+        // Manual playback fights an automatic seek — let the user win.
+        if self.playing || self.panes.is_empty() {
+            self.pending_seek = None;
+            return;
+        }
+        let i = self.current.min(self.panes.len() - 1);
+        let known = self.panes[i].media.frame_count();
+        if known > target {
+            self.shared_frame = target;
+            self.pending_seek = None;
+        } else if self.panes[i].media.at_end() {
+            // Sequence ended before the target — clamp to its last frame.
+            self.shared_frame = known - 1;
+            self.pending_seek = None;
+        } else {
+            // Ride the frontier and probe the next page; `ensure_lookahead`
+            // (triggered by this frame position) issues the actual request.
+            self.shared_frame = known - 1;
+            self.request(i, known);
         }
     }
 

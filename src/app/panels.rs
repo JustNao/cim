@@ -39,15 +39,7 @@ impl CimApp {
                     .suffix(" fps")
                     .fixed_decimals(0),
             );
-
-            let tl = self.timeline_len();
-            if tl > 1 {
-                ui.label("frame");
-                ui.add(
-                    egui::Slider::new(&mut self.shared_frame, 0..=tl - 1)
-                        .clamping(egui::SliderClamping::Always),
-                );
-            }
+            // The frame scrubber itself now lives in the full-width bottom bar.
 
             ui.separator();
             if ui.button("⤓ Load all").clicked() {
@@ -62,13 +54,16 @@ impl CimApp {
             if ui.selectable_label(self.show_export, "Export").clicked() {
                 self.toggle_export();
             }
+            if ui.selectable_label(self.show_viewcmd, "⧉ View cmd").clicked() {
+                self.show_viewcmd = !self.show_viewcmd;
+            }
             if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
                 self.show_settings = !self.show_settings;
             }
         });
 
         // A/B operand pickers.
-        if self.mode == Mode::Ab && self.panes.len() >= 1 {
+        if self.mode == Mode::Ab && !self.panes.is_empty() {
             ui.horizontal(|ui| {
                 self.ab_picker(ui, true);
                 ui.separator();
@@ -94,6 +89,150 @@ impl CimApp {
         if ui.small_button("▶").clicked() {
             *slot = (*slot + 1) % n;
         }
+    }
+
+    // ---- full-width frame bar -------------------------------------------
+
+    /// The bottom transport strip: play / step controls, the selected media's
+    /// name and frame counter, and a full-width scrubber. Shown only while the
+    /// focused media is a sequence; its length tracks the selected media.
+    pub(super) fn draw_frame_bar(&mut self, ui: &mut egui::Ui) {
+        let len = self.timeline_len();
+        let at_end = self.current_at_end();
+        let cur = self.current.min(self.panes.len().saturating_sub(1));
+        let name = self
+            .panes
+            .get(cur)
+            .map(|p| p.media.name().to_string())
+            .unwrap_or_default();
+
+        ui.horizontal(|ui| {
+            let play = if self.playing { "⏸" } else { "▶" };
+            if ui.button(play).clicked() {
+                self.playing = !self.playing;
+            }
+            if ui.button("◀").on_hover_text("Previous frame").clicked() {
+                self.pending_seek = None;
+                if self.shared_frame > 0 {
+                    self.shared_frame -= 1;
+                } else if at_end {
+                    self.shared_frame = len - 1;
+                }
+            }
+            if ui.button("▶").on_hover_text("Next frame").clicked() {
+                self.pending_seek = None;
+                if self.shared_frame + 1 < len {
+                    self.shared_frame += 1;
+                } else if at_end {
+                    self.shared_frame = 0;
+                }
+            }
+            ui.separator();
+            ui.strong(ellipsize(&name, 40));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let count = if at_end {
+                    format!("{len}")
+                } else {
+                    format!("{len}+")
+                };
+                ui.monospace(format!("frame {} / {}", self.shared_frame + 1, count));
+            });
+        });
+
+        self.draw_scrubber(ui, len, at_end);
+    }
+
+    /// A wide, click/drag-seekable frame track filling the panel width. The
+    /// filled portion reflects progress; a playhead marks the current frame, and
+    /// per-frame ticks appear while the sequence is short enough to read them.
+    pub(super) fn draw_scrubber(&mut self, ui: &mut egui::Ui, len: usize, at_end: bool) {
+        let width = ui.available_width();
+        let (rect, resp) =
+            ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+
+        let span = (len.saturating_sub(1)).max(1) as f32;
+        let frac = self.shared_frame as f32 / span;
+
+        painter.rect_filled(rect, 4.0, Color32::from_gray(30));
+        let filled = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
+        painter.rect_filled(filled, 4.0, Color32::from_rgb(56, 104, 162));
+
+        // Per-frame ticks while they stay legible; a "+" marker at the frontier.
+        if len <= 80 {
+            for k in 0..len {
+                let x = rect.left() + rect.width() * (k as f32 / span);
+                painter.line_segment(
+                    [Pos2::new(x, rect.bottom() - 5.0), Pos2::new(x, rect.bottom())],
+                    Stroke::new(1.0, Color32::from_gray(80)),
+                );
+            }
+        }
+        if !at_end {
+            painter.text(
+                rect.right_center() - Vec2::new(6.0, 0.0),
+                Align2::RIGHT_CENTER,
+                "+",
+                FontId::proportional(16.0),
+                Color32::from_gray(150),
+            );
+        }
+
+        // Playhead.
+        let px = rect.left() + rect.width() * frac;
+        painter.line_segment(
+            [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
+            Stroke::new(2.0, Color32::from_gray(235)),
+        );
+        painter.circle_filled(Pos2::new(px, rect.center().y), 6.0, Color32::from_gray(240));
+
+        // Click or drag anywhere on the track to seek.
+        if (resp.clicked() || resp.dragged()) && len > 1 {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.pending_seek = None; // manual seek cancels an automatic one
+                let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                self.shared_frame = (t * span).round() as usize;
+            }
+        }
+    }
+
+    // ---- view command ----------------------------------------------------
+
+    /// The "View command" window: shows the `cim …` line that reopens the
+    /// current files at this exact view, with a button to copy it.
+    pub(super) fn draw_viewcmd(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_viewcmd;
+        let cmd = self.view_command();
+        egui::Window::new("⧉ View command")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.label("Reopen the current files at this exact view by running:");
+                ui.add_space(4.0);
+                let mut text = cmd.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(3)
+                        .font(egui::TextStyle::Monospace),
+                );
+                ui.add_space(6.0);
+                if ui.button("⧉ Copy to clipboard").clicked() {
+                    ui.output_mut(|o| o.copied_text = cmd.clone());
+                    self.status = "View command copied to clipboard".into();
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Captures files, layout, columns, shared zoom/pan, frame, \
+                         focus and the A/B split.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+        self.show_viewcmd = open;
     }
 
     pub(super) fn view_zoom_label(&self) -> f32 {

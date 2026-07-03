@@ -32,11 +32,27 @@ impl CimApp {
     /// Snapshot a participating pane for the export plan.
     pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
         let p = &self.panes[idx];
-        let source = match p.media.decode_job(0) {
-            Some(path) => ExportSource::Seq { path },
-            None => ExportSource::Still(
-                p.media.resident(0).expect("still frame always resident"),
-            ),
+        let source = if let Some((files, map)) = p.media.concat_layout() {
+            // Concatenation of multi-page TIFFs: hand export the files + the
+            // discovered global→(file,page) map so it composites the same
+            // continuous timeline (Load-all first to export it in full).
+            ExportSource::Concat { files, map }
+        } else {
+            match p.media.decode_job(0) {
+                Some(media::DecodeReq::Tiff { path, .. }) => ExportSource::Seq { path },
+                // A numbered still sequence: hand export its frame file list.
+                Some(media::DecodeReq::File(_)) => match &p.source {
+                    Source::Sequence { files, .. } => ExportSource::Files {
+                        paths: files.clone(),
+                    },
+                    _ => ExportSource::Still(
+                        p.media.resident(0).expect("sequence frame 0 resident"),
+                    ),
+                },
+                None => ExportSource::Still(
+                    p.media.resident(0).expect("still frame always resident"),
+                ),
+            }
         };
         ExportPane::new(
             *self.view_ref(idx),
@@ -59,7 +75,7 @@ impl CimApp {
                     Mode::Grid => {
                         let n = self.visible_indices().len().max(1);
                         let cols = self.config.max_columns.max(1).min(n);
-                        let rows = (n + cols - 1) / cols;
+                        let rows = n.div_ceil(cols);
                         Rect::from_min_size(
                             Pos2::ZERO,
                             Vec2::new(cols as f32 * w, rows as f32 * h),

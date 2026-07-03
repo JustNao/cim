@@ -15,17 +15,55 @@ pub const LOADABLE_EXTS: &[&str] = &["tif", "tiff", "png", "jpg", "jpeg", "bmp",
 
 /// Outcome of parsing argv.
 pub enum Cli {
-    /// Launch the GUI, opening these already-expanded paths.
-    Run(Vec<PathBuf>),
+    /// Launch the GUI, opening these inputs at the initial view described by
+    /// `view` (empty unless `--mode`/`--zoom`/… were given).
+    Run { inputs: Vec<Input>, view: ViewState },
     /// A CLI-only request (help / completion) was handled; exit with this code.
     Exit(i32),
 }
 
+/// One thing to open. A bare path becomes a single media; a compact
+/// `PREFIX%0Nd,START,END.EXT` token that names two or more files becomes **one**
+/// image sequence (a single pane), not a pane per file.
+pub enum Input {
+    Single(PathBuf),
+    /// A numbered still sequence: `token` is the original compact argument (so
+    /// the view-command panel can round-trip it) and `files` are its frames.
+    Sequence { token: String, files: Vec<PathBuf> },
+}
+
+/// Which layout a `--mode` flag selects. Mirrors the app's `Mode` but lives here
+/// so the CLI stays decoupled from the GUI module.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ViewMode {
+    Grid,
+    Single,
+    Ab,
+}
+
+/// A viewpoint captured from a running session and replayed on the next launch.
+/// Every field is optional: only the flags actually present on the command line
+/// override the app's defaults. Produced by the "View command" panel and parsed
+/// back here so a shared command reopens the same files at the same view.
+#[derive(Default)]
+pub struct ViewState {
+    pub mode: Option<ViewMode>,
+    pub cols: Option<usize>,
+    pub zoom: Option<f32>,
+    pub center: Option<(f32, f32)>,
+    pub frame: Option<usize>,
+    pub pane: Option<usize>,
+    pub ab: Option<(usize, usize, f32)>,
+}
+
 /// Parse the arguments after argv[0].
 pub fn parse(args: Vec<String>) -> Cli {
-    let mut paths = Vec::new();
+    let mut inputs = Vec::new();
+    let mut view = ViewState::default();
     let mut i = 0;
     while i < args.len() {
+        // Flags that take a value read the following argument and skip it.
+        let next = |i: usize| args.get(i + 1).map(String::as_str);
         match args[i].as_str() {
             "-h" | "--help" => {
                 print!("{}", help_text());
@@ -55,11 +93,64 @@ pub fn parse(args: Vec<String>) -> Cli {
                     }
                 }
             }
-            other => expand_arg(other, &mut paths),
+            "--mode" => {
+                view.mode = next(i).and_then(parse_mode);
+                i += 1;
+            }
+            "--cols" => {
+                view.cols = next(i).and_then(|s| s.parse().ok());
+                i += 1;
+            }
+            "--zoom" => {
+                view.zoom = next(i).and_then(|s| s.parse().ok());
+                i += 1;
+            }
+            "--center" => {
+                view.center = next(i).and_then(parse_pair);
+                i += 1;
+            }
+            "--frame" => {
+                view.frame = next(i).and_then(|s| s.parse().ok());
+                i += 1;
+            }
+            "--pane" => {
+                view.pane = next(i).and_then(|s| s.parse().ok());
+                i += 1;
+            }
+            "--ab" => {
+                view.ab = next(i).and_then(parse_ab);
+                i += 1;
+            }
+            other => expand_arg(other, &mut inputs),
         }
         i += 1;
     }
-    Cli::Run(paths)
+    Cli::Run { inputs, view }
+}
+
+/// Parse a `--mode` value (case-insensitive).
+fn parse_mode(s: &str) -> Option<ViewMode> {
+    match s.to_ascii_lowercase().as_str() {
+        "grid" => Some(ViewMode::Grid),
+        "single" => Some(ViewMode::Single),
+        "ab" | "a/b" => Some(ViewMode::Ab),
+        _ => None,
+    }
+}
+
+/// Parse `x,y` into a float pair (used by `--center`).
+fn parse_pair(s: &str) -> Option<(f32, f32)> {
+    let (a, b) = s.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parse `a,b,split` (0-based pane indices + 0..1 divider) for `--ab`.
+fn parse_ab(s: &str) -> Option<(usize, usize, f32)> {
+    let mut it = s.split(',');
+    let a = it.next()?.trim().parse().ok()?;
+    let b = it.next()?.trim().parse().ok()?;
+    let split = it.next()?.trim().parse().ok()?;
+    Some((a, b, split))
 }
 
 fn help_text() -> String {
@@ -88,6 +179,18 @@ OPTIONS:
         --completions <SHELL>  Print a completion script for SHELL to stdout
                                (bash | powershell)
 
+VIEW STATE:
+    These reproduce a saved viewpoint and are normally generated for you by the
+    in-app \"View cmd\" panel (⧉ Copy). All indices are 0-based.
+
+        --mode <grid|single|ab>  Initial layout
+        --cols <N>               Grid columns
+        --zoom <F>               Shared zoom (screen px per image px)
+        --center <X,Y>           Shared view centre, in image pixels
+        --frame <N>              Timeline frame to show
+        --pane <N>               Focused pane
+        --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
+
 SHELL COMPLETION:
     bash         eval \"$(cim --completions bash)\"
     PowerShell   cim --completions powershell | Out-String | Invoke-Expression
@@ -99,12 +202,17 @@ SHELL COMPLETION:
 
 // ---- sequence-token expansion -------------------------------------------
 
-/// If `arg` is a sequence token, push every file it names; otherwise push it
-/// as a plain path.
-fn expand_arg(arg: &str, out: &mut Vec<PathBuf>) {
+/// Turn one positional argument into an `Input`. A sequence token naming two or
+/// more files becomes a single `Sequence`; a token that resolves to one file, or
+/// any plain path, becomes a `Single`.
+fn expand_arg(arg: &str, out: &mut Vec<Input>) {
     match expand_sequence_token(arg) {
-        Some(files) => out.extend(files),
-        None => out.push(PathBuf::from(arg)),
+        Some(files) if files.len() >= 2 => out.push(Input::Sequence {
+            token: arg.to_string(),
+            files,
+        }),
+        Some(mut files) => out.push(Input::Single(files.pop().unwrap_or_default())),
+        None => out.push(Input::Single(PathBuf::from(arg))),
     }
 }
 
@@ -349,6 +457,79 @@ mod tests {
         let mut out = group_files(&files, "");
         out.sort();
         assert_eq!(out, vec!["f_%03d,0,2.tif".to_string(), "solo.png".to_string()]);
+    }
+
+    #[test]
+    fn parses_view_flags() {
+        let args = "a.tif b.tif --mode ab --cols 3 --zoom 2.5 --center 10,20 \
+                    --frame 4 --pane 1 --ab 0,1,0.25"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { inputs, view } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(inputs.len(), 2);
+        assert!(matches!(view.mode, Some(ViewMode::Ab)));
+        assert_eq!(view.cols, Some(3));
+        assert_eq!(view.zoom, Some(2.5));
+        assert_eq!(view.center, Some((10.0, 20.0)));
+        assert_eq!(view.frame, Some(4));
+        assert_eq!(view.pane, Some(1));
+        assert_eq!(view.ab, Some((0, 1, 0.25)));
+    }
+
+    #[test]
+    fn view_flags_absent_stay_none() {
+        let Cli::Run { inputs, view } = parse(vec!["a.tif".into()]) else {
+            panic!("expected Run");
+        };
+        assert_eq!(inputs.len(), 1);
+        assert!(view.mode.is_none() && view.zoom.is_none() && view.ab.is_none());
+    }
+
+    #[test]
+    fn token_becomes_one_sequence_input() {
+        let Cli::Run { inputs, .. } = parse(vec![
+            "frame_%03d,0,11.png".into(),
+            "solo.png".into(),
+        ]) else {
+            panic!("expected Run");
+        };
+        assert_eq!(inputs.len(), 2);
+        match &inputs[0] {
+            Input::Sequence { token, files } => {
+                assert_eq!(token, "frame_%03d,0,11.png");
+                assert_eq!(files.len(), 12);
+            }
+            _ => panic!("first input should be a sequence"),
+        }
+        assert!(matches!(inputs[1], Input::Single(_)));
+    }
+
+    #[test]
+    fn multiple_tokens_each_become_a_sequence() {
+        // A big video split into parts: two independent numbered runs, each its
+        // own token, must open as two separate sequences (two panes).
+        let Cli::Run { inputs, .. } = parse(vec![
+            "partA_%03d,0,49.png".into(),
+            "partB_%03d,0,99.png".into(),
+        ]) else {
+            panic!("expected Run");
+        };
+        assert_eq!(inputs.len(), 2);
+        match (&inputs[0], &inputs[1]) {
+            (
+                Input::Sequence { token: t0, files: f0 },
+                Input::Sequence { token: t1, files: f1 },
+            ) => {
+                assert_eq!(t0, "partA_%03d,0,49.png");
+                assert_eq!(f0.len(), 50);
+                assert_eq!(t1, "partB_%03d,0,99.png");
+                assert_eq!(f1.len(), 100);
+            }
+            _ => panic!("both inputs should be sequences"),
+        }
     }
 
     #[test]

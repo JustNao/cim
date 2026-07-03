@@ -26,6 +26,7 @@ use eframe::egui::{
     TextureId, TextureOptions, Vec2,
 };
 
+use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
 use crate::media::{self, HistData, Media};
@@ -62,10 +63,20 @@ struct HistCache {
     data: HistData,
 }
 
+/// How a pane's media was opened, so it can be reloaded from disk and emitted
+/// back into a replay command.
+enum Source {
+    /// A single file (still or multi-page TIFF).
+    File(PathBuf),
+    /// A numbered still sequence: the compact `PREFIX%0Nd,START,END.EXT` token
+    /// it was opened from, plus the individual frame files.
+    Sequence { token: String, files: Vec<PathBuf> },
+}
+
 /// One opened media plus its per-pane view/timeline state.
 struct Pane {
     id: u64, // stable across reorder/close; matches background-decode results
-    path: PathBuf, // source file, for reloading from disk
+    source: Source, // how to reload it / re-emit it in a replay command
     media: Media,
     tex: Option<CachedTex>,
     transform: ViewTransform, // used only when !sync_spatial
@@ -90,6 +101,11 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
+    /// A requested timeline frame not yet reachable because the sequence's
+    /// length is still being discovered (e.g. from `--frame` at launch). While
+    /// set, discovery is driven forward until this frame exists, then the
+    /// timeline jumps to it. Cleared by any manual frame navigation.
+    pending_seek: Option<usize>,
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
@@ -105,6 +121,9 @@ pub struct CimApp {
     show_settings: bool,
     show_manager: bool,
     show_vis: bool,
+    /// The "View command" window: shows a `cim …` line that reopens the current
+    /// files at the current view, for copying / sharing.
+    show_viewcmd: bool,
     hist: Option<HistCache>,
     rebinding: Option<Action>,
 
@@ -154,7 +173,11 @@ pub struct CimApp {
 }
 
 impl CimApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, startup: Vec<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        inputs: Vec<cli::Input>,
+        view: cli::ViewState,
+    ) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         style.visuals.window_rounding = 8.0.into();
@@ -170,6 +193,7 @@ impl CimApp {
             next_id: 0,
             shared_view: ViewTransform::default(),
             shared_frame: 0,
+            pending_seek: None,
             mode: Mode::Grid,
             current: 0,
             slot_a: 0,
@@ -182,6 +206,7 @@ impl CimApp {
             show_settings: false,
             show_manager: false,
             show_vis: false,
+            show_viewcmd: false,
             hist: None,
             rebinding: None,
 
@@ -213,8 +238,97 @@ impl CimApp {
             clock: 0,
             render_scratch: Vec::new(),
         };
-        app.open_paths(startup);
+        app.open_inputs(inputs);
+        app.apply_view_state(view);
         app
+    }
+
+    /// Apply a viewpoint parsed from the command line (see `cli::ViewState`).
+    /// Called once after the startup files are opened. Only the fields that were
+    /// present on the command line change anything; the rest keep their defaults.
+    pub(super) fn apply_view_state(&mut self, vs: cli::ViewState) {
+        if let Some(c) = vs.cols {
+            self.config.max_columns = c.clamp(1, 8);
+        }
+        if let Some(m) = vs.mode {
+            self.mode = match m {
+                cli::ViewMode::Grid => Mode::Grid,
+                cli::ViewMode::Single => Mode::Single,
+                cli::ViewMode::Ab => Mode::Ab,
+            };
+        }
+        let n = self.panes.len();
+        if let Some(p) = vs.pane {
+            if n > 0 {
+                self.current = p.min(n - 1);
+            }
+        }
+        if let Some((a, b, split)) = vs.ab {
+            if n > 0 {
+                self.slot_a = a.min(n - 1);
+                self.slot_b = b.min(n - 1);
+            }
+            self.ab_split = split.clamp(0.02, 0.98);
+        }
+        if let Some(f) = vs.frame {
+            // The sequence length isn't discovered yet, so we can't land on `f`
+            // now — record it and let `drive_seek` walk discovery up to it.
+            self.shared_frame = f;
+            self.pending_seek = Some(f);
+        }
+        // A restored zoom/centre is an explicit view, so suppress the auto-fit
+        // that would otherwise run on first draw.
+        if vs.zoom.is_some() || vs.center.is_some() {
+            if let Some(z) = vs.zoom {
+                self.shared_view.zoom = z.clamp(1e-4, 512.0);
+            }
+            if let Some((x, y)) = vs.center {
+                self.shared_view.center = Vec2::new(x, y);
+            }
+            self.shared_view.needs_fit = false;
+        }
+    }
+
+    /// Build a `cim …` command line that reopens the current files at the
+    /// current shared view. Captures the layout, columns, shared zoom/pan, the
+    /// timeline frame, the focused pane and (in A/B) the operands + split.
+    ///
+    /// Only the *shared* view is captured — panes with their own view (sync off)
+    /// fall back to it. Sequences are listed as their individual files (the
+    /// compact `PREFIX%0Nd,…` token isn't reconstructed).
+    pub(super) fn view_command(&self) -> String {
+        let mut parts: Vec<String> = vec!["cim".into()];
+        for p in &self.panes {
+            // Re-emit a numbered sequence as its compact token so a replay
+            // reopens it as one sequence (not a pane per file).
+            match &p.source {
+                Source::File(path) => parts.push(quote_path(path)),
+                Source::Sequence { token, .. } => parts.push(quote_arg(token)),
+            }
+        }
+        let mode = match self.mode {
+            Mode::Grid => "grid",
+            Mode::Single => "single",
+            Mode::Ab => "ab",
+        };
+        parts.push(format!("--mode {mode}"));
+        parts.push(format!("--cols {}", self.config.max_columns));
+        let v = self.shared_view;
+        parts.push(format!("--zoom {:.4}", v.zoom));
+        parts.push(format!("--center {:.2},{:.2}", v.center.x, v.center.y));
+        if self.timeline_len() > 1 {
+            parts.push(format!("--frame {}", self.shared_frame));
+        }
+        if !self.panes.is_empty() {
+            parts.push(format!("--pane {}", self.current.min(self.panes.len() - 1)));
+            if self.mode == Mode::Ab {
+                parts.push(format!(
+                    "--ab {},{},{:.3}",
+                    self.slot_a, self.slot_b, self.ab_split
+                ));
+            }
+        }
+        parts.join(" ")
     }
 
     // ---- loading ---------------------------------------------------------
@@ -229,31 +343,26 @@ impl CimApp {
         }
     }
 
+    /// Open plain paths (from the file dialog or a drag-and-drop) — each becomes
+    /// its own pane. Sequences only come from the command line (`open_inputs`).
     pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>) {
-        for p in paths {
-            match media::load(&p) {
-                Ok(m) => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    let clip = m.hi_depth(); // >8-bit sources auto-contrast by default
-                    self.panes.push(Pane {
-                        id,
-                        path: p.clone(),
-                        media: m,
-                        tex: None,
-                        transform: ViewTransform::default(),
-                        frame: 0,
-                        sync_spatial: true,
-                        sync_temporal: true,
-                        visible: true,
-                        clip,
-                        error: None,
-                        eager: false,
-                    });
-                }
-                Err(e) => {
-                    self.error_popup = Some(format!("Failed to open {}:\n{e}", p.display()))
-                }
+        self.open_inputs(paths.into_iter().map(cli::Input::Single).collect());
+    }
+
+    /// Open a list of CLI inputs: a `Single` becomes one media, a `Sequence`
+    /// becomes a single numbered-file sequence media (one pane, not one per file).
+    pub(super) fn open_inputs(&mut self, inputs: Vec<cli::Input>) {
+        for input in inputs {
+            let (loaded, source) = match input {
+                cli::Input::Single(p) => (media::load(&p), Source::File(p)),
+                cli::Input::Sequence { token, files } => (
+                    media::load_sequence(&files, token.clone()),
+                    Source::Sequence { token, files },
+                ),
+            };
+            match loaded {
+                Ok(m) => self.add_pane(m, source),
+                Err(e) => self.error_popup = Some(format!("Failed to open:\n{e}")),
             }
         }
         let n = self.panes.len();
@@ -264,6 +373,27 @@ impl CimApp {
             self.slot_b = self.slot_a + 1;
         }
         self.shared_view.needs_fit = true;
+    }
+
+    /// Push a freshly loaded media as a new pane with default per-pane state.
+    fn add_pane(&mut self, media: Media, source: Source) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let clip = media.hi_depth(); // >8-bit sources auto-contrast by default
+        self.panes.push(Pane {
+            id,
+            source,
+            media,
+            tex: None,
+            transform: ViewTransform::default(),
+            frame: 0,
+            sync_spatial: true,
+            sync_temporal: true,
+            visible: true,
+            clip,
+            error: None,
+            eager: false,
+        });
     }
 
     pub(super) fn remove_media(&mut self, i: usize) {
@@ -291,8 +421,11 @@ impl CimApp {
         if i >= self.panes.len() {
             return;
         }
-        let path = self.panes[i].path.clone();
-        match media::load(&path) {
+        let loaded = match &self.panes[i].source {
+            Source::File(p) => media::load(p),
+            Source::Sequence { token, files } => media::load_sequence(files, token.clone()),
+        };
+        match loaded {
             Ok(m) => {
                 let id = self.panes[i].id;
                 self.decoder.forget(id); // reopen the file for its fresh contents
@@ -358,7 +491,9 @@ impl CimApp {
     /// Whether the timeline-driving media's true end is known. Until it is, the
     /// timeline holds at the last discovered frame rather than wrapping early.
     pub(super) fn current_at_end(&self) -> bool {
-        self.panes.get(self.current).map_or(true, |p| p.media.at_end())
+        self.panes
+            .get(self.current)
+            .is_none_or(|p| p.media.at_end())
     }
 
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a
@@ -393,6 +528,7 @@ impl eframe::App for CimApp {
         self.pump_decoder();
         self.handle_input(ctx);
         self.advance_playback(ctx);
+        self.drive_seek();
 
         // Discover sequence length lazily: eager "Load all" batches drive to the
         // end, otherwise just keep one page ahead of the cursor.
@@ -413,6 +549,17 @@ impl eframe::App for CimApp {
             ui.add_space(2.0);
         });
 
+        // Full-width frame scrubber for the selected media, pinned to the
+        // bottom. Only present when the focused media is a sequence; its range
+        // follows whichever media is currently selected.
+        if self.timeline_len() > 1 {
+            egui::TopBottomPanel::bottom("framebar").show(ctx, |ui| {
+                ui.add_space(4.0);
+                self.draw_frame_bar(ui);
+                ui.add_space(4.0);
+            });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             self.draw_central(ui, ctx);
         });
@@ -428,6 +575,9 @@ impl eframe::App for CimApp {
         }
         if self.show_settings {
             self.draw_settings(ctx);
+        }
+        if self.show_viewcmd {
+            self.draw_viewcmd(ctx);
         }
 
         if self.error_popup.is_some() {
@@ -578,6 +728,21 @@ fn wheel_delta(ctx: &egui::Context) -> f32 {
             s.x
         }
     })
+}
+
+/// Render a path for a shell command line, double-quoting it when it contains
+/// whitespace so the generated `cim …` command pastes back correctly.
+fn quote_path(p: &Path) -> String {
+    quote_arg(&p.display().to_string())
+}
+
+/// Double-quote a command-line argument when it contains whitespace.
+fn quote_arg(s: &str) -> String {
+    if s.chars().any(char::is_whitespace) {
+        format!("\"{s}\"")
+    } else {
+        s.to_string()
+    }
 }
 
 fn ellipsize(s: &str, max: usize) -> String {

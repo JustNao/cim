@@ -136,7 +136,7 @@ impl CimApp {
     pub(super) fn grid_cells(&self, vis: &[usize], area: Rect) -> Vec<(usize, Rect)> {
         let n = vis.len();
         let cols = self.config.max_columns.max(1).min(n).max(1);
-        let rows = (n + cols - 1) / cols;
+        let rows = n.div_ceil(cols);
         let cw = (area.width() - GAP * (cols as f32 - 1.0)) / cols as f32;
         let ch = (area.height() - GAP * (rows as f32 - 1.0)) / rows as f32;
         let mut cells = Vec::with_capacity(n);
@@ -439,7 +439,7 @@ impl CimApp {
         let ptr = ctx.input(|i| i.pointer.interact_pos());
         if !self.selecting_region {
             if resp.drag_started() {
-                self.ab_handle_grabbed = ptr.map_or(false, |p| (p.x - split_x).abs() <= HANDLE_HIT);
+                self.ab_handle_grabbed = ptr.is_some_and(|p| (p.x - split_x).abs() <= HANDLE_HIT);
             }
             if resp.dragged() {
                 let d = resp.drag_delta();

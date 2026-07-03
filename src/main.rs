@@ -17,8 +17,8 @@ fn main() -> eframe::Result<()> {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let startup = match cli::parse(args) {
-        cli::Cli::Run(paths) => paths,
+    let (inputs, view) = match cli::parse(args) {
+        cli::Cli::Run { inputs, view } => (inputs, view),
         cli::Cli::Exit(code) => std::process::exit(code),
     };
 
@@ -33,6 +33,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "cim",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::CimApp::new(cc, startup)))),
+        Box::new(move |cc| Ok(Box::new(app::CimApp::new(cc, inputs, view)))),
     )
 }
