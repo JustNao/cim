@@ -271,25 +271,6 @@ pub fn out_dims(region: Rect, target_h: u32) -> (usize, usize) {
     (w, h)
 }
 
-/// Very rough H.264 size estimate. x264 roughly doubles size per −6 CRF.
-pub fn estimate_bytes(w: usize, h: usize, frames: usize, crf: u32) -> u64 {
-    let bpp_ref = 0.10_f64; // bits/pixel/frame at CRF 23, medium preset (typical)
-    let bpp = bpp_ref * 2f64.powf((23.0 - crf as f64) / 6.0);
-    let bits = bpp * (w as f64) * (h as f64) * (frames.max(1) as f64);
-    (bits / 8.0) as u64
-}
-
-pub fn human_size(bytes: u64) -> String {
-    let b = bytes as f64;
-    if b >= 1e9 {
-        format!("{:.2} GB", b / 1e9)
-    } else if b >= 1e6 {
-        format!("{:.1} MB", b / 1e6)
-    } else {
-        format!("{:.0} KB", b / 1e3)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

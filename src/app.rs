@@ -1,7 +1,7 @@
 //! Application state and the egui update loop.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{
     self, Align2, Color32, ColorImage, FontId, Id, Key, Pos2, Rect, Sense, Stroke, TextureHandle,
@@ -110,7 +110,9 @@ pub struct CimApp {
     out_height: u32,
     crf: u32,
     export_fps: f32,
-    export_path: Option<PathBuf>,
+    /// Output file name, saved in the current working directory. The user
+    /// edits just the name — no save dialog / folder picker.
+    export_name: String,
     export_run: Option<ExportRun>,
     cancel_export: bool,
     export_status: String,
@@ -173,7 +175,7 @@ impl CimApp {
             out_height: 720,
             crf: 23,
             export_fps: 12.0,
-            export_path: None,
+            export_name: "comparison.mp4".into(),
             export_run: None,
             cancel_export: false,
             export_status: String::new(),
@@ -1663,7 +1665,9 @@ impl CimApp {
         let crop = self.export_region;
         let region = self.export_canvas();
         let (out_w, out_h) = export::out_dims(region, self.out_height);
-        let bilinear = matches!(self.config.vis.interp, Interpolation::Bilinear);
+        // Always nearest for export: source pixels are sampled directly onto the
+        // output grid, so blending would soften detail the comparison exists to show.
+        let bilinear = false;
         let (start, end) = self.export_frames();
         let total = end - start + 1;
 
@@ -1754,10 +1758,17 @@ impl CimApp {
     }
 
     fn start_export(&mut self) {
-        let Some(path) = self.export_path.clone() else {
-            self.export_status = "Choose an output file first".into();
+        let name = self.export_name.trim();
+        if name.is_empty() {
+            self.export_status = "Enter an output file name first".into();
             return;
+        }
+        let name = if Path::new(name).extension().is_some() {
+            name.to_string()
+        } else {
+            format!("{name}.mp4")
         };
+        let path = PathBuf::from(&name); // relative -> current working directory
         let plan = match self.build_export_plan() {
             Ok(p) => p,
             Err(e) => {
@@ -1941,29 +1952,32 @@ impl CimApp {
                     });
                 }
 
-                let bytes = export::estimate_bytes(out_w, out_h, total, self.crf);
                 ui.label(format!(
-                    "{total} frames · {:.1}s · ≈ {}  (lower CRF = larger)",
+                    "{total} frames · {:.1}s",
                     total as f32 / self.export_fps.max(1.0),
-                    export::human_size(bytes)
                 ));
 
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!running, egui::Button::new("Output…")).clicked() {
-                        if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("MP4 video", &["mp4"])
-                            .set_file_name("comparison.mp4")
-                            .save_file()
-                        {
-                            self.export_path = Some(p);
-                        }
-                    }
-                    if let Some(p) = &self.export_path {
-                        ui.monospace(ellipsize(&p.to_string_lossy(), 30));
-                    } else {
-                        ui.label("(no file chosen)");
-                    }
+                    ui.label("Save as");
+                    ui.add_enabled(
+                        !running,
+                        egui::TextEdit::singleline(&mut self.export_name).desired_width(180.0),
+                    );
                 });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "→ {}",
+                        ellipsize(
+                            &std::env::current_dir()
+                                .unwrap_or_default()
+                                .display()
+                                .to_string(),
+                            40
+                        )
+                    ))
+                    .weak()
+                    .small(),
+                );
 
                 ui.separator();
                 if let Some(run) = &self.export_run {
@@ -1975,7 +1989,7 @@ impl CimApp {
                         self.cancel_export = true;
                     }
                 } else {
-                    let ready = self.export_path.is_some();
+                    let ready = !self.export_name.trim().is_empty();
                     if ui.add_enabled(ready, egui::Button::new("Export MP4")).clicked() {
                         self.start_export();
                     }
