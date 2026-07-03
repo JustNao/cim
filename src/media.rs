@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use tiff::decoder::{Decoder, DecodingResult};
@@ -32,6 +32,11 @@ pub struct FrameData {
     pub size: [usize; 2], // [width, height]
     pub channels: usize,  // 1 (gray), 3 (rgb) or 4 (rgba)
     pub samples: Samples,
+    /// Display bounds are content-invariant per frame, so memoize them the
+    /// first time each mapping is needed (full-range vs 0.01% clip) — the clip
+    /// path otherwise re-scans the whole image on every redraw.
+    bounds_full: OnceLock<(f32, f32)>,
+    bounds_clip: OnceLock<(f32, f32)>,
 }
 
 /// Per-channel histogram plus the true value extent, for the Visualise panel.
@@ -43,6 +48,16 @@ pub struct HistData {
 }
 
 impl FrameData {
+    pub fn new(size: [usize; 2], channels: usize, samples: Samples) -> Self {
+        Self {
+            size,
+            channels,
+            samples,
+            bounds_full: OnceLock::new(),
+            bounds_clip: OnceLock::new(),
+        }
+    }
+
     /// Bytes held by the sample buffer, for the cache memory budget.
     pub fn byte_len(&self) -> usize {
         let n = self.size[0] * self.size[1] * self.channels;
@@ -149,9 +164,19 @@ impl FrameData {
         }
     }
 
-    /// Display range [lo, hi] mapped to [0, 255]. With `clip`, a fixed 0.01%
-    /// percentile stretch (robust auto-contrast); otherwise the full range.
-    fn display_bounds(&self, clip: bool) -> (f32, f32) {
+    /// Display range [lo, hi] mapped to [0, 255], memoized per mapping. With
+    /// `clip`, a fixed 0.01% percentile stretch (robust auto-contrast);
+    /// otherwise the full range.
+    pub fn display_bounds(&self, clip: bool) -> (f32, f32) {
+        let cell = if clip {
+            &self.bounds_clip
+        } else {
+            &self.bounds_full
+        };
+        *cell.get_or_init(|| self.compute_display_bounds(clip))
+    }
+
+    fn compute_display_bounds(&self, clip: bool) -> (f32, f32) {
         if clip {
             self.percentile_bounds(0.01)
         } else if self.is_float() {
@@ -269,34 +294,44 @@ impl FrameData {
         }
     }
 
-    /// Build the 8-bit RGBA buffer egui uploads as a texture.
+    /// Build the 8-bit RGBA buffer egui uploads as a texture (fresh allocation).
     pub fn render_rgba(&self, clip: bool) -> Vec<u8> {
         let (lo, hi) = self.display_bounds(clip);
-        let denom = hi - lo;
-        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-        let map = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
+        let mut out = Vec::new();
+        self.render_into(lo, hi, &mut out);
+        out
+    }
 
+    /// Render the 8-bit RGBA display buffer into `out` (resized to fit), mapping
+    /// native samples through `[lo, hi] → [0, 255]`.
+    ///
+    /// Integer sources map through a small lookup table keyed by sample value —
+    /// one table build (≤ 64 Ki entries) instead of a float multiply-and-clamp
+    /// at every pixel — which is the bulk of the per-frame CPU on a large image.
+    /// Passing a reusable `out` also avoids re-allocating the buffer each frame.
+    pub fn render_into(&self, lo: f32, hi: f32, out: &mut Vec<u8>) {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
-        let mut out = vec![0u8; px * 4];
-        for i in 0..px {
-            let base = i * ch;
-            let (r, g, b) = if self.color_channels() == 1 {
-                let v = map(self.sample_f(base));
-                (v, v, v)
-            } else {
-                (
-                    map(self.sample_f(base)),
-                    map(self.sample_f(base + 1)),
-                    map(self.sample_f(base + 2)),
-                )
-            };
-            out[i * 4] = r;
-            out[i * 4 + 1] = g;
-            out[i * 4 + 2] = b;
-            out[i * 4 + 3] = 255;
+        let cc = self.color_channels();
+        out.clear();
+        out.resize(px * 4, 255); // alpha stays 255; rgb overwritten below
+
+        let denom = hi - lo;
+        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
+        let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
+
+        match &self.samples {
+            Samples::U8(v) => {
+                let lut: Vec<u8> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+            }
+            Samples::U16(v) => {
+                let lut: Vec<u8> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+            }
+            // Floats have no bounded domain to tabulate; map arithmetically.
+            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, |s| map_f(s)),
         }
-        out
     }
 
     /// Per-channel histogram binned across the true [min, max] extent.
@@ -527,11 +562,7 @@ fn open_still(path: &Path, name: String) -> Result<Media> {
 
     Ok(Media::Still(Still {
         name,
-        frame: Arc::new(FrameData {
-            size: [w, h],
-            channels,
-            samples,
-        }),
+        frame: Arc::new(FrameData::new([w, h], channels, samples)),
         hi_depth,
     }))
 }
@@ -627,11 +658,7 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
         return Err(anyhow!("short TIFF buffer: {got} < {expected}"));
     }
 
-    Ok(FrameData {
-        size: [w, h],
-        channels,
-        samples,
-    })
+    Ok(FrameData::new([w, h], channels, samples))
 }
 
 #[cfg(test)]
@@ -694,6 +721,76 @@ mod tests {
         assert_eq!(m.resident_bytes(), 0);
         assert!(m.resident(0).is_none());
         assert_eq!(m.frame_count(), len, "eviction must not change known length");
+    }
+
+    /// The LUT render path must produce exactly what the straightforward
+    /// per-pixel float mapping would, for both integer widths and both
+    /// mono/RGB layouts, at arbitrary bounds.
+    #[test]
+    fn lut_render_matches_float_reference() {
+        // Reference mapping identical to the pre-LUT implementation.
+        fn reference(frame: &FrameData, lo: f32, hi: f32) -> Vec<u8> {
+            let denom = hi - lo;
+            let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
+            let map = |s: f32| (((s - lo) * scale).clamp(0.0, 255.0)) as u8;
+            let px = frame.size[0] * frame.size[1];
+            let cc = if frame.channels >= 3 { 3 } else { 1 };
+            let mut out = vec![255u8; px * 4];
+            for i in 0..px {
+                let base = i * frame.channels;
+                for c in 0..3 {
+                    let s = frame.sample_f(base + if cc == 1 { 0 } else { c });
+                    out[i * 4 + c] = map(s);
+                }
+            }
+            out
+        }
+
+        // mono u8, mono u16, and rgb u16, with a non-trivial clip window.
+        let mono_u8 = FrameData::new([16, 1], 1, Samples::U8((0..16).cycle().take(16).collect()));
+        let mono_u16 = FrameData::new([4, 1], 1, Samples::U16(vec![0, 1000, 30000, 65535]));
+        let rgb_u16 = FrameData::new(
+            [2, 1],
+            3,
+            Samples::U16(vec![10, 20000, 60000, 500, 40000, 65535]),
+        );
+
+        for (frame, lo, hi) in [
+            (&mono_u8, 0.0, 255.0),
+            (&mono_u16, 1000.0, 60000.0),
+            (&rgb_u16, 400.0, 61000.0),
+        ] {
+            let mut got = Vec::new();
+            frame.render_into(lo, hi, &mut got);
+            assert_eq!(got, reference(frame, lo, hi));
+        }
+    }
+}
+
+/// Write interleaved samples into an RGBA buffer through `map`. Mono sources
+/// (1 colour channel) replicate the grey value across R/G/B; alpha is left at
+/// whatever `out` already holds (255). `out` must already be `px * 4` long.
+fn fill_rgba<T: Copy>(
+    out: &mut [u8],
+    v: &[T],
+    ch: usize,
+    cc: usize,
+    px: usize,
+    map: impl Fn(T) -> u8,
+) {
+    for i in 0..px {
+        let base = i * ch;
+        let o = i * 4;
+        if cc == 1 {
+            let g = map(v[base]);
+            out[o] = g;
+            out[o + 1] = g;
+            out[o + 2] = g;
+        } else {
+            out[o] = map(v[base]);
+            out[o + 1] = map(v[base + 1]);
+            out[o + 2] = map(v[base + 2]);
+        }
     }
 }
 

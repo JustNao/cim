@@ -173,10 +173,13 @@ impl CimApp {
                 None => true,
             };
             if need {
-                // Only run the (expensive) render + upload when the texture is stale.
+                // Only run the (expensive) render + upload when the texture is
+                // stale. Bounds are memoized on the frame; render into a reused
+                // scratch buffer via the LUT path.
                 let opts = self.tex_options();
-                let pixels = frame.render_rgba(self.panes[idx].clip);
-                let img = ColorImage::from_rgba_unmultiplied(frame.size, &pixels);
+                let (lo, hi) = frame.display_bounds(self.panes[idx].clip);
+                frame.render_into(lo, hi, &mut self.render_scratch);
+                let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
                 let p = &mut self.panes[idx];
                 match &mut p.tex {
                     Some(t) => {

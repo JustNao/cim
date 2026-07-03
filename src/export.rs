@@ -294,11 +294,7 @@ mod tests {
     #[test]
     fn region_crop_is_pixel_exact() {
         // 8×8 gradient: value = y*8 + x, easy to identify per pixel.
-        let frame = FrameData {
-            size: [8, 8],
-            channels: 1,
-            samples: Samples::U8((0..64).collect()),
-        };
+        let frame = FrameData::new([8, 8], 1, Samples::U8((0..64).collect()));
         // Crop the 4×2 region at (2, 3).
         let reg = Rect::from_min_size(Pos2::new(2.0, 3.0), Vec2::new(4.0, 2.0));
         let cell = Rect::from_min_size(Pos2::ZERO, reg.size());

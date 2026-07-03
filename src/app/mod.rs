@@ -148,6 +148,9 @@ pub struct CimApp {
     decoding_all: bool,
     /// Monotonic per-frame counter driving cache LRU recency.
     clock: u64,
+    /// Reused RGBA scratch buffer for texture rendering, so `prepare` doesn't
+    /// allocate a full-image buffer on every frame change.
+    render_scratch: Vec<u8>,
 }
 
 impl CimApp {
@@ -208,6 +211,7 @@ impl CimApp {
             inflight: HashSet::new(),
             decoding_all: false,
             clock: 0,
+            render_scratch: Vec::new(),
         };
         app.open_paths(startup);
         app
