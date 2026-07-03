@@ -1,0 +1,499 @@
+//! The toolbar and the floating tool windows: media manager, visualise
+//! (interpolation + histogram), and settings (layout + keybindings).
+
+use super::*;
+
+impl CimApp {
+    pub(super) fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("📂 Open").clicked() {
+                self.open_dialog();
+            }
+            ui.separator();
+            for (mode, label) in [
+                (Mode::Grid, "Grid"),
+                (Mode::Single, "Single"),
+                (Mode::Ab, "A/B"),
+            ] {
+                if ui.selectable_label(self.mode == mode, label).clicked() {
+                    self.mode = mode;
+                }
+            }
+            ui.separator();
+            if ui.button("Fit").clicked() {
+                self.apply_action_local(Action::ResetView);
+            }
+            if ui.button("100%").clicked() && !self.panes.is_empty() {
+                let size = self.panes[self.current].media.size();
+                self.view_mut(self.current).actual_size(size);
+            }
+            ui.label(format!("{:.0}%", self.view_zoom_label() * 100.0));
+
+            ui.separator();
+            let play = if self.playing { "⏸" } else { "▶" };
+            if ui.button(play).clicked() {
+                self.playing = !self.playing;
+            }
+            ui.add(
+                egui::Slider::new(&mut self.fps, 1.0..=60.0)
+                    .suffix(" fps")
+                    .fixed_decimals(0),
+            );
+
+            let tl = self.timeline_len();
+            if tl > 1 {
+                ui.label("frame");
+                ui.add(
+                    egui::Slider::new(&mut self.shared_frame, 0..=tl - 1)
+                        .clamping(egui::SliderClamping::Always),
+                );
+            }
+
+            ui.separator();
+            if ui.button("⤓ Load all").clicked() {
+                self.load_all();
+            }
+            if ui.selectable_label(self.show_manager, "☰ Media").clicked() {
+                self.show_manager = !self.show_manager;
+            }
+            if ui.selectable_label(self.show_vis, "Visualise").clicked() {
+                self.show_vis = !self.show_vis;
+            }
+            if ui.selectable_label(self.show_export, "Export").clicked() {
+                self.toggle_export();
+            }
+            if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
+                self.show_settings = !self.show_settings;
+            }
+        });
+
+        // A/B operand pickers.
+        if self.mode == Mode::Ab && self.panes.len() >= 1 {
+            ui.horizontal(|ui| {
+                self.ab_picker(ui, true);
+                ui.separator();
+                self.ab_picker(ui, false);
+            });
+        }
+
+        if !self.status.is_empty() {
+            ui.label(egui::RichText::new(&self.status).weak().small());
+        }
+    }
+
+    pub(super) fn ab_picker(&mut self, ui: &mut egui::Ui, is_a: bool) {
+        let n = self.panes.len();
+        let slot = if is_a { &mut self.slot_a } else { &mut self.slot_b };
+        *slot = (*slot).min(n - 1);
+        ui.label(if is_a { "A:" } else { "B:" });
+        if ui.small_button("◀").clicked() {
+            *slot = (*slot + n - 1) % n;
+        }
+        let name = self.panes[*slot].media.name().to_string();
+        ui.monospace(format!("{}·{}", *slot + 1, ellipsize(&name, 16)));
+        if ui.small_button("▶").clicked() {
+            *slot = (*slot + 1) % n;
+        }
+    }
+
+    pub(super) fn view_zoom_label(&self) -> f32 {
+        if self.panes.is_empty() {
+            1.0
+        } else {
+            self.view_ref(self.current.min(self.panes.len() - 1)).zoom
+        }
+    }
+
+    pub(super) fn apply_action_local(&mut self, action: Action) {
+        if action == Action::ResetView {
+            self.shared_view.needs_fit = true;
+            for p in &mut self.panes {
+                p.transform.needs_fit = true;
+            }
+        }
+    }
+
+    pub(super) fn draw_manager(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_manager;
+        let shared_view = self.shared_view;
+        let shared_frame = self.shared_frame;
+
+        egui::Window::new("☰ Media")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                if self.panes.is_empty() {
+                    ui.label("No media open. Use 📂 Open or drop files onto the window.");
+                    return;
+                }
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("media_table")
+                        .num_columns(9)
+                        .striped(true)
+                        .spacing([10.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Show");
+                            ui.label("#");
+                            ui.label("Name");
+                            ui.label("Frames");
+                            ui.label("Single");
+                            ui.label("A / B");
+                            ui.label("Sync");
+                            ui.label("Clip");
+                            ui.label("");
+                            ui.end_row();
+
+                            // Aggregate row: each toggle here drives the matching
+                            // column for every media below it. Single / A / B are
+                            // single-target selectors, so they get no aggregate.
+                            {
+                                let mut all_vis = self.panes.iter().all(|p| p.visible);
+                                if ui
+                                    .checkbox(&mut all_vis, "")
+                                    .on_hover_text("Show / hide all")
+                                    .changed()
+                                {
+                                    for p in &mut self.panes {
+                                        p.visible = all_vis;
+                                    }
+                                }
+                                ui.label("");
+                                ui.strong("all");
+                                ui.label("");
+                                ui.label(""); // Single
+                                ui.label(""); // A / B
+                                ui.horizontal(|ui| {
+                                    let mut all_pos = self.panes.iter().all(|p| p.sync_spatial);
+                                    if ui.checkbox(&mut all_pos, "Pos").changed() {
+                                        for p in &mut self.panes {
+                                            if !all_pos && p.sync_spatial {
+                                                p.transform = shared_view;
+                                            }
+                                            p.sync_spatial = all_pos;
+                                        }
+                                    }
+                                    let mut all_time = self.panes.iter().all(|p| p.sync_temporal);
+                                    if ui.checkbox(&mut all_time, "Time").changed() {
+                                        for p in &mut self.panes {
+                                            if !all_time && p.sync_temporal {
+                                                p.frame = shared_frame;
+                                            }
+                                            p.sync_temporal = all_time;
+                                        }
+                                    }
+                                });
+                                let mut all_clip = self.panes.iter().all(|p| p.clip);
+                                if ui
+                                    .checkbox(&mut all_clip, "0.01%")
+                                    .on_hover_text("Clip all")
+                                    .changed()
+                                {
+                                    for p in &mut self.panes {
+                                        if p.clip != all_clip {
+                                            p.clip = all_clip;
+                                            p.tex = None; // rebuild with new mapping
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .small_button("⟳")
+                                    .on_hover_text("Reload all from disk")
+                                    .clicked()
+                                {
+                                    self.pending_reload_all = true;
+                                }
+                                ui.end_row();
+                            }
+
+                            let mut to_remove = None;
+                            let mut to_reload = None;
+                            for i in 0..self.panes.len() {
+                                let count = self.panes[i].media.frame_count();
+                                let resident = self.panes[i].media.resident_count();
+
+                                ui.checkbox(&mut self.panes[i].visible, "");
+
+                                ui.monospace(format!("{}", i + 1));
+
+                                let name = self.panes[i].media.name().to_string();
+                                ui.label(ellipsize(&name, 26));
+
+                                if count > 1 {
+                                    ui.monospace(format!("{count}  ({resident}◈)"));
+                                } else {
+                                    ui.monospace("still");
+                                }
+
+                                if ui
+                                    .selectable_label(self.current == i, "▢")
+                                    .on_hover_text("Show alone in Single view")
+                                    .clicked()
+                                {
+                                    self.current = i;
+                                    self.mode = Mode::Single;
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(self.slot_a == i, "A").clicked() {
+                                        self.slot_a = i;
+                                    }
+                                    if ui.selectable_label(self.slot_b == i, "B").clicked() {
+                                        self.slot_b = i;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    let mut ss = self.panes[i].sync_spatial;
+                                    if ui.checkbox(&mut ss, "Pos").changed() {
+                                        if !ss {
+                                            self.panes[i].transform = shared_view;
+                                        }
+                                        self.panes[i].sync_spatial = ss;
+                                    }
+                                    let mut st = self.panes[i].sync_temporal;
+                                    if ui.checkbox(&mut st, "Time").changed() {
+                                        if !st {
+                                            self.panes[i].frame = shared_frame;
+                                        }
+                                        self.panes[i].sync_temporal = st;
+                                    }
+                                });
+
+                                let mut clip = self.panes[i].clip;
+                                if ui
+                                    .checkbox(&mut clip, "0.01%")
+                                    .on_hover_text("Percentile auto-contrast for this media")
+                                    .changed()
+                                {
+                                    self.panes[i].clip = clip;
+                                    self.panes[i].tex = None; // rebuild with new mapping
+                                }
+
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("⟳")
+                                        .on_hover_text("Reload this media from disk")
+                                        .clicked()
+                                    {
+                                        to_reload = Some(i);
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        to_remove = Some(i);
+                                    }
+                                });
+                                ui.end_row();
+                            }
+
+                            if let Some(i) = to_remove {
+                                self.pending_remove = Some(i);
+                            }
+                            if let Some(i) = to_reload {
+                                self.pending_reload = Some(i);
+                            }
+                        });
+                });
+            });
+        self.show_manager = open;
+    }
+
+    pub(super) fn draw_vis(&mut self, ctx: &egui::Context) {
+        self.update_histogram();
+        let mut open = self.show_vis;
+        let mut changed = false;
+        egui::Window::new("Visualise")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Interpolation");
+                    egui::ComboBox::from_id_salt("interp")
+                        .selected_text(match self.config.vis.interp {
+                            Interpolation::Nearest => "Nearest",
+                            Interpolation::Bilinear => "Bilinear",
+                        })
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.vis.interp,
+                                    Interpolation::Nearest,
+                                    "Nearest",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.vis.interp,
+                                    Interpolation::Bilinear,
+                                    "Bilinear",
+                                )
+                                .changed();
+                        });
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.heading("Histogram");
+                self.draw_histogram(ui);
+            });
+
+        if changed {
+            // Rebuild textures so filter/clip changes are visible immediately.
+            for p in &mut self.panes {
+                p.tex = None;
+            }
+            self.config.save();
+        }
+        self.show_vis = open;
+    }
+
+    /// Recompute the histogram of the focused media/frame when it changes.
+    pub(super) fn update_histogram(&mut self) {
+        if self.panes.is_empty() {
+            self.hist = None;
+            return;
+        }
+        let cur = self.current.min(self.panes.len() - 1);
+        let f = self.frame_disp(cur);
+        let key = (self.panes[cur].id, f);
+        if self.hist.as_ref().map(|h| h.key) == Some(key) {
+            return;
+        }
+        if let Some(frame) = self.panes[cur].media.resident(f) {
+            self.hist = Some(HistCache {
+                key,
+                data: frame.histogram_display(256),
+            });
+        }
+    }
+
+    pub(super) fn draw_histogram(&self, ui: &mut egui::Ui) {
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 140.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_gray(16));
+
+        let Some(hist) = &self.hist else { return };
+        let data = &hist.data;
+
+        // Peak across every channel/bin; sqrt scaling makes tails legible.
+        let peak = data
+            .bins
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .max()
+            .unwrap_or(1)
+            .max(1) as f32;
+
+        let colors: &[Color32] = if data.mono {
+            &[Color32::from_gray(210)]
+        } else {
+            &[
+                Color32::from_rgb(230, 90, 90),
+                Color32::from_rgb(90, 210, 90),
+                Color32::from_rgb(100, 140, 240),
+            ]
+        };
+
+        for (ci, chan) in data.bins.iter().enumerate() {
+            let nb = chan.len().max(2);
+            let mut pts = Vec::with_capacity(nb);
+            for (v, &count) in chan.iter().enumerate() {
+                let x = rect.left() + (v as f32 / (nb - 1) as f32) * rect.width();
+                let h = (count as f32 / peak).sqrt();
+                let y = rect.bottom() - h * rect.height();
+                pts.push(Pos2::new(x, y));
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
+        }
+
+        // True value extent under the graph: min at left, max at right.
+        // Whole numbers (integer sources) print plainly; floats get 4 digits.
+        let fmt = |v: f32| -> String {
+            if v.fract() == 0.0 {
+                format!("{}", v as i64)
+            } else {
+                format!("{v:.4}")
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.monospace(format!("min {}", fmt(data.min)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.monospace(format!("max {}", fmt(data.max)));
+            });
+        });
+    }
+
+    pub(super) fn draw_settings(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        egui::Window::new("⚙ Settings")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.heading("Layout");
+                ui.horizontal(|ui| {
+                    ui.label("Max columns");
+                    ui.add(egui::Slider::new(&mut self.config.max_columns, 1..=8));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("UI scale");
+                    ui.add(
+                        egui::Slider::new(&mut self.config.ui_scale, 0.6..=2.0)
+                            .suffix("×")
+                            .fixed_decimals(2),
+                    );
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.heading("Keyboard shortcuts");
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    egui::Grid::new("keys")
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            for action in Action::all() {
+                                ui.label(action.label());
+                                let key_txt = self
+                                    .config
+                                    .keybindings
+                                    .key_for(action)
+                                    .map(|k| k.name().to_string())
+                                    .unwrap_or_else(|| "—".into());
+                                if self.rebinding == Some(action) {
+                                    ui.colored_label(
+                                        Color32::from_rgb(240, 200, 120),
+                                        "press a key…",
+                                    );
+                                } else {
+                                    ui.monospace(key_txt);
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Rebind").clicked() {
+                                        self.rebinding = Some(action);
+                                    }
+                                    if ui.small_button("Clear").clicked() {
+                                        self.config.keybindings.clear(action);
+                                        self.config.save();
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                if ui.button("Save settings").clicked() {
+                    self.config.save();
+                    self.status = "Settings saved".into();
+                }
+            });
+        self.show_settings = open;
+    }
+}
