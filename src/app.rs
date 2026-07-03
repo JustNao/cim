@@ -176,10 +176,7 @@ impl CimApp {
 
     fn open_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
-            .add_filter(
-                "Images & sequences",
-                &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp"],
-            )
+            .add_filter("Images & sequences", crate::cli::LOADABLE_EXTS)
             .add_filter("All files", &["*"])
             .pick_files()
         {

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod decoder;
 mod export;
 mod media;
@@ -10,6 +11,17 @@ mod view;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // Handle CLI-only requests (--help, completion) and expand sequence tokens
+    // before we ever open a window.
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let startup = match cli::parse(args) {
+        cli::Cli::Run(paths) => paths,
+        cli::Cli::Exit(code) => std::process::exit(code),
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -17,9 +29,6 @@ fn main() -> eframe::Result<()> {
             .with_title("cim — Compare Images & Media"),
         ..Default::default()
     };
-
-    // Any paths on the command line are opened at startup.
-    let startup: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
 
     eframe::run_native(
         "cim",
