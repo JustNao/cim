@@ -58,6 +58,8 @@ struct Pane {
     visible: bool,
     /// Per-pane 0.01% percentile auto-contrast (independent of other panes).
     clip: bool,
+    /// Last decode error for this sequence, shown centred over the pane.
+    error: Option<String>,
 }
 
 pub struct CimApp {
@@ -100,6 +102,8 @@ pub struct CimApp {
     cancel_export: bool,
     export_status: String,
     status: String,
+    /// Global error not tied to a sequence — rendered as a modal popup.
+    error_popup: Option<String>,
     last_area: Rect,
     drag_src: Option<usize>,
     pending_remove: Option<usize>,
@@ -153,6 +157,7 @@ impl CimApp {
             cancel_export: false,
             export_status: String::new(),
             status: String::new(),
+            error_popup: None,
             last_area: Rect::NOTHING,
             drag_src: None,
             pending_remove: None,
@@ -195,9 +200,12 @@ impl CimApp {
                         sync_temporal: true,
                         visible: true,
                         clip,
+                        error: None,
                     });
                 }
-                Err(e) => self.status = format!("Failed to open {}: {e}", p.display()),
+                Err(e) => {
+                    self.error_popup = Some(format!("Failed to open {}:\n{e}", p.display()))
+                }
             }
         }
         let n = self.panes.len();
@@ -283,9 +291,14 @@ impl CimApp {
                 Ok(frame) => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
+                        p.error = None; // a good frame clears any stale error
                     }
                 }
-                Err(e) => self.status = format!("decode error: {e}"),
+                Err(e) => {
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
+                        p.error = Some(format!("Frame {}: {e}", d.frame + 1));
+                    }
+                }
             }
         }
     }
@@ -759,6 +772,7 @@ impl CimApp {
         if loading {
             draw_spinner(&painter, img_area, ctx.input(|i| i.time));
         }
+        self.draw_pane_error(ui, idx, img_area);
 
         // Interaction: zoom / pan / ctrl-drag reorder. Disabled while the user
         // is dragging out an export region (so that drag isn't stolen).
@@ -771,7 +785,7 @@ impl CimApp {
         if !self.selecting_region {
             let ctrl = ctx.input(|i| i.modifiers.ctrl);
             if resp.hovered() {
-                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                let scroll = wheel_delta(ctx);
                 if scroll != 0.0 {
                     let anchor = ctx
                         .input(|i| i.pointer.hover_pos())
@@ -802,6 +816,24 @@ impl CimApp {
             ui.painter()
                 .rect_stroke(cell, 0.0, Stroke::new(1.0, Color32::from_gray(80)));
         }
+    }
+
+    /// If this sequence failed to decode, paint its message centred over `rect`.
+    fn draw_pane_error(&self, ui: &egui::Ui, idx: usize, rect: Rect) {
+        let Some(msg) = self.panes[idx].error.as_deref() else {
+            return;
+        };
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(150));
+        let col = Color32::from_rgb(240, 130, 130);
+        let galley = painter.layout(
+            format!("⚠  {msg}"),
+            FontId::proportional(15.0),
+            col,
+            (rect.width() - 32.0).max(48.0),
+        );
+        let pos = rect.center() - galley.size() / 2.0;
+        painter.galley(pos, galley, col);
     }
 
     fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, cell: Rect) {
@@ -943,6 +975,8 @@ impl CimApp {
 
         self.draw_ab_side(ui, a, ta, la, img, left, true, now);
         self.draw_ab_side(ui, b, tb, lb, img, right, false, now);
+        self.draw_pane_error(ui, a, left);
+        self.draw_pane_error(ui, b, right);
 
         // Divider line + grab handle.
         let p = ui.painter_at(img);
@@ -985,7 +1019,7 @@ impl CimApp {
                 self.ab_handle_grabbed = false;
             }
             if resp.hovered() {
-                let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+                let scroll = wheel_delta(ctx);
                 if scroll != 0.0 {
                     if let Some(pos) = ptr {
                         let side = if pos.x < split_x { a } else { b };
@@ -1697,6 +1731,27 @@ impl eframe::App for CimApp {
             self.draw_settings(ctx);
         }
 
+        if self.error_popup.is_some() {
+            let msg = self.error_popup.clone().unwrap();
+            let mut dismiss = false;
+            egui::Window::new("⚠ Error")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    ui.add_space(8.0);
+                    ui.vertical_centered(|ui| {
+                        if ui.button("OK").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            if dismiss {
+                self.error_popup = None;
+            }
+        }
+
         if let Some(i) = self.pending_remove.take() {
             self.remove_media(i);
         }
@@ -1768,6 +1823,20 @@ fn zoom_speed(ctx: &egui::Context) -> f32 {
     } else {
         0.0015
     }
+}
+
+/// Effective wheel delta for zooming. While Shift is held the platform remaps
+/// the mouse wheel to the horizontal axis, leaving `raw_scroll_delta.y` at 0 —
+/// so fall back to the `x` component when `y` is zero.
+fn wheel_delta(ctx: &egui::Context) -> f32 {
+    ctx.input(|i| {
+        let s = i.raw_scroll_delta;
+        if s.y != 0.0 {
+            s.y
+        } else {
+            s.x
+        }
+    })
 }
 
 fn ellipsize(s: &str, max: usize) -> String {
