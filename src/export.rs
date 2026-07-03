@@ -153,15 +153,18 @@ pub struct ExportPlan {
     pub region: Rect,
     pub out_w: usize,
     pub out_h: usize,
+    /// First timeline frame to export; frame `t` of the output shows timeline
+    /// position `start + t`.
+    pub start: usize,
     pub total: usize,
     pub bilinear: bool,
 }
 
 impl ExportPlan {
-    /// Composite timeline frame `t` into an RGBA buffer of `out_w * out_h`.
+    /// Composite output frame `t` (of `total`) into an RGBA buffer.
     pub fn compose(&mut self, t: usize) -> Vec<u8> {
         for p in &mut self.panes {
-            p.ensure_frame(t);
+            p.ensure_frame(self.start + t);
         }
         let (w, h) = (self.out_w, self.out_h);
         let (rw, rh) = (self.region.width(), self.region.height());
@@ -290,7 +293,47 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::Samples;
     use std::path::PathBuf;
+
+    /// An image-space crop exported 1:1 must reproduce exactly the region's
+    /// pixels: cell of the crop's size + view (zoom 1, centred on the crop).
+    #[test]
+    fn region_crop_is_pixel_exact() {
+        // 8×8 gradient: value = y*8 + x, easy to identify per pixel.
+        let frame = FrameData {
+            size: [8, 8],
+            channels: 1,
+            samples: Samples::U8((0..64).collect()),
+        };
+        // Crop the 4×2 region at (2, 3).
+        let reg = Rect::from_min_size(Pos2::new(2.0, 3.0), Vec2::new(4.0, 2.0));
+        let cell = Rect::from_min_size(Pos2::ZERO, reg.size());
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: reg.center().to_vec2(),
+            needs_fit: false,
+        };
+        let pane = ExportPane::new(view, false, 1, true, 0, ExportSource::Still(Arc::new(frame)));
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            region: cell,
+            out_w: 4,
+            out_h: 2,
+            start: 0,
+            total: 1,
+            bilinear: false,
+        };
+        let buf = plan.compose(0);
+        for oy in 0..2 {
+            for ox in 0..4 {
+                let expect = (3 + oy) * 8 + (2 + ox); // source pixel value
+                let got = buf[(oy * 4 + ox) * 4] as usize;
+                assert_eq!(got, expect, "pixel ({ox},{oy})");
+            }
+        }
+    }
 
     /// Full compose → ffmpeg encode of a few frames. Skips gracefully if the
     /// fixture or ffmpeg is unavailable (e.g. CI without ffmpeg).
@@ -314,6 +357,7 @@ mod tests {
             region: area,
             out_w: 160,
             out_h: 120,
+            start: 0,
             total: 4,
             bilinear: true,
         };

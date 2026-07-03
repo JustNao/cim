@@ -95,9 +95,18 @@ pub struct CimApp {
     // Export
     show_export: bool,
     export_mode: Mode,
-    export_region: Option<Rect>, // in central-area coords; None = full view
+    /// Selected export crop in IMAGE space (pixels of the compared images).
+    /// Chosen in Single view; applied to every pane of the comparison. None =
+    /// whole image / whole view.
+    export_region: Option<Rect>,
+    /// Inclusive (start, end) timeline range to export; None = start to finish.
+    export_range: Option<(usize, usize)>,
     selecting_region: bool,
     sel_start: Option<Pos2>,
+    /// Live screen-space rubber band while dragging out a region.
+    sel_rect: Option<Rect>,
+    /// Mode to restore once region selection (forced Single) ends.
+    pre_select_mode: Option<Mode>,
     out_height: u32,
     crf: u32,
     export_fps: f32,
@@ -156,8 +165,11 @@ impl CimApp {
             show_export: false,
             export_mode: Mode::Grid,
             export_region: None,
+            export_range: None,
             selecting_region: false,
             sel_start: None,
+            sel_rect: None,
+            pre_select_mode: None,
             out_height: 720,
             crf: 23,
             export_fps: 12.0,
@@ -792,11 +804,14 @@ impl CimApp {
     }
 
     /// Draw / edit the export region rectangle over the view.
+    ///
+    /// Selection is done in Single view (forced while `selecting_region`): the
+    /// screen drag is converted to IMAGE space on release, so the same crop
+    /// applies to every pane of the comparison afterwards.
     fn region_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
-        if !self.show_export {
+        if !self.show_export || self.panes.is_empty() {
             return;
         }
-        let painter = ui.painter_at(area);
 
         if self.selecting_region {
             let resp = ui.interact(area, Id::new("region_sel"), Sense::drag());
@@ -806,46 +821,71 @@ impl CimApp {
             }
             if resp.dragged() {
                 if let (Some(s), Some(c)) = (self.sel_start, pos) {
-                    self.export_region = Some(Rect::from_two_pos(s, c).intersect(area));
+                    self.sel_rect = Some(Rect::from_two_pos(s, c).intersect(area));
                 }
             }
             if resp.drag_stopped() {
                 self.selecting_region = false;
                 self.sel_start = None;
-                // Discard a zero-size accidental click.
-                if let Some(r) = self.export_region {
-                    if r.width() < 4.0 || r.height() < 4.0 {
-                        self.export_region = None;
-                    }
+                // Discard a zero-size accidental click, then map to image space.
+                self.export_region = self
+                    .sel_rect
+                    .take()
+                    .filter(|r| r.width() >= 4.0 && r.height() >= 4.0)
+                    .and_then(|r| self.screen_rect_to_image(r, area));
+                if let Some(m) = self.pre_select_mode.take() {
+                    self.mode = m;
                 }
             }
+            if let Some(r) = self.sel_rect {
+                dim_outside(&ui.painter_at(area), area, r);
+            }
+            return;
         }
 
-        if let Some(r) = self.export_region {
-            // Dim everything outside the region.
-            let dim = Color32::from_black_alpha(120);
-            painter.rect_filled(
-                Rect::from_min_max(area.min, Pos2::new(area.max.x, r.min.y)),
-                0.0,
-                dim,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(area.min.x, r.max.y), area.max),
-                0.0,
-                dim,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(area.min.x, r.min.y), Pos2::new(r.min.x, r.max.y)),
-                0.0,
-                dim,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(area.max.x, r.max.y)),
-                0.0,
-                dim,
-            );
-            painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(240, 200, 80)));
+        // Region chosen: show it on every pane it applies to.
+        let Some(reg) = self.export_region else { return };
+        let panes_areas: Vec<(usize, Rect)> = match self.mode {
+            Mode::Single => {
+                vec![(self.current.min(self.panes.len() - 1), image_area(area))]
+            }
+            Mode::Grid => self
+                .grid_cells(&self.visible_indices(), area)
+                .iter()
+                .map(|&(idx, cell)| (idx, image_area(cell)))
+                .collect(),
+            // The wipe shares one image area; both sides are spatially the same
+            // place, so pane A's view is representative.
+            Mode::Ab => vec![(
+                self.slot_a.min(self.panes.len() - 1),
+                Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0)),
+            )],
+        };
+        for (idx, img_area) in panes_areas {
+            let v = self.view_ref(idx);
+            let r = Rect::from_two_pos(
+                v.img_to_screen(reg.min.to_vec2(), img_area),
+                v.img_to_screen(reg.max.to_vec2(), img_area),
+            )
+            .intersect(img_area);
+            if r.is_positive() {
+                dim_outside(&ui.painter_at(img_area), img_area, r);
+            }
         }
+    }
+
+    /// Convert a screen-space rect (drawn in Single view over `area`) into the
+    /// image-space crop it covers, clamped to the current image's bounds.
+    fn screen_rect_to_image(&self, r: Rect, area: Rect) -> Option<Rect> {
+        let idx = self.current.min(self.panes.len().checked_sub(1)?);
+        let img_area = image_area(area);
+        let v = self.view_ref(idx);
+        let [w, h] = self.disp_size(idx);
+        let a = v.screen_to_img(r.min, img_area);
+        let b = v.screen_to_img(r.max, img_area);
+        let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
+            .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
+        (reg.width() >= 1.0 && reg.height() >= 1.0).then_some(reg)
     }
 
     fn grid_cells(&self, vis: &[usize], area: Rect) -> Vec<(usize, Rect)> {
@@ -1547,6 +1587,14 @@ impl CimApp {
         self.show_export = !self.show_export;
         if self.show_export {
             self.export_mode = self.mode; // default to what's on screen
+        } else if self.selecting_region {
+            // Panel closed mid-selection: abandon it and restore the view.
+            self.selecting_region = false;
+            self.sel_start = None;
+            self.sel_rect = None;
+            if let Some(m) = self.pre_select_mode.take() {
+                self.mode = m;
+            }
         }
     }
 
@@ -1569,18 +1617,55 @@ impl CimApp {
         )
     }
 
+    /// The composition-space rect the export renders (fixes the output aspect).
+    /// With an image-space crop, panes become cells of exactly the crop's pixel
+    /// size laid out side by side; without one it's the live screen area.
+    fn export_canvas(&self) -> Rect {
+        match self.export_region {
+            Some(reg) => {
+                let (w, h) = (reg.width(), reg.height());
+                match self.export_mode {
+                    Mode::Grid => {
+                        let n = self.visible_indices().len().max(1);
+                        let cols = self.config.max_columns.max(1).min(n);
+                        let rows = (n + cols - 1) / cols;
+                        Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(cols as f32 * w, rows as f32 * h),
+                        )
+                    }
+                    Mode::Single | Mode::Ab => {
+                        Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))
+                    }
+                }
+            }
+            None => self.last_area,
+        }
+    }
+
+    /// Inclusive (start, end) of the exported timeline range, clamped to what's
+    /// currently known of the timeline. None = start to finish.
+    fn export_frames(&self) -> (usize, usize) {
+        let tl = self.timeline_len().max(1);
+        let (s, e) = self.export_range.unwrap_or((0, tl - 1));
+        let s = s.min(tl - 1);
+        (s, e.clamp(s, tl - 1))
+    }
+
     fn build_export_plan(&self) -> Result<ExportPlan, String> {
         if self.panes.is_empty() {
             return Err("No media to export".into());
         }
         let area = self.last_area;
-        if area.width() < 2.0 {
+        if self.export_region.is_none() && area.width() < 2.0 {
             return Err("View not ready yet".into());
         }
-        let region = self.export_region.unwrap_or(area);
+        let crop = self.export_region;
+        let region = self.export_canvas();
         let (out_w, out_h) = export::out_dims(region, self.out_height);
         let bilinear = matches!(self.config.vis.interp, Interpolation::Bilinear);
-        let total = self.timeline_len().max(1);
+        let (start, end) = self.export_frames();
+        let total = end - start + 1;
 
         let mut panes = Vec::new();
         let layout = match self.export_mode {
@@ -1589,29 +1674,63 @@ impl CimApp {
                 if vis.is_empty() {
                     return Err("No visible media (enable some in ☰ Media)".into());
                 }
-                let cells = self.grid_cells(&vis, area);
                 let mut v = Vec::new();
-                for (k, &(idx, cell)) in cells.iter().enumerate() {
-                    panes.push(self.export_pane(idx));
-                    v.push((k, image_area(cell)));
+                if let Some(reg) = crop {
+                    // Side-by-side of just the cropped image region: one cell of
+                    // the crop's exact pixel size per pane, nothing outside it.
+                    let cols = self.config.max_columns.max(1).min(vis.len());
+                    for (k, &idx) in vis.iter().enumerate() {
+                        let (r, c) = (k / cols, k % cols);
+                        let cell = Rect::from_min_size(
+                            Pos2::new(c as f32 * reg.width(), r as f32 * reg.height()),
+                            reg.size(),
+                        );
+                        let mut pane = self.export_pane(idx);
+                        pane.view = region_view(reg);
+                        panes.push(pane);
+                        v.push((k, cell));
+                    }
+                } else {
+                    let cells = self.grid_cells(&vis, area);
+                    for (k, &(idx, cell)) in cells.iter().enumerate() {
+                        panes.push(self.export_pane(idx));
+                        v.push((k, image_area(cell)));
+                    }
                 }
                 ExportLayout::Grid(v)
             }
             Mode::Single => {
                 let idx = self.current.min(self.panes.len() - 1);
-                panes.push(self.export_pane(idx));
-                ExportLayout::Single(0, image_area(area))
+                let mut pane = self.export_pane(idx);
+                let cell = match crop {
+                    Some(reg) => {
+                        pane.view = region_view(reg);
+                        Rect::from_min_size(Pos2::ZERO, reg.size())
+                    }
+                    None => image_area(area),
+                };
+                panes.push(pane);
+                ExportLayout::Single(0, cell)
             }
             Mode::Ab => {
                 let n = self.panes.len();
                 let a = self.slot_a.min(n - 1);
                 let b = self.slot_b.min(n - 1);
-                panes.push(self.export_pane(a));
-                panes.push(self.export_pane(b));
-                let img = Rect::from_min_max(
-                    area.min,
-                    Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
-                );
+                let mut pa = self.export_pane(a);
+                let mut pb = self.export_pane(b);
+                let img = match crop {
+                    Some(reg) => {
+                        pa.view = region_view(reg);
+                        pb.view = region_view(reg);
+                        Rect::from_min_size(Pos2::ZERO, reg.size())
+                    }
+                    None => Rect::from_min_max(
+                        area.min,
+                        Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
+                    ),
+                };
+                panes.push(pa);
+                panes.push(pb);
                 let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
                 ExportLayout::Ab {
                     a: 0,
@@ -1628,6 +1747,7 @@ impl CimApp {
             region,
             out_w,
             out_h,
+            start,
             total,
             bilinear,
         })
@@ -1695,10 +1815,11 @@ impl CimApp {
     fn draw_export(&mut self, ctx: &egui::Context) {
         let mut open = self.show_export;
         let running = self.export_run.is_some();
-        let area = self.last_area;
-        let region = self.export_region.unwrap_or(area);
+        let region = self.export_canvas();
         let (out_w, out_h) = export::out_dims(region, self.out_height);
-        let total = self.timeline_len().max(1);
+        let tl = self.timeline_len().max(1);
+        let (start, end) = self.export_frames();
+        let total = end - start + 1;
 
         egui::Window::new("Export comparison")
             .open(&mut open)
@@ -1726,14 +1847,59 @@ impl CimApp {
 
                             ui.label("Region");
                             ui.horizontal(|ui| {
-                                if ui.button("Select…").clicked() {
+                                if ui
+                                    .button("Select…")
+                                    .on_hover_text(
+                                        "Drag the crop on a single image; it then applies \
+                                         to every pane of the comparison",
+                                    )
+                                    .clicked()
+                                {
+                                    // Pick the crop on one image: force Single
+                                    // view for the drag, restore after.
+                                    if self.mode != Mode::Single {
+                                        self.pre_select_mode = Some(self.mode);
+                                        self.mode = Mode::Single;
+                                    }
                                     self.selecting_region = true;
                                 }
                                 let has = self.export_region.is_some();
                                 if ui.add_enabled(has, egui::Button::new("Full view")).clicked() {
                                     self.export_region = None;
                                 }
-                                ui.label(if has { "custom" } else { "full" });
+                                match self.export_region {
+                                    Some(r) => ui.label(format!(
+                                        "{}×{} px",
+                                        r.width().round() as u32,
+                                        r.height().round() as u32
+                                    )),
+                                    None => ui.label("full"),
+                                };
+                            });
+                            ui.end_row();
+
+                            ui.label("Frames");
+                            ui.horizontal(|ui| {
+                                let mut all = self.export_range.is_none();
+                                if ui.checkbox(&mut all, "all").changed() {
+                                    self.export_range =
+                                        if all { None } else { Some((0, tl - 1)) };
+                                }
+                                if let Some((s, e)) = self.export_range {
+                                    // Shown 1-based; stored 0-based inclusive.
+                                    let (mut s1, mut e1) = (s + 1, e + 1);
+                                    ui.add(
+                                        egui::DragValue::new(&mut s1)
+                                            .range(1..=e1)
+                                            .prefix("from "),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut e1)
+                                            .range(s1..=tl)
+                                            .prefix("to "),
+                                    );
+                                    self.export_range = Some((s1 - 1, e1 - 1));
+                                }
                             });
                             ui.end_row();
 
@@ -1760,6 +1926,20 @@ impl CimApp {
                             ui.end_row();
                         });
                 });
+
+                // Sequence lengths are discovered lazily, so warn when a media's
+                // true end isn't known yet — the range above may be short.
+                if self.panes.iter().any(|p| !p.media.at_end()) {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            Color32::from_rgb(240, 200, 120),
+                            "⚠ Some media aren't fully loaded — frame counts may be incomplete.",
+                        );
+                        if ui.button("⤓ Load all").clicked() {
+                            self.load_all();
+                        }
+                    });
+                }
 
                 let bytes = export::estimate_bytes(out_w, out_h, total, self.crf);
                 ui.label(format!(
@@ -1994,6 +2174,32 @@ fn uv() -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
 }
 
+/// Dim everything in `area` outside `r`, then outline `r` (export-region look).
+fn dim_outside(painter: &egui::Painter, area: Rect, r: Rect) {
+    let dim = Color32::from_black_alpha(120);
+    painter.rect_filled(
+        Rect::from_min_max(area.min, Pos2::new(area.max.x, r.min.y)),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(area.min.x, r.max.y), area.max),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(area.min.x, r.min.y), Pos2::new(r.min.x, r.max.y)),
+        0.0,
+        dim,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(area.max.x, r.max.y)),
+        0.0,
+        dim,
+    );
+    painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(240, 200, 80)));
+}
+
 /// A small animated dot-spinner badge in the bottom-right of `area`.
 fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
     let center = area.right_bottom() - Vec2::splat(20.0);
@@ -2007,6 +2213,16 @@ fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
         let bright = 1.0 - behind as f32 / n as f32;
         let alpha = (40.0 + 215.0 * bright) as u8;
         painter.circle_filled(pos, 2.0, Color32::from_white_alpha(alpha));
+    }
+}
+
+/// The view that maps an export cell of exactly `reg`'s pixel size onto the
+/// image-space crop `reg` (1:1, centred) — a pane cropped to the region.
+fn region_view(reg: Rect) -> ViewTransform {
+    ViewTransform {
+        zoom: 1.0,
+        center: reg.center().to_vec2(),
+        needs_fit: false,
     }
 }
 
