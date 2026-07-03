@@ -14,7 +14,7 @@ use std::thread;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::media::{decode_tiff_page, FrameData};
+use crate::media::{FrameData, SeqReader};
 use crate::view::ViewTransform;
 
 const BG: [u8; 4] = [24, 24, 24, 255];
@@ -34,6 +34,9 @@ pub struct ExportPane {
     pub own_frame: usize,
     pub source: ExportSource,
 
+    /// Persistent reader for `Seq` sources, opened on first use, so a long
+    /// export doesn't re-walk the IFD chain for every frame.
+    reader: Option<SeqReader>,
     cur_idx: Option<usize>,
     cur_display: Option<Vec<u8>>,
     cur_size: [usize; 2],
@@ -55,6 +58,7 @@ impl ExportPane {
             sync_temporal,
             own_frame,
             source,
+            reader: None,
             cur_idx: None,
             cur_display: None,
             cur_size: [0, 0],
@@ -79,11 +83,19 @@ impl ExportPane {
         }
         let frame = match &self.source {
             ExportSource::Still(f) => f.clone(),
-            ExportSource::Seq { path, .. } => match decode_tiff_page(path, idx) {
-                Ok(Some(f)) => Arc::new(f),
-                // No page here (past the end) or a decode error: keep last frame.
-                Ok(None) | Err(_) => return,
-            },
+            ExportSource::Seq { path } => {
+                if self.reader.is_none() {
+                    match SeqReader::open(path) {
+                        Ok(r) => self.reader = Some(r),
+                        Err(_) => return, // keep last frame on open failure
+                    }
+                }
+                match self.reader.as_mut().unwrap().decode(idx) {
+                    Ok(Some(f)) => Arc::new(f),
+                    // No page here (past the end) or a decode error: keep last.
+                    Ok(None) | Err(_) => return,
+                }
+            }
         };
         self.cur_size = frame.size;
         self.cur_display = Some(frame.render_rgba(self.clip));
@@ -325,7 +337,9 @@ mod tests {
             return; // fixtures not present
         }
         let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(320.0, 240.0));
-        let frame0 = decode_tiff_page(&src, 0)
+        let frame0 = SeqReader::open(&src)
+            .expect("open")
+            .decode(0)
             .expect("decode page 0")
             .expect("page 0 exists");
         let mut view = ViewTransform::default();

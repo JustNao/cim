@@ -558,18 +558,34 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
     }))
 }
 
-/// Decode a single TIFF page at native bit depth. Stateless / `Send`-safe.
-/// Returns `Ok(None)` when `idx` is past the last page — that's how the caller
-/// discovers the true length without counting pages ahead of time.
-pub fn decode_tiff_page(path: &Path, idx: usize) -> Result<Option<FrameData>> {
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut dec = Decoder::new(BufReader::new(file))?;
-    // A fresh decoder already sits on page 0; only seek for later pages. A seek
-    // failure means the page doesn't exist → end of sequence.
-    if idx > 0 && dec.seek_to_image(idx).is_err() {
-        return Ok(None);
+/// A persistent TIFF reader for one sequence.
+///
+/// The `tiff` crate caches the byte offset of each IFD it has walked, but only
+/// within a single `Decoder`. Keeping one `SeqReader` alive per sequence keeps
+/// that cache warm, so seeking to page `k` no longer re-walks the whole IFD
+/// chain from the start on every decode (which made a sweep O(N²)).
+pub struct SeqReader {
+    dec: Decoder<BufReader<File>>,
+}
+
+impl SeqReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        Ok(Self {
+            dec: Decoder::new(BufReader::new(file))?,
+        })
     }
-    decode_current(&mut dec).map(Some)
+
+    /// Decode page `idx` at native bit depth, or `Ok(None)` when `idx` is past
+    /// the last page (how the caller learns the true length without counting
+    /// ahead). Always seeks first — the reader may sit on any page from a prior
+    /// call — which is cheap once the offset is cached.
+    pub fn decode(&mut self, idx: usize) -> Result<Option<FrameData>> {
+        if self.dec.seek_to_image(idx).is_err() {
+            return Ok(None);
+        }
+        decode_current(&mut self.dec).map(Some)
+    }
 }
 
 fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
@@ -637,16 +653,17 @@ mod tests {
         assert!(!m.at_end());
 
         // Walk pages the way the app does until a probe finds nothing.
+        let mut reader = SeqReader::open(path).expect("open");
         let mut pages = 0;
         loop {
-            match decode_tiff_page(path, pages).expect("decode") {
+            match reader.decode(pages).expect("decode") {
                 Some(_) => pages += 1,
                 None => break,
             }
         }
         assert!(pages >= 1, "at least one page must decode");
         // Probing exactly at the end reports None, not an error.
-        assert!(decode_tiff_page(path, pages).unwrap().is_none());
+        assert!(reader.decode(pages).unwrap().is_none());
     }
 
     /// Inserting a frame accounts its bytes; evicting frees them and keeps the
@@ -660,7 +677,11 @@ mod tests {
         let mut m = load(path).expect("open tiff");
         assert_eq!(m.resident_bytes(), 0);
 
-        let frame = decode_tiff_page(path, 0).unwrap().expect("page 0");
+        let frame = SeqReader::open(path)
+            .unwrap()
+            .decode(0)
+            .unwrap()
+            .expect("page 0");
         let bytes = frame.byte_len();
         assert!(bytes > 0);
 

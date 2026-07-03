@@ -266,6 +266,7 @@ impl CimApp {
         if i >= self.panes.len() {
             return;
         }
+        self.decoder.forget(self.panes[i].id); // drop its persistent reader
         self.panes.remove(i);
         let n = self.panes.len();
         let fix = |v: &mut usize| {
@@ -280,8 +281,8 @@ impl CimApp {
     }
 
     /// Re-open a pane's file from disk, picking up external changes while
-    /// keeping its current frame. Decodes only ever open the file read-only and
-    /// briefly, so it's never held locked against the program writing it.
+    /// keeping its current frame. Files are opened read-only with shared access,
+    /// so a persistent reader never blocks another program from writing them.
     pub(super) fn reload(&mut self, i: usize) {
         if i >= self.panes.len() {
             return;
@@ -290,6 +291,7 @@ impl CimApp {
         match media::load(&path) {
             Ok(m) => {
                 let id = self.panes[i].id;
+                self.decoder.forget(id); // reopen the file for its fresh contents
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;
