@@ -49,6 +49,7 @@ struct HistCache {
 /// One opened media plus its per-pane view/timeline state.
 struct Pane {
     id: u64, // stable across reorder/close; matches background-decode results
+    path: PathBuf, // source file, for reloading from disk
     media: Media,
     tex: Option<CachedTex>,
     transform: ViewTransform, // used only when !sync_spatial
@@ -110,6 +111,8 @@ pub struct CimApp {
     last_area: Rect,
     drag_src: Option<usize>,
     pending_remove: Option<usize>,
+    pending_reload: Option<usize>,
+    pending_reload_all: bool,
 
     decoder: BackgroundDecoder,
     inflight: HashSet<(u64, usize)>,
@@ -167,6 +170,8 @@ impl CimApp {
             last_area: Rect::NOTHING,
             drag_src: None,
             pending_remove: None,
+            pending_reload: None,
+            pending_reload_all: false,
             decoder: BackgroundDecoder::new(threads),
             inflight: HashSet::new(),
             decoding_all: false,
@@ -196,6 +201,7 @@ impl CimApp {
                     let clip = m.hi_depth(); // >8-bit sources auto-contrast by default
                     self.panes.push(Pane {
                         id,
+                        path: p.clone(),
                         media: m,
                         tex: None,
                         transform: ViewTransform::default(),
@@ -238,6 +244,35 @@ impl CimApp {
         fix(&mut self.current);
         fix(&mut self.slot_a);
         fix(&mut self.slot_b);
+    }
+
+    /// Re-open a pane's file from disk, picking up external changes while
+    /// keeping its current frame. Decodes only ever open the file read-only and
+    /// briefly, so it's never held locked against the program writing it.
+    fn reload(&mut self, i: usize) {
+        if i >= self.panes.len() {
+            return;
+        }
+        let path = self.panes[i].path.clone();
+        match media::load(&path) {
+            Ok(m) => {
+                let id = self.panes[i].id;
+                // Drop stale in-flight decodes aimed at the old contents.
+                self.inflight.retain(|(pid, _)| *pid != id);
+                self.panes[i].media = m;
+                self.panes[i].tex = None; // re-render the kept frame from fresh data
+                self.panes[i].error = None;
+                // Frame position is left untouched; frame_disp clamps it if the
+                // reloaded file is shorter.
+            }
+            Err(e) => self.panes[i].error = Some(format!("Reload failed: {e}")),
+        }
+    }
+
+    fn reload_all(&mut self) {
+        for i in 0..self.panes.len() {
+            self.reload(i);
+        }
     }
 
     // ---- per-pane state resolution --------------------------------------
@@ -910,12 +945,19 @@ impl CimApp {
         self.draw_header(ui, idx, cell);
         self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
 
+        // No persistent pane border (it doubles up at zero gap, breaking the
+        // middle pane). Borders show only during a ctrl-drag reorder: blue on
+        // the pane being moved, green on the pane it would swap with.
         if self.drag_src == Some(idx) {
             ui.painter()
                 .rect_stroke(cell, 0.0, Stroke::new(2.0, Color32::from_rgb(120, 170, 240)));
-        } else if idx == self.current {
+        } else if self.drag_src.is_some()
+            && ctx
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| cell.contains(p))
+        {
             ui.painter()
-                .rect_stroke(cell, 0.0, Stroke::new(1.0, Color32::from_gray(80)));
+                .rect_stroke(cell, 0.0, Stroke::new(2.0, Color32::from_rgb(120, 210, 120)));
         }
     }
 
@@ -1202,76 +1244,6 @@ impl CimApp {
                     return;
                 }
 
-                // Apply-to-all controls, one group per per-media toggle column
-                // (Single / A / B are single-target selectors, so they have none).
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Apply to all —");
-
-                    ui.label("Show:");
-                    if ui.small_button("on").clicked() {
-                        for p in &mut self.panes {
-                            p.visible = true;
-                        }
-                    }
-                    if ui.small_button("off").clicked() {
-                        for p in &mut self.panes {
-                            p.visible = false;
-                        }
-                    }
-                    ui.separator();
-
-                    ui.label("Pos:");
-                    if ui.small_button("on").clicked() {
-                        for p in &mut self.panes {
-                            p.sync_spatial = true;
-                        }
-                    }
-                    if ui.small_button("off").clicked() {
-                        for p in &mut self.panes {
-                            if p.sync_spatial {
-                                p.transform = shared_view;
-                            }
-                            p.sync_spatial = false;
-                        }
-                    }
-                    ui.separator();
-
-                    ui.label("Time:");
-                    if ui.small_button("on").clicked() {
-                        for p in &mut self.panes {
-                            p.sync_temporal = true;
-                        }
-                    }
-                    if ui.small_button("off").clicked() {
-                        for p in &mut self.panes {
-                            if p.sync_temporal {
-                                p.frame = shared_frame;
-                            }
-                            p.sync_temporal = false;
-                        }
-                    }
-                    ui.separator();
-
-                    ui.label("Clip:");
-                    if ui.small_button("on").clicked() {
-                        for p in &mut self.panes {
-                            if !p.clip {
-                                p.clip = true;
-                                p.tex = None; // rebuild with new mapping
-                            }
-                        }
-                    }
-                    if ui.small_button("off").clicked() {
-                        for p in &mut self.panes {
-                            if p.clip {
-                                p.clip = false;
-                                p.tex = None;
-                            }
-                        }
-                    }
-                });
-                ui.separator();
-
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("media_table")
                         .num_columns(9)
@@ -1289,7 +1261,70 @@ impl CimApp {
                             ui.label("");
                             ui.end_row();
 
+                            // Aggregate row: each toggle here drives the matching
+                            // column for every media below it. Single / A / B are
+                            // single-target selectors, so they get no aggregate.
+                            {
+                                let mut all_vis = self.panes.iter().all(|p| p.visible);
+                                if ui
+                                    .checkbox(&mut all_vis, "")
+                                    .on_hover_text("Show / hide all")
+                                    .changed()
+                                {
+                                    for p in &mut self.panes {
+                                        p.visible = all_vis;
+                                    }
+                                }
+                                ui.label("");
+                                ui.strong("all");
+                                ui.label("");
+                                ui.label(""); // Single
+                                ui.label(""); // A / B
+                                ui.horizontal(|ui| {
+                                    let mut all_pos = self.panes.iter().all(|p| p.sync_spatial);
+                                    if ui.checkbox(&mut all_pos, "Pos").changed() {
+                                        for p in &mut self.panes {
+                                            if !all_pos && p.sync_spatial {
+                                                p.transform = shared_view;
+                                            }
+                                            p.sync_spatial = all_pos;
+                                        }
+                                    }
+                                    let mut all_time = self.panes.iter().all(|p| p.sync_temporal);
+                                    if ui.checkbox(&mut all_time, "Time").changed() {
+                                        for p in &mut self.panes {
+                                            if !all_time && p.sync_temporal {
+                                                p.frame = shared_frame;
+                                            }
+                                            p.sync_temporal = all_time;
+                                        }
+                                    }
+                                });
+                                let mut all_clip = self.panes.iter().all(|p| p.clip);
+                                if ui
+                                    .checkbox(&mut all_clip, "0.01%")
+                                    .on_hover_text("Clip all")
+                                    .changed()
+                                {
+                                    for p in &mut self.panes {
+                                        if p.clip != all_clip {
+                                            p.clip = all_clip;
+                                            p.tex = None; // rebuild with new mapping
+                                        }
+                                    }
+                                }
+                                if ui
+                                    .small_button("⟳")
+                                    .on_hover_text("Reload all from disk")
+                                    .clicked()
+                                {
+                                    self.pending_reload_all = true;
+                                }
+                                ui.end_row();
+                            }
+
                             let mut to_remove = None;
+                            let mut to_reload = None;
                             for i in 0..self.panes.len() {
                                 let count = self.panes[i].media.frame_count();
                                 let resident = self.panes[i].media.resident_count();
@@ -1352,14 +1387,26 @@ impl CimApp {
                                     self.panes[i].tex = None; // rebuild with new mapping
                                 }
 
-                                if ui.small_button("×").clicked() {
-                                    to_remove = Some(i);
-                                }
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button("⟳")
+                                        .on_hover_text("Reload this media from disk")
+                                        .clicked()
+                                    {
+                                        to_reload = Some(i);
+                                    }
+                                    if ui.small_button("×").clicked() {
+                                        to_remove = Some(i);
+                                    }
+                                });
                                 ui.end_row();
                             }
 
                             if let Some(i) = to_remove {
                                 self.pending_remove = Some(i);
+                            }
+                            if let Some(i) = to_reload {
+                                self.pending_reload = Some(i);
                             }
                         });
                 });
@@ -1904,6 +1951,12 @@ impl eframe::App for CimApp {
 
         if let Some(i) = self.pending_remove.take() {
             self.remove_media(i);
+        }
+        if std::mem::take(&mut self.pending_reload_all) {
+            self.reload_all();
+        }
+        if let Some(i) = self.pending_reload.take() {
+            self.reload(i);
         }
 
         // Encode one frame per frame while an export is running.
