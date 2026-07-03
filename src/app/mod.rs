@@ -38,6 +38,12 @@ const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 
+/// Soft ceiling on decoded frames kept resident across all sequences. Beyond
+/// it the least-recently-viewed frames are evicted (they re-decode on demand),
+/// so a long sequence can't grow memory without bound. Sized to stay
+/// comfortable on a modest VNC host; raise it if the machine has RAM to spare.
+const CACHE_BUDGET_BYTES: usize = 1536 * 1024 * 1024; // 1.5 GiB
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Grid,
@@ -140,6 +146,8 @@ pub struct CimApp {
     /// True while a "Load all" batch is still decoding, so the status line can
     /// be cleared once every queued frame has landed.
     decoding_all: bool,
+    /// Monotonic per-frame counter driving cache LRU recency.
+    clock: u64,
 }
 
 impl CimApp {
@@ -199,6 +207,7 @@ impl CimApp {
             decoder: BackgroundDecoder::new(threads),
             inflight: HashSet::new(),
             decoding_all: false,
+            clock: 0,
         };
         app.open_paths(startup);
         app
@@ -373,6 +382,8 @@ impl eframe::App for CimApp {
             ctx.set_zoom_factor(scale);
         }
 
+        self.clock = self.clock.wrapping_add(1);
+
         self.pump_decoder();
         self.handle_input(ctx);
         self.advance_playback(ctx);
@@ -382,6 +393,7 @@ impl eframe::App for CimApp {
         self.drive_eager();
         self.ensure_lookahead();
         self.poll_decoding_all();
+        self.enforce_cache_budget();
 
         // Keep the shared timeline within the selected media's range.
         let tl = self.timeline_len();

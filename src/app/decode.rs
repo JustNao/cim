@@ -8,12 +8,14 @@ use super::*;
 
 impl CimApp {
     pub(super) fn pump_decoder(&mut self) {
+        let clock = self.clock;
         for d in self.decoder.drain() {
             self.inflight.remove(&(d.id, d.frame));
             match d.result {
                 Ok(Some(frame)) => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
+                        p.media.touch(d.frame, clock); // freshly decoded → most recent
                         p.error = None; // a good frame clears any stale error
                     }
                 }
@@ -94,6 +96,45 @@ impl CimApp {
         }
     }
 
+    /// Evict least-recently-viewed frames once resident memory exceeds the
+    /// budget. Each pane's currently shown frame is protected so the view never
+    /// blanks, and an over-budget "Load all" is stopped rather than thrashing.
+    pub(super) fn enforce_cache_budget(&mut self) {
+        let mut total: usize = self.panes.iter().map(|p| p.media.resident_bytes()).sum();
+        if total <= CACHE_BUDGET_BYTES {
+            return;
+        }
+
+        // The sequence(s) can't all fit — a running "Load all" would just fight
+        // eviction forever, so stop it and tell the user.
+        if self.panes.iter().any(|p| p.eager) {
+            for p in &mut self.panes {
+                p.eager = false;
+            }
+            self.decoding_all = false;
+            self.status = "Memory budget reached — keeping the most-recent frames only".into();
+        }
+
+        // Gather evictable frames (resident, not currently shown), oldest first.
+        let mut cands: Vec<(u64, usize, usize, usize)> = Vec::new(); // (used, pane, frame, bytes)
+        for i in 0..self.panes.len() {
+            let shown = self.frame_disp(i);
+            for (frame, used, bytes) in self.panes[i].media.resident_frames() {
+                if frame != shown {
+                    cands.push((used, i, frame, bytes));
+                }
+            }
+        }
+        cands.sort_unstable_by_key(|c| c.0);
+        for (_, i, frame, bytes) in cands {
+            if total <= CACHE_BUDGET_BYTES {
+                break;
+            }
+            self.panes[i].media.evict(frame);
+            total -= bytes;
+        }
+    }
+
     /// Clear the "decoding…" status once the whole batch has landed.
     pub(super) fn poll_decoding_all(&mut self) {
         if self.decoding_all && !self.panes.iter().any(|p| p.eager) && self.inflight.is_empty() {
@@ -126,6 +167,7 @@ impl CimApp {
     pub(super) fn prepare(&mut self, ctx: &egui::Context, idx: usize) -> (Option<TextureId>, bool) {
         let f = self.frame_disp(idx);
         if let Some(frame) = self.panes[idx].media.resident(f) {
+            self.panes[idx].media.touch(f, self.clock); // viewing keeps it hot
             let need = match &self.panes[idx].tex {
                 Some(t) => t.shown != f,
                 None => true,

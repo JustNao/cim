@@ -43,6 +43,16 @@ pub struct HistData {
 }
 
 impl FrameData {
+    /// Bytes held by the sample buffer, for the cache memory budget.
+    pub fn byte_len(&self) -> usize {
+        let n = self.size[0] * self.size[1] * self.channels;
+        n * match self.samples {
+            Samples::U8(_) => 1,
+            Samples::U16(_) => 2,
+            Samples::F32(_) => 4,
+        }
+    }
+
     #[inline]
     pub fn sample(&self, idx: usize) -> u32 {
         match &self.samples {
@@ -336,8 +346,14 @@ pub struct TiffSeq {
     size: [usize; 2],
     hi_depth: bool,
     /// Frames known so far. Grows lazily as later pages are decoded — we never
-    /// walk the whole file to learn its length.
+    /// walk the whole file to learn its length. Slots may be evicted back to
+    /// `None` to stay within the cache budget; the length is still preserved.
     cache: Vec<Option<Arc<FrameData>>>,
+    /// Recency tick per frame, parallel to `cache`. The budget evicts the
+    /// least-recently-used resident frames first.
+    last_used: Vec<u64>,
+    /// Running total of resident sample bytes (sum of `byte_len` over `Some`s).
+    resident_bytes: usize,
     /// Set once a probe past `cache.len()` found no more pages: the real end.
     at_end: bool,
 }
@@ -389,11 +405,60 @@ impl Media {
     pub fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
         if let Media::TiffSeq(t) = self {
             if idx < t.cache.len() {
+                if let Some(old) = &t.cache[idx] {
+                    t.resident_bytes -= old.byte_len();
+                }
+                t.resident_bytes += frame.byte_len();
                 t.cache[idx] = Some(frame);
             } else if idx == t.cache.len() {
                 // A frontier probe discovered the next page: extend the length.
+                t.resident_bytes += frame.byte_len();
                 t.cache.push(Some(frame));
+                t.last_used.push(0);
             }
+        }
+    }
+
+    /// Mark frame `idx` as used at `clock`, so the budget evicts it last.
+    pub fn touch(&mut self, idx: usize, clock: u64) {
+        if let Media::TiffSeq(t) = self {
+            if let Some(u) = t.last_used.get_mut(idx) {
+                *u = clock;
+            }
+        }
+    }
+
+    /// Drop a resident frame to reclaim memory. The known length is unchanged;
+    /// the frame simply re-decodes on demand if shown again.
+    pub fn evict(&mut self, idx: usize) {
+        if let Media::TiffSeq(t) = self {
+            if let Some(slot) = t.cache.get_mut(idx) {
+                if let Some(old) = slot.take() {
+                    t.resident_bytes -= old.byte_len();
+                }
+            }
+        }
+    }
+
+    /// Sample bytes currently resident, for the memory budget.
+    pub fn resident_bytes(&self) -> usize {
+        match self {
+            Media::Still(s) => s.frame.byte_len(),
+            Media::TiffSeq(t) => t.resident_bytes,
+        }
+    }
+
+    /// Resident frames as `(frame index, last-used tick, byte size)`. Stills
+    /// return empty — their single frame is always needed and never evicted.
+    pub fn resident_frames(&self) -> Vec<(usize, u64, usize)> {
+        match self {
+            Media::Still(_) => Vec::new(),
+            Media::TiffSeq(t) => t
+                .cache
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.as_ref().map(|f| (i, t.last_used[i], f.byte_len())))
+                .collect(),
         }
     }
 
@@ -487,6 +552,8 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
         size: [w as usize, h as usize],
         hi_depth,
         cache: vec![None],
+        last_used: vec![0],
+        resident_bytes: 0,
         at_end: false,
     }))
 }
@@ -580,6 +647,32 @@ mod tests {
         assert!(pages >= 1, "at least one page must decode");
         // Probing exactly at the end reports None, not an error.
         assert!(decode_tiff_page(path, pages).unwrap().is_none());
+    }
+
+    /// Inserting a frame accounts its bytes; evicting frees them and keeps the
+    /// known length intact so the frame can be re-decoded later.
+    #[test]
+    fn eviction_frees_bytes_and_keeps_length() {
+        let path = Path::new("examples/alpes_noisy_a.tif");
+        if !path.exists() {
+            return;
+        }
+        let mut m = load(path).expect("open tiff");
+        assert_eq!(m.resident_bytes(), 0);
+
+        let frame = decode_tiff_page(path, 0).unwrap().expect("page 0");
+        let bytes = frame.byte_len();
+        assert!(bytes > 0);
+
+        m.insert(0, Arc::new(frame));
+        assert_eq!(m.resident_bytes(), bytes);
+        assert!(m.resident(0).is_some());
+        let len = m.frame_count();
+
+        m.evict(0);
+        assert_eq!(m.resident_bytes(), 0);
+        assert!(m.resident(0).is_none());
+        assert_eq!(m.frame_count(), len, "eviction must not change known length");
     }
 }
 
