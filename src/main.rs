@@ -26,7 +26,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("cim — Compare Images & Media"),
+            .with_title("cim"),
         ..Default::default()
     };
 

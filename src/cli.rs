@@ -65,9 +65,9 @@ pub fn parse(args: Vec<String>) -> Cli {
 fn help_text() -> String {
     format!(
         "\
-cim {ver} — Compare Images & Media
+cim {ver} — Compare Images & Sequences
 
-Lossless side-by-side viewer for images and multi-page TIFF sequences.
+Lossless side-by-side viewer for images and sequences.
 
 USAGE:
     cim [OPTIONS] [FILES|SEQUENCES]...

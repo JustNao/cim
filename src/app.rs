@@ -660,9 +660,9 @@ impl CimApp {
             }
             ui.separator();
             for (mode, label) in [
-                (Mode::Grid, "▦ Grid"),
-                (Mode::Single, "▢ Single"),
-                (Mode::Ab, "◧ A/B"),
+                (Mode::Grid, "Grid"),
+                (Mode::Single, "Single"),
+                (Mode::Ab, "A/B"),
             ] {
                 if ui.selectable_label(self.mode == mode, label).clicked() {
                     self.mode = mode;
@@ -772,7 +772,7 @@ impl CimApp {
             ui.painter().text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                "Open images or drop files here\n(mp4/avi coming later)",
+                "Open images or drop files here",
                 FontId::proportional(18.0),
                 Color32::from_gray(140),
             );

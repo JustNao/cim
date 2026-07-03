@@ -2,7 +2,7 @@
 name = "cim"
 version = "0.1.0"
 edition = "2021"
-description = "Compare Images & Media — lossless side-by-side viewer for images and sequences"
+description = "Compare Images & Sequences — lossless side-by-side viewer for images and sequences"
 
 [dependencies]
 eframe = { version = "0.29", default-features = true }
