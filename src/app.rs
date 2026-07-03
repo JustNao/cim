@@ -25,7 +25,7 @@ struct ExportRun {
 
 const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
-const GAP: f32 = 6.0;
+const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 
 #[derive(Clone, Copy, PartialEq)]
@@ -110,6 +110,9 @@ pub struct CimApp {
 
     decoder: BackgroundDecoder,
     inflight: HashSet<(u64, usize)>,
+    /// True while a "Load all" batch is still decoding, so the status line can
+    /// be cleared once every queued frame has landed.
+    decoding_all: bool,
 }
 
 impl CimApp {
@@ -163,6 +166,7 @@ impl CimApp {
             pending_remove: None,
             decoder: BackgroundDecoder::new(threads),
             inflight: HashSet::new(),
+            decoding_all: false,
         };
         app.open_paths(startup);
         app
@@ -324,6 +328,17 @@ impl CimApp {
             }
         }
         self.status = "Queued all frames for background decoding…".into();
+        self.decoding_all = true;
+    }
+
+    /// Clear the "decoding…" status once the whole batch has landed.
+    fn poll_decoding_all(&mut self) {
+        if self.decoding_all && self.inflight.is_empty() {
+            self.decoding_all = false;
+            if self.status == "Queued all frames for background decoding…" {
+                self.status.clear();
+            }
+        }
     }
 
     // ---- textures --------------------------------------------------------
@@ -1699,6 +1714,7 @@ impl eframe::App for CimApp {
         }
 
         self.pump_decoder();
+        self.poll_decoding_all();
         self.handle_input(ctx);
         self.advance_playback(ctx);
 
