@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     ToggleView,
+    ViewGrid,
+    ViewSingle,
+    ViewAb,
     NextMedia,
     PrevMedia,
     NextFrame,
@@ -34,6 +37,9 @@ impl Action {
     pub fn id(&self) -> String {
         match self {
             Action::ToggleView => "toggle_view".into(),
+            Action::ViewGrid => "view_grid".into(),
+            Action::ViewSingle => "view_single".into(),
+            Action::ViewAb => "view_ab".into(),
             Action::NextMedia => "next_media".into(),
             Action::PrevMedia => "prev_media".into(),
             Action::NextFrame => "next_frame".into(),
@@ -56,7 +62,10 @@ impl Action {
     /// Human label for the settings UI.
     pub fn label(&self) -> String {
         match self {
-            Action::ToggleView => "Toggle grid / single view".into(),
+            Action::ToggleView => "Toggle grid / single / A-B view".into(),
+            Action::ViewGrid => "Switch to grid view".into(),
+            Action::ViewSingle => "Switch to single view".into(),
+            Action::ViewAb => "Switch to A/B view".into(),
             Action::NextMedia => "Next media".into(),
             Action::PrevMedia => "Previous media".into(),
             Action::NextFrame => "Next frame".into(),
@@ -80,6 +89,9 @@ impl Action {
     pub fn all() -> Vec<Action> {
         let mut v = vec![
             Action::ToggleView,
+            Action::ViewGrid,
+            Action::ViewSingle,
+            Action::ViewAb,
             Action::NextMedia,
             Action::PrevMedia,
             Action::NextFrame,
@@ -115,6 +127,9 @@ impl Default for Keybindings {
             map.insert(a.id(), k.name().to_string());
         };
         set(Action::ToggleView, Key::Tab);
+        set(Action::ViewGrid, Key::G);
+        set(Action::ViewSingle, Key::U);
+        set(Action::ViewAb, Key::B);
         set(Action::NextMedia, Key::ArrowRight);
         set(Action::PrevMedia, Key::ArrowLeft);
         set(Action::NextFrame, Key::ArrowUp);

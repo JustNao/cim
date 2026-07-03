@@ -516,6 +516,9 @@ impl CimApp {
                     Mode::Ab => Mode::Grid,
                 };
             }
+            Action::ViewGrid => self.mode = Mode::Grid,
+            Action::ViewSingle => self.mode = Mode::Single,
+            Action::ViewAb => self.mode = Mode::Ab,
             Action::NextMedia if n > 0 => self.current = (self.current + 1) % n,
             Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
             Action::NextFrame => {
