@@ -162,6 +162,7 @@ impl CimApp {
                 if dst != src {
                     self.panes.swap(src, dst);
                     remap(&mut self.current, src, dst);
+                    remap(&mut self.control, src, dst);
                     remap(&mut self.slot_a, src, dst);
                     remap(&mut self.slot_b, src, dst);
                 }

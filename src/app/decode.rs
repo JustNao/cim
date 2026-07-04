@@ -97,7 +97,7 @@ impl CimApp {
             self.pending_seek = None;
             return;
         }
-        let i = self.current.min(self.panes.len() - 1);
+        let i = self.control.min(self.panes.len() - 1);
         let known = self.panes[i].media.frame_count();
         if known > target {
             self.shared_frame = target;

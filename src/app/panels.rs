@@ -86,7 +86,7 @@ impl CimApp {
     pub(super) fn draw_frame_bar(&mut self, ui: &mut egui::Ui) {
         let len = self.timeline_len();
         let at_end = self.current_at_end();
-        let cur = self.current.min(self.panes.len().saturating_sub(1));
+        let cur = self.control.min(self.panes.len().saturating_sub(1));
         let name = self
             .panes
             .get(cur)
@@ -432,6 +432,18 @@ impl CimApp {
                                             self.panes[i].frame = shared_frame;
                                         }
                                         self.panes[i].sync_temporal = st;
+                                    }
+                                    // Only a sequence can drive the timeline; pick
+                                    // which one the transport / loop follows.
+                                    if self.panes[i].media.frame_count() > 1
+                                        && ui
+                                            .selectable_label(self.control == i, "Control")
+                                            .on_hover_text(
+                                                "This sequence drives the timeline & playback",
+                                            )
+                                            .clicked()
+                                    {
+                                        self.control = i;
                                     }
                                 });
 

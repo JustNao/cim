@@ -122,6 +122,10 @@ pub struct CimApp {
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
+    /// Pane whose sequence drives the shared timeline / playback / scrubber.
+    /// Decoupled from `current` so selecting a still to view doesn't take over
+    /// (or hide) the transport. Kept pointing at a sequence by `ensure_control`.
+    control: usize,
     slot_a: usize,  // A/B view operands
     slot_b: usize,
     ab_split: f32, // 0..1 divider position
@@ -224,6 +228,7 @@ impl CimApp {
             pending_seek: None,
             mode: Mode::Grid,
             current: 0,
+            control: 0,
             slot_a: 0,
             slot_b: 0,
             ab_split: 0.5,
@@ -454,6 +459,7 @@ impl CimApp {
             *v = (*v).min(n.saturating_sub(1));
         };
         fix(&mut self.current);
+        fix(&mut self.control);
         fix(&mut self.slot_a);
         fix(&mut self.slot_b);
     }
@@ -522,11 +528,11 @@ impl CimApp {
         }
     }
 
-    /// Length of the shared timeline: the currently selected media drives the
-    /// loop. Other synced sequences clamp/hold against this length.
+    /// Length of the shared timeline: the **control** media drives the loop.
+    /// Other synced sequences clamp/hold against this length.
     pub(super) fn timeline_len(&self) -> usize {
         self.panes
-            .get(self.current)
+            .get(self.control)
             .map(|p| p.media.frame_count())
             .unwrap_or(1)
             .max(1)
@@ -536,8 +542,31 @@ impl CimApp {
     /// timeline holds at the last discovered frame rather than wrapping early.
     pub(super) fn current_at_end(&self) -> bool {
         self.panes
-            .get(self.current)
+            .get(self.control)
             .is_none_or(|p| p.media.at_end())
+    }
+
+    /// Any loaded media has more than one (discovered) frame — i.e. there is a
+    /// sequence to play, so the transport bar should be shown.
+    pub(super) fn any_sequence(&self) -> bool {
+        self.panes.iter().any(|p| p.media.frame_count() > 1)
+    }
+
+    /// Keep `control` pointing at a sequence: clamp it in range, and if it isn't
+    /// a multi-frame media, repoint to the first one that is (leaving a valid
+    /// user choice untouched).
+    pub(super) fn ensure_control(&mut self) {
+        if self.panes.is_empty() {
+            self.control = 0;
+            return;
+        }
+        self.control = self.control.min(self.panes.len() - 1);
+        let is_seq = |p: &Pane| p.media.frame_count() > 1;
+        if !self.panes.get(self.control).is_some_and(|p| is_seq(p)) {
+            if let Some(i) = self.panes.iter().position(is_seq) {
+                self.control = i;
+            }
+        }
     }
 
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a
@@ -581,7 +610,8 @@ impl eframe::App for CimApp {
         self.poll_decoding_all();
         self.enforce_cache_budget();
 
-        // Keep the shared timeline within the selected media's range.
+        // Keep `control` on a sequence, then clamp the shared timeline to it.
+        self.ensure_control();
         let tl = self.timeline_len();
         if self.shared_frame >= tl {
             self.shared_frame = tl - 1;
@@ -593,10 +623,11 @@ impl eframe::App for CimApp {
             ui.add_space(2.0);
         });
 
-        // Full-width frame scrubber for the selected media, pinned to the
-        // bottom. Only present when the focused media is a sequence; its range
-        // follows whichever media is currently selected.
-        if self.timeline_len() > 1 {
+        // Full-width transport bar, pinned to the bottom. Shown whenever any
+        // loaded media is a sequence (not just the focused one), so selecting a
+        // still doesn't drop the bar and shift the whole layout. It follows the
+        // `control` sequence.
+        if self.any_sequence() {
             egui::TopBottomPanel::bottom("framebar").show(ctx, |ui| {
                 ui.add_space(4.0);
                 self.draw_frame_bar(ui);
