@@ -535,6 +535,15 @@ impl CimApp {
                 self.panes[i].media = m;
                 self.panes[i].tex = None; // re-render the kept frame from fresh data
                 self.panes[i].error = None;
+                // If this is a mask, invalidate overlay textures sourced from it
+                // so they rebuild from the reloaded contents (same frame index).
+                for p in &mut self.panes {
+                    if let Some(o) = &mut p.overlay {
+                        if o.src_id == id {
+                            o.tex = None;
+                        }
+                    }
+                }
                 // Frame position is left untouched; frame_disp clamps it if the
                 // reloaded file is shorter.
             }

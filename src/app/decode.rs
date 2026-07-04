@@ -251,14 +251,25 @@ impl CimApp {
     /// Ensure the tinted overlay texture for pane `idx` is current, returning it
     /// to draw over the pane's image. Sources the mask from the pane referenced
     /// by `overlay.src_id`, at that mask's currently shown frame. Returns `None`
-    /// when there's no overlay, the mask pane is gone, or its frame isn't
-    /// resident yet.
+    /// when there's no overlay or the mask pane is gone.
+    ///
+    /// The mask is decoded on demand here, so the overlay works even when the
+    /// mask pane itself isn't drawn (hidden in the manager, or just reloaded).
+    /// While the frame decodes, the last overlay texture keeps showing.
     pub(super) fn prepare_overlay(&mut self, ctx: &egui::Context, idx: usize) -> Option<TextureId> {
         let ov = self.panes[idx].overlay.as_ref()?;
         let (src_id, color, opacity) = (ov.src_id, ov.color, ov.opacity);
         let src = self.panes.iter().position(|p| p.id == src_id)?;
         let f = self.frame_disp(src);
-        let frame = self.panes[src].media.resident(f)?; // owned Arc; borrow ends here
+        let Some(frame) = self.panes[src].media.resident(f) else {
+            // Not decoded yet: request it and keep the previous overlay texture.
+            self.request(src, f);
+            return self.panes[idx]
+                .overlay
+                .as_ref()
+                .and_then(|o| o.tex.as_ref().map(|t| t.handle.id()));
+        };
+        self.panes[src].media.touch(f, self.clock); // keep it hot so it isn't evicted
 
         let rgb = [color.r(), color.g(), color.b()];
         let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
