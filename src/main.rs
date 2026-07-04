@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod decoder;
 mod export;
+mod imageproc;
 mod media;
 mod settings;
 mod view;
