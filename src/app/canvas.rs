@@ -557,7 +557,6 @@ impl CimApp {
         }
 
         let Some(reg) = self.stats_region else { return };
-        self.ensure_region_stats(idx);
 
         // Map the image-space region onto this pane and clip to its visible area.
         let v = *self.view_ref(idx);
@@ -571,7 +570,13 @@ impl CimApp {
         }
         ui.painter_at(clip_rect)
             .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
-        self.draw_stats_panel(ui, idx, r, clip_rect);
+
+        // The stats panel (and its per-pane computation) is optional; the region
+        // outline above stays visible regardless.
+        if self.show_stats {
+            self.ensure_region_stats(idx);
+            self.draw_stats_panel(ui, idx, r, clip_rect);
+        }
     }
 
     /// Track the right-button drag with simple edge detection on the secondary

@@ -171,6 +171,9 @@ pub struct CimApp {
     hist: Option<HistCache>,
     rebinding: Option<Action>,
 
+    /// Draw the per-region stats panels (histogram + numbers + LUT button).
+    /// Toggled from the toolbar; the region outline stays visible either way.
+    show_stats: bool,
     /// Right-drag statistics region, in IMAGE space (like `export_region`), so
     /// the same crop and its per-pane stats replicate across every pane. `None`
     /// = no region selected.
@@ -283,6 +286,7 @@ impl CimApp {
             show_viewcmd: false,
             hist: None,
             rebinding: None,
+            show_stats: true,
             stats_region: None,
             stats_gen: 0,
             stats_sel_start: None,
