@@ -41,6 +41,15 @@ pub enum ViewMode {
     Ab,
 }
 
+/// Per-pane tone mode carried by `--tone`. Mirrors the app's `ContrastMode` but
+/// lives here so the CLI stays decoupled from the GUI module.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tone {
+    Linear,
+    LinearClip,
+    LutAlpha,
+}
+
 /// A viewpoint captured from a running session and replayed on the next launch.
 /// Every field is optional: only the flags actually present on the command line
 /// override the app's defaults. Produced by the "View command" panel and parsed
@@ -54,6 +63,12 @@ pub struct ViewState {
     pub frame: Option<usize>,
     pub pane: Option<usize>,
     pub ab: Option<(usize, usize, f32)>,
+    /// Per-pane tone modes (`--tone`), in pane order.
+    pub tones: Option<Vec<Tone>>,
+    /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
+    pub details: Option<Vec<bool>>,
+    /// Inclusive playback loop range `LO,HI` (`--loop`), 0-based.
+    pub loop_range: Option<(usize, usize)>,
 }
 
 /// Parse the arguments after argv[0].
@@ -121,6 +136,18 @@ pub fn parse(args: Vec<String>) -> Cli {
                 view.ab = next(i).and_then(parse_ab);
                 i += 1;
             }
+            "--tone" => {
+                view.tones = next(i).and_then(parse_tones);
+                i += 1;
+            }
+            "--detail" => {
+                view.details = next(i).and_then(parse_details);
+                i += 1;
+            }
+            "--loop" => {
+                view.loop_range = next(i).and_then(parse_uint_pair);
+                i += 1;
+            }
             other => expand_arg(other, &mut inputs),
         }
         i += 1;
@@ -151,6 +178,34 @@ fn parse_ab(s: &str) -> Option<(usize, usize, f32)> {
     let b = it.next()?.trim().parse().ok()?;
     let split = it.next()?.trim().parse().ok()?;
     Some((a, b, split))
+}
+
+/// Parse `LO,HI` into a `usize` pair (used by `--loop`).
+fn parse_uint_pair(s: &str) -> Option<(usize, usize)> {
+    let (a, b) = s.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parse a comma-separated per-pane tone list for `--tone` (case-insensitive).
+/// Any unrecognised token makes the whole flag ignored.
+fn parse_tones(s: &str) -> Option<Vec<Tone>> {
+    s.split(',')
+        .map(|t| match t.trim().to_ascii_lowercase().as_str() {
+            "linear" => Some(Tone::Linear),
+            "linearclip" | "clip" => Some(Tone::LinearClip),
+            "lutalpha" | "lut_alpha" => Some(Tone::LutAlpha),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parse a comma-separated per-pane on/off list for `--detail` (`1`/`0`).
+fn parse_details(s: &str) -> Option<Vec<bool>> {
+    Some(
+        s.split(',')
+            .map(|t| matches!(t.trim(), "1" | "true" | "on"))
+            .collect(),
+    )
 }
 
 fn help_text() -> String {
@@ -190,6 +245,9 @@ VIEW STATE:
         --frame <N>              Timeline frame to show
         --pane <N>               Focused pane
         --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
+        --tone <T,T,...>         Per-pane tone: linear | linearclip | lutalpha
+        --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
+        --loop <LO,HI>           Inclusive playback loop range (0-based)
 
 SHELL COMPLETION:
     bash         eval \"$(cim --completions bash)\"
@@ -477,6 +535,23 @@ mod tests {
         assert_eq!(view.frame, Some(4));
         assert_eq!(view.pane, Some(1));
         assert_eq!(view.ab, Some((0, 1, 0.25)));
+    }
+
+    #[test]
+    fn parses_tone_detail_loop() {
+        let args = "a.tif b.tif --tone linearclip,lutalpha --detail 0,1 --loop 3,9"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert!(matches!(
+            view.tones.as_deref(),
+            Some([Tone::LinearClip, Tone::LutAlpha])
+        ));
+        assert_eq!(view.details, Some(vec![false, true]));
+        assert_eq!(view.loop_range, Some((3, 9)));
     }
 
     #[test]

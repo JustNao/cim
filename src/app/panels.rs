@@ -135,17 +135,18 @@ impl CimApp {
             // 1-based start/end fields (typeable or draggable). Editing either
             // sets a sub-range; they mirror the timeline brackets.
             let (lo, hi) = self.loop_bounds(len);
-            let (mut s, mut e) = (lo + 1, hi + 1);
+            let last = len.saturating_sub(1);
+            let (mut s, mut e) = (lo, hi);
             ui.label("[");
-            let s_resp = ui.add(egui::DragValue::new(&mut s).range(1..=(hi + 1)).speed(0.25));
+            let s_resp = ui.add(egui::DragValue::new(&mut s).range(0..=hi).speed(0.25));
             ui.label("–");
-            let e_resp = ui.add(egui::DragValue::new(&mut e).range((lo + 1)..=len).speed(0.25));
+            let e_resp = ui.add(egui::DragValue::new(&mut e).range(lo..=last).speed(0.25));
             ui.label("]");
             if s_resp.changed() {
-                self.loop_range = Some((s.saturating_sub(1).min(hi), hi));
+                self.loop_range = Some((s.min(hi), hi));
             }
             if e_resp.changed() {
-                self.loop_range = Some((lo, e.saturating_sub(1).clamp(lo, len - 1)));
+                self.loop_range = Some((lo, e.clamp(lo, last)));
             }
             ui.separator();
 
@@ -161,12 +162,14 @@ impl CimApp {
             ui.separator();
             ui.strong(ellipsize(&name, 40));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // 0-based: current index over the last discovered index.
+                let last = len.saturating_sub(1);
                 let count = if at_end {
-                    format!("{len}")
+                    format!("{last}")
                 } else {
-                    format!("{len}+")
+                    format!("{last}+")
                 };
-                ui.monospace(format!("frame {} / {}", self.shared_frame + 1, count));
+                ui.monospace(format!("frame {} / {}", self.shared_frame, count));
             });
         });
 

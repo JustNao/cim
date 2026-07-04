@@ -319,6 +319,26 @@ impl CimApp {
             self.shared_frame = f;
             self.pending_seek = Some(f);
         }
+        // Per-pane tone / detail (each list positional over the panes).
+        if let Some(tones) = &vs.tones {
+            for (p, t) in self.panes.iter_mut().zip(tones) {
+                p.contrast = match t {
+                    cli::Tone::Linear => ContrastMode::Linear,
+                    cli::Tone::LinearClip => ContrastMode::LinearClip,
+                    cli::Tone::LutAlpha => ContrastMode::LutAlpha,
+                };
+                p.tex = None; // re-render with the restored mapping
+            }
+        }
+        if let Some(details) = &vs.details {
+            for (p, d) in self.panes.iter_mut().zip(details) {
+                p.details = *d;
+                p.tex = None;
+            }
+        }
+        if let Some((lo, hi)) = vs.loop_range {
+            self.loop_range = Some((lo, hi));
+        }
         // A restored zoom/centre is an explicit view, so suppress the auto-fit
         // that would otherwise run on first draw.
         if vs.zoom.is_some() || vs.center.is_some() {
@@ -361,6 +381,28 @@ impl CimApp {
         parts.push(format!("--center {:.2},{:.2}", v.center.x, v.center.y));
         if self.timeline_len() > 1 {
             parts.push(format!("--frame {}", self.shared_frame));
+        }
+        // Per-pane tone / detail, in pane order, so a replay reproduces them.
+        if !self.panes.is_empty() {
+            let tones: Vec<&str> = self
+                .panes
+                .iter()
+                .map(|p| match p.contrast {
+                    ContrastMode::Linear => "linear",
+                    ContrastMode::LinearClip => "linearclip",
+                    ContrastMode::LutAlpha => "lutalpha",
+                })
+                .collect();
+            parts.push(format!("--tone {}", tones.join(",")));
+            let details: Vec<&str> = self
+                .panes
+                .iter()
+                .map(|p| if p.details { "1" } else { "0" })
+                .collect();
+            parts.push(format!("--detail {}", details.join(",")));
+        }
+        if let Some((lo, hi)) = self.loop_range {
+            parts.push(format!("--loop {lo},{hi}"));
         }
         if !self.panes.is_empty() {
             parts.push(format!("--pane {}", self.current.min(self.panes.len() - 1)));
