@@ -38,13 +38,6 @@ impl CimApp {
             if ui.selectable_label(self.show_vis, "Visualise").clicked() {
                 self.show_vis = !self.show_vis;
             }
-            if ui
-                .selectable_label(self.show_stats, "Stats")
-                .on_hover_text("Show statistics panels under right-drag regions")
-                .clicked()
-            {
-                self.show_stats = !self.show_stats;
-            }
             if ui.selectable_label(self.show_export, "Export").clicked() {
                 self.toggle_export();
             }

@@ -172,7 +172,8 @@ pub struct CimApp {
     rebinding: Option<Action>,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
-    /// Toggled from the toolbar; the region outline stays visible either way.
+    /// Toggled by the button in the panel's top-left corner; when off, a small
+    /// button under the region brings it back. The outline stays visible.
     show_stats: bool,
     /// Right-drag statistics region, in IMAGE space (like `export_region`), so
     /// the same crop and its per-pane stats replicate across every pane. `None`

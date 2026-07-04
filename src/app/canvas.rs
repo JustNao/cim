@@ -571,11 +571,13 @@ impl CimApp {
         ui.painter_at(clip_rect)
             .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
 
-        // The stats panel (and its per-pane computation) is optional; the region
-        // outline above stays visible regardless.
+        // The stats panel is collapsible: when hidden, a small button under the
+        // region brings it back. The region outline above stays visible.
         if self.show_stats {
             self.ensure_region_stats(idx);
             self.draw_stats_panel(ui, idx, r, clip_rect);
+        } else {
+            self.draw_stats_collapsed(ui, r, clip_rect);
         }
     }
 
@@ -676,11 +678,21 @@ impl CimApp {
         ];
 
         let pad = 6.0;
+        let head_h = 15.0; // top strip holding the collapse button
         let hist_h = 40.0;
         let axis_h = 12.0;
         let line_h = 13.0;
         let btn_h = 20.0;
-        let h = pad + hist_h + 2.0 + axis_h + 4.0 + rows.len() as f32 * line_h + 4.0 + btn_h + pad;
+        let h = pad
+            + head_h
+            + hist_h
+            + 2.0
+            + axis_h
+            + 4.0
+            + rows.len() as f32 * line_h
+            + 4.0
+            + btn_h
+            + pad;
         let w = r.width().max(212.0).min((clip.width() - 2.0).max(120.0));
         // Prefer below the region; fall back to above, then pin inside the clip.
         let top = if r.bottom() + h + 4.0 <= clip.bottom() {
@@ -697,8 +709,10 @@ impl CimApp {
         painter.rect_filled(panel, 0.0, Color32::from_black_alpha(205));
         painter.rect_stroke(panel, 0.0, Stroke::new(1.0, REGION_COL));
 
-        let hist_rect =
-            Rect::from_min_size(panel.min + Vec2::splat(pad), Vec2::new(w - 2.0 * pad, hist_h));
+        let hist_rect = Rect::from_min_size(
+            Pos2::new(panel.left() + pad, panel.top() + pad + head_h),
+            Vec2::new(w - 2.0 * pad, hist_h),
+        );
         draw_region_hist(&painter, hist_rect, data);
 
         // Min / max labelled at the histogram's two ends.
@@ -744,6 +758,38 @@ impl CimApp {
         );
         if resp.clicked() {
             self.apply_region_tone(!on);
+        }
+
+        // Collapse button in the top-left corner: hides the panel, leaving the
+        // small re-open button under the region (`draw_stats_collapsed`).
+        let hide_rect =
+            Rect::from_min_size(panel.min + Vec2::splat(3.0), Vec2::new(16.0, head_h - 3.0));
+        if ui
+            .put(hide_rect, egui::Button::new("–"))
+            .on_hover_text("Hide stats")
+            .clicked()
+        {
+            self.show_stats = false;
+        }
+    }
+
+    /// The collapsed stats indicator: a small "σ stats" button under the region
+    /// `r` that re-opens the panels (replicated, so any pane's button works).
+    fn draw_stats_collapsed(&mut self, ui: &mut egui::Ui, r: Rect, clip: Rect) {
+        let size = Vec2::new(58.0, 18.0);
+        let top = if r.bottom() + size.y + 4.0 <= clip.bottom() {
+            r.bottom() + 4.0
+        } else {
+            (r.top() - size.y - 4.0).max(clip.top())
+        };
+        let left = r.left().clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
+        let btn_rect = Rect::from_min_size(Pos2::new(left, top), size);
+        if ui
+            .put(btn_rect, egui::Button::new("σ stats"))
+            .on_hover_text("Show region stats")
+            .clicked()
+        {
+            self.show_stats = true;
         }
     }
 }

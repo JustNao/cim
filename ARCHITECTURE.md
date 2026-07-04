@@ -363,9 +363,11 @@ mean / std / pixel count, computed by `FrameData::region_stats` and cached per
 pane (`RegionStatsCache`, keyed on `(frame, stats_gen)`). A near-zero drag (or a
 plain right-click) **clears** the region. The panel's **"compute LUT from
 region"** toggle pins every pane's tone to the region (`apply_region_tone`,
-see §7). The toolbar **"Stats"** button (`show_stats`) hides/shows the panels
-(the outline stays); pan/reorder are switched to **primary-button-only** so the
-right-drag is never stolen.
+see §7). A **–** button in the panel's top-left corner collapses it
+(`show_stats`); collapsed, a small **"σ stats"** button under the region
+(`draw_stats_collapsed`) re-opens it, and the outline stays visible throughout.
+Pan/reorder are switched to **primary-button-only** so the right-drag is never
+stolen.
 
 ---
 
