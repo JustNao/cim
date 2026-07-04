@@ -378,9 +378,11 @@ see §7). A **–** button in the panel's top-left corner collapses it
 Pan/reorder are switched to **primary-button-only** so the right-drag is never
 stolen.
 
-**Compute panes.** The toolbar **"Compute"** button (`open_compute`) adds a pane
-whose image is *generated* rather than loaded: `Pane.compute: Option<Compute>`
-holds the reduction `kind` (`media::Reduce::Mean | Std`) and the source pane id.
+**Compute panes.** Each pane header's **"Compute"** button (next to
+Transformations) queues `pending_compute` → `open_compute(prefer)`, adding a pane
+whose image is *generated* rather than loaded, sourced from the clicked pane when
+it's a sequence (else the first sequence): `Pane.compute: Option<Compute>` holds
+the reduction `kind` (`media::Reduce::Mean | Std`) and the source pane id.
 `recompute_pane` gathers the source's **resident** frames and calls
 `media::reduce_frames` (per-pixel/per-channel mean or population std, in `f64`,
 emitting an `f32` `Media::still`); the pane's `Source::Computed` makes the media
@@ -395,13 +397,16 @@ working dir. Computed panes are skipped by `view_command` (not CLI-reproducible)
 **"Transformations" options popup.** Each pane header has a **Transformations**
 button on the *left* (away from the close ×), toggling `Pane.show_opts`.
 `draw_options_popup` renders a foreground `Area` under the header with the tone
-`ContrastMode`, its mode-specific options, and the Details toggle; edits
-invalidate the texture. Per-mode options live in `settings::ToneOptions` (one
-sub-struct per mode, so switching modes keeps each mode's settings) and are laid
-out by the free `draw_tone_options` — **the single place to add a knob**: grow
-the mode's sub-struct, add a row there, and read it in `prepare`. These controls
-were removed from the Media-manager table (it kept the clutter down as options
-grow).
+`ContrastMode`, its mode-specific options, the Details toggle, the (global)
+magnification **Interp** filter, and this pane's **Histogram** — the old
+*Visualise* window folded in here (`ensure_pane_histogram` + `draw_histogram`),
+so it's now per-pane. Edits invalidate the texture. Per-mode tone options live in
+`settings::ToneOptions` (one sub-struct per mode, so switching modes keeps each
+mode's settings) and are laid out by the free `draw_tone_options` — **the single
+place to add a knob**: grow the mode's sub-struct, add a row there, and read it in
+`prepare`. These controls were removed from the Media-manager table (it kept the
+clutter down as options grow). The keybinding `Action::ToggleVis` (default `V`)
+now toggles the focused pane's popup.
 
 **Transformations sync (`Pane.sync_tone`).** Like the Pos/Time view syncs, a pane
 can follow the **shared** Transformations (`shared_contrast` / `shared_tone` /
@@ -516,7 +521,7 @@ Order each frame:
    shown whenever **any** loaded media is a sequence (`any_sequence`) so it
    doesn't drop/shift when a still is focused — a click/drag-seekable scrubber
    plus transport controls that follow the *control* sequence), central panel,
-   then windows (manager/vis/export/settings/**view-command**), the error popup,
+   then windows (manager/export/settings/**view-command**), the error popup,
    and apply deferred `pending_remove/reload(_all)`.
 7. `export_tick` if a run is active.
 8. `request_repaint()` while playing, decoding (`!inflight.is_empty()`), or

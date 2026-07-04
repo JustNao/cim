@@ -78,7 +78,7 @@ impl Action {
             Action::OpenFiles => "Open files…".into(),
             Action::ToggleSettings => "Toggle settings".into(),
             Action::ToggleManager => "Toggle media manager".into(),
-            Action::ToggleVis => "Toggle visualisation panel".into(),
+            Action::ToggleVis => "Toggle Transformations popup (focused pane)".into(),
             Action::ToggleExport => "Toggle export panel".into(),
             Action::PlayPause => "Play / pause sequences".into(),
             Action::SelectMedia(i) => format!("Select media {}", i + 1),

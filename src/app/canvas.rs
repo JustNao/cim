@@ -322,6 +322,33 @@ impl CimApp {
             self.panes[idx].show_opts = !open;
         }
 
+        // "Compute" button next to Transformations: creates a Compute pane
+        // sourced from this pane (deferred so we don't grow `panes` mid-draw).
+        let compute = Rect::from_min_size(
+            Pos2::new(header.min.x + MODIFY_W, header.min.y),
+            Vec2::new(COMPUTE_W, HEADER_H),
+        );
+        let comp_resp = ui.interact(compute, Id::new(("compute_btn", idx)), Sense::click());
+        hp.rect_filled(
+            compute,
+            0.0,
+            if comp_resp.hovered() {
+                Color32::from_gray(70)
+            } else {
+                Color32::from_gray(52)
+            },
+        );
+        hp.text(
+            compute.center(),
+            Align2::CENTER_CENTER,
+            "Compute",
+            FontId::proportional(12.0),
+            Color32::from_gray(225),
+        );
+        if comp_resp.clicked() {
+            self.pending_compute = Some(self.panes[idx].id);
+        }
+
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
         let title = if count > 1 {
@@ -355,7 +382,7 @@ impl CimApp {
             format!("{}  {}", idx + 1, name)
         };
         hp.text(
-            header.left_center() + Vec2::new(MODIFY_W + 8.0, 0.0),
+            header.left_center() + Vec2::new(MODIFY_W + COMPUTE_W + 8.0, 0.0),
             Align2::LEFT_CENTER,
             title,
             FontId::proportional(13.0),
@@ -823,7 +850,13 @@ impl CimApp {
         let mut contrast = self.contrast_of(idx);
         let mut tone = self.tone_of(idx);
         let mut details = self.details_of(idx);
+        let mut interp = self.config.vis.interp; // global magnification filter
         let mut close = false;
+
+        // Histogram of this pane's current frame (folded in from Visualise).
+        self.ensure_pane_histogram(idx);
+        let f = self.frame_disp(idx);
+        let have_hist = self.hist.as_ref().map(|h| h.key) == Some((pane_id, f));
 
         egui::Area::new(Id::new(("pane_opts", pane_id)))
             .order(egui::Order::Foreground)
@@ -846,7 +879,7 @@ impl CimApp {
                     });
                     if synced {
                         ui.label(
-                            egui::RichText::new("shared across tone-synced panes")
+                            egui::RichText::new("Transformations synced")
                                 .weak()
                                 .small(),
                         );
@@ -874,9 +907,50 @@ impl CimApp {
                             ui.add(egui::Checkbox::without_text(&mut details))
                                 .on_hover_text("DETAILS_ENHANCED detail enhancement");
                             ui.end_row();
+
+                            // Interpolation is a global filter (all panes), but
+                            // lives here now that Visualise folded in.
+                            ui.label("Interp")
+                                .on_hover_text("Magnification filter (applies to all panes)");
+                            egui::ComboBox::from_id_salt(("opt_interp", pane_id))
+                                .selected_text(match interp {
+                                    Interpolation::Nearest => "Nearest",
+                                    Interpolation::Bilinear => "Bilinear",
+                                })
+                                .width(130.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut interp,
+                                        Interpolation::Nearest,
+                                        "Nearest",
+                                    );
+                                    ui.selectable_value(
+                                        &mut interp,
+                                        Interpolation::Bilinear,
+                                        "Bilinear",
+                                    );
+                                });
+                            ui.end_row();
                         });
+
+                    ui.separator();
+                    ui.strong("Histogram");
+                    if have_hist {
+                        self.draw_histogram(ui);
+                    } else {
+                        ui.label(egui::RichText::new("frame not loaded").weak().small());
+                    }
                 });
             });
+
+        // Interpolation change: global filter → rebuild every texture + persist.
+        if interp != self.config.vis.interp {
+            self.config.vis.interp = interp;
+            for p in &mut self.panes {
+                p.tex = None;
+            }
+            self.config.save();
+        }
 
         if synced {
             if self.shared_contrast != contrast

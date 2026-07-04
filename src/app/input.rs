@@ -59,7 +59,13 @@ impl CimApp {
             Action::OpenFiles => self.open_dialog(),
             Action::ToggleSettings => self.show_settings = !self.show_settings,
             Action::ToggleManager => self.show_manager = !self.show_manager,
-            Action::ToggleVis => self.show_vis = !self.show_vis,
+            Action::ToggleVis => {
+                // The Visualise window folded into the per-pane Transformations
+                // popup; this now toggles it for the focused pane.
+                if let Some(p) = self.panes.get_mut(self.current) {
+                    p.show_opts = !p.show_opts;
+                }
+            }
             Action::ToggleExport => self.toggle_export(),
             Action::PlayPause => self.playing = !self.playing,
             Action::SelectMedia(i) if i < n => {

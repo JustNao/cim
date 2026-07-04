@@ -9,13 +9,6 @@ impl CimApp {
             if ui.button("Open").clicked() {
                 self.open_dialog();
             }
-            if ui
-                .button("Compute")
-                .on_hover_text("Add a panel that computes mean / std across a sequence")
-                .clicked()
-            {
-                self.open_compute();
-            }
             ui.separator();
             for (mode, label) in [
                 (Mode::Grid, "Grid"),
@@ -41,9 +34,6 @@ impl CimApp {
             ui.separator();
             if ui.selectable_label(self.show_manager, "Media").clicked() {
                 self.show_manager = !self.show_manager;
-            }
-            if ui.selectable_label(self.show_vis, "Visualise").clicked() {
-                self.show_vis = !self.show_vis;
             }
             if ui.selectable_label(self.show_export, "Export").clicked() {
                 self.toggle_export();
@@ -800,69 +790,16 @@ impl CimApp {
         self.show_manager = open;
     }
 
-    pub(super) fn draw_vis(&mut self, ctx: &egui::Context) {
-        self.update_histogram();
-        let mut open = self.show_vis;
-        let mut changed = false;
-        egui::Window::new("Visualise")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Interpolation");
-                    egui::ComboBox::from_id_salt("interp")
-                        .selected_text(match self.config.vis.interp {
-                            Interpolation::Nearest => "Nearest",
-                            Interpolation::Bilinear => "Bilinear",
-                        })
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.config.vis.interp,
-                                    Interpolation::Nearest,
-                                    "Nearest",
-                                )
-                                .changed();
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.config.vis.interp,
-                                    Interpolation::Bilinear,
-                                    "Bilinear",
-                                )
-                                .changed();
-                        });
-                });
-
-                ui.add_space(6.0);
-                ui.separator();
-                ui.heading("Histogram");
-                self.draw_histogram(ui);
-            });
-
-        if changed {
-            // Rebuild textures so filter/clip changes are visible immediately.
-            for p in &mut self.panes {
-                p.tex = None;
-            }
-            self.config.save();
-        }
-        self.show_vis = open;
-    }
-
-    /// Recompute the histogram of the focused media/frame when it changes.
-    pub(super) fn update_histogram(&mut self) {
-        if self.panes.is_empty() {
-            self.hist = None;
-            return;
-        }
-        let cur = self.current.min(self.panes.len() - 1);
-        let f = self.frame_disp(cur);
-        let key = (self.panes[cur].id, f);
+    /// Recompute the cached histogram for pane `idx`'s current frame when it
+    /// changes (the Visualise histogram now lives in the Transformations popup,
+    /// so it's per pane rather than a single focused-pane window).
+    pub(super) fn ensure_pane_histogram(&mut self, idx: usize) {
+        let f = self.frame_disp(idx);
+        let key = (self.panes[idx].id, f);
         if self.hist.as_ref().map(|h| h.key) == Some(key) {
             return;
         }
-        if let Some(frame) = self.panes[cur].media.resident(f) {
+        if let Some(frame) = self.panes[idx].media.resident(f) {
             self.hist = Some(HistCache {
                 key,
                 data: frame.histogram_display(256),

@@ -39,6 +39,7 @@ const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
+const COMPUTE_W: f32 = 62.0; // width of the header "Compute" button
 
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
@@ -196,12 +197,16 @@ pub struct CimApp {
 
     show_settings: bool,
     show_manager: bool,
-    show_vis: bool,
     /// The "View command" window: shows a `cim …` line that reopens the current
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
+    /// Cached histogram of the pane whose Transformations popup is drawing it.
     hist: Option<HistCache>,
     rebinding: Option<Action>,
+    /// A header "Compute" button was clicked: create a Compute pane after the
+    /// draw, preferring this pane id as the source. Deferred to avoid mutating
+    /// `panes` mid-draw.
+    pending_compute: Option<u64>,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
     /// Toggled by the button in the panel's top-left corner; when off, a small
@@ -318,10 +323,10 @@ impl CimApp {
             play_accum: 0.0,
             show_settings: false,
             show_manager: false,
-            show_vis: false,
             show_viewcmd: false,
             hist: None,
             rebinding: None,
+            pending_compute: None,
             show_stats: true,
             stats_region: None,
             stats_gen: 0,
@@ -648,14 +653,14 @@ impl CimApp {
 
     // ---- compute panes ---------------------------------------------------
 
-    /// Open a new Compute pane in the comparator, defaulting its source to the
-    /// first available sequence and computing it right away.
-    pub(super) fn open_compute(&mut self) {
-        let source_id = self
-            .panes
-            .iter()
-            .find(|p| p.compute.is_none() && p.media.frame_count() > 1)
-            .map(|p| p.id);
+    /// Open a new Compute pane in the comparator and compute it right away. The
+    /// source defaults to `prefer` when it names a usable sequence (e.g. the
+    /// pane whose header "Compute" button was clicked), else the first sequence.
+    pub(super) fn open_compute(&mut self, prefer: Option<u64>) {
+        let is_source = |p: &Pane| p.compute.is_none() && p.media.frame_count() > 1;
+        let source_id = prefer
+            .filter(|id| self.panes.iter().any(|p| p.id == *id && is_source(p)))
+            .or_else(|| self.panes.iter().find(|p| is_source(p)).map(|p| p.id));
         let was_empty = self.panes.is_empty();
         self.add_pane(
             media::Media::still("Compute".into(), media::placeholder_frame()),
@@ -1025,9 +1030,6 @@ impl eframe::App for CimApp {
         if self.show_manager {
             self.draw_manager(ctx);
         }
-        if self.show_vis {
-            self.draw_vis(ctx);
-        }
         if self.show_export {
             self.draw_export(ctx);
         }
@@ -1067,6 +1069,9 @@ impl eframe::App for CimApp {
         }
         if let Some(i) = self.pending_reload.take() {
             self.reload(i);
+        }
+        if let Some(src) = self.pending_compute.take() {
+            self.open_compute(Some(src));
         }
 
         // Encode one frame per frame while an export is running.
