@@ -573,9 +573,13 @@ impl eframe::App for CimApp {
             });
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.draw_central(ui, ctx);
-        });
+        // No frame margin: the image area runs flush to the window edges
+        // (top under the toolbar, left and right).
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                self.draw_central(ui, ctx);
+            });
 
         if self.show_manager {
             self.draw_manager(ctx);
