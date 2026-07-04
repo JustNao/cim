@@ -262,10 +262,13 @@ impl Default for LutAlphaOptions {
 
 /// Per-pane tone options: one sub-struct per mode, so switching modes keeps each
 /// mode's own settings. Extend a mode by growing its sub-struct (see above).
+/// Also carries the per-pane magnification `interp` filter so it rides the same
+/// Transformations sync as the tone.
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
     pub lut_alpha: LutAlphaOptions,
+    pub interp: Interpolation,
 }
 
 /// Global visualisation settings. Grows over time. (Intensity clip is per-pane,

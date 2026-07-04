@@ -182,8 +182,8 @@ impl CimApp {
 
     // ---- textures --------------------------------------------------------
 
-    pub(super) fn tex_options(&self) -> TextureOptions {
-        let magnification = match self.config.vis.interp {
+    pub(super) fn tex_options(&self, idx: usize) -> TextureOptions {
+        let magnification = match self.tone_of(idx).interp {
             Interpolation::Nearest => egui::TextureFilter::Nearest,
             Interpolation::Bilinear => egui::TextureFilter::Linear,
         };
@@ -211,7 +211,7 @@ impl CimApp {
                 // Only run the (expensive) render + upload when the texture is
                 // stale. Bounds are memoized on the frame; render into a reused
                 // scratch buffer via the LUT path.
-                let opts = self.tex_options();
+                let opts = self.tex_options(idx);
                 // Built-in mapping to 8-bit (full range, or 0.01% clip for
                 // Linear+Clip); the LUT_ALPHA / detail operators (the
                 // proprietary C++) then transform the rendered RGBA in place.

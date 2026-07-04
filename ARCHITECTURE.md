@@ -397,16 +397,24 @@ working dir. Computed panes are skipped by `view_command` (not CLI-reproducible)
 **"Transformations" options popup.** Each pane header has a **Transformations**
 button on the *left* (away from the close ×), toggling `Pane.show_opts`.
 `draw_options_popup` renders a foreground `Area` under the header with the tone
-`ContrastMode`, its mode-specific options, the Details toggle, the (global)
+`ContrastMode`, its mode-specific options, the Details toggle, the per-pane
 magnification **Interp** filter, and this pane's **Histogram** — the old
 *Visualise* window folded in here (`ensure_pane_histogram` + `draw_histogram`),
-so it's now per-pane. Edits invalidate the texture. Per-mode tone options live in
-`settings::ToneOptions` (one sub-struct per mode, so switching modes keeps each
-mode's settings) and are laid out by the free `draw_tone_options` — **the single
-place to add a knob**: grow the mode's sub-struct, add a row there, and read it in
-`prepare`. These controls were removed from the Media-manager table (it kept the
-clutter down as options grow). The keybinding `Action::ToggleVis` (default `V`)
-now toggles the focused pane's popup.
+so both are now per-pane. Edits invalidate the texture. Per-mode tone options
+live in `settings::ToneOptions` (one sub-struct per mode, so switching modes
+keeps each mode's settings; `ToneOptions.interp` also carries the magnification
+filter so it rides the tone-sync) and are laid out by the free
+`draw_tone_options` — **the single place to add a knob**: grow the mode's
+sub-struct, add a row there, and read it in `prepare` (or `tex_options(idx)` for
+`interp`). New panes seed `interp` from the saved `config.vis.interp` default.
+These controls were removed from the Media-manager table (it kept the clutter
+down as options grow). The keybinding `Action::ToggleVis` (default `V`) now
+toggles the focused pane's popup.
+
+The header is **one or two rows** (`header_rows` / `header_h_for`, both feeding
+`image_area`): when a cell is too narrow to fit Transformations + Compute + a
+little title on one line, Compute drops onto a second row under Transformations
+and the image area shrinks to match.
 
 **Transformations sync (`Pane.sync_tone`).** Like the Pos/Time view syncs, a pane
 can follow the **shared** Transformations (`shared_contrast` / `shared_tone` /

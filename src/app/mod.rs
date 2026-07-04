@@ -552,6 +552,11 @@ impl CimApp {
         } else {
             ContrastMode::Linear
         };
+        // Seed the per-pane magnification filter from the saved default.
+        let tone = ToneOptions {
+            interp: self.config.vis.interp,
+            ..ToneOptions::default()
+        };
         self.panes.push(Pane {
             id,
             source,
@@ -564,7 +569,7 @@ impl CimApp {
             sync_tone: false,
             visible: true,
             contrast,
-            tone: ToneOptions::default(),
+            tone,
             show_opts: false,
             details: false,
             overlay: None,
@@ -1092,10 +1097,26 @@ impl eframe::App for CimApp {
 
 // ---- shared free helpers -------------------------------------------------
 
-/// The image sub-rect of a cell, between its header and footer strips.
+/// Header rows for a cell of `width`: **two** (Compute stacks under
+/// Transformations) when it's too narrow to fit both buttons plus a little
+/// title on one line, else **one**.
+fn header_rows(width: f32) -> f32 {
+    if width < MODIFY_W + COMPUTE_W + 44.0 {
+        2.0
+    } else {
+        1.0
+    }
+}
+
+/// Total header height for a cell of `width` (one or two `HEADER_H` rows).
+fn header_h_for(width: f32) -> f32 {
+    header_rows(width) * HEADER_H
+}
+
+/// The image sub-rect of a cell, between its header (one or two rows) and footer.
 fn image_area(cell: Rect) -> Rect {
     Rect::from_min_max(
-        Pos2::new(cell.min.x, cell.min.y + HEADER_H + 2.0),
+        Pos2::new(cell.min.x, cell.min.y + header_h_for(cell.width()) + 2.0),
         Pos2::new(cell.max.x, cell.max.y - FOOTER_H - 2.0),
     )
 }

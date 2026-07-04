@@ -282,7 +282,10 @@ impl CimApp {
     }
 
     pub(super) fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, cell: Rect) {
-        let header = Rect::from_min_size(cell.min, Vec2::new(cell.width(), HEADER_H));
+        // Two rows when the cell is too narrow to fit both buttons + a little
+        // title on one line: Compute drops under Transformations.
+        let two_row = header_rows(cell.width()) > 1.0;
+        let header = Rect::from_min_size(cell.min, Vec2::new(cell.width(), header_h_for(cell.width())));
         let hp = ui.painter_at(header);
         let focused = idx == self.current;
         hp.rect_filled(
@@ -295,8 +298,8 @@ impl CimApp {
             },
         );
 
-        // "Transformations" button on the LEFT (away from the close × so it's
-        // hard to mis-click), toggling this pane's options popup.
+        // "Transformations" button on the LEFT of row 1 (away from the close ×
+        // so it's hard to mis-click), toggling this pane's options popup.
         let modify = Rect::from_min_size(header.min, Vec2::new(MODIFY_W, HEADER_H));
         let mod_resp = ui.interact(modify, Id::new(("modify", idx)), Sense::click());
         let open = self.panes[idx].show_opts;
@@ -322,12 +325,20 @@ impl CimApp {
             self.panes[idx].show_opts = !open;
         }
 
-        // "Compute" button next to Transformations: creates a Compute pane
-        // sourced from this pane (deferred so we don't grow `panes` mid-draw).
-        let compute = Rect::from_min_size(
-            Pos2::new(header.min.x + MODIFY_W, header.min.y),
-            Vec2::new(COMPUTE_W, HEADER_H),
-        );
+        // "Compute" button: next to Transformations on one row, or under it
+        // (row 2) when stacked. Creates a Compute pane sourced from this pane
+        // (deferred so we don't grow `panes` mid-draw).
+        let compute = if two_row {
+            Rect::from_min_size(
+                Pos2::new(header.min.x, header.min.y + HEADER_H),
+                Vec2::new(COMPUTE_W, HEADER_H),
+            )
+        } else {
+            Rect::from_min_size(
+                Pos2::new(header.min.x + MODIFY_W, header.min.y),
+                Vec2::new(COMPUTE_W, HEADER_H),
+            )
+        };
         let comp_resp = ui.interact(compute, Id::new(("compute_btn", idx)), Sense::click());
         hp.rect_filled(
             compute,
@@ -381,14 +392,17 @@ impl CimApp {
         } else {
             format!("{}  {}", idx + 1, name)
         };
+        // Title on row 1, after Transformations (and Compute when inline).
+        let title_x = header.min.x + if two_row { MODIFY_W } else { MODIFY_W + COMPUTE_W } + 8.0;
         hp.text(
-            header.left_center() + Vec2::new(MODIFY_W + COMPUTE_W + 8.0, 0.0),
+            Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
             Align2::LEFT_CENTER,
             title,
             FontId::proportional(13.0),
             Color32::from_gray(220),
         );
 
+        // Close × at the top-right (row 1).
         let close = Rect::from_min_size(
             Pos2::new(header.max.x - HEADER_H, header.min.y),
             Vec2::splat(HEADER_H),
@@ -848,9 +862,8 @@ impl CimApp {
         let synced = self.panes[idx].sync_tone;
         // Edit the effective values (shared when synced, else the pane's own).
         let mut contrast = self.contrast_of(idx);
-        let mut tone = self.tone_of(idx);
+        let mut tone = self.tone_of(idx); // includes the magnification `interp`
         let mut details = self.details_of(idx);
-        let mut interp = self.config.vis.interp; // global magnification filter
         let mut close = false;
 
         // Histogram of this pane's current frame (folded in from Visualise).
@@ -862,7 +875,10 @@ impl CimApp {
             .order(egui::Order::Foreground)
             .movable(false)
             .constrain_to(cell)
-            .fixed_pos(Pos2::new(cell.left() + 4.0, cell.top() + HEADER_H + 2.0))
+            .fixed_pos(Pos2::new(
+                cell.left() + 4.0,
+                cell.top() + header_h_for(cell.width()) + 2.0,
+            ))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(230.0);
@@ -908,24 +924,24 @@ impl CimApp {
                                 .on_hover_text("DETAILS_ENHANCED detail enhancement");
                             ui.end_row();
 
-                            // Interpolation is a global filter (all panes), but
-                            // lives here now that Visualise folded in.
+                            // Per-pane magnification filter (folded in from
+                            // Visualise); rides the Transformations sync.
                             ui.label("Interp")
-                                .on_hover_text("Magnification filter (applies to all panes)");
+                                .on_hover_text("Magnification filter for this pane");
                             egui::ComboBox::from_id_salt(("opt_interp", pane_id))
-                                .selected_text(match interp {
+                                .selected_text(match tone.interp {
                                     Interpolation::Nearest => "Nearest",
                                     Interpolation::Bilinear => "Bilinear",
                                 })
                                 .width(130.0)
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
-                                        &mut interp,
+                                        &mut tone.interp,
                                         Interpolation::Nearest,
                                         "Nearest",
                                     );
                                     ui.selectable_value(
-                                        &mut interp,
+                                        &mut tone.interp,
                                         Interpolation::Bilinear,
                                         "Bilinear",
                                     );
@@ -943,15 +959,8 @@ impl CimApp {
                 });
             });
 
-        // Interpolation change: global filter → rebuild every texture + persist.
-        if interp != self.config.vis.interp {
-            self.config.vis.interp = interp;
-            for p in &mut self.panes {
-                p.tex = None;
-            }
-            self.config.save();
-        }
-
+        // `interp` now lives inside `tone`, so the tone write-back below (own or
+        // shared) picks up an interpolation change too, invalidating textures.
         if synced {
             if self.shared_contrast != contrast
                 || self.shared_tone != tone
