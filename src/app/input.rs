@@ -77,7 +77,12 @@ impl CimApp {
         }
         let tl = self.timeline_len();
         let at_end = self.current_at_end();
-        if tl <= 1 && at_end {
+        // Loop window: a user sub-range, else the whole sequence. When it's the
+        // full sequence and the end isn't discovered yet, `hi` is only the
+        // frontier — hold there rather than wrapping early.
+        let (lo, hi) = self.loop_bounds(tl);
+        let full = self.loop_range.is_none();
+        if hi <= lo && at_end {
             return;
         }
         let dt = ctx.input(|i| i.stable_dt).min(0.25);
@@ -85,20 +90,20 @@ impl CimApp {
         let step = 1.0 / self.fps.max(0.1);
         while self.play_accum >= step {
             self.play_accum -= step;
-            if self.shared_frame + 1 < tl {
-                self.shared_frame += 1;
-            } else if at_end {
-                if self.loop_playback {
-                    self.shared_frame = 0;
-                } else {
-                    // Reached the end with looping off: stop on the last frame.
-                    self.playing = false;
-                    self.play_accum = 0.0;
-                    break;
-                }
+            let f = self.shared_frame;
+            if f < lo {
+                self.shared_frame = lo; // jump into the window
+            } else if f < hi {
+                self.shared_frame = f + 1;
+            } else if full && !at_end {
+                // At the frontier of a still-discovering full sequence: wait for
+                // the next page; drop the backlog so we don't burst afterwards.
+                self.play_accum = 0.0;
+                break;
+            } else if self.loop_playback {
+                self.shared_frame = lo; // wrap to the window start
             } else {
-                // At the discovered frontier — wait for the next page rather than
-                // wrapping early; drop the backlog so we don't burst afterwards.
+                self.playing = false; // stop on the last frame of the window
                 self.play_accum = 0.0;
                 break;
             }

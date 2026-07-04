@@ -105,6 +105,20 @@ impl CimApp {
             {
                 self.loop_playback = !self.loop_playback;
             }
+            // Loop range: shows the active window and resets to the full
+            // sequence on click. Drag the timeline brackets to set a sub-range.
+            let (lo, hi) = self.loop_bounds(len);
+            let range_label = match self.loop_range {
+                Some(_) => format!("⟺ {}–{}", lo + 1, hi + 1),
+                None => "⟺ full".to_string(),
+            };
+            if ui
+                .add_enabled(self.loop_range.is_some(), egui::Button::new(range_label))
+                .on_hover_text("Loop range — click to reset to the whole sequence")
+                .clicked()
+            {
+                self.loop_range = None;
+            }
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
                 if self.shared_frame > 0 {
@@ -145,9 +159,10 @@ impl CimApp {
         self.draw_scrubber(ui, len, at_end);
     }
 
-    /// A wide, click/drag-seekable frame track filling the panel width. The
-    /// filled portion reflects progress; a playhead marks the current frame, and
-    /// per-frame ticks appear while the sequence is short enough to read them.
+    /// A wide, click/drag-seekable frame track filling the panel width. Frames
+    /// resident in memory are drawn in the accent colour (the rest greyed);
+    /// draggable brackets mark the loop window (dimmed outside); a playhead
+    /// marks the current frame, and per-frame ticks appear when short enough.
     pub(super) fn draw_scrubber(&mut self, ui: &mut egui::Ui, len: usize, at_end: bool) {
         let width = ui.available_width();
         let (rect, resp) =
@@ -155,19 +170,70 @@ impl CimApp {
         let painter = ui.painter_at(rect);
 
         let span = (len.saturating_sub(1)).max(1) as f32;
-        let frac = self.shared_frame as f32 / span;
+        let x_of = |k: usize| rect.left() + rect.width() * (k as f32 / span);
+        let (lo, hi) = self.loop_bounds(len);
+        let (xlo, xhi) = (x_of(lo), x_of(hi));
 
-        painter.rect_filled(rect, 0.0, Color32::from_gray(30));
-        let filled = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
-        painter.rect_filled(filled, 0.0, Color32::from_rgb(56, 104, 162));
+        // Base track = "not loaded".
+        painter.rect_filled(rect, 0.0, Color32::from_gray(28));
+
+        // Frames resident in memory, in the accent colour. Merge contiguous
+        // runs so a long cached span is one rect (cheap, and reads as solid).
+        let mut res: Vec<usize> = self
+            .panes
+            .get(self.control)
+            .map(|p| {
+                p.media
+                    .resident_frames()
+                    .into_iter()
+                    .map(|(i, _, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        res.sort_unstable();
+        let cell = rect.width() / span; // px per frame
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for k in res {
+            match runs.last_mut() {
+                Some(last) if k == last.1 + 1 => last.1 = k,
+                _ => runs.push((k, k)),
+            }
+        }
+        let loaded = Color32::from_rgb(56, 104, 162);
+        for (a, b) in runs {
+            let xa = (x_of(a) - cell / 2.0).max(rect.left());
+            let xb = (x_of(b) + cell / 2.0).min(rect.right());
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(xa, rect.top()), Pos2::new(xb, rect.bottom())),
+                0.0,
+                loaded,
+            );
+        }
+
+        // Dim outside the loop window.
+        let dim = Color32::from_black_alpha(120);
+        if xlo > rect.left() {
+            painter.rect_filled(
+                Rect::from_min_max(rect.left_top(), Pos2::new(xlo, rect.bottom())),
+                0.0,
+                dim,
+            );
+        }
+        if xhi < rect.right() {
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(xhi, rect.top()), rect.right_bottom()),
+                0.0,
+                dim,
+            );
+        }
 
         // Per-frame ticks while they stay legible; a "+" marker at the frontier.
         if len <= 80 {
             for k in 0..len {
-                let x = rect.left() + rect.width() * (k as f32 / span);
+                let x = x_of(k);
                 painter.line_segment(
                     [Pos2::new(x, rect.bottom() - 5.0), Pos2::new(x, rect.bottom())],
-                    Stroke::new(1.0, Color32::from_gray(80)),
+                    Stroke::new(1.0, Color32::from_gray(90)),
                 );
             }
         }
@@ -181,20 +247,66 @@ impl CimApp {
             );
         }
 
+        // Loop brackets: [ at the start, ] at the end.
+        let amber = Color32::from_rgb(240, 200, 80);
+        let st = Stroke::new(2.0, amber);
+        let (top, bot, cap) = (rect.top(), rect.bottom(), 5.0);
+        painter.line_segment([Pos2::new(xlo, top), Pos2::new(xlo, bot)], st);
+        painter.line_segment([Pos2::new(xlo, top), Pos2::new(xlo + cap, top)], st);
+        painter.line_segment([Pos2::new(xlo, bot), Pos2::new(xlo + cap, bot)], st);
+        painter.line_segment([Pos2::new(xhi, top), Pos2::new(xhi, bot)], st);
+        painter.line_segment([Pos2::new(xhi, top), Pos2::new(xhi - cap, top)], st);
+        painter.line_segment([Pos2::new(xhi, bot), Pos2::new(xhi - cap, bot)], st);
+
         // Playhead.
-        let px = rect.left() + rect.width() * frac;
+        let px = x_of(self.shared_frame.min(len.saturating_sub(1)));
         painter.line_segment(
             [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
             Stroke::new(2.0, Color32::from_gray(235)),
         );
         painter.circle_filled(Pos2::new(px, rect.center().y), 6.0, Color32::from_gray(240));
 
-        // Click or drag anywhere on the track to seek.
-        if (resp.clicked() || resp.dragged()) && len > 1 {
+        // Interaction: a drag that starts on a bracket moves it (sets the loop
+        // range); otherwise a click/drag seeks.
+        if len <= 1 {
+            return;
+        }
+        let grab = 8.0;
+        let frame_at = |p: Pos2| -> usize {
+            let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            (t * span).round() as usize
+        };
+        if resp.drag_started() {
+            self.loop_drag = resp.interact_pointer_pos().and_then(|p| {
+                if (p.x - xlo).abs() <= grab {
+                    Some(true)
+                } else if (p.x - xhi).abs() <= grab {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+        }
+        if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
-                self.pending_seek = None; // manual seek cancels an automatic one
-                let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                self.shared_frame = (t * span).round() as usize;
+                let f = frame_at(p);
+                match self.loop_drag {
+                    Some(true) => self.loop_range = Some((f.min(hi), hi)),
+                    Some(false) => self.loop_range = Some((lo, f.max(lo).min(len - 1))),
+                    None => {
+                        self.pending_seek = None;
+                        self.shared_frame = f;
+                    }
+                }
+            }
+        }
+        if resp.drag_stopped() {
+            self.loop_drag = None;
+        }
+        if resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.pending_seek = None;
+                self.shared_frame = frame_at(p);
             }
         }
     }
@@ -442,8 +554,10 @@ impl CimApp {
                                                 "This sequence drives the timeline & playback",
                                             )
                                             .clicked()
+                                        && self.control != i
                                     {
                                         self.control = i;
+                                        self.loop_range = None; // range is per-sequence
                                     }
                                 });
 

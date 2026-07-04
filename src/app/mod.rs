@@ -135,6 +135,13 @@ pub struct CimApp {
     /// Loop the sequence when playback reaches the end (on by default). When
     /// off, playback stops on the last frame instead of wrapping.
     loop_playback: bool,
+    /// Inclusive frame sub-range to loop over on the control sequence; `None`
+    /// loops the whole (discovered) sequence. Set by dragging the timeline
+    /// brackets, reset to full by the loop-range button.
+    loop_range: Option<(usize, usize)>,
+    /// Which loop bracket the pointer is dragging: `Some(true)` = start (left),
+    /// `Some(false)` = end (right); `None` = not dragging a bracket.
+    loop_drag: Option<bool>,
     fps: f32,
     play_accum: f32,
 
@@ -235,6 +242,8 @@ impl CimApp {
             ab_handle_grabbed: false,
             playing: false,
             loop_playback: true,
+            loop_range: None,
+            loop_drag: None,
             fps: 12.0,
             play_accum: 0.0,
             show_settings: false,
@@ -552,6 +561,19 @@ impl CimApp {
         self.panes.iter().any(|p| p.media.frame_count() > 1)
     }
 
+    /// The inclusive `[lo, hi]` frame window playback loops over, clamped to the
+    /// current known length `len`. `loop_range == None` → the whole sequence.
+    pub(super) fn loop_bounds(&self, len: usize) -> (usize, usize) {
+        let last = len.saturating_sub(1);
+        match self.loop_range {
+            Some((lo, hi)) => {
+                let hi = hi.min(last);
+                (lo.min(hi), hi)
+            }
+            None => (0, last),
+        }
+    }
+
     /// Keep `control` pointing at a sequence: clamp it in range, and if it isn't
     /// a multi-frame media, repoint to the first one that is (leaving a valid
     /// user choice untouched).
@@ -560,12 +582,18 @@ impl CimApp {
             self.control = 0;
             return;
         }
+        let before = self.control;
         self.control = self.control.min(self.panes.len() - 1);
         let is_seq = |p: &Pane| p.media.frame_count() > 1;
         if !self.panes.get(self.control).is_some_and(|p| is_seq(p)) {
             if let Some(i) = self.panes.iter().position(is_seq) {
                 self.control = i;
             }
+        }
+        // A loop sub-range belongs to a specific sequence; drop it if control
+        // moved to a different one.
+        if self.control != before {
+            self.loop_range = None;
         }
     }
 
