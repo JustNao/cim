@@ -358,12 +358,13 @@ the export crop) so the same region — and each pane's own statistics for it �
 (`region_input`, tracking the secondary button + a per-pane `stats_sel_*`
 anchor), draws the live rubber band, and otherwise draws the committed outline
 plus a **stats panel** under it: a mini histogram (`draw_region_hist`, Visualise
-style), per-channel mean/std, min/max and pixel count, computed by
-`FrameData::region_stats` and cached per pane (`RegionStatsCache`, keyed on
-`(frame, stats_gen)`). A near-zero drag (or a plain right-click) **clears** the
-region. The panel's **"Tone ⟵ region"** toggle pins every pane's tone to the
-region (`apply_region_tone`, see §7). Pan/reorder are switched to
-**primary-button-only** so the right-drag is never stolen.
+style, with min/max labelled at its ends) and a verbose one-per-row list of
+mean / std / pixel count, computed by `FrameData::region_stats` and cached per
+pane (`RegionStatsCache`, keyed on `(frame, stats_gen)`). A near-zero drag (or a
+plain right-click) **clears** the region. The panel's **"compute LUT from
+region"** toggle pins every pane's tone to the region (`apply_region_tone`,
+see §7). Pan/reorder are switched to **primary-button-only** so the right-drag
+is never stolen.
 
 ---
 

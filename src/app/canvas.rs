@@ -644,17 +644,39 @@ impl CimApp {
     }
 
     /// Draw the stats panel for pane `idx` just below (or above) the on-screen
-    /// region rect `r`: a mini histogram, mean/std/min/max, pixel count, and the
-    /// "Tone ⟵ region" toggle that pins every pane's tone to the region.
+    /// region rect `r`: a mini histogram with min/max labelled at its ends, a
+    /// verbose one-per-row stats list (mean / std / n), and the "compute LUT
+    /// from region" toggle that pins every pane's tone to the region.
     fn draw_stats_panel(&mut self, ui: &mut egui::Ui, idx: usize, r: Rect, clip: Rect) {
         let Some(sc) = self.panes[idx].stats.as_ref() else {
             return;
         };
         let data = &sc.data;
 
+        let fmt = |v: f32| -> String {
+            if v.fract() == 0.0 {
+                format!("{}", v as i64)
+            } else {
+                format!("{v:.3}")
+            }
+        };
+        let vals = |v: &[f32]| -> String {
+            v.iter().map(|x| fmt(*x)).collect::<Vec<_>>().join(" / ")
+        };
+        // One result per row (mean / std / n), aligned labels.
+        let rows = [
+            format!("{:<4} = {}", "mean", vals(&data.mean)),
+            format!("{:<4} = {}", "std", vals(&data.std)),
+            format!("{:<4} = {}", "n", data.count),
+        ];
+
         let pad = 6.0;
-        let w = r.width().max(196.0).min((clip.width() - 2.0).max(120.0));
-        let h = 104.0;
+        let hist_h = 40.0;
+        let axis_h = 12.0;
+        let line_h = 13.0;
+        let btn_h = 20.0;
+        let h = pad + hist_h + 2.0 + axis_h + 4.0 + rows.len() as f32 * line_h + 4.0 + btn_h + pad;
+        let w = r.width().max(212.0).min((clip.width() - 2.0).max(120.0));
         // Prefer below the region; fall back to above, then pin inside the clip.
         let top = if r.bottom() + h + 4.0 <= clip.bottom() {
             r.bottom() + 4.0
@@ -670,52 +692,42 @@ impl CimApp {
         painter.rect_filled(panel, 0.0, Color32::from_black_alpha(205));
         painter.rect_stroke(panel, 0.0, Stroke::new(1.0, REGION_COL));
 
-        let hist_rect = Rect::from_min_size(
-            panel.min + Vec2::splat(pad),
-            Vec2::new(w - 2.0 * pad, 40.0),
-        );
+        let hist_rect =
+            Rect::from_min_size(panel.min + Vec2::splat(pad), Vec2::new(w - 2.0 * pad, hist_h));
         draw_region_hist(&painter, hist_rect, data);
 
-        let fmt = |v: f32| -> String {
-            if v.fract() == 0.0 {
-                format!("{}", v as i64)
-            } else {
-                format!("{v:.3}")
-            }
-        };
-        let text = if data.hist.mono {
-            format!(
-                "μ {}   σ {}\n[{}, {}]   n={}",
-                fmt(data.mean[0]),
-                fmt(data.std[0]),
-                fmt(data.hist.min),
-                fmt(data.hist.max),
-                data.count
-            )
-        } else {
-            format!(
-                "μ {}/{}/{}  σ {}/{}/{}\n[{}, {}]  n={}",
-                fmt(data.mean[0]),
-                fmt(data.mean[1]),
-                fmt(data.mean[2]),
-                fmt(data.std[0]),
-                fmt(data.std[1]),
-                fmt(data.std[2]),
-                fmt(data.hist.min),
-                fmt(data.hist.max),
-                data.count
-            )
-        };
+        // Min / max labelled at the histogram's two ends.
+        let axis_font = FontId::monospace(9.0);
+        let axis_col = Color32::from_gray(170);
         painter.text(
-            Pos2::new(panel.left() + pad, hist_rect.bottom() + 3.0),
+            Pos2::new(hist_rect.left(), hist_rect.bottom() + 2.0),
             Align2::LEFT_TOP,
-            text,
-            FontId::monospace(10.0),
-            Color32::from_gray(220),
+            format!("min = {}", fmt(data.hist.min)),
+            axis_font.clone(),
+            axis_col,
+        );
+        painter.text(
+            Pos2::new(hist_rect.right(), hist_rect.bottom() + 2.0),
+            Align2::RIGHT_TOP,
+            format!("max = {}", fmt(data.hist.max)),
+            axis_font,
+            axis_col,
         );
 
+        // Verbose results, one per row.
+        let mut y = hist_rect.bottom() + 2.0 + axis_h + 4.0;
+        for row in &rows {
+            painter.text(
+                Pos2::new(panel.left() + pad, y),
+                Align2::LEFT_TOP,
+                row,
+                FontId::monospace(10.0),
+                Color32::from_gray(220),
+            );
+            y += line_h;
+        }
+
         // Tone toggle at the bottom of the panel. Applies to every pane.
-        let btn_h = 20.0;
         let btn_rect = Rect::from_min_max(
             Pos2::new(panel.left() + pad, panel.bottom() - btn_h - pad),
             Pos2::new(panel.right() - pad, panel.bottom() - pad),
@@ -723,7 +735,7 @@ impl CimApp {
         let on = self.panes[idx].region_tone;
         let resp = ui.put(
             btn_rect,
-            egui::SelectableLabel::new(on, "Tone ⟵ region"),
+            egui::SelectableLabel::new(on, "compute LUT from region"),
         );
         if resp.clicked() {
             self.apply_region_tone(!on);
