@@ -86,6 +86,13 @@ helpers live in `app/mod.rs`; siblings reach them via `use super::*`.
   - `render_rgba(clip) -> Vec<u8>` and `render_into(lo, hi, &mut Vec<u8>)` —
     build the 8-bit RGBA display buffer (see §7 rendering).
   - `display_bounds(clip)` — memoized `(lo,hi)`; `pixel_string`, `histogram_display`.
+  - **Boolean masks:** a frame decoded from a **1-bit bilevel TIFF** is flagged
+    `mask` (`new_mask` / `is_mask()`). `render_into` then bypasses the tone
+    window and paints false→black / true→white, and `render_mask_rgba(rgb,
+    alpha)` builds a tinted overlay buffer (true pixels coloured, false
+    transparent). Only TIFFs are masks; everything else is a normal image.
+    `Media::is_mask()` (true for a `TiffSeq` whose page 0 is bilevel) lets the
+    UI list masks as overlay sources.
 
 ### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq`
 Unified interface the app/decoder use:
@@ -260,6 +267,17 @@ RGBA8 and run in `app/decode.rs::prepare` (live) and `export.rs::ensure_frame`
 (export), so exports match the screen. The C++ bridge, data contract, and
 drop-in steps are documented in `INTEGRATION_CPP.md`.
 
+**Region-driven tone (`Pane.region_tone`).** When pinned (the stats panel's
+"Tone ⟵ region" button, §9), a pane's linear bounds come from the shared stats
+region via `FrameData::region_display_bounds` — the region's **min/max** (Linear)
+or its **0.01% percentile** (Linear+Clip) — instead of `display_bounds`. Pixels
+outside the region that exceed these bounds are **clamped** by the render (the
+LUT covers the full sample domain and saturates), so extremes elsewhere go
+black/white while the region drives the contrast. LUT_ALPHA is unaffected: it
+still runs over the **whole** rendered image after the (region-derived) linear
+map. `region_tone` is recomputed on each texture rebuild (so it tracks the frame
+in a sequence) and replicates to every pane.
+
 Texture filtering (`tex_options`): magnification follows `config.vis.interp`
 (Nearest/Bilinear); minification Linear.
 
@@ -280,8 +298,22 @@ Each `Pane` has its own `transform` and `frame`, plus `sync_spatial` /
 - Toggling sync **off** snapshots the shared state into the pane so it doesn't
   jump. The media manager offers per-column and aggregate ("all") toggles.
 
-`timeline_len()` = the **current** (focused) pane's known length; it drives the
-loop. Playback (`advance_playback`) accumulates `stable_dt`, steps `shared_frame`
+`timeline_len()` = the **control** pane's known length; it drives the loop. The
+control pane (the sequence driving the shared timeline / transport) is **separate
+from `current`** (the focused pane for Single view / keyboard / header tint), so
+selecting a still to view doesn't hijack or hide playback. `ensure_control` keeps
+`control` on a sequence (repointing if it isn't one), and the media manager's
+**Control** selector (Sync column, sequences only) chooses which one.
+
+Playback loops over a **window** `loop_bounds(len)` — a user sub-range
+(`loop_range: Option<(lo,hi)>`, set by dragging the scrubber's brackets; `None`
+= whole sequence, reset via the transport's loop-range button). When the window
+is the full sequence and the end isn't discovered yet, `hi` is only the frontier
+and playback holds there rather than wrapping early; a sub-range (both bounds
+known) wraps/stops at `hi` immediately. The scrubber (`draw_scrubber`) shades
+memory-resident frames in the accent colour (contiguous runs merged) over a
+grey base, dims outside the loop window, and draws the two draggable brackets.
+Playback (`advance_playback`) accumulates `stable_dt`, steps `shared_frame`
 at `fps`, holds at the frontier when `!current_at_end()`, and advances unsynced
 panes independently.
 
@@ -297,6 +329,17 @@ panes independently.
 - **A/B wipe:** `draw_ab` shows `slot_a`/`slot_b` split at `ab_split` (draggable
   divider, `HANDLE_HIT` grab zone); pan/zoom acts on the side under the cursor.
 
+**Mask overlays.** A pane may carry a `MaskOverlay { src_id, color, opacity,
+tex }` — a boolean-mask media (referenced by stable pane id) tinted and drawn on
+top. `app/decode.rs::prepare_overlay` builds/caches the tinted texture from the
+mask's currently shown frame (via `render_mask_rgba`) and `draw_pane` paints it
+over the base image at the *same* image-space rect (1:1). The mask frame is
+**decoded on demand** there, so the overlay works even when the mask pane isn't
+drawn (hidden, or just reloaded — `reload` invalidates dependent overlay
+textures). Configured per pane in the media manager's **Overlay** column (mask
+picker + colour + α, with an aggregate row); cleared when its source mask is closed. Aligns pixel-for-pixel, so a mask is expected to match
+its target's dimensions.
+
 Per pane: `image_area(cell)` (between `HEADER_H` header and `FOOTER_H` footer),
 `draw_header` (index, name, `frame/known(+)`, `in mem`, sync markers, close ×),
 `draw_footer` (`h×w`, cursor `x y`, native pixel value via `pixel_string`).
@@ -307,6 +350,21 @@ shown by the header tint.
 Interaction guards: while `selecting_region` (export crop), pane pan/zoom is
 disabled so the drag isn't stolen.
 
+**Statistics region (right-drag).** A **right-button drag** on any pane selects
+a rectangle; it is stored in **image space** (`stats_region: Option<Rect>`, like
+the export crop) so the same region — and each pane's own statistics for it —
+**replicate across every pane**. `region_overlay_for_pane` (called from
+`draw_pane` and both A/B sides) runs the selection edge-detection
+(`region_input`, tracking the secondary button + a per-pane `stats_sel_*`
+anchor), draws the live rubber band, and otherwise draws the committed outline
+plus a **stats panel** under it: a mini histogram (`draw_region_hist`, Visualise
+style), per-channel mean/std, min/max and pixel count, computed by
+`FrameData::region_stats` and cached per pane (`RegionStatsCache`, keyed on
+`(frame, stats_gen)`). A near-zero drag (or a plain right-click) **clears** the
+region. The panel's **"Tone ⟵ region"** toggle pins every pane's tone to the
+region (`apply_region_tone`, see §7). Pan/reorder are switched to
+**primary-button-only** so the right-drag is never stolen.
+
 ---
 
 ## 10. Export (`export.rs` + `app/export_ui.rs`)
@@ -316,7 +374,10 @@ flags, sources, frame range) decoupled from live state, then composites each
 output frame on the CPU and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264).
 
 - `ExportPane` holds a snapshot view/clip/source plus its **own `SeqReader`**
-  (lazily opened) and a 1-frame decode+render cache. `ExportSource =
+  (lazily opened) and a 1-frame decode+render cache. A pane's **mask overlay** is
+  snapshotted too (`set_overlay`: the mask's `ExportSource` + tint + its own
+  decode cache); `blend_overlay` tints it over the base at sample time, so mask
+  overlays appear in the exported video just as on screen. `ExportSource =
   Still(Arc<FrameData>) | Seq { path } | Files { paths } | Concat { files, map }`
   — a numbered still run exports each file standalone; a concatenation follows
   its `(file, page)` map, reopening the reader when the timeline crosses files.
@@ -330,9 +391,10 @@ output frame on the CPU and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264).
   screen drag is converted to image-space on release (`screen_rect_to_image`) and
   then applies to *every* pane (each becomes a cell of exactly the crop's pixel
   size via `region_view`, 1:1). `dim_outside` shows it on all panes.
-- **Frame range:** "all" by default, else inclusive `from/to` (1-based UI,
-  clamped to the known timeline). A warning + "Load all" button appears when any
-  media's true length isn't discovered yet.
+- **Frame range:** "all" by default, else inclusive `from/to` (0-based, clamped
+  to the known timeline); a **"Use loop range"** button adopts the current
+  playback loop window. A warning + "Load all" button appears when any media's
+  true length isn't discovered yet.
 - Output: filename typed in the panel, written to the **current working dir** (no
   save dialog). `Encoder` streams frames one-per-update on the UI thread;
   `export_tick` drives it, `kill`/`finish` manage ffmpeg.
@@ -346,7 +408,10 @@ GUI) or `Cli::Exit(code)`.
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, all 0-based, all optional): `--mode
   <grid|single|ab>`, `--cols`, `--zoom`, `--center X,Y`, `--frame`, `--pane`,
-  `--ab A,B,SPLIT`. These reproduce a saved viewpoint and are normally *generated*
+  `--ab A,B,SPLIT`, `--tone T,T,…` (per-pane `linear|linearclip|lutalpha`),
+  `--detail B,B,…` (per-pane `1`/`0`), `--loop LO,HI` (playback loop range).
+  `--tone`/`--detail` are positional over the panes. These reproduce a saved
+  viewpoint and are normally *generated*
   by the in-app "⧉ View cmd" window (`CimApp::view_command`), then applied once
   after the startup files load (`CimApp::apply_view_state`). Only present flags
   override defaults; a restored `--zoom`/`--center` clears `needs_fit` so the
@@ -397,8 +462,9 @@ Order each frame:
    (clear the status when a batch lands) → `enforce_cache_budget`.
 5. Clamp `shared_frame` to the timeline.
 6. Draw: top toolbar panel, the full-width bottom frame bar (`draw_frame_bar`,
-   only when the focused media is a sequence — a click/drag-seekable scrubber
-   plus transport controls that follow the *selected* media), central panel,
+   shown whenever **any** loaded media is a sequence (`any_sequence`) so it
+   doesn't drop/shift when a still is focused — a click/drag-seekable scrubber
+   plus transport controls that follow the *control* sequence), central panel,
    then windows (manager/vis/export/settings/**view-command**), the error popup,
    and apply deferred `pending_remove/reload(_all)`.
 7. `export_tick` if a run is active.

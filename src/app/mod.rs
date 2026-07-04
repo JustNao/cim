@@ -22,14 +22,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
-    self, Align2, Color32, ColorImage, FontId, Id, Key, Pos2, Rect, Sense, Stroke, TextureHandle,
-    TextureId, TextureOptions, Vec2,
+    self, Align2, Color32, ColorImage, FontId, Id, Key, PointerButton, Pos2, Rect, Sense, Stroke,
+    TextureHandle, TextureId, TextureOptions, Vec2,
 };
 
 use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
-use crate::media::{self, HistData, Media};
+use crate::media::{self, HistData, Media, RegionStats};
 use crate::settings::{Action, Config, ContrastMode, Interpolation};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
@@ -38,6 +38,10 @@ const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
+
+/// Outline / accent colour for the right-drag statistics region (cyan, so it
+/// reads distinct from the amber export-region rectangle).
+const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
 
 /// Soft ceiling on decoded frames kept resident across all sequences. Beyond
 /// it the least-recently-viewed frames are evicted (they re-decode on demand),
@@ -72,6 +76,13 @@ struct HistCache {
     data: HistData,
 }
 
+/// Cached statistics for a pane's current view of the shared stats region.
+/// Recomputed when the frame or the region (via `stats_gen`) changes.
+struct RegionStatsCache {
+    key: (usize, u64), // (frame, stats_gen)
+    data: RegionStats,
+}
+
 /// How a pane's media was opened, so it can be reloaded from disk and emitted
 /// back into a replay command.
 enum Source {
@@ -99,6 +110,12 @@ struct Pane {
     details: bool,
     /// Optional boolean-mask overlay drawn on top of this pane.
     overlay: Option<MaskOverlay>,
+    /// When set, this pane's tone bounds come from the shared stats region
+    /// instead of the whole image (min/max, or 0.01% clip). Replicated to every
+    /// pane by the "Tone ⟵ region" button.
+    region_tone: bool,
+    /// Cached statistics of the shared region for this pane's current frame.
+    stats: Option<RegionStatsCache>,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
     /// "Load all" requested: keep requesting missing + frontier frames until the
@@ -153,6 +170,20 @@ pub struct CimApp {
     show_viewcmd: bool,
     hist: Option<HistCache>,
     rebinding: Option<Action>,
+
+    /// Right-drag statistics region, in IMAGE space (like `export_region`), so
+    /// the same crop and its per-pane stats replicate across every pane. `None`
+    /// = no region selected.
+    stats_region: Option<Rect>,
+    /// Bumped whenever `stats_region` changes, so cached per-pane stats and
+    /// region-tone textures know to recompute.
+    stats_gen: u64,
+    /// In-progress right-drag: anchor / current screen positions, the pane it
+    /// started on, and that pane's coordinate area (for screen↔image mapping).
+    stats_sel_start: Option<Pos2>,
+    stats_sel_now: Option<Pos2>,
+    stats_sel_pane: Option<usize>,
+    stats_sel_area: Rect,
 
     // Export
     show_export: bool,
@@ -252,6 +283,12 @@ impl CimApp {
             show_viewcmd: false,
             hist: None,
             rebinding: None,
+            stats_region: None,
+            stats_gen: 0,
+            stats_sel_start: None,
+            stats_sel_now: None,
+            stats_sel_pane: None,
+            stats_sel_area: Rect::NOTHING,
 
             show_export: false,
             export_mode: Mode::Grid,
@@ -484,6 +521,8 @@ impl CimApp {
             contrast,
             details: false,
             overlay: None,
+            region_tone: false,
+            stats: None,
             error: None,
             eager: false,
         });
@@ -534,6 +573,7 @@ impl CimApp {
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;
                 self.panes[i].tex = None; // re-render the kept frame from fresh data
+                self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].error = None;
                 // If this is a mask, invalidate overlay textures sourced from it
                 // so they rebuild from the reloaded contents (same frame index).
@@ -664,6 +704,59 @@ impl CimApp {
         (0..self.panes.len())
             .filter(|&i| self.panes[i].visible)
             .collect()
+    }
+
+    // ---- statistics region ----------------------------------------------
+
+    /// Set (or clear) the shared image-space stats region. Bumps `stats_gen` so
+    /// cached stats recompute; clearing also drops region-tone off every pane.
+    /// Region-tone textures are invalidated so their bounds re-derive.
+    pub(super) fn set_stats_region(&mut self, reg: Option<Rect>) {
+        self.stats_region = reg;
+        self.stats_gen = self.stats_gen.wrapping_add(1);
+        for p in &mut self.panes {
+            p.stats = None;
+            if reg.is_none() && p.region_tone {
+                p.region_tone = false;
+                p.tex = None;
+            } else if reg.is_some() && p.region_tone {
+                p.tex = None; // bounds change with the new region
+            }
+        }
+    }
+
+    /// Turn region-driven tone on/off for every pane at once (the button is a
+    /// single control replicated across panes), invalidating their textures.
+    pub(super) fn apply_region_tone(&mut self, on: bool) {
+        for p in &mut self.panes {
+            if p.region_tone != on {
+                p.region_tone = on;
+                p.tex = None;
+            }
+        }
+    }
+
+    /// Ensure pane `idx` has current statistics for the shared region and its
+    /// displayed frame, recomputing only when the frame or region changed.
+    pub(super) fn ensure_region_stats(&mut self, idx: usize) {
+        let Some(reg) = self.stats_region else {
+            self.panes[idx].stats = None;
+            return;
+        };
+        let f = self.frame_disp(idx);
+        let key = (f, self.stats_gen);
+        if self.panes[idx].stats.as_ref().map(|s| s.key) == Some(key) {
+            return;
+        }
+        let Some(frame) = self.panes[idx].media.resident(f) else {
+            return; // not decoded yet; keep any previous stats until it lands
+        };
+        let Some((x0, y0, x1, y1)) = pixel_bounds(reg, frame.size) else {
+            self.panes[idx].stats = None;
+            return;
+        };
+        let data = frame.region_stats(x0, y0, x1, y1, 256);
+        self.panes[idx].stats = Some(RegionStatsCache { key, data });
     }
 }
 
@@ -843,6 +936,53 @@ fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
         let bright = 1.0 - behind as f32 / n as f32;
         let alpha = (40.0 + 215.0 * bright) as u8;
         painter.circle_filled(pos, 2.0, Color32::from_white_alpha(alpha));
+    }
+}
+
+/// Clamp an image-space region to a frame's pixel grid, returning the integer
+/// half-open bounds `[x0, x1) × [y0, y1)`, or `None` if it doesn't cover at
+/// least one pixel (e.g. the region lies entirely outside this frame — pages
+/// can differ in size).
+fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usize)> {
+    let (w, h) = (size[0], size[1]);
+    let x0 = (reg.min.x.floor().max(0.0) as usize).min(w);
+    let y0 = (reg.min.y.floor().max(0.0) as usize).min(h);
+    let x1 = (reg.max.x.ceil().max(0.0) as usize).min(w);
+    let y1 = (reg.max.y.ceil().max(0.0) as usize).min(h);
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+}
+
+/// Draw a region's per-channel histogram into `rect` (Visualise-panel style:
+/// sqrt-scaled line curves over a dark base).
+fn draw_region_hist(painter: &egui::Painter, rect: Rect, stats: &RegionStats) {
+    painter.rect_filled(rect, 0.0, Color32::from_gray(16));
+    let peak = stats
+        .hist
+        .bins
+        .iter()
+        .flat_map(|c| c.iter().copied())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let colors: &[Color32] = if stats.hist.mono {
+        &[Color32::from_gray(210)]
+    } else {
+        &[
+            Color32::from_rgb(230, 90, 90),
+            Color32::from_rgb(90, 210, 90),
+            Color32::from_rgb(100, 140, 240),
+        ]
+    };
+    for (ci, chan) in stats.hist.bins.iter().enumerate() {
+        let nb = chan.len().max(2);
+        let mut pts = Vec::with_capacity(nb);
+        for (v, &count) in chan.iter().enumerate() {
+            let x = rect.left() + (v as f32 / (nb - 1) as f32) * rect.width();
+            let hh = (count as f32 / peak).sqrt();
+            let y = rect.bottom() - hh * rect.height();
+            pts.push(Pos2::new(x, y));
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
     }
 }
 

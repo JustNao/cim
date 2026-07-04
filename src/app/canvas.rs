@@ -221,10 +221,10 @@ impl CimApp {
                     self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
                 }
             }
-            if resp.drag_started() && ctrl {
+            if resp.drag_started_by(PointerButton::Primary) && ctrl {
                 self.drag_src = Some(idx);
             }
-            if resp.dragged() && self.drag_src.is_none() {
+            if resp.dragged_by(PointerButton::Primary) && self.drag_src.is_none() {
                 let d = resp.drag_delta();
                 self.view_mut(idx).pan(d);
             }
@@ -232,6 +232,9 @@ impl CimApp {
                 self.current = idx;
             }
         }
+
+        // Right-drag statistics region (selection + outline + stats panel).
+        self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
 
         self.draw_header(ui, idx, cell);
         self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
@@ -444,10 +447,10 @@ impl CimApp {
         let resp = ui.interact(img, Id::new("ab_area"), sense);
         let ptr = ctx.input(|i| i.pointer.interact_pos());
         if !self.selecting_region {
-            if resp.drag_started() {
+            if resp.drag_started_by(PointerButton::Primary) {
                 self.ab_handle_grabbed = ptr.is_some_and(|p| (p.x - split_x).abs() <= HANDLE_HIT);
             }
-            if resp.dragged() {
+            if resp.dragged_by(PointerButton::Primary) {
                 let d = resp.drag_delta();
                 if self.ab_handle_grabbed {
                     self.ab_split = ((split_x + d.x - img.min.x) / img.width()).clamp(0.02, 0.98);
@@ -456,7 +459,7 @@ impl CimApp {
                     self.view_mut(side).pan(d);
                 }
             }
-            if resp.drag_stopped() {
+            if resp.drag_stopped_by(PointerButton::Primary) {
                 self.ab_handle_grabbed = false;
             }
             if resp.hovered() {
@@ -475,6 +478,13 @@ impl CimApp {
         let hover = resp.hover_pos();
         let side = hover.map(|pos| if pos.x < split_x { a } else { b });
         self.draw_footer(ui, side.unwrap_or(a), hover, img, footer);
+
+        // Right-drag statistics region on each side. Both sides share `img` as
+        // the coordinate area (image_rect maps against it); the clip rect limits
+        // the visible side and where a drag may start.
+        let ab_hover = resp.hovered();
+        self.region_overlay_for_pane(ui, ctx, a, img, left, ab_hover);
+        self.region_overlay_for_pane(ui, ctx, b, img, right, ab_hover);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -516,5 +526,207 @@ impl CimApp {
             FontId::proportional(13.0),
             Color32::from_gray(230),
         );
+    }
+
+    // ---- right-drag statistics region ------------------------------------
+
+    /// Process the right-drag selection for pane `idx` and draw its result: the
+    /// live rubber band while dragging on this pane, otherwise the committed
+    /// region outline plus a stats panel. `coord_area` maps screen↔image (the
+    /// pane's image area, or the shared A/B image rect); `clip_rect` bounds the
+    /// visible side and where a drag may start.
+    pub(super) fn region_overlay_for_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        idx: usize,
+        coord_area: Rect,
+        clip_rect: Rect,
+        hovered: bool,
+    ) {
+        self.region_input(ctx, idx, coord_area, clip_rect, hovered);
+
+        // While actively selecting on this pane, show only the rubber band.
+        if self.stats_sel_pane == Some(idx) {
+            if let (Some(s), Some(n)) = (self.stats_sel_start, self.stats_sel_now) {
+                let r = Rect::from_two_pos(s, n).intersect(clip_rect);
+                ui.painter_at(clip_rect)
+                    .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
+            }
+            return;
+        }
+
+        let Some(reg) = self.stats_region else { return };
+        self.ensure_region_stats(idx);
+
+        // Map the image-space region onto this pane and clip to its visible area.
+        let v = *self.view_ref(idx);
+        let r = Rect::from_two_pos(
+            v.img_to_screen(reg.min.to_vec2(), coord_area),
+            v.img_to_screen(reg.max.to_vec2(), coord_area),
+        )
+        .intersect(clip_rect);
+        if !r.is_positive() {
+            return;
+        }
+        ui.painter_at(clip_rect)
+            .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
+        self.draw_stats_panel(ui, idx, r, clip_rect);
+    }
+
+    /// Track the right-button drag with simple edge detection on the secondary
+    /// button: start on the pane under the cursor, follow while held, finalize
+    /// on release. A near-zero drag clears the region instead.
+    fn region_input(
+        &mut self,
+        ctx: &egui::Context,
+        idx: usize,
+        coord_area: Rect,
+        hit_rect: Rect,
+        hovered: bool,
+    ) {
+        if self.selecting_region {
+            return; // the export-region drag owns the pointer
+        }
+        let down = ctx.input(|i| i.pointer.secondary_down());
+        let pos = ctx.input(|i| i.pointer.interact_pos());
+        match self.stats_sel_pane {
+            None => {
+                if down && hovered {
+                    if let Some(p) = pos {
+                        if hit_rect.contains(p) {
+                            self.stats_sel_pane = Some(idx);
+                            self.stats_sel_start = Some(p);
+                            self.stats_sel_now = Some(p);
+                            self.stats_sel_area = coord_area;
+                        }
+                    }
+                }
+            }
+            Some(sel) if sel == idx => {
+                if down {
+                    if let Some(p) = pos {
+                        self.stats_sel_now = Some(p);
+                    }
+                } else {
+                    self.finalize_region(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Convert the finished right-drag into an image-space region (or clear it
+    /// on a near-zero drag), using the pane's view and stored coordinate area.
+    fn finalize_region(&mut self, idx: usize) {
+        let start = self.stats_sel_start.take();
+        let now = self.stats_sel_now.take();
+        let area = self.stats_sel_area;
+        self.stats_sel_pane = None;
+        let (Some(s), Some(n)) = (start, now) else {
+            return;
+        };
+        if (s - n).length() < 4.0 {
+            self.set_stats_region(None); // treat a right-click as "clear"
+            return;
+        }
+        let v = *self.view_ref(idx);
+        let a = v.screen_to_img(s, area);
+        let b = v.screen_to_img(n, area);
+        let [w, h] = self.disp_size(idx);
+        let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
+            .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
+        if reg.width() >= 1.0 && reg.height() >= 1.0 {
+            self.set_stats_region(Some(reg));
+        } else {
+            self.set_stats_region(None);
+        }
+    }
+
+    /// Draw the stats panel for pane `idx` just below (or above) the on-screen
+    /// region rect `r`: a mini histogram, mean/std/min/max, pixel count, and the
+    /// "Tone ⟵ region" toggle that pins every pane's tone to the region.
+    fn draw_stats_panel(&mut self, ui: &mut egui::Ui, idx: usize, r: Rect, clip: Rect) {
+        let Some(sc) = self.panes[idx].stats.as_ref() else {
+            return;
+        };
+        let data = &sc.data;
+
+        let pad = 6.0;
+        let w = r.width().max(196.0).min((clip.width() - 2.0).max(120.0));
+        let h = 104.0;
+        // Prefer below the region; fall back to above, then pin inside the clip.
+        let top = if r.bottom() + h + 4.0 <= clip.bottom() {
+            r.bottom() + 4.0
+        } else if r.top() - h - 4.0 >= clip.top() {
+            r.top() - h - 4.0
+        } else {
+            (clip.bottom() - h).max(clip.top())
+        };
+        let left = r.left().clamp(clip.left(), (clip.right() - w).max(clip.left()));
+        let panel = Rect::from_min_size(Pos2::new(left, top), Vec2::new(w, h));
+
+        let painter = ui.painter_at(clip);
+        painter.rect_filled(panel, 0.0, Color32::from_black_alpha(205));
+        painter.rect_stroke(panel, 0.0, Stroke::new(1.0, REGION_COL));
+
+        let hist_rect = Rect::from_min_size(
+            panel.min + Vec2::splat(pad),
+            Vec2::new(w - 2.0 * pad, 40.0),
+        );
+        draw_region_hist(&painter, hist_rect, data);
+
+        let fmt = |v: f32| -> String {
+            if v.fract() == 0.0 {
+                format!("{}", v as i64)
+            } else {
+                format!("{v:.3}")
+            }
+        };
+        let text = if data.hist.mono {
+            format!(
+                "μ {}   σ {}\n[{}, {}]   n={}",
+                fmt(data.mean[0]),
+                fmt(data.std[0]),
+                fmt(data.hist.min),
+                fmt(data.hist.max),
+                data.count
+            )
+        } else {
+            format!(
+                "μ {}/{}/{}  σ {}/{}/{}\n[{}, {}]  n={}",
+                fmt(data.mean[0]),
+                fmt(data.mean[1]),
+                fmt(data.mean[2]),
+                fmt(data.std[0]),
+                fmt(data.std[1]),
+                fmt(data.std[2]),
+                fmt(data.hist.min),
+                fmt(data.hist.max),
+                data.count
+            )
+        };
+        painter.text(
+            Pos2::new(panel.left() + pad, hist_rect.bottom() + 3.0),
+            Align2::LEFT_TOP,
+            text,
+            FontId::monospace(10.0),
+            Color32::from_gray(220),
+        );
+
+        // Tone toggle at the bottom of the panel. Applies to every pane.
+        let btn_h = 20.0;
+        let btn_rect = Rect::from_min_max(
+            Pos2::new(panel.left() + pad, panel.bottom() - btn_h - pad),
+            Pos2::new(panel.right() - pad, panel.bottom() - pad),
+        );
+        let on = self.panes[idx].region_tone;
+        let resp = ui.put(
+            btn_rect,
+            egui::SelectableLabel::new(on, "Tone ⟵ region"),
+        );
+        if resp.clicked() {
+            self.apply_region_tone(!on);
+        }
     }
 }

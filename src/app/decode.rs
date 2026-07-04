@@ -215,7 +215,23 @@ impl CimApp {
                 // Linear+Clip); the LUT_ALPHA / detail operators (the
                 // proprietary C++) then transform the rendered RGBA in place.
                 let contrast = self.panes[idx].contrast;
-                let (lo, hi) = frame.display_bounds(contrast.clips());
+                let clip = contrast.clips();
+                // With region-tone pinned, derive the linear bounds from the
+                // shared stats region instead of the whole image (min/max, or
+                // the 0.01% clip). Pixels outside the region that fall beyond
+                // these bounds are clamped by the render — the region drives the
+                // contrast and extremes elsewhere saturate. LUT_ALPHA below is
+                // unaffected: it still runs over the whole rendered image.
+                let (lo, hi) = if self.panes[idx].region_tone {
+                    self.stats_region
+                        .and_then(|reg| pixel_bounds(reg, frame.size))
+                        .map(|(x0, y0, x1, y1)| {
+                            frame.region_display_bounds(x0, y0, x1, y1, clip)
+                        })
+                        .unwrap_or_else(|| frame.display_bounds(clip))
+                } else {
+                    frame.display_bounds(clip)
+                };
                 frame.render_into(lo, hi, &mut self.render_scratch);
                 let [w, h] = frame.size;
                 // A boolean mask renders black/white; the tone operators don't apply.

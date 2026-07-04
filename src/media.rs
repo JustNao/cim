@@ -51,6 +51,16 @@ pub struct HistData {
     pub mono: bool,
 }
 
+/// Statistics over a rectangular region of a frame, for the region stats panel
+/// shown under a right-drag selection. The histogram mirrors the Visualise
+/// panel; `mean`/`std` carry one entry per colour channel (1 mono, 3 RGB).
+pub struct RegionStats {
+    pub hist: HistData,
+    pub mean: Vec<f32>,
+    pub std: Vec<f32>,
+    pub count: usize,
+}
+
 impl FrameData {
     pub fn new(size: [usize; 2], channels: usize, samples: Samples) -> Self {
         Self {
@@ -415,6 +425,240 @@ impl FrameData {
             min,
             max,
             mono: cc == 1,
+        }
+    }
+
+    /// Min/max of the colour samples within the pixel rectangle
+    /// `[x0, x1) × [y0, y1)` (NaN-skipping). Falls back to the nominal range for
+    /// an empty / all-NaN region. Bounds are assumed already clamped to size.
+    fn region_extent(&self, x0: usize, y0: usize, x1: usize, y1: usize) -> (f32, f32) {
+        let cc = self.color_channels();
+        let w = self.size[0];
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let base = (y * w + x) * self.channels;
+                for c in 0..cc {
+                    let s = self.sample_f(base + c);
+                    if s < min {
+                        min = s;
+                    }
+                    if s > max {
+                        max = s;
+                    }
+                }
+            }
+        }
+        if min > max {
+            (0.0, self.max_possible() as f32)
+        } else {
+            (min, max)
+        }
+    }
+
+    /// Histogram + mean/std over the pixel rectangle `[x0, x1) × [y0, y1)`, for
+    /// the region stats panel. The histogram is binned across the region's own
+    /// value extent so the tails stay legible.
+    pub fn region_stats(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        nbins: usize,
+    ) -> RegionStats {
+        let cc = self.color_channels();
+        let w = self.size[0];
+        let (min, max) = self.region_extent(x0, y0, x1, y1);
+        let span = (max - min).max(f32::MIN_POSITIVE);
+        let last = (nbins - 1) as f32;
+
+        let mut bins = vec![vec![0u32; nbins]; cc];
+        let mut sum = vec![0f64; cc];
+        let mut sumsq = vec![0f64; cc];
+        let mut count = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let base = (y * w + x) * self.channels;
+                for c in 0..cc {
+                    let s = self.sample_f(base + c);
+                    if s.is_nan() {
+                        continue;
+                    }
+                    let bin = (((s - min) / span) * last) as usize;
+                    bins[c][bin.min(nbins - 1)] += 1;
+                    sum[c] += s as f64;
+                    sumsq[c] += (s as f64) * (s as f64);
+                }
+                count += 1;
+            }
+        }
+        let n = count.max(1) as f64;
+        let mean: Vec<f32> = (0..cc).map(|c| (sum[c] / n) as f32).collect();
+        let std: Vec<f32> = (0..cc)
+            .map(|c| {
+                let m = sum[c] / n;
+                ((sumsq[c] / n - m * m).max(0.0)).sqrt() as f32
+            })
+            .collect();
+        RegionStats {
+            hist: HistData {
+                bins,
+                min,
+                max,
+                mono: cc == 1,
+            },
+            mean,
+            std,
+            count,
+        }
+    }
+
+    /// Display bounds derived from a region instead of the whole image: the
+    /// region's min/max, or its 0.01% percentile stretch with `clip`. Used when
+    /// a pane's tone is pinned to a right-drag selection. Values elsewhere in the
+    /// image that fall outside these bounds are clamped by the render (that is
+    /// the whole point — the region drives the contrast, extremes outside it
+    /// saturate to black/white).
+    pub fn region_display_bounds(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        clip: bool,
+    ) -> (f32, f32) {
+        if clip {
+            self.region_percentile_bounds(x0, y0, x1, y1, 0.01)
+        } else {
+            self.region_extent(x0, y0, x1, y1)
+        }
+    }
+
+    /// Region variant of [`FrameData::percentile_bounds`]: the `p`% and
+    /// `(100 - p)`% percentile values within the pixel rectangle.
+    fn region_percentile_bounds(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        p: f32,
+    ) -> (f32, f32) {
+        if self.is_float() {
+            return self.region_percentile_float(x0, y0, x1, y1, p);
+        }
+        let nb = self.max_possible() as usize + 1;
+        let mut hist = vec![0u32; nb];
+        let cc = self.color_channels();
+        let w = self.size[0];
+        let mut total = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let base = (y * w + x) * self.channels;
+                for c in 0..cc {
+                    hist[self.sample(base + c) as usize] += 1;
+                    total += 1;
+                }
+            }
+        }
+        let full = self.region_extent(x0, y0, x1, y1);
+        if total == 0 {
+            return full;
+        }
+        let lo_t = (total as f32 * p / 100.0) as u32;
+        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
+
+        let mut cum = 0u32;
+        let mut lo = 0usize;
+        while lo + 1 < nb {
+            cum += hist[lo];
+            if cum > lo_t {
+                break;
+            }
+            lo += 1;
+        }
+        let mut cum = 0u32;
+        let mut hi = 0usize;
+        while hi + 1 < nb {
+            cum += hist[hi];
+            if cum >= hi_t {
+                break;
+            }
+            hi += 1;
+        }
+        if hi <= lo {
+            full
+        } else {
+            (lo as f32, hi as f32)
+        }
+    }
+
+    /// Region percentile stretch for float frames (bins across the region's
+    /// value extent, mirroring [`FrameData::percentile_bounds_float`]).
+    fn region_percentile_float(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        p: f32,
+    ) -> (f32, f32) {
+        const NB: usize = 4096;
+        let (min, max) = self.region_extent(x0, y0, x1, y1);
+        if max <= min {
+            return (min, max);
+        }
+        let span = max - min;
+        let last = (NB - 1) as f32;
+        let mut hist = vec![0u32; NB];
+        let cc = self.color_channels();
+        let w = self.size[0];
+        let mut total = 0u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let base = (y * w + x) * self.channels;
+                for c in 0..cc {
+                    let s = self.sample_f(base + c);
+                    if s.is_nan() {
+                        continue;
+                    }
+                    let b = (((s - min) / span) * last) as usize;
+                    hist[b.min(NB - 1)] += 1;
+                    total += 1;
+                }
+            }
+        }
+        if total == 0 {
+            return (min, max);
+        }
+        let lo_t = (total as f32 * p / 100.0) as u32;
+        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
+
+        let bin_val = |b: usize| min + (b as f32 / last) * span;
+        let mut cum = 0u32;
+        let mut lo = 0usize;
+        while lo + 1 < NB {
+            cum += hist[lo];
+            if cum > lo_t {
+                break;
+            }
+            lo += 1;
+        }
+        let mut cum = 0u32;
+        let mut hi = 0usize;
+        while hi + 1 < NB {
+            cum += hist[hi];
+            if cum >= hi_t {
+                break;
+            }
+            hi += 1;
+        }
+        if hi <= lo {
+            (min, max)
+        } else {
+            (bin_val(lo), bin_val(hi))
         }
     }
 }
@@ -1216,6 +1460,31 @@ mod tests {
         assert_eq!(m.resident_bytes(), 0);
         assert!(m.resident(0).is_none());
         assert_eq!(m.frame_count(), len, "eviction must not change known length");
+    }
+
+    /// Region statistics cover only the selected pixels: mean/std/min/max and
+    /// the region-derived tone bounds ignore extremes elsewhere in the image.
+    #[test]
+    fn region_stats_and_bounds_cover_only_the_region() {
+        // 3x1 mono row: a bright outlier, then two mid values.
+        //   x=0 -> 255 (outside the region), x=1 -> 10, x=2 -> 20.
+        let f = FrameData::new([3, 1], 1, Samples::U8(vec![255, 10, 20]));
+
+        // Region = the last two pixels [1,3) x [0,1).
+        let s = f.region_stats(1, 0, 3, 1, 256);
+        assert_eq!(s.count, 2);
+        assert!(s.hist.mono);
+        assert_eq!(s.hist.min, 10.0);
+        assert_eq!(s.hist.max, 20.0);
+        assert_eq!(s.mean[0], 15.0);
+        assert_eq!(s.std[0], 5.0); // population std of {10,20}
+
+        // Linear (no clip) region bounds are the region's own min/max — the
+        // bright pixel at x=0 is excluded, so it will clamp to white on render.
+        assert_eq!(f.region_display_bounds(1, 0, 3, 1, false), (10.0, 20.0));
+
+        // Whole-image full-range bounds still span the outlier.
+        assert_eq!(f.display_bounds(false), (0.0, 255.0));
     }
 
     /// The LUT render path must produce exactly what the straightforward
