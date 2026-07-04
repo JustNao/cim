@@ -185,7 +185,19 @@ impl CimApp {
     ) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
-        style.visuals.window_rounding = 8.0.into();
+        // Square corners everywhere: windows, menus, and every widget state.
+        let sq = egui::Rounding::ZERO;
+        style.visuals.window_rounding = sq;
+        style.visuals.menu_rounding = sq;
+        for w in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            w.rounding = sq;
+        }
         cc.egui_ctx.set_style(style);
 
         let threads = std::thread::available_parallelism()

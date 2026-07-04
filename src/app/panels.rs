@@ -157,9 +157,9 @@ impl CimApp {
         let span = (len.saturating_sub(1)).max(1) as f32;
         let frac = self.shared_frame as f32 / span;
 
-        painter.rect_filled(rect, 4.0, Color32::from_gray(30));
+        painter.rect_filled(rect, 0.0, Color32::from_gray(30));
         let filled = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
-        painter.rect_filled(filled, 4.0, Color32::from_rgb(56, 104, 162));
+        painter.rect_filled(filled, 0.0, Color32::from_rgb(56, 104, 162));
 
         // Per-frame ticks while they stay legible; a "+" marker at the frontier.
         if len <= 80 {
