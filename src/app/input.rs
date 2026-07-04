@@ -142,10 +142,15 @@ impl CimApp {
             return;
         }
 
-        for action in Action::all() {
-            if let Some(key) = self.config.keybindings.key_for(action) {
-                if ctx.input(|i| i.key_pressed(key)) {
-                    self.apply_action(action, ctx);
+        // Don't fire shortcuts while the user is typing in a text field (e.g. the
+        // Compute pane's Save name, or the export name) — the keystrokes belong
+        // to that widget, not the view.
+        if !ctx.wants_keyboard_input() {
+            for action in Action::all() {
+                if let Some(key) = self.config.keybindings.key_for(action) {
+                    if ctx.input(|i| i.key_pressed(key)) {
+                        self.apply_action(action, ctx);
+                    }
                 }
             }
         }

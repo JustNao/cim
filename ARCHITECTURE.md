@@ -377,8 +377,8 @@ holds the reduction `kind` (`media::Reduce::Mean | Std`) and the source pane id.
 `media::reduce_frames` (per-pixel/per-channel mean or population std, in `f64`,
 emitting an `f32` `Media::still`); the pane's `Source::Computed` makes the media
 manager's ⟳ **recompute from current memory** instead of reloading a file.
-`draw_compute_ui` overlays two foreground `Area`s on the pane: top-left controls
-(kind + source combos + "Recompute from memory") and a bottom-right **Save** that
+`draw_compute_ui` overlays a top-left foreground `Area` on the pane: the kind +
+source combos, "Recompute from memory", and an inline **Save** button that
 expands into a file-name field. `media::save_frame` writes `.tif`/`.tiff` as a
 **32-bit float** TIFF (native values preserved, via the `tiff` encoder) or
 `.png`/`.jpg`/`.jpeg` as the 8-bit display rendering; the path is relative to the
@@ -468,6 +468,8 @@ key_name>`; bindings are unique (setting a key clears it elsewhere). Defaults
 include `Tab` cycle, `G/U/B` direct views, arrows, `F`, digits for media, etc.
 **Note:** new default bindings do **not** retroactively apply to a user's saved
 config — the action just shows `—` until rebound (a known limitation).
+`handle_input` skips the shortcut scan while `ctx.wants_keyboard_input()` (a text
+field such as the Compute Save name has focus), so typing doesn't trigger views.
 
 ---
 

@@ -780,10 +780,10 @@ impl CimApp {
 
     // ---- compute pane controls -------------------------------------------
 
-    /// Overlay a Compute pane with its controls (top-left: reduction kind +
-    /// source sequence + recompute) and an inline Save (bottom-right). Both are
-    /// foreground `Area`s pinned to `img_area`; edits are written back and a
-    /// recompute / save is dispatched after the frame.
+    /// Overlay a Compute pane with its controls: a top-left foreground `Area`
+    /// pinned to `img_area` holding the reduction kind + source sequence,
+    /// Recompute, and an inline Save (a button that expands into a name field).
+    /// Edits are written back and a recompute / save is dispatched after.
     fn draw_compute_ui(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect) {
         let pane_id = self.panes[idx].id;
         // Sources: any non-compute sequence (needs ≥2 frames to reduce).
@@ -801,7 +801,6 @@ impl CimApp {
         let mut recompute = false;
         let mut do_save = false;
 
-        // Controls, top-left.
         egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
@@ -845,40 +844,20 @@ impl CimApp {
                                 }
                             });
                     });
-                    if ui.button("Recompute from memory").clicked() {
-                        recompute = true;
-                    }
-                    if !status.is_empty() {
-                        ui.label(egui::RichText::new(&status).weak().small());
-                    }
-                });
-            });
-
-        // Save, bottom-right.
-        egui::Area::new(Id::new(("compute_save", pane_id)))
-            .order(egui::Order::Foreground)
-            .movable(false)
-            .constrain_to(img_area)
-            .fixed_pos(img_area.right_bottom() - Vec2::splat(8.0))
-            .pivot(Align2::RIGHT_BOTTOM)
-            .show(ctx, |ui| {
-                if !saving {
-                    if ui.button("Save").clicked() {
-                        saving = true;
-                    }
-                } else {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(260.0);
-                        ui.label("Save computed image");
+                    ui.horizontal(|ui| {
+                        if ui.button("Recompute from memory").clicked() {
+                            recompute = true;
+                        }
+                        if !saving && ui.button("Save").clicked() {
+                            saving = true;
+                        }
+                    });
+                    // Inline save: a name field (relative to the working dir).
+                    if saving {
                         ui.add(
                             egui::TextEdit::singleline(&mut save_name)
-                                .desired_width(240.0)
+                                .desired_width(220.0)
                                 .hint_text("name.tif"),
-                        );
-                        ui.label(
-                            egui::RichText::new(".tif = float values · .png/.jpg = 8-bit view")
-                                .weak()
-                                .small(),
                         );
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
@@ -888,8 +867,11 @@ impl CimApp {
                                 saving = false;
                             }
                         });
-                    });
-                }
+                    }
+                    if !status.is_empty() {
+                        ui.label(egui::RichText::new(&status).weak().small());
+                    }
+                });
             });
 
         // Write edits back, then dispatch heavier work outside the closures.
