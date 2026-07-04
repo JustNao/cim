@@ -500,49 +500,116 @@ impl CimApp {
                                         }
                                     }
                                 }
-                                // Aggregate overlay: apply a mask to (or clear
-                                // it from) every non-mask pane at once.
+                                // Aggregate overlay: a mask picker plus colour /
+                                // alpha, all applied to every non-mask pane. The
+                                // picker shows the mask common to them (else
+                                // "mixed"); colour/alpha mirror a representative.
                                 if masks.is_empty() {
                                     ui.label("");
                                 } else {
-                                    egui::ComboBox::from_id_salt("overlay_all")
-                                        .selected_text("set all")
-                                        .width(90.0)
-                                        .show_ui(ui, |ui| {
-                                            if ui.selectable_label(false, "None").clicked() {
-                                                for p in &mut self.panes {
-                                                    p.overlay = None;
-                                                }
+                                    ui.horizontal(|ui| {
+                                        let ids: Vec<Option<u64>> = self
+                                            .panes
+                                            .iter()
+                                            .filter(|p| !p.media.is_mask())
+                                            .map(|p| p.overlay.as_ref().map(|o| o.src_id))
+                                            .collect();
+                                        let common: Option<Option<u64>> = match ids.first() {
+                                            Some(first) if ids.iter().all(|c| c == first) => {
+                                                Some(*first)
                                             }
-                                            for (mid, mname) in &masks {
+                                            _ => None,
+                                        };
+                                        let sel_text = match common {
+                                            Some(None) => "None".to_string(),
+                                            Some(Some(id)) => masks
+                                                .iter()
+                                                .find(|(m, _)| *m == id)
+                                                .map(|(_, n)| ellipsize(n, 10))
+                                                .unwrap_or_else(|| "None".into()),
+                                            None => "mixed".to_string(),
+                                        };
+                                        egui::ComboBox::from_id_salt("overlay_all")
+                                            .selected_text(sel_text)
+                                            .width(90.0)
+                                            .show_ui(ui, |ui| {
                                                 if ui
-                                                    .selectable_label(false, ellipsize(mname, 16))
+                                                    .selectable_label(common == Some(None), "None")
                                                     .clicked()
                                                 {
                                                     for p in &mut self.panes {
-                                                        if p.media.is_mask() {
-                                                            continue;
-                                                        }
-                                                        match &mut p.overlay {
-                                                            Some(o) => {
-                                                                o.src_id = *mid;
-                                                                o.tex = None;
+                                                        p.overlay = None;
+                                                    }
+                                                }
+                                                for (mid, mname) in &masks {
+                                                    if ui
+                                                        .selectable_label(
+                                                            common == Some(Some(*mid)),
+                                                            ellipsize(mname, 16),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        for p in &mut self.panes {
+                                                            if p.media.is_mask() {
+                                                                continue;
                                                             }
-                                                            None => {
-                                                                p.overlay = Some(MaskOverlay {
-                                                                    src_id: *mid,
-                                                                    color: Color32::from_rgb(
-                                                                        240, 60, 60,
-                                                                    ),
-                                                                    opacity: 0.5,
-                                                                    tex: None,
-                                                                });
+                                                            match &mut p.overlay {
+                                                                Some(o) => {
+                                                                    o.src_id = *mid;
+                                                                    o.tex = None;
+                                                                }
+                                                                None => {
+                                                                    p.overlay = Some(MaskOverlay {
+                                                                        src_id: *mid,
+                                                                        color: Color32::from_rgb(
+                                                                            240, 60, 60,
+                                                                        ),
+                                                                        opacity: 0.5,
+                                                                        tex: None,
+                                                                    });
+                                                                }
                                                             }
                                                         }
                                                     }
                                                 }
+                                            });
+                                        // Colour + alpha: representative from the
+                                        // first active overlay; edits apply to all.
+                                        let rep = self
+                                            .panes
+                                            .iter()
+                                            .filter(|p| !p.media.is_mask())
+                                            .find_map(|p| {
+                                                p.overlay.as_ref().map(|o| (o.color, o.opacity))
+                                            });
+                                        if let Some((mut col, mut op)) = rep {
+                                            if ui.color_edit_button_srgba(&mut col).changed() {
+                                                for p in &mut self.panes {
+                                                    if let Some(o) = &mut p.overlay {
+                                                        o.color = col;
+                                                        o.tex = None;
+                                                    }
+                                                }
                                             }
-                                        });
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(&mut op)
+                                                        .speed(0.02)
+                                                        .range(0.0..=1.0)
+                                                        .fixed_decimals(2)
+                                                        .prefix("α "),
+                                                )
+                                                .changed()
+                                            {
+                                                for p in &mut self.panes {
+                                                    if let Some(o) = &mut p.overlay {
+                                                        o.opacity = op;
+                                                        o.tex = None;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                                 if ui
                                     .small_button("⟳")
