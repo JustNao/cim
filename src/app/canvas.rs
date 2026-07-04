@@ -869,7 +869,7 @@ impl CimApp {
         // Histogram of this pane's current frame (folded in from Visualise).
         self.ensure_pane_histogram(idx);
         let f = self.frame_disp(idx);
-        let have_hist = self.hist.as_ref().map(|h| h.key) == Some((pane_id, f));
+        let have_hist = self.panes[idx].hist.as_ref().map(|h| h.key) == Some((pane_id, f));
 
         egui::Area::new(Id::new(("pane_opts", pane_id)))
             .order(egui::Order::Foreground)
@@ -926,8 +926,8 @@ impl CimApp {
 
                             // Per-pane magnification filter (folded in from
                             // Visualise); rides the Transformations sync.
-                            ui.label("Interp")
-                                .on_hover_text("Magnification filter for this pane");
+                            ui.label("Zoom")
+                                .on_hover_text("Zoom mode for this pane");
                             egui::ComboBox::from_id_salt(("opt_interp", pane_id))
                                 .selected_text(match tone.interp {
                                     Interpolation::Nearest => "Nearest",
@@ -952,7 +952,7 @@ impl CimApp {
                     ui.separator();
                     ui.strong("Histogram");
                     if have_hist {
-                        self.draw_histogram(ui);
+                        self.draw_histogram(ui, idx);
                     } else {
                         ui.label(egui::RichText::new("frame not loaded").weak().small());
                     }

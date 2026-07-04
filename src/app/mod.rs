@@ -141,6 +141,9 @@ struct Pane {
     region_tone: bool,
     /// Cached statistics of the shared region for this pane's current frame.
     stats: Option<RegionStatsCache>,
+    /// Cached histogram for this pane's current frame (Transformations popup).
+    /// Per pane so multiple open popups don't thrash one shared cache.
+    hist: Option<HistCache>,
     /// Present iff this is a Compute pane (its media is a generated still).
     compute: Option<Compute>,
     /// Last decode error for this sequence, shown centred over the pane.
@@ -200,8 +203,6 @@ pub struct CimApp {
     /// The "View command" window: shows a `cim …` line that reopens the current
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
-    /// Cached histogram of the pane whose Transformations popup is drawing it.
-    hist: Option<HistCache>,
     rebinding: Option<Action>,
     /// A header "Compute" button was clicked: create a Compute pane after the
     /// draw, preferring this pane id as the source. Deferred to avoid mutating
@@ -324,7 +325,6 @@ impl CimApp {
             show_settings: false,
             show_manager: false,
             show_viewcmd: false,
-            hist: None,
             rebinding: None,
             pending_compute: None,
             show_stats: true,
@@ -575,6 +575,7 @@ impl CimApp {
             overlay: None,
             region_tone: false,
             stats: None,
+            hist: None,
             compute: None,
             error: None,
             eager: false,
@@ -633,6 +634,7 @@ impl CimApp {
                 self.panes[i].media = m;
                 self.panes[i].tex = None; // re-render the kept frame from fresh data
                 self.panes[i].stats = None; // recompute region stats from fresh data
+                self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
                 // If this is a mask, invalidate overlay textures sourced from it
                 // so they rebuild from the reloaded contents (same frame index).
@@ -713,6 +715,7 @@ impl CimApp {
                 let name = format!("{} · {}", kind.label(), base);
                 self.panes[idx].media = media::Media::still(name, fr);
                 self.panes[idx].tex = None;
+                self.panes[idx].hist = None; // recompute for the new result
                 self.panes[idx].contrast = if hi {
                     ContrastMode::LinearClip
                 } else {

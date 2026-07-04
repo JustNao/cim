@@ -790,30 +790,31 @@ impl CimApp {
         self.show_manager = open;
     }
 
-    /// Recompute the cached histogram for pane `idx`'s current frame when it
-    /// changes (the Visualise histogram now lives in the Transformations popup,
-    /// so it's per pane rather than a single focused-pane window).
+    /// Recompute pane `idx`'s cached histogram when its frame changes. The cache
+    /// lives **on the pane** (not a single shared slot) so several open
+    /// Transformations popups don't thrash one cache — each scan runs once per
+    /// frame, not once per popup per repaint.
     pub(super) fn ensure_pane_histogram(&mut self, idx: usize) {
         let f = self.frame_disp(idx);
         let key = (self.panes[idx].id, f);
-        if self.hist.as_ref().map(|h| h.key) == Some(key) {
+        if self.panes[idx].hist.as_ref().map(|h| h.key) == Some(key) {
             return;
         }
         if let Some(frame) = self.panes[idx].media.resident(f) {
-            self.hist = Some(HistCache {
+            self.panes[idx].hist = Some(HistCache {
                 key,
                 data: frame.histogram_display(256),
             });
         }
     }
 
-    pub(super) fn draw_histogram(&self, ui: &mut egui::Ui) {
+    pub(super) fn draw_histogram(&self, ui: &mut egui::Ui, idx: usize) {
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 140.0), Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, Color32::from_gray(16));
 
-        let Some(hist) = &self.hist else { return };
+        let Some(hist) = &self.panes[idx].hist else { return };
         let data = &hist.data;
 
         // Peak across every channel/bin; sqrt scaling makes tails legible.
