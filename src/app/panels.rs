@@ -500,7 +500,50 @@ impl CimApp {
                                         }
                                     }
                                 }
-                                ui.label(""); // Overlay (per-pane only)
+                                // Aggregate overlay: apply a mask to (or clear
+                                // it from) every non-mask pane at once.
+                                if masks.is_empty() {
+                                    ui.label("");
+                                } else {
+                                    egui::ComboBox::from_id_salt("overlay_all")
+                                        .selected_text("set all")
+                                        .width(90.0)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(false, "None").clicked() {
+                                                for p in &mut self.panes {
+                                                    p.overlay = None;
+                                                }
+                                            }
+                                            for (mid, mname) in &masks {
+                                                if ui
+                                                    .selectable_label(false, ellipsize(mname, 16))
+                                                    .clicked()
+                                                {
+                                                    for p in &mut self.panes {
+                                                        if p.media.is_mask() {
+                                                            continue;
+                                                        }
+                                                        match &mut p.overlay {
+                                                            Some(o) => {
+                                                                o.src_id = *mid;
+                                                                o.tex = None;
+                                                            }
+                                                            None => {
+                                                                p.overlay = Some(MaskOverlay {
+                                                                    src_id: *mid,
+                                                                    color: Color32::from_rgb(
+                                                                        240, 60, 60,
+                                                                    ),
+                                                                    opacity: 0.5,
+                                                                    tex: None,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                }
                                 if ui
                                     .small_button("⟳")
                                     .on_hover_text("Reload all from disk")

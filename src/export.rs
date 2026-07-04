@@ -52,6 +52,72 @@ pub struct ExportPane {
     cur_idx: Option<usize>,
     cur_display: Option<Vec<u8>>,
     cur_size: [usize; 2],
+    /// Optional boolean-mask overlay tinted over this pane (mirrors the live view).
+    overlay: Option<ExportOverlay>,
+}
+
+/// A boolean-mask overlay snapshotted for export: its own source + decode cache,
+/// plus the tint. Sampled in the pane's image space and blended over the base.
+struct ExportOverlay {
+    source: ExportSource,
+    count: usize,
+    sync_temporal: bool,
+    own_frame: usize,
+    color: [u8; 3],
+    alpha: u8,
+    reader: Option<SeqReader>,
+    cur_file: Option<usize>,
+    cur_idx: Option<usize>,
+    /// Rendered overlay RGBA (true → colour at `alpha`, false → transparent).
+    cur_mask: Option<Vec<u8>>,
+    cur_size: [usize; 2],
+}
+
+impl ExportOverlay {
+    fn src_index(&self, t: usize) -> usize {
+        let c = self.count.max(1);
+        if self.sync_temporal {
+            t.min(c - 1)
+        } else {
+            self.own_frame % c
+        }
+    }
+}
+
+/// Decode frame `idx` from `source`, keeping `reader`/`cur_file` warm for
+/// seekable sources. `None` means "keep the previous frame" (open/decode miss).
+fn decode_source(
+    source: &ExportSource,
+    idx: usize,
+    reader: &mut Option<SeqReader>,
+    cur_file: &mut Option<usize>,
+) -> Option<Arc<FrameData>> {
+    match source {
+        ExportSource::Still(f) => Some(f.clone()),
+        ExportSource::Seq { path } => {
+            if reader.is_none() {
+                *reader = Some(SeqReader::open(path).ok()?);
+            }
+            match reader.as_mut().unwrap().decode(idx) {
+                Ok(Some(f)) => Some(Arc::new(f)),
+                _ => None,
+            }
+        }
+        ExportSource::Files { paths } => {
+            crate::media::decode_file(paths.get(idx)?).ok().map(Arc::new)
+        }
+        ExportSource::Concat { files, map } => {
+            let &(file, page) = map.get(idx)?;
+            if *cur_file != Some(file) {
+                *reader = Some(SeqReader::open(files.get(file)?).ok()?);
+                *cur_file = Some(file);
+            }
+            match reader.as_mut().unwrap().decode(page) {
+                Ok(Some(f)) => Some(Arc::new(f)),
+                _ => None,
+            }
+        }
+    }
 }
 
 impl ExportPane {
@@ -77,7 +143,35 @@ impl ExportPane {
             cur_idx: None,
             cur_display: None,
             cur_size: [0, 0],
+            overlay: None,
         }
+    }
+
+    /// Attach a boolean-mask overlay tinted `color` at `alpha`, sourced from the
+    /// mask media `source` (with its own timeline sync like a pane).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_overlay(
+        &mut self,
+        source: ExportSource,
+        count: usize,
+        sync_temporal: bool,
+        own_frame: usize,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        self.overlay = Some(ExportOverlay {
+            source,
+            count,
+            sync_temporal,
+            own_frame,
+            color,
+            alpha,
+            reader: None,
+            cur_file: None,
+            cur_idx: None,
+            cur_mask: None,
+            cur_size: [0, 0],
+        });
     }
 
     /// Which source frame this pane shows at timeline position `t`.
@@ -90,54 +184,36 @@ impl ExportPane {
         }
     }
 
+    /// Decode + render the mask overlay for timeline `t` (if any), caching the
+    /// tinted RGBA to blend during sampling.
+    fn ensure_overlay(&mut self, t: usize) {
+        let Some(ov) = &mut self.overlay else {
+            return;
+        };
+        let idx = ov.src_index(t);
+        if ov.cur_idx == Some(idx) {
+            return;
+        }
+        if let Some(frame) = decode_source(&ov.source, idx, &mut ov.reader, &mut ov.cur_file) {
+            ov.cur_size = frame.size;
+            let mut buf = ov.cur_mask.take().unwrap_or_default();
+            frame.render_mask_rgba(ov.color, ov.alpha, &mut buf);
+            ov.cur_mask = Some(buf);
+            ov.cur_idx = Some(idx);
+        }
+    }
+
     /// Ensure the display buffer for timeline `t` is decoded + rendered.
     fn ensure_frame(&mut self, t: usize) {
+        self.ensure_overlay(t);
         let idx = self.src_index(t);
         if self.cur_idx == Some(idx) {
             return;
         }
-        let frame = match &self.source {
-            ExportSource::Still(f) => f.clone(),
-            ExportSource::Seq { path } => {
-                if self.reader.is_none() {
-                    match SeqReader::open(path) {
-                        Ok(r) => self.reader = Some(r),
-                        Err(_) => return, // keep last frame on open failure
-                    }
-                }
-                match self.reader.as_mut().unwrap().decode(idx) {
-                    Ok(Some(f)) => Arc::new(f),
-                    // No page here (past the end) or a decode error: keep last.
-                    Ok(None) | Err(_) => return,
-                }
-            }
-            ExportSource::Files { paths } => match paths.get(idx) {
-                // Each frame is its own file; decode it standalone.
-                Some(p) => match crate::media::decode_file(p) {
-                    Ok(f) => Arc::new(f),
-                    Err(_) => return, // keep last frame on decode failure
-                },
-                None => return,
-            },
-            ExportSource::Concat { files, map } => {
-                let Some(&(file, page)) = map.get(idx) else {
-                    return;
-                };
-                // Reopen the reader when the timeline crosses into a new file.
-                if self.cur_file != Some(file) {
-                    match files.get(file).and_then(|p| SeqReader::open(p).ok()) {
-                        Some(r) => {
-                            self.reader = Some(r);
-                            self.cur_file = Some(file);
-                        }
-                        None => return, // keep last frame on open failure
-                    }
-                }
-                match self.reader.as_mut().unwrap().decode(page) {
-                    Ok(Some(f)) => Arc::new(f),
-                    Ok(None) | Err(_) => return,
-                }
-            }
+        // Keep the previous frame on any open/decode miss.
+        let Some(frame) = decode_source(&self.source, idx, &mut self.reader, &mut self.cur_file)
+        else {
+            return;
         };
         self.cur_size = frame.size;
         // Built-in render (full range or 0.01% clip), then the same proprietary
@@ -154,7 +230,45 @@ impl ExportPane {
         self.cur_idx = Some(idx);
     }
 
+    /// Sample the composited pane colour (base image with the mask overlay, if
+    /// any, blended on top) at image-space point `ip`.
     fn sample(&self, ip: Vec2, bilinear: bool) -> Option<[u8; 3]> {
+        let base = self.sample_base(ip, bilinear)?;
+        Some(self.blend_overlay(base, ip))
+    }
+
+    /// Blend the mask overlay over `base` at image point `ip`. The overlay is
+    /// stretched onto the base image rect (as in the live view), so the base
+    /// pixel maps to the mask pixel proportionally.
+    fn blend_overlay(&self, base: [u8; 3], ip: Vec2) -> [u8; 3] {
+        let Some(ov) = &self.overlay else {
+            return base;
+        };
+        let Some(buf) = &ov.cur_mask else {
+            return base;
+        };
+        let ([mw, mh], [bw, bh]) = (ov.cur_size, self.cur_size);
+        if mw == 0 || mh == 0 || bw == 0 || bh == 0 {
+            return base;
+        }
+        let mx = (ip.x / bw as f32 * mw as f32) as usize;
+        let my = (ip.y / bh as f32 * mh as f32) as usize;
+        if mx >= mw || my >= mh {
+            return base;
+        }
+        let i = (my * mw + mx) * 4;
+        let a = buf[i + 3] as f32 / 255.0;
+        if a <= 0.0 {
+            return base;
+        }
+        let mut out = base;
+        for k in 0..3 {
+            out[k] = (base[k] as f32 * (1.0 - a) + buf[i + k] as f32 * a).round() as u8;
+        }
+        out
+    }
+
+    fn sample_base(&self, ip: Vec2, bilinear: bool) -> Option<[u8; 3]> {
         let [w, h] = self.cur_size;
         let buf = self.cur_display.as_ref()?;
         if w == 0 || h == 0 || ip.x < 0.0 || ip.y < 0.0 || ip.x >= w as f32 || ip.y >= h as f32 {
@@ -380,6 +494,64 @@ mod tests {
                 let expect = (3 + oy) * 8 + (2 + ox); // source pixel value
                 let got = buf[(oy * 4 + ox) * 4] as usize;
                 assert_eq!(got, expect, "pixel ({ox},{oy})");
+            }
+        }
+    }
+
+    /// A mask overlay must tint the exported composite: diagonal mask pixels
+    /// take the overlay colour, the rest keep the base image.
+    #[test]
+    fn mask_overlay_tints_export() {
+        let base = FrameData::new([8, 8], 1, Samples::U8(vec![100u8; 64]));
+        let mut m = vec![0u8; 64];
+        for k in 0..8 {
+            m[k * 8 + k] = 1; // true on the diagonal
+        }
+        let mask = FrameData::new_mask([8, 8], 1, Samples::U8(m));
+
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(4.0, 4.0),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(base)),
+        );
+        pane.set_overlay(
+            ExportSource::Still(Arc::new(mask)),
+            1,
+            true,
+            0,
+            [255, 0, 0],
+            255,
+        );
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            region: cell,
+            out_w: 8,
+            out_h: 8,
+            start: 0,
+            total: 1,
+            bilinear: false,
+        };
+        let buf = plan.compose(0);
+        for y in 0..8 {
+            for x in 0..8 {
+                let o = (y * 8 + x) * 4;
+                let px = [buf[o], buf[o + 1], buf[o + 2]];
+                if x == y {
+                    assert_eq!(px, [255, 0, 0], "diagonal ({x},{y}) tinted");
+                } else {
+                    assert_eq!(px, [100, 100, 100], "off-diagonal ({x},{y}) base");
+                }
             }
         }
     }

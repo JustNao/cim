@@ -29,10 +29,10 @@ impl CimApp {
         }
     }
 
-    /// Snapshot a participating pane for the export plan.
-    pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
+    /// The export source for pane `idx` (how its frames are decoded at export).
+    fn export_source(&self, idx: usize) -> ExportSource {
         let p = &self.panes[idx];
-        let source = if let Some((files, map)) = p.media.concat_layout() {
+        if let Some((files, map)) = p.media.concat_layout() {
             // Concatenation of multi-page TIFFs: hand export the files + the
             // discovered global→(file,page) map so it composites the same
             // continuous timeline (Load-all first to export it in full).
@@ -53,16 +53,37 @@ impl CimApp {
                     p.media.resident(0).expect("still frame always resident"),
                 ),
             }
-        };
-        ExportPane::new(
+        }
+    }
+
+    /// Snapshot a participating pane for the export plan, including its mask
+    /// overlay (sourced from the referenced mask pane) so the export matches
+    /// what's on screen.
+    pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
+        let p = &self.panes[idx];
+        let mut pane = ExportPane::new(
             *self.view_ref(idx),
             p.contrast,
             p.details,
             p.media.frame_count(),
             p.sync_temporal,
             p.frame,
-            source,
-        )
+            self.export_source(idx),
+        );
+        if let Some(ov) = &p.overlay {
+            if let Some(m) = self.panes.iter().position(|q| q.id == ov.src_id) {
+                let mp = &self.panes[m];
+                pane.set_overlay(
+                    self.export_source(m),
+                    mp.media.frame_count(),
+                    mp.sync_temporal,
+                    mp.frame,
+                    [ov.color.r(), ov.color.g(), ov.color.b()],
+                    (ov.opacity.clamp(0.0, 1.0) * 255.0) as u8,
+                );
+            }
+        }
+        pane
     }
 
     /// The composition-space rect the export renders (fixes the output aspect).
