@@ -66,10 +66,6 @@ enum Mode {
 struct CachedTex {
     handle: TextureHandle,
     shown: usize, // frame index currently uploaded
-    /// Integer downscale factor of the uploaded texture (1 = native). Frames
-    /// shown below 100% get a box-downsampled texture (see `prepare`); a change
-    /// here re-renders just like a frame change.
-    scale: usize,
 }
 
 /// A boolean mask from another pane, tinted and drawn over a pane. Config only

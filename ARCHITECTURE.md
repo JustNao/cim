@@ -158,18 +158,10 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
 ## 7. Rendering pipeline (native samples → texture)
 
 `app/decode.rs::prepare(ctx, idx)` returns `(Option<TextureId>, loading)`: render +
-upload **only when stale** (`tex.shown != f` **or** the downscale `tex.scale != k`),
-else reuse; if not resident, queue a decode and keep showing the last texture with a
-spinner. Pipeline: bounds → `render_into(lo, hi, &mut render_scratch)` (a reused
-buffer) → optional **display-downscale** → `ColorImage::from_rgba_unmultiplied` →
-texture `set`/`load`.
-
-**Display-downscale.** Below 100% zoom the image is minified on screen anyway, so the
-finished RGBA is box-averaged by a power-of-two factor `k = downscale_factor(zoom,
-size)` (`downsample_rgba`) before upload — a large cut in texture-upload bytes (the
-bottleneck over VNC) for big images in small cells. `k` is a power of two so it only
-re-renders at octave zoom boundaries; at **≥100% it's 1**, so zoomed-in pixels stay
-exact. Overlays stay native (`scale = 1`).
+upload **only when stale** (`tex.shown != f`), else reuse; if not resident, queue a
+decode and keep showing the last texture with a spinner. Pipeline: bounds →
+`render_into(lo, hi, &mut render_scratch)` (a reused buffer) →
+`ColorImage::from_rgba_unmultiplied` → texture `set`/`load`.
 
 `render_into` (`media.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
 per frame then table-look-up per pixel; **F32** maps arithmetically. Mono replicates
@@ -416,9 +408,8 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 
 Done: lazy length, persistent readers, bounded LRU cache, LUT render + memoized bounds
 + reused buffer, per-pane histogram cache, **paced repaints** (§13, no busy-spin while
-decoding/playing), **display-downscale** on texture upload (§7). Remaining candidates:
-**threaded export** (compose+encode off the UI thread); minor per-frame allocations
-(`Action::all()`, `grid_cells`).
+decoding/playing). Remaining candidates: minor per-frame allocations (`Action::all()`,
+`grid_cells`) and display-downscale for large images in tiny cells.
 
 ---
 
