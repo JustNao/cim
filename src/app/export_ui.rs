@@ -56,7 +56,8 @@ impl CimApp {
         };
         ExportPane::new(
             *self.view_ref(idx),
-            p.clip,
+            p.contrast,
+            p.details,
             p.media.frame_count(),
             p.sync_temporal,
             p.frame,

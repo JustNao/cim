@@ -30,7 +30,7 @@ use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
 use crate::media::{self, HistData, Media};
-use crate::settings::{Action, Config, Interpolation};
+use crate::settings::{Action, Config, ContrastMode, Interpolation};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
 
@@ -84,8 +84,10 @@ struct Pane {
     sync_spatial: bool,
     sync_temporal: bool,
     visible: bool,
-    /// Per-pane 0.01% percentile auto-contrast (independent of other panes).
-    clip: bool,
+    /// Per-pane tone-mapping mode (Linear or proprietary LUT_ALPHA).
+    contrast: ContrastMode,
+    /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
+    details: bool,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
     /// "Load all" requested: keep requesting missing + frontier frames until the
@@ -379,7 +381,12 @@ impl CimApp {
     fn add_pane(&mut self, media: Media, source: Source) {
         let id = self.next_id;
         self.next_id += 1;
-        let clip = media.hi_depth(); // >8-bit sources auto-contrast by default
+        // >8-bit sources auto-contrast by default — now via LUT_ALPHA.
+        let contrast = if media.hi_depth() {
+            ContrastMode::LutAlpha
+        } else {
+            ContrastMode::Linear
+        };
         self.panes.push(Pane {
             id,
             source,
@@ -390,7 +397,8 @@ impl CimApp {
             sync_spatial: true,
             sync_temporal: true,
             visible: true,
-            clip,
+            contrast,
+            details: false,
             error: None,
             eager: false,
         });

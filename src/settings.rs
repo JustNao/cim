@@ -192,6 +192,28 @@ pub enum Interpolation {
     Bilinear,
 }
 
+/// Per-pane tone-mapping mode, chosen in the media manager. Replaces the old
+/// 0.01%-percentile clip toggle: `LutAlpha` routes the rendered image through
+/// the proprietary LUT_ALPHA auto-contrast (see `crate::imageproc`).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
+pub enum ContrastMode {
+    /// Straight full-range mapping (native samples → [0, 255]).
+    #[default]
+    Linear,
+    /// Proprietary LUT_ALPHA auto-contrast, applied to the rendered image.
+    LutAlpha,
+}
+
+impl ContrastMode {
+    /// Short label for the media-manager dropdown.
+    pub fn label(self) -> &'static str {
+        match self {
+            ContrastMode::Linear => "Linear",
+            ContrastMode::LutAlpha => "LUT_ALPHA",
+        }
+    }
+}
+
 /// Global visualisation settings. Grows over time. (Intensity clip is per-pane,
 /// toggled in the media manager, so it lives on the pane, not here.)
 #[derive(Clone, Serialize, Deserialize)]

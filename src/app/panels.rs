@@ -6,7 +6,7 @@ use super::*;
 impl CimApp {
     pub(super) fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("📂 Open").clicked() {
+            if ui.button("Open").clicked() {
                 self.open_dialog();
             }
             ui.separator();
@@ -28,24 +28,11 @@ impl CimApp {
                 self.view_mut(self.current).actual_size(size);
             }
             ui.label(format!("{:.0}%", self.view_zoom_label() * 100.0));
+            // Playback (Play/speed/Load all) and the scrubber live in the
+            // full-width bottom frame bar, shown when the media is a sequence.
 
             ui.separator();
-            let play = if self.playing { "⏸" } else { "▶" };
-            if ui.button(play).clicked() {
-                self.playing = !self.playing;
-            }
-            ui.add(
-                egui::Slider::new(&mut self.fps, 1.0..=60.0)
-                    .suffix(" fps")
-                    .fixed_decimals(0),
-            );
-            // The frame scrubber itself now lives in the full-width bottom bar.
-
-            ui.separator();
-            if ui.button("⤓ Load all").clicked() {
-                self.load_all();
-            }
-            if ui.selectable_label(self.show_manager, "☰ Media").clicked() {
+            if ui.selectable_label(self.show_manager, "Media").clicked() {
                 self.show_manager = !self.show_manager;
             }
             if ui.selectable_label(self.show_vis, "Visualise").clicked() {
@@ -54,10 +41,10 @@ impl CimApp {
             if ui.selectable_label(self.show_export, "Export").clicked() {
                 self.toggle_export();
             }
-            if ui.selectable_label(self.show_viewcmd, "⧉ View cmd").clicked() {
+            if ui.selectable_label(self.show_viewcmd, "View cmd").clicked() {
                 self.show_viewcmd = !self.show_viewcmd;
             }
-            if ui.selectable_label(self.show_settings, "⚙ Settings").clicked() {
+            if ui.selectable_label(self.show_settings, "Settings").clicked() {
                 self.show_settings = !self.show_settings;
             }
         });
@@ -107,11 +94,11 @@ impl CimApp {
             .unwrap_or_default();
 
         ui.horizontal(|ui| {
-            let play = if self.playing { "⏸" } else { "▶" };
+            let play = if self.playing { "Pause" } else { "Play" };
             if ui.button(play).clicked() {
                 self.playing = !self.playing;
             }
-            if ui.button("◀").on_hover_text("Previous frame").clicked() {
+            if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
                 if self.shared_frame > 0 {
                     self.shared_frame -= 1;
@@ -119,13 +106,22 @@ impl CimApp {
                     self.shared_frame = len - 1;
                 }
             }
-            if ui.button("▶").on_hover_text("Next frame").clicked() {
+            if ui.button("Next").on_hover_text("Next frame").clicked() {
                 self.pending_seek = None;
                 if self.shared_frame + 1 < len {
                     self.shared_frame += 1;
                 } else if at_end {
                     self.shared_frame = 0;
                 }
+            }
+            ui.separator();
+            ui.add(
+                egui::Slider::new(&mut self.fps, 1.0..=60.0)
+                    .suffix(" fps")
+                    .fixed_decimals(0),
+            );
+            if ui.button("Load all").clicked() {
+                self.load_all();
             }
             ui.separator();
             ui.strong(ellipsize(&name, 40));
@@ -203,7 +199,7 @@ impl CimApp {
     pub(super) fn draw_viewcmd(&mut self, ctx: &egui::Context) {
         let mut open = self.show_viewcmd;
         let cmd = self.view_command();
-        egui::Window::new("⧉ View command")
+        egui::Window::new("View command")
             .open(&mut open)
             .resizable(true)
             .default_width(560.0)
@@ -218,7 +214,7 @@ impl CimApp {
                         .font(egui::TextStyle::Monospace),
                 );
                 ui.add_space(6.0);
-                if ui.button("⧉ Copy to clipboard").clicked() {
+                if ui.button("Copy to clipboard").clicked() {
                     ui.output_mut(|o| o.copied_text = cmd.clone());
                     self.status = "View command copied to clipboard".into();
                 }
@@ -269,7 +265,7 @@ impl CimApp {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("media_table")
-                        .num_columns(9)
+                        .num_columns(10)
                         .striped(true)
                         .spacing([10.0, 6.0])
                         .show(ui, |ui| {
@@ -280,7 +276,8 @@ impl CimApp {
                             ui.label("Single");
                             ui.label("A / B");
                             ui.label("Sync");
-                            ui.label("Clip");
+                            ui.label("Tone");
+                            ui.label("Detail");
                             ui.label("");
                             ui.end_row();
 
@@ -323,15 +320,36 @@ impl CimApp {
                                         }
                                     }
                                 });
-                                let mut all_clip = self.panes.iter().all(|p| p.clip);
+                                // Aggregate tone: show the common mode (or the
+                                // first pane's), and apply the pick to all.
+                                let mut all_tone = self.panes[0].contrast;
+                                egui::ComboBox::from_id_salt("tone_all")
+                                    .selected_text(all_tone.label())
+                                    .width(90.0)
+                                    .show_ui(ui, |ui| {
+                                        for m in [ContrastMode::Linear, ContrastMode::LutAlpha] {
+                                            if ui
+                                                .selectable_value(&mut all_tone, m, m.label())
+                                                .clicked()
+                                            {
+                                                for p in &mut self.panes {
+                                                    if p.contrast != all_tone {
+                                                        p.contrast = all_tone;
+                                                        p.tex = None; // rebuild
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                let mut all_det = self.panes.iter().all(|p| p.details);
                                 if ui
-                                    .checkbox(&mut all_clip, "0.01%")
-                                    .on_hover_text("Clip all")
+                                    .checkbox(&mut all_det, "On")
+                                    .on_hover_text("DETAILS_ENHANCED for all")
                                     .changed()
                                 {
                                     for p in &mut self.panes {
-                                        if p.clip != all_clip {
-                                            p.clip = all_clip;
+                                        if p.details != all_det {
+                                            p.details = all_det;
                                             p.tex = None; // rebuild with new mapping
                                         }
                                     }
@@ -400,13 +418,27 @@ impl CimApp {
                                     }
                                 });
 
-                                let mut clip = self.panes[i].clip;
+                                let mut tone = self.panes[i].contrast;
+                                egui::ComboBox::from_id_salt(("tone", i))
+                                    .selected_text(tone.label())
+                                    .width(90.0)
+                                    .show_ui(ui, |ui| {
+                                        for m in [ContrastMode::Linear, ContrastMode::LutAlpha] {
+                                            ui.selectable_value(&mut tone, m, m.label());
+                                        }
+                                    });
+                                if tone != self.panes[i].contrast {
+                                    self.panes[i].contrast = tone;
+                                    self.panes[i].tex = None; // rebuild with new mapping
+                                }
+
+                                let mut det = self.panes[i].details;
                                 if ui
-                                    .checkbox(&mut clip, "0.01%")
-                                    .on_hover_text("Percentile auto-contrast for this media")
+                                    .checkbox(&mut det, "On")
+                                    .on_hover_text("DETAILS_ENHANCED for this media")
                                     .changed()
                                 {
-                                    self.panes[i].clip = clip;
+                                    self.panes[i].details = det;
                                     self.panes[i].tex = None; // rebuild with new mapping
                                 }
 

@@ -1,7 +1,7 @@
 //! MP4 comparison export.
 //!
 //! The app builds a self-contained [`ExportPlan`] (a snapshot of layout, views,
-//! clip flags and media sources), then composites each timeline frame on the CPU
+//! tone/detail settings and media sources), then composites each timeline frame on the CPU
 //! and pipes raw RGBA to the `ffmpeg` CLI, which encodes H.264. Keeping the plan
 //! decoupled from live app state means an in-progress export is stable even if
 //! the user keeps interacting, and it could move to a worker thread later.
@@ -15,6 +15,7 @@ use std::thread;
 use eframe::egui::{Pos2, Rect, Vec2};
 
 use crate::media::{FrameData, SeqReader};
+use crate::settings::ContrastMode;
 use crate::view::ViewTransform;
 
 const BG: [u8; 4] = [24, 24, 24, 255];
@@ -35,7 +36,8 @@ pub enum ExportSource {
 /// One pane, snapshotted for export, plus a small decode/render cache.
 pub struct ExportPane {
     pub view: ViewTransform,
-    pub clip: bool,
+    pub contrast: ContrastMode,
+    pub details: bool,
     pub count: usize,
     pub sync_temporal: bool,
     pub own_frame: usize,
@@ -55,7 +57,8 @@ pub struct ExportPane {
 impl ExportPane {
     pub fn new(
         view: ViewTransform,
-        clip: bool,
+        contrast: ContrastMode,
+        details: bool,
         count: usize,
         sync_temporal: bool,
         own_frame: usize,
@@ -63,7 +66,8 @@ impl ExportPane {
     ) -> Self {
         Self {
             view,
-            clip,
+            contrast,
+            details,
             count,
             sync_temporal,
             own_frame,
@@ -136,7 +140,17 @@ impl ExportPane {
             }
         };
         self.cur_size = frame.size;
-        self.cur_display = Some(frame.render_rgba(self.clip));
+        // Full-range render, then the same proprietary operators the live view
+        // applies, so an export matches what's on screen.
+        let [w, h] = frame.size;
+        let mut rgba = frame.render_rgba(false);
+        if self.contrast == ContrastMode::LutAlpha {
+            crate::imageproc::lut_alpha(&mut rgba, w, h);
+        }
+        if self.details {
+            crate::imageproc::details_enhanced(&mut rgba, w, h);
+        }
+        self.cur_display = Some(rgba);
         self.cur_idx = Some(idx);
     }
 
@@ -341,7 +355,15 @@ mod tests {
             center: reg.center().to_vec2(),
             needs_fit: false,
         };
-        let pane = ExportPane::new(view, false, 1, true, 0, ExportSource::Still(Arc::new(frame)));
+        let pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(frame)),
+        );
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
@@ -379,7 +401,15 @@ mod tests {
         let mut view = ViewTransform::default();
         view.fit(frame0.size, area);
 
-        let pane = ExportPane::new(view, false, 4, true, 0, ExportSource::Seq { path: src });
+        let pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            4,
+            true,
+            0,
+            ExportSource::Seq { path: src },
+        );
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, area),

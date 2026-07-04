@@ -211,8 +211,17 @@ impl CimApp {
                 // stale. Bounds are memoized on the frame; render into a reused
                 // scratch buffer via the LUT path.
                 let opts = self.tex_options();
-                let (lo, hi) = frame.display_bounds(self.panes[idx].clip);
+                // Full-range mapping to 8-bit; contrast/detail operators (the
+                // proprietary C++) then transform the rendered RGBA in place.
+                let (lo, hi) = frame.display_bounds(false);
                 frame.render_into(lo, hi, &mut self.render_scratch);
+                let [w, h] = frame.size;
+                if self.panes[idx].contrast == ContrastMode::LutAlpha {
+                    crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
+                }
+                if self.panes[idx].details {
+                    crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
+                }
                 let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
                 let p = &mut self.panes[idx];
                 match &mut p.tex {
