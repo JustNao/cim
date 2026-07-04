@@ -1150,10 +1150,22 @@ mod tests {
             .unwrap()
             .expect("page 0");
         assert!(frame.is_mask(), "decoded page should be flagged as a mask");
-        // Renders to something non-empty at native size.
+        let [w, h] = frame.size;
+        assert_eq!([w, h], [2560, 1706]);
+
+        // Cross-check the bit unpacking (MSB-first, byte-padded rows) against
+        // Pillow's ground truth for this fixture: exact true-pixel count and a
+        // few specific pixels.
+        let ones = (0..w * h).filter(|&i| frame.sample(i) != 0).count();
+        assert_eq!(ones, 395048, "true-pixel count");
+        assert_eq!(frame.sample(0), 0, "px (0,0)");
+        assert_eq!(frame.sample((h / 2) * w + w / 2), 0, "px centre");
+        assert_eq!(frame.sample(10 * w + 100), 1, "px (100,10)");
+
+        // Renders black/white at native size.
         let mut out = Vec::new();
         frame.render_into(0.0, 255.0, &mut out);
-        assert_eq!(out.len(), frame.size[0] * frame.size[1] * 4);
+        assert_eq!(out.len(), w * h * 4);
     }
 
     /// A boolean mask renders as pure black/white regardless of the tone
