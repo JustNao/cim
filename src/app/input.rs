@@ -88,7 +88,14 @@ impl CimApp {
             if self.shared_frame + 1 < tl {
                 self.shared_frame += 1;
             } else if at_end {
-                self.shared_frame = 0;
+                if self.loop_playback {
+                    self.shared_frame = 0;
+                } else {
+                    // Reached the end with looping off: stop on the last frame.
+                    self.playing = false;
+                    self.play_accum = 0.0;
+                    break;
+                }
             } else {
                 // At the discovered frontier — wait for the next page rather than
                 // wrapping early; drop the backlog so we don't burst afterwards.

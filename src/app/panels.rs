@@ -98,6 +98,13 @@ impl CimApp {
             if ui.button(play).clicked() {
                 self.playing = !self.playing;
             }
+            if ui
+                .selectable_label(self.loop_playback, "Loop")
+                .on_hover_text("Loop the sequence when it reaches the end")
+                .clicked()
+            {
+                self.loop_playback = !self.loop_playback;
+            }
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
                 if self.shared_frame > 0 {

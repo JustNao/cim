@@ -117,6 +117,9 @@ pub struct CimApp {
     ab_handle_grabbed: bool,
 
     playing: bool,
+    /// Loop the sequence when playback reaches the end (on by default). When
+    /// off, playback stops on the last frame instead of wrapping.
+    loop_playback: bool,
     fps: f32,
     play_accum: f32,
 
@@ -203,6 +206,7 @@ impl CimApp {
             ab_split: 0.5,
             ab_handle_grabbed: false,
             playing: false,
+            loop_playback: true,
             fps: 12.0,
             play_accum: 0.0,
             show_settings: false,
