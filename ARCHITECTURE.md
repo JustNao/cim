@@ -253,7 +253,7 @@ cells so the clip histogram scan runs once per frame, not once per redraw.
 
 **Tone modes & proprietary post-processing (C++).** Each pane picks a *tone*
 mode (`ContrastMode`) plus per-mode **`ToneOptions`** (edited in the pane's
-"Modify" popup, §9):
+"Transformations" popup, §9):
 - **Linear + Clip** — full-range map with a per-tail percentile clip
   (`clip_bounds(percent)`, default **0.01%**, editable via `ToneOptions.clip`);
   robust auto-contrast, the default for **>8-bit** media (8-bit displays 1:1 so
@@ -392,15 +392,27 @@ expands into a file-name field. `media::save_frame` writes `.tif`/`.tiff` as a
 `.png`/`.jpg`/`.jpeg` as the 8-bit display rendering; the path is relative to the
 working dir. Computed panes are skipped by `view_command` (not CLI-reproducible).
 
-**"Modify" options popup.** Each pane header has a **Modify** button on the
-*left* (away from the close ×), toggling `Pane.show_opts`. `draw_options_popup`
-renders a foreground `Area` under the header with the tone `ContrastMode`, its
-mode-specific options, and the Details toggle; edits invalidate the texture.
-Per-mode options live in `settings::ToneOptions` (one sub-struct per mode, so
-switching modes keeps each mode's settings) and are laid out by the free
-`draw_tone_options` — **the single place to add a knob**: grow the mode's
-sub-struct, add a row there, and read it in `prepare`. This keeps the growing
-tone/enhancement controls off the Media-manager table.
+**"Transformations" options popup.** Each pane header has a **Transformations**
+button on the *left* (away from the close ×), toggling `Pane.show_opts`.
+`draw_options_popup` renders a foreground `Area` under the header with the tone
+`ContrastMode`, its mode-specific options, and the Details toggle; edits
+invalidate the texture. Per-mode options live in `settings::ToneOptions` (one
+sub-struct per mode, so switching modes keeps each mode's settings) and are laid
+out by the free `draw_tone_options` — **the single place to add a knob**: grow
+the mode's sub-struct, add a row there, and read it in `prepare`. These controls
+were removed from the Media-manager table (it kept the clutter down as options
+grow).
+
+**Transformations sync (`Pane.sync_tone`).** Like the Pos/Time view syncs, a pane
+can follow the **shared** Transformations (`shared_contrast` / `shared_tone` /
+`shared_details`) instead of its own — toggled by the **Transf** checkbox in the
+manager's Sync column (per-row and aggregate). `contrast_of` / `tone_of` /
+`details_of` return the effective value (shared when synced) and are what
+`prepare`, `export_pane`, and `view_command` read; editing a synced pane's popup
+writes the shared set and `invalidate_synced_tone` refreshes every synced pane.
+`set_sync_tone(false)` snapshots the shared values into the pane so nothing jumps
+(mirroring the Pos/Time off-toggle). Default off (each pane independent, so the
+per-depth tone default is preserved).
 
 ---
 

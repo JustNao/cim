@@ -295,8 +295,8 @@ impl CimApp {
             },
         );
 
-        // "Modify" button on the LEFT (away from the close × so it's hard to
-        // mis-click), toggling this pane's options popup.
+        // "Transformations" button on the LEFT (away from the close × so it's
+        // hard to mis-click), toggling this pane's options popup.
         let modify = Rect::from_min_size(header.min, Vec2::new(MODIFY_W, HEADER_H));
         let mod_resp = ui.interact(modify, Id::new(("modify", idx)), Sense::click());
         let open = self.panes[idx].show_opts;
@@ -314,7 +314,7 @@ impl CimApp {
         hp.text(
             modify.center(),
             Align2::CENTER_CENTER,
-            "Modify",
+            "Transformations",
             FontId::proportional(12.0),
             Color32::from_gray(225),
         );
@@ -810,15 +810,19 @@ impl CimApp {
 
     // ---- per-pane "Modify" options popup ---------------------------------
 
-    /// The pane options popup (toggled by the header "Modify" button): the tone
-    /// mode, its mode-specific options (`draw_tone_options`), and Details. Drawn
-    /// as a foreground `Area` under the header, constrained to the pane `cell`.
-    /// Edits are written back and invalidate the texture if anything changed.
+    /// The pane options popup (toggled by the header "Transformations" button):
+    /// the tone mode, its mode-specific options (`draw_tone_options`), and
+    /// Details. Drawn as a foreground `Area` under the header, constrained to the
+    /// pane `cell`. When the pane is tone-synced, edits target the *shared*
+    /// Transformations (and every synced pane re-renders); otherwise the pane's
+    /// own. Nothing is written unless something changed.
     fn draw_options_popup(&mut self, ctx: &egui::Context, idx: usize, cell: Rect) {
         let pane_id = self.panes[idx].id;
-        let mut contrast = self.panes[idx].contrast;
-        let mut tone = self.panes[idx].tone;
-        let mut details = self.panes[idx].details;
+        let synced = self.panes[idx].sync_tone;
+        // Edit the effective values (shared when synced, else the pane's own).
+        let mut contrast = self.contrast_of(idx);
+        let mut tone = self.tone_of(idx);
+        let mut details = self.details_of(idx);
         let mut close = false;
 
         egui::Area::new(Id::new(("pane_opts", pane_id)))
@@ -830,7 +834,7 @@ impl CimApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(230.0);
                     ui.horizontal(|ui| {
-                        ui.strong("Modify");
+                        ui.strong("Transformations");
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
@@ -840,6 +844,13 @@ impl CimApp {
                             },
                         );
                     });
+                    if synced {
+                        ui.label(
+                            egui::RichText::new("shared across tone-synced panes")
+                                .weak()
+                                .small(),
+                        );
+                    }
                     ui.separator();
 
                     egui::Grid::new(("opt_grid", pane_id))
@@ -867,15 +878,27 @@ impl CimApp {
                 });
             });
 
-        let p = &mut self.panes[idx];
-        if p.contrast != contrast || p.tone != tone || p.details != details {
-            p.contrast = contrast;
-            p.tone = tone;
-            p.details = details;
-            p.tex = None; // re-render with the new mapping
+        if synced {
+            if self.shared_contrast != contrast
+                || self.shared_tone != tone
+                || self.shared_details != details
+            {
+                self.shared_contrast = contrast;
+                self.shared_tone = tone;
+                self.shared_details = details;
+                self.invalidate_synced_tone();
+            }
+        } else {
+            let p = &mut self.panes[idx];
+            if p.contrast != contrast || p.tone != tone || p.details != details {
+                p.contrast = contrast;
+                p.tone = tone;
+                p.details = details;
+                p.tex = None; // re-render with the new mapping
+            }
         }
         if close {
-            p.show_opts = false;
+            self.panes[idx].show_opts = false;
         }
     }
 

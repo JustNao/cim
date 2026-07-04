@@ -38,7 +38,7 @@ const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
-const MODIFY_W: f32 = 58.0; // width of the header "Modify" button
+const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
@@ -119,6 +119,9 @@ struct Pane {
     frame: usize,             // used only when !sync_temporal
     sync_spatial: bool,
     sync_temporal: bool,
+    /// Follow the shared "Transformations" (tone + options + details) instead of
+    /// this pane's own — synced across selected rows in the media manager.
+    sync_tone: bool,
     visible: bool,
     /// Per-pane tone-mapping mode (Linear or proprietary LUT_ALPHA).
     contrast: ContrastMode,
@@ -154,6 +157,12 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
+    /// Shared "Transformations" (tone mode + options + details) that every pane
+    /// with `sync_tone` follows, so editing one synced pane's Transformations
+    /// popup updates them all.
+    shared_contrast: ContrastMode,
+    shared_tone: ToneOptions,
+    shared_details: bool,
     /// A requested timeline frame not yet reachable because the sequence's
     /// length is still being discovered (e.g. from `--frame` at launch). While
     /// set, discovery is driven forward until this frame exists, then the
@@ -290,6 +299,9 @@ impl CimApp {
             next_id: 0,
             shared_view: ViewTransform::default(),
             shared_frame: 0,
+            shared_contrast: ContrastMode::LinearClip,
+            shared_tone: ToneOptions::default(),
+            shared_details: false,
             pending_seek: None,
             mode: Mode::Grid,
             current: 0,
@@ -449,22 +461,19 @@ impl CimApp {
         if self.timeline_len() > 1 {
             parts.push(format!("--frame {}", self.shared_frame));
         }
-        // Per-pane tone / detail, in pane order, so a replay reproduces them.
+        // Per-pane tone / detail (effective — shared when tone-synced), in pane
+        // order, so a replay reproduces them.
         if !self.panes.is_empty() {
-            let tones: Vec<&str> = self
-                .panes
-                .iter()
-                .map(|p| match p.contrast {
+            let tones: Vec<&str> = (0..self.panes.len())
+                .map(|i| match self.contrast_of(i) {
                     ContrastMode::Linear => "linear",
                     ContrastMode::LinearClip => "linearclip",
                     ContrastMode::LutAlpha => "lutalpha",
                 })
                 .collect();
             parts.push(format!("--tone {}", tones.join(",")));
-            let details: Vec<&str> = self
-                .panes
-                .iter()
-                .map(|p| if p.details { "1" } else { "0" })
+            let details: Vec<&str> = (0..self.panes.len())
+                .map(|i| if self.details_of(i) { "1" } else { "0" })
                 .collect();
             parts.push(format!("--detail {}", details.join(",")));
         }
@@ -547,6 +556,7 @@ impl CimApp {
             frame: 0,
             sync_spatial: true,
             sync_temporal: true,
+            sync_tone: false,
             visible: true,
             contrast,
             tone: ToneOptions::default(),
@@ -765,6 +775,58 @@ impl CimApp {
         } else {
             self.panes[i].frame % c
         }
+    }
+
+    // ---- effective Transformations (own, or shared when `sync_tone`) ------
+
+    pub(super) fn contrast_of(&self, i: usize) -> ContrastMode {
+        if self.panes[i].sync_tone {
+            self.shared_contrast
+        } else {
+            self.panes[i].contrast
+        }
+    }
+
+    pub(super) fn tone_of(&self, i: usize) -> ToneOptions {
+        if self.panes[i].sync_tone {
+            self.shared_tone
+        } else {
+            self.panes[i].tone
+        }
+    }
+
+    pub(super) fn details_of(&self, i: usize) -> bool {
+        if self.panes[i].sync_tone {
+            self.shared_details
+        } else {
+            self.panes[i].details
+        }
+    }
+
+    /// Invalidate the textures of every tone-synced pane (after the shared
+    /// Transformations change), so they re-render with the new mapping.
+    pub(super) fn invalidate_synced_tone(&mut self) {
+        for p in &mut self.panes {
+            if p.sync_tone {
+                p.tex = None;
+            }
+        }
+    }
+
+    /// Set a pane's tone-sync flag. Turning it **off** snapshots the shared
+    /// Transformations into the pane so nothing jumps; either way the pane
+    /// re-renders.
+    pub(super) fn set_sync_tone(&mut self, i: usize, on: bool) {
+        if self.panes[i].sync_tone == on {
+            return;
+        }
+        if !on {
+            self.panes[i].contrast = self.shared_contrast;
+            self.panes[i].tone = self.shared_tone;
+            self.panes[i].details = self.shared_details;
+        }
+        self.panes[i].sync_tone = on;
+        self.panes[i].tex = None;
     }
 
     /// Length of the shared timeline: the **control** media drives the loop.
@@ -1136,11 +1198,8 @@ fn draw_tone_options(
             ui.end_row();
             // Add more LUT_ALPHA options here: one row + a field on LutAlphaOptions.
         }
-        ContrastMode::Linear => {
-            ui.label("");
-            ui.label(egui::RichText::new("No options").weak().small());
-            ui.end_row();
-        }
+        // Plain Linear has no options — emit no row (no wasted space).
+        ContrastMode::Linear => {}
     }
 }
 

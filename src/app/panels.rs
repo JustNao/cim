@@ -396,6 +396,9 @@ impl CimApp {
         let mut open = self.show_manager;
         let shared_view = self.shared_view;
         let shared_frame = self.shared_frame;
+        let shared_contrast = self.shared_contrast;
+        let shared_tone = self.shared_tone;
+        let shared_details = self.shared_details;
 
         egui::Window::new("☰ Media")
             .open(&mut open)
@@ -409,7 +412,7 @@ impl CimApp {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("media_table")
-                        .num_columns(11)
+                        .num_columns(9)
                         .striped(true)
                         .spacing([10.0, 6.0])
                         .show(ui, |ui| {
@@ -427,9 +430,11 @@ impl CimApp {
                             ui.label("Frames");
                             ui.label("Single");
                             ui.label("A / B");
-                            ui.label("Sync");
-                            ui.label("Tone");
-                            ui.label("Detail");
+                            ui.label("Sync")
+                                .on_hover_text(
+                                    "Pos / Time / Transformations sync (Transf shares the \
+                                     per-pane Transformations popup) and the timeline Control",
+                                );
                             ui.label("Overlay");
                             ui.label("");
                             ui.end_row();
@@ -472,41 +477,28 @@ impl CimApp {
                                             p.sync_temporal = all_time;
                                         }
                                     }
-                                });
-                                // Aggregate tone: show the common mode (or the
-                                // first pane's), and apply the pick to all.
-                                let mut all_tone = self.panes[0].contrast;
-                                egui::ComboBox::from_id_salt("tone_all")
-                                    .selected_text(all_tone.label())
-                                    .width(100.0)
-                                    .show_ui(ui, |ui| {
-                                        for m in ContrastMode::ORDER {
-                                            if ui
-                                                .selectable_value(&mut all_tone, m, m.label())
-                                                .clicked()
-                                            {
-                                                for p in &mut self.panes {
-                                                    if p.contrast != all_tone {
-                                                        p.contrast = all_tone;
-                                                        p.tex = None; // rebuild
-                                                    }
-                                                }
+                                    // Transformations sync: share the per-pane
+                                    // Transformations popup across all panes.
+                                    let mut all_ts = self.panes.iter().all(|p| p.sync_tone);
+                                    if ui
+                                        .checkbox(&mut all_ts, "Transf")
+                                        .on_hover_text("Sync the Transformations popup across all")
+                                        .changed()
+                                    {
+                                        for p in &mut self.panes {
+                                            if p.sync_tone == all_ts {
+                                                continue;
                                             }
-                                        }
-                                    });
-                                let mut all_det = self.panes.iter().all(|p| p.details);
-                                if ui
-                                    .checkbox(&mut all_det, "On")
-                                    .on_hover_text("DETAILS_ENHANCED for all")
-                                    .changed()
-                                {
-                                    for p in &mut self.panes {
-                                        if p.details != all_det {
-                                            p.details = all_det;
-                                            p.tex = None; // rebuild with new mapping
+                                            if !all_ts {
+                                                p.contrast = shared_contrast;
+                                                p.tone = shared_tone;
+                                                p.details = shared_details;
+                                            }
+                                            p.sync_tone = all_ts;
+                                            p.tex = None;
                                         }
                                     }
-                                }
+                                });
                                 // Aggregate overlay: a mask picker plus colour /
                                 // alpha, all applied to every non-mask pane. The
                                 // picker shows the mask common to them (else
@@ -680,6 +672,19 @@ impl CimApp {
                                         }
                                         self.panes[i].sync_temporal = st;
                                     }
+                                    // Transformations sync: this pane follows the
+                                    // shared Transformations (edited in any synced
+                                    // pane's popup). Toggling off keeps its look.
+                                    let mut ts = self.panes[i].sync_tone;
+                                    if ui
+                                        .checkbox(&mut ts, "Transf")
+                                        .on_hover_text(
+                                            "Sync the Transformations popup with other Transf panes",
+                                        )
+                                        .changed()
+                                    {
+                                        self.set_sync_tone(i, ts);
+                                    }
                                     // Only a sequence can drive the timeline; pick
                                     // which one the transport / loop follows.
                                     if self.panes[i].media.frame_count() > 1
@@ -695,30 +700,6 @@ impl CimApp {
                                         self.loop_range = None; // range is per-sequence
                                     }
                                 });
-
-                                let mut tone = self.panes[i].contrast;
-                                egui::ComboBox::from_id_salt(("tone", i))
-                                    .selected_text(tone.label())
-                                    .width(100.0)
-                                    .show_ui(ui, |ui| {
-                                        for m in ContrastMode::ORDER {
-                                            ui.selectable_value(&mut tone, m, m.label());
-                                        }
-                                    });
-                                if tone != self.panes[i].contrast {
-                                    self.panes[i].contrast = tone;
-                                    self.panes[i].tex = None; // rebuild with new mapping
-                                }
-
-                                let mut det = self.panes[i].details;
-                                if ui
-                                    .checkbox(&mut det, "On")
-                                    .on_hover_text("DETAILS_ENHANCED for this media")
-                                    .changed()
-                                {
-                                    self.panes[i].details = det;
-                                    self.panes[i].tex = None; // rebuild with new mapping
-                                }
 
                                 // Overlay: tint a loaded mask over this pane. Not
                                 // shown for mask media themselves, or if none loaded.

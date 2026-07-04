@@ -215,8 +215,8 @@ impl CimApp {
                 // Built-in mapping to 8-bit (full range, or 0.01% clip for
                 // Linear+Clip); the LUT_ALPHA / detail operators (the
                 // proprietary C++) then transform the rendered RGBA in place.
-                let contrast = self.panes[idx].contrast;
-                let tone = self.panes[idx].tone;
+                let contrast = self.contrast_of(idx);
+                let tone = self.tone_of(idx);
                 let clip = contrast.clips();
                 let pct = tone.clip.percent;
                 // The built-in linear bounds. `clip` uses the per-tail percentile
@@ -260,7 +260,7 @@ impl CimApp {
                             blend_rgba(&mut self.render_scratch, &base, blend);
                         }
                     }
-                    if self.panes[idx].details {
+                    if self.details_of(idx) {
                         crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
                     }
                 }

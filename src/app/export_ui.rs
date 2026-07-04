@@ -63,8 +63,8 @@ impl CimApp {
         let p = &self.panes[idx];
         let mut pane = ExportPane::new(
             *self.view_ref(idx),
-            p.contrast,
-            p.details,
+            self.contrast_of(idx),
+            self.details_of(idx),
             p.media.frame_count(),
             p.sync_temporal,
             p.frame,
