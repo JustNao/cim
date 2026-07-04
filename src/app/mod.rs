@@ -381,6 +381,13 @@ impl CimApp {
     fn add_pane(&mut self, media: Media, source: Source) {
         let id = self.next_id;
         self.next_id += 1;
+        // >8-bit sources need auto-contrast to be legible; 8-bit displays 1:1,
+        // so it defaults to a plain identity map.
+        let contrast = if media.hi_depth() {
+            ContrastMode::LinearClip
+        } else {
+            ContrastMode::Linear
+        };
         self.panes.push(Pane {
             id,
             source,
@@ -391,7 +398,7 @@ impl CimApp {
             sync_spatial: true,
             sync_temporal: true,
             visible: true,
-            contrast: ContrastMode::default(), // Linear + Clip
+            contrast,
             details: false,
             error: None,
             eager: false,
