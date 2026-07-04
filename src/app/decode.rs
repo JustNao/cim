@@ -216,29 +216,49 @@ impl CimApp {
                 // Linear+Clip); the LUT_ALPHA / detail operators (the
                 // proprietary C++) then transform the rendered RGBA in place.
                 let contrast = self.panes[idx].contrast;
+                let tone = self.panes[idx].tone;
                 let clip = contrast.clips();
+                let pct = tone.clip.percent;
+                // The built-in linear bounds. `clip` uses the per-tail percentile
+                // (Modify → Clip %); otherwise the full range / float extent.
+                let base_bounds = |clip: bool| {
+                    if clip {
+                        frame.clip_bounds(pct)
+                    } else {
+                        frame.display_bounds(false)
+                    }
+                };
                 // With region-tone pinned, derive the linear bounds from the
-                // shared stats region instead of the whole image (min/max, or
-                // the 0.01% clip). Pixels outside the region that fall beyond
-                // these bounds are clamped by the render — the region drives the
-                // contrast and extremes elsewhere saturate. LUT_ALPHA below is
-                // unaffected: it still runs over the whole rendered image.
+                // shared stats region instead of the whole image. Pixels outside
+                // the region that fall beyond these bounds are clamped by the
+                // render — the region drives the contrast and extremes elsewhere
+                // saturate. LUT_ALPHA below is unaffected: it still runs over the
+                // whole rendered image.
                 let (lo, hi) = if self.panes[idx].region_tone {
                     self.stats_region
                         .and_then(|reg| pixel_bounds(reg, frame.size))
                         .map(|(x0, y0, x1, y1)| {
-                            frame.region_display_bounds(x0, y0, x1, y1, clip)
+                            frame.region_display_bounds(x0, y0, x1, y1, clip, pct)
                         })
-                        .unwrap_or_else(|| frame.display_bounds(clip))
+                        .unwrap_or_else(|| base_bounds(clip))
                 } else {
-                    frame.display_bounds(clip)
+                    base_bounds(clip)
                 };
                 frame.render_into(lo, hi, &mut self.render_scratch);
                 let [w, h] = frame.size;
                 // A boolean mask renders black/white; the tone operators don't apply.
                 if !frame.is_mask() {
                     if contrast == ContrastMode::LutAlpha {
-                        crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
+                        let blend = tone.lut_alpha.blend.clamp(0.0, 1.0);
+                        if blend >= 1.0 {
+                            crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
+                        } else {
+                            // Mix the operator's output back toward the plain
+                            // linear image (Modify → LUT_ALPHA Blend).
+                            let base = self.render_scratch.clone();
+                            crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
+                            blend_rgba(&mut self.render_scratch, &base, blend);
+                        }
                     }
                     if self.panes[idx].details {
                         crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);

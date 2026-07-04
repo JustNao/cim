@@ -30,7 +30,7 @@ use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
-use crate::settings::{Action, Config, ContrastMode, Interpolation};
+use crate::settings::{Action, Config, ContrastMode, Interpolation, ToneOptions};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
 
@@ -38,6 +38,7 @@ const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
+const MODIFY_W: f32 = 58.0; // width of the header "Modify" button
 
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
@@ -121,6 +122,11 @@ struct Pane {
     visible: bool,
     /// Per-pane tone-mapping mode (Linear or proprietary LUT_ALPHA).
     contrast: ContrastMode,
+    /// Per-mode tone options (clip percentile, LUT_ALPHA knobs, …), edited in
+    /// the pane's "Modify" popup.
+    tone: ToneOptions,
+    /// The "Modify" options popup is open for this pane.
+    show_opts: bool,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
     /// Optional boolean-mask overlay drawn on top of this pane.
@@ -543,6 +549,8 @@ impl CimApp {
             sync_temporal: true,
             visible: true,
             contrast,
+            tone: ToneOptions::default(),
+            show_opts: false,
             details: false,
             overlay: None,
             region_tone: false,
@@ -1076,6 +1084,15 @@ fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
     }
 }
 
+/// Lerp `out` toward `base` per byte: `out = base*(1-t) + out*t`. Used to blend
+/// a tone operator's RGBA result back toward the plain linear image.
+fn blend_rgba(out: &mut [u8], base: &[u8], t: f32) {
+    let t = t.clamp(0.0, 1.0);
+    for (o, &b) in out.iter_mut().zip(base) {
+        *o = (b as f32 * (1.0 - t) + *o as f32 * t).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
 /// Clamp an image-space region to a frame's pixel grid, returning the integer
 /// half-open bounds `[x0, x1) × [y0, y1)`, or `None` if it doesn't cover at
 /// least one pixel (e.g. the region lies entirely outside this frame — pages
@@ -1087,6 +1104,44 @@ fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usi
     let x1 = (reg.max.x.ceil().max(0.0) as usize).min(w);
     let y1 = (reg.max.y.ceil().max(0.0) as usize).min(h);
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+}
+
+/// Render the tone options for `mode` as label/value rows inside a 2-column
+/// `Grid` (each row ends with `end_row`). Extend by adding a `match` arm or a
+/// row: each mode reads/writes its own sub-struct of `ToneOptions`, so options
+/// never collide across modes.
+fn draw_tone_options(
+    ui: &mut egui::Ui,
+    _pane_id: u64,
+    mode: ContrastMode,
+    tone: &mut ToneOptions,
+) {
+    match mode {
+        ContrastMode::LinearClip => {
+            ui.label("Clip %");
+            ui.add(
+                egui::DragValue::new(&mut tone.clip.percent)
+                    .speed(0.005)
+                    .range(0.0..=49.0)
+                    .max_decimals(3)
+                    .suffix(" %"),
+            )
+            .on_hover_text("Percentile clipped at each tail before the stretch");
+            ui.end_row();
+        }
+        ContrastMode::LutAlpha => {
+            ui.label("Blend");
+            ui.add(egui::Slider::new(&mut tone.lut_alpha.blend, 0.0..=1.0).fixed_decimals(2))
+                .on_hover_text("Mix from the linear image (0) to full LUT_ALPHA (1)");
+            ui.end_row();
+            // Add more LUT_ALPHA options here: one row + a field on LutAlphaOptions.
+        }
+        ContrastMode::Linear => {
+            ui.label("");
+            ui.label(egui::RichText::new("No options").weak().small());
+            ui.end_row();
+        }
+    }
 }
 
 /// Draw a region's per-channel histogram into `rect` (Visualise-panel style:

@@ -252,26 +252,34 @@ Bounds are **content-invariant per frame**, memoized in `FrameData`'s `OnceLock`
 cells so the clip histogram scan runs once per frame, not once per redraw.
 
 **Tone modes & proprietary post-processing (C++).** Each pane picks a *tone*
-mode (`ContrastMode`, media-tab dropdown, in this order):
-- **Linear + Clip** — full-range map with the 0.01% percentile clip
-  (`display_bounds(true)`); robust auto-contrast, the default for **>8-bit**
-  media (8-bit displays 1:1 so it defaults to plain Linear).
-- **LUT_ALPHA** — full-range map, then the proprietary auto-contrast operator.
+mode (`ContrastMode`) plus per-mode **`ToneOptions`** (edited in the pane's
+"Modify" popup, §9):
+- **Linear + Clip** — full-range map with a per-tail percentile clip
+  (`clip_bounds(percent)`, default **0.01%**, editable via `ToneOptions.clip`);
+  robust auto-contrast, the default for **>8-bit** media (8-bit displays 1:1 so
+  it defaults to plain Linear).
+- **LUT_ALPHA** — full-range map, then the proprietary auto-contrast operator,
+  with a Rust-side **Blend** back toward the linear image
+  (`ToneOptions.lut_alpha.blend`, `blend_rgba`). More LUT_ALPHA knobs slot into
+  `LutAlphaOptions` + `draw_tone_options`.
 - **Linear** — plain full-range map (native range → [0, 255]), no clip.
 
 Plus a per-pane **DETAILS_ENHANCED** on/off toggle (proprietary detail enhance).
 `render_into` first produces the 8-bit RGBA using the mode's built-in bounds
-(`ContrastMode::clips()`), then the proprietary operators from `imageproc.rs`
-(`lut_alpha` when the mode is LUT_ALPHA, `details_enhanced` when the toggle is
-on) transform the RGBA in place before upload. Both take/return interleaved
-RGBA8 and run in `app/decode.rs::prepare` (live) and `export.rs::ensure_frame`
-(export), so exports match the screen. The C++ bridge, data contract, and
-drop-in steps are documented in `INTEGRATION_CPP.md`.
+(`ContrastMode::clips()` + the clip percentile), then the proprietary operators
+from `imageproc.rs` (`lut_alpha` when the mode is LUT_ALPHA, `details_enhanced`
+when the toggle is on) transform the RGBA in place before upload. Both
+take/return interleaved RGBA8 and run in `app/decode.rs::prepare` (live) and
+`export.rs::ensure_frame` (export), so exports match the screen. (Export uses the
+default clip percentile; the per-pane `ToneOptions` are a live-view setting.) The
+C++ bridge, data contract, and drop-in steps are documented in
+`INTEGRATION_CPP.md`.
 
 **Region-driven tone (`Pane.region_tone`).** When pinned (the stats panel's
 "Tone ⟵ region" button, §9), a pane's linear bounds come from the shared stats
 region via `FrameData::region_display_bounds` — the region's **min/max** (Linear)
-or its **0.01% percentile** (Linear+Clip) — instead of `display_bounds`. Pixels
+or its per-tail-percentile clip (Linear+Clip, the pane's `ToneOptions` percent) —
+instead of `display_bounds`. Pixels
 outside the region that exceed these bounds are **clamped** by the render (the
 LUT covers the full sample domain and saturates), so extremes elsewhere go
 black/white while the region drives the contrast. LUT_ALPHA is unaffected: it
@@ -383,6 +391,16 @@ expands into a file-name field. `media::save_frame` writes `.tif`/`.tiff` as a
 **32-bit float** TIFF (native values preserved, via the `tiff` encoder) or
 `.png`/`.jpg`/`.jpeg` as the 8-bit display rendering; the path is relative to the
 working dir. Computed panes are skipped by `view_command` (not CLI-reproducible).
+
+**"Modify" options popup.** Each pane header has a **Modify** button on the
+*left* (away from the close ×), toggling `Pane.show_opts`. `draw_options_popup`
+renders a foreground `Area` under the header with the tone `ContrastMode`, its
+mode-specific options, and the Details toggle; edits invalidate the texture.
+Per-mode options live in `settings::ToneOptions` (one sub-struct per mode, so
+switching modes keeps each mode's settings) and are laid out by the free
+`draw_tone_options` — **the single place to add a knob**: grow the mode's
+sub-struct, add a row there, and read it in `prepare`. This keeps the growing
+tone/enhancement controls off the Media-manager table.
 
 ---
 

@@ -427,7 +427,7 @@ impl CimApp {
                             Color32::from_rgb(240, 200, 120),
                             "⚠ Some media aren't fully loaded — frame counts may be incomplete.",
                         );
-                        if ui.button("⤓ Load all").clicked() {
+                        if ui.button("Load all").clicked() {
                             self.load_all();
                         }
                     });

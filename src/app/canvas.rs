@@ -242,6 +242,9 @@ impl CimApp {
         }
 
         self.draw_header(ui, idx, cell);
+        if self.panes[idx].show_opts {
+            self.draw_options_popup(ctx, idx, cell);
+        }
         self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
 
         // No persistent pane border (it doubles up at zero gap, breaking the
@@ -292,6 +295,33 @@ impl CimApp {
             },
         );
 
+        // "Modify" button on the LEFT (away from the close × so it's hard to
+        // mis-click), toggling this pane's options popup.
+        let modify = Rect::from_min_size(header.min, Vec2::new(MODIFY_W, HEADER_H));
+        let mod_resp = ui.interact(modify, Id::new(("modify", idx)), Sense::click());
+        let open = self.panes[idx].show_opts;
+        hp.rect_filled(
+            modify,
+            0.0,
+            if open {
+                Color32::from_rgb(70, 110, 160)
+            } else if mod_resp.hovered() {
+                Color32::from_gray(70)
+            } else {
+                Color32::from_gray(52)
+            },
+        );
+        hp.text(
+            modify.center(),
+            Align2::CENTER_CENTER,
+            "Modify",
+            FontId::proportional(12.0),
+            Color32::from_gray(225),
+        );
+        if mod_resp.clicked() {
+            self.panes[idx].show_opts = !open;
+        }
+
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
         let title = if count > 1 {
@@ -325,7 +355,7 @@ impl CimApp {
             format!("{}  {}", idx + 1, name)
         };
         hp.text(
-            header.left_center() + Vec2::new(8.0, 0.0),
+            header.left_center() + Vec2::new(MODIFY_W + 8.0, 0.0),
             Align2::LEFT_CENTER,
             title,
             FontId::proportional(13.0),
@@ -775,6 +805,77 @@ impl CimApp {
             .clicked()
         {
             self.show_stats = false;
+        }
+    }
+
+    // ---- per-pane "Modify" options popup ---------------------------------
+
+    /// The pane options popup (toggled by the header "Modify" button): the tone
+    /// mode, its mode-specific options (`draw_tone_options`), and Details. Drawn
+    /// as a foreground `Area` under the header, constrained to the pane `cell`.
+    /// Edits are written back and invalidate the texture if anything changed.
+    fn draw_options_popup(&mut self, ctx: &egui::Context, idx: usize, cell: Rect) {
+        let pane_id = self.panes[idx].id;
+        let mut contrast = self.panes[idx].contrast;
+        let mut tone = self.panes[idx].tone;
+        let mut details = self.panes[idx].details;
+        let mut close = false;
+
+        egui::Area::new(Id::new(("pane_opts", pane_id)))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .constrain_to(cell)
+            .fixed_pos(Pos2::new(cell.left() + 4.0, cell.top() + HEADER_H + 2.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(230.0);
+                    ui.horizontal(|ui| {
+                        ui.strong("Modify");
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.small_button("×").clicked() {
+                                    close = true;
+                                }
+                            },
+                        );
+                    });
+                    ui.separator();
+
+                    egui::Grid::new(("opt_grid", pane_id))
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Tone");
+                            egui::ComboBox::from_id_salt(("opt_tone", pane_id))
+                                .selected_text(contrast.label())
+                                .width(130.0)
+                                .show_ui(ui, |ui| {
+                                    for m in ContrastMode::ORDER {
+                                        ui.selectable_value(&mut contrast, m, m.label());
+                                    }
+                                });
+                            ui.end_row();
+
+                            draw_tone_options(ui, pane_id, contrast, &mut tone);
+
+                            ui.label("Details");
+                            ui.add(egui::Checkbox::without_text(&mut details))
+                                .on_hover_text("DETAILS_ENHANCED detail enhancement");
+                            ui.end_row();
+                        });
+                });
+            });
+
+        let p = &mut self.panes[idx];
+        if p.contrast != contrast || p.tone != tone || p.details != details {
+            p.contrast = contrast;
+            p.tone = tone;
+            p.details = details;
+            p.tex = None; // re-render with the new mapping
+        }
+        if close {
+            p.show_opts = false;
         }
     }
 

@@ -224,10 +224,48 @@ impl ContrastMode {
         }
     }
 
-    /// Whether the built-in render should apply the 0.01% percentile clip.
+    /// Whether the built-in render should apply the percentile clip.
     pub fn clips(self) -> bool {
         matches!(self, ContrastMode::LinearClip)
     }
+}
+
+/// Options for the **Linear + Clip** tone.
+#[derive(Clone, Copy, PartialEq)]
+pub struct ClipOptions {
+    /// Percentile clipped at *each* tail before the full-range stretch, in
+    /// percent (0.01 = the robust default; 0 = plain min/max).
+    pub percent: f32,
+}
+
+impl Default for ClipOptions {
+    fn default() -> Self {
+        Self { percent: 0.01 }
+    }
+}
+
+/// Options for the proprietary **LUT_ALPHA** tone. To add a knob: add a field
+/// here, a widget row in `draw_tone_options`, and read it where the operator
+/// runs (`app/decode.rs::prepare`).
+#[derive(Clone, Copy, PartialEq)]
+pub struct LutAlphaOptions {
+    /// Mix between the plain linear image (0.0) and the LUT_ALPHA result (1.0),
+    /// applied Rust-side after the operator. 1.0 = the operator's full output.
+    pub blend: f32,
+}
+
+impl Default for LutAlphaOptions {
+    fn default() -> Self {
+        Self { blend: 1.0 }
+    }
+}
+
+/// Per-pane tone options: one sub-struct per mode, so switching modes keeps each
+/// mode's own settings. Extend a mode by growing its sub-struct (see above).
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct ToneOptions {
+    pub clip: ClipOptions,
+    pub lut_alpha: LutAlphaOptions,
 }
 
 /// Global visualisation settings. Grows over time. (Intensity clip is per-pane,

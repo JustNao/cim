@@ -329,6 +329,17 @@ impl FrameData {
         *cell.get_or_init(|| self.compute_display_bounds(clip))
     }
 
+    /// Clip bounds at an arbitrary per-tail `percent`. The default (`0.01`) uses
+    /// the memoized `display_bounds(true)`; any other percentile is computed
+    /// fresh (only when the texture is re-rendered, so it's not per-repaint).
+    pub fn clip_bounds(&self, percent: f32) -> (f32, f32) {
+        if (percent - 0.01).abs() < 1e-6 {
+            self.display_bounds(true)
+        } else {
+            self.percentile_bounds(percent)
+        }
+    }
+
     fn compute_display_bounds(&self, clip: bool) -> (f32, f32) {
         if clip {
             self.percentile_bounds(0.01)
@@ -637,11 +648,11 @@ impl FrameData {
     }
 
     /// Display bounds derived from a region instead of the whole image: the
-    /// region's min/max, or its 0.01% percentile stretch with `clip`. Used when
-    /// a pane's tone is pinned to a right-drag selection. Values elsewhere in the
-    /// image that fall outside these bounds are clamped by the render (that is
-    /// the whole point — the region drives the contrast, extremes outside it
-    /// saturate to black/white).
+    /// region's min/max, or its `percent`% per-tail percentile stretch with
+    /// `clip`. Used when a pane's tone is pinned to a right-drag selection.
+    /// Values elsewhere in the image that fall outside these bounds are clamped
+    /// by the render (that is the whole point — the region drives the contrast,
+    /// extremes outside it saturate to black/white).
     pub fn region_display_bounds(
         &self,
         x0: usize,
@@ -649,9 +660,10 @@ impl FrameData {
         x1: usize,
         y1: usize,
         clip: bool,
+        percent: f32,
     ) -> (f32, f32) {
         if clip {
-            self.region_percentile_bounds(x0, y0, x1, y1, 0.01)
+            self.region_percentile_bounds(x0, y0, x1, y1, percent)
         } else {
             self.region_extent(x0, y0, x1, y1)
         }
@@ -1613,7 +1625,7 @@ mod tests {
 
         // Linear (no clip) region bounds are the region's own min/max — the
         // bright pixel at x=0 is excluded, so it will clamp to white on render.
-        assert_eq!(f.region_display_bounds(1, 0, 3, 1, false), (10.0, 20.0));
+        assert_eq!(f.region_display_bounds(1, 0, 3, 1, false, 0.01), (10.0, 20.0));
 
         // Whole-image full-range bounds still span the outlier.
         assert_eq!(f.display_bounds(false), (0.0, 255.0));
