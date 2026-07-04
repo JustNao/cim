@@ -871,7 +871,7 @@ impl CimApp {
         let synced = self.panes[idx].sync_tone;
         // Edit the effective values (shared when synced, else the pane's own).
         let mut contrast = self.contrast_of(idx);
-        let mut tone = self.tone_of(idx); // includes the magnification `interp`
+        let mut tone = self.tone_of(idx);
         let mut details = self.details_of(idx);
         let mut close = false;
 
@@ -947,30 +947,6 @@ impl CimApp {
                             ui.add(egui::Checkbox::without_text(&mut details))
                                 .on_hover_text("DETAILS_ENHANCED detail enhancement");
                             ui.end_row();
-
-                            // Per-pane magnification filter (folded in from
-                            // Visualise); rides the Transformations sync.
-                            ui.label("Zoom")
-                                .on_hover_text("Zoom mode for this pane");
-                            egui::ComboBox::from_id_salt(("opt_interp", pane_id))
-                                .selected_text(match tone.interp {
-                                    Interpolation::Nearest => "Nearest",
-                                    Interpolation::Bilinear => "Bilinear",
-                                })
-                                .width(130.0)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut tone.interp,
-                                        Interpolation::Nearest,
-                                        "Nearest",
-                                    );
-                                    ui.selectable_value(
-                                        &mut tone.interp,
-                                        Interpolation::Bilinear,
-                                        "Bilinear",
-                                    );
-                                });
-                            ui.end_row();
                         });
 
                     // Mask overlay picker + colour/alpha (non-mask panes only).
@@ -1042,8 +1018,7 @@ impl CimApp {
             }
         }
 
-        // `interp` now lives inside `tone`, so the tone write-back below (own or
-        // shared) picks up an interpolation change too, invalidating textures.
+        // Write the effective tone back (own or shared), invalidating textures.
         if synced {
             if self.shared_contrast != contrast
                 || self.shared_tone != tone

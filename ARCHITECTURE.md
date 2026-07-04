@@ -193,8 +193,10 @@ region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA still
 runs over the whole image. Recomputed on each texture rebuild; replicates to all
 panes.
 
-**Magnification filter** (`tex_options(idx)`): follows the pane's `ToneOptions.interp`
-(Nearest/Bilinear, so it rides the tone-sync); minification Linear.
+**Texture filtering:** always **nearest**, at every zoom, both magnification and
+minification (`TextureOptions::NEAREST`). The tool is pixel-accurate — an on-screen
+pixel must be a true source sample, never a blend — so there is no interpolation option
+anywhere (display or export).
 
 ---
 
@@ -246,8 +248,8 @@ area shrinks to match.
 button (left, away from ×) toggles `Pane.show_opts`, opening a foreground `Area`
 under the header with: the tone `ContrastMode` + its mode-specific options
 (`draw_tone_options` — **the single place to add a tone knob**: grow the mode's
-`ToneOptions` sub-struct, add a row, read it in `prepare`/`tex_options`), the Details
-toggle, the per-pane magnification **Interp**, the mask **Overlay** picker, and this
+`ToneOptions` sub-struct, add a row, read it in `prepare`), the Details
+toggle, the mask **Overlay** picker, and this
 pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`, cached per pane).
 Edits invalidate the texture. `Action::ToggleVis` (default `V`) toggles it for the
 focused pane.
@@ -320,7 +322,8 @@ responsive and interaction can't corrupt the export.
   (`set_overlay` + `blend_overlay`), so overlays appear in the video. `ExportSource =
   Still | Seq { path } | Files { paths } | Concat { files, map }`.
 - `ExportLayout = Grid | Single | Ab`. `ExportPlan.compose(t)` maps each output pixel
-  back through the pane's view (export forces **nearest**). `start` offsets so output
+  back through the pane's view, sampling **nearest** — upscaling to a larger output
+  just replicates source pixels, never blends them. `start` offsets so output
   frame `t` = timeline `start+t`.
 - **Region crop** is chosen in image space ("Select…" forces Single;
   `screen_rect_to_image` on release), applied to every pane as a cell of exactly the
@@ -358,7 +361,7 @@ responsive and interaction can't corrupt the export.
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, vis: { interp }, ui_scale, cache_budget_mb, keybindings }`,
+`Config { max_columns, ui_scale, cache_budget_mb, keybindings }`,
 saved as JSON via `ProjectDirs("dev","cim","cim")`. Loaded on start, saved on
 exit / explicit save.
 

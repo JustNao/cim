@@ -175,9 +175,6 @@ impl CimApp {
         let crop = self.export_region;
         let region = self.export_canvas();
         let (out_w, out_h) = export::out_dims(region, self.out_height);
-        // Always nearest for export: source pixels are sampled directly onto the
-        // output grid, so blending would soften detail the comparison exists to show.
-        let bilinear = false;
         let (start, end) = self.export_frames();
         let total = end - start + 1;
 
@@ -263,7 +260,6 @@ impl CimApp {
             out_h,
             start,
             total,
-            bilinear,
         })
     }
 

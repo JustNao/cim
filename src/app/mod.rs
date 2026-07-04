@@ -30,7 +30,7 @@ use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
-use crate::settings::{Action, Config, ContrastMode, Interpolation, ToneOptions};
+use crate::settings::{Action, Config, ContrastMode, ToneOptions};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
 
@@ -593,11 +593,7 @@ impl CimApp {
         } else {
             ContrastMode::Linear
         };
-        // Seed the per-pane magnification filter from the saved default.
-        let tone = ToneOptions {
-            interp: self.config.vis.interp,
-            ..ToneOptions::default()
-        };
+        let tone = ToneOptions::default();
         // Transformations sync is on by default; the first opened media seeds the
         // shared set (so its depth-appropriate tone becomes the group default).
         if self.panes.is_empty() {

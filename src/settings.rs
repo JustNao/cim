@@ -182,16 +182,6 @@ impl Keybindings {
     }
 }
 
-/// Texture magnification filter used when zooming past 100%.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum Interpolation {
-    /// Nearest-neighbour: exact square samples, no blending.
-    #[default]
-    Nearest,
-    /// Bilinear: linear interpolation between the 4 nearest texels.
-    Bilinear,
-}
-
 /// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
 /// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
 /// `crate::imageproc`); the other two are built-in mappings.
@@ -262,36 +252,15 @@ impl Default for LutAlphaOptions {
 
 /// Per-pane tone options: one sub-struct per mode, so switching modes keeps each
 /// mode's own settings. Extend a mode by growing its sub-struct (see above).
-/// Also carries the per-pane magnification `interp` filter so it rides the same
-/// Transformations sync as the tone.
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
     pub lut_alpha: LutAlphaOptions,
-    pub interp: Interpolation,
-}
-
-/// Global visualisation settings. Grows over time. (Intensity clip is per-pane,
-/// toggled in the media manager, so it lives on the pane, not here.)
-#[derive(Clone, Serialize, Deserialize)]
-pub struct VisSettings {
-    #[serde(default)]
-    pub interp: Interpolation,
-}
-
-impl Default for VisSettings {
-    fn default() -> Self {
-        Self {
-            interp: Interpolation::Nearest,
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub max_columns: usize,
-    #[serde(default)]
-    pub vis: VisSettings,
     /// Global UI zoom factor for buttons/text (egui zoom_factor).
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
@@ -314,7 +283,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_columns: 3,
-            vis: VisSettings::default(),
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
             keybindings: Keybindings::default(),

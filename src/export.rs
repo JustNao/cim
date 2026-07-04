@@ -232,8 +232,8 @@ impl ExportPane {
 
     /// Sample the composited pane colour (base image with the mask overlay, if
     /// any, blended on top) at image-space point `ip`.
-    fn sample(&self, ip: Vec2, bilinear: bool) -> Option<[u8; 3]> {
-        let base = self.sample_base(ip, bilinear)?;
+    fn sample(&self, ip: Vec2) -> Option<[u8; 3]> {
+        let base = self.sample_base(ip)?;
         Some(self.blend_overlay(base, ip))
     }
 
@@ -268,36 +268,18 @@ impl ExportPane {
         out
     }
 
-    fn sample_base(&self, ip: Vec2, bilinear: bool) -> Option<[u8; 3]> {
+    /// Nearest-neighbour sample of the base image at image point `ip`. Always
+    /// nearest so every exported pixel is a true source value, never a blend —
+    /// upscaling just replicates source pixels.
+    fn sample_base(&self, ip: Vec2) -> Option<[u8; 3]> {
         let [w, h] = self.cur_size;
         let buf = self.cur_display.as_ref()?;
         if w == 0 || h == 0 || ip.x < 0.0 || ip.y < 0.0 || ip.x >= w as f32 || ip.y >= h as f32 {
             return None;
         }
-        let get = |x: usize, y: usize| -> [u8; 3] {
-            let i = (y * w + x) * 4;
-            [buf[i], buf[i + 1], buf[i + 2]]
-        };
-        if !bilinear {
-            return Some(get(ip.x as usize, ip.y as usize));
-        }
-        // Bilinear on pixel centres, clamped at the edges.
-        let fx = (ip.x - 0.5).max(0.0);
-        let fy = (ip.y - 0.5).max(0.0);
-        let x0 = (fx.floor() as usize).min(w - 1);
-        let y0 = (fy.floor() as usize).min(h - 1);
-        let x1 = (x0 + 1).min(w - 1);
-        let y1 = (y0 + 1).min(h - 1);
-        let tx = fx - x0 as f32;
-        let ty = fy - y0 as f32;
-        let (a, b, c, d) = (get(x0, y0), get(x1, y0), get(x0, y1), get(x1, y1));
-        let mut out = [0u8; 3];
-        for k in 0..3 {
-            let top = a[k] as f32 * (1.0 - tx) + b[k] as f32 * tx;
-            let bot = c[k] as f32 * (1.0 - tx) + d[k] as f32 * tx;
-            out[k] = (top * (1.0 - ty) + bot * ty).round() as u8;
-        }
-        Some(out)
+        let (x, y) = (ip.x as usize, ip.y as usize);
+        let i = (y * w + x) * 4;
+        Some([buf[i], buf[i + 1], buf[i + 2]])
     }
 }
 
@@ -335,7 +317,6 @@ pub struct ExportPlan {
     /// position `start + t`.
     pub start: usize,
     pub total: usize,
-    pub bilinear: bool,
 }
 
 impl ExportPlan {
@@ -357,7 +338,7 @@ impl ExportPlan {
                 if let Some((pi, area)) = self.layout.locate(c) {
                     let pane = &self.panes[pi];
                     let ip = pane.view.screen_to_img(c, area);
-                    if let Some(rgb) = pane.sample(ip, self.bilinear) {
+                    if let Some(rgb) = pane.sample(ip) {
                         col = [rgb[0], rgb[1], rgb[2], 255];
                     }
                 }
@@ -486,7 +467,6 @@ mod tests {
             out_h: 2,
             start: 0,
             total: 1,
-            bilinear: false,
         };
         let buf = plan.compose(0);
         for oy in 0..2 {
@@ -540,7 +520,6 @@ mod tests {
             out_h: 8,
             start: 0,
             total: 1,
-            bilinear: false,
         };
         let buf = plan.compose(0);
         for y in 0..8 {
@@ -590,7 +569,6 @@ mod tests {
             out_h: 120,
             start: 0,
             total: 4,
-            bilinear: true,
         };
 
         let out = std::env::temp_dir().join("cim_plan_test.mp4");

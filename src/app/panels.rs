@@ -1,5 +1,5 @@
-//! The toolbar and the floating tool windows: media manager, visualise
-//! (interpolation + histogram), and settings (layout + keybindings).
+//! The toolbar and the floating tool windows: media manager, and settings
+//! (layout + keybindings).
 
 use super::*;
 
