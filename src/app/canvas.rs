@@ -183,12 +183,17 @@ impl CimApp {
         }
 
         let (tex, loading) = self.prepare(ctx, idx);
+        let overlay = self.prepare_overlay(ctx, idx);
         let painter = ui.painter_at(img_area);
         painter.rect_filled(img_area, 0.0, Color32::from_gray(24));
         if let Some(id) = tex {
             let v = *self.view_ref(idx);
             let rect = v.image_rect(self.disp_size(idx), img_area);
             painter.image(id, rect, uv(), Color32::WHITE);
+            // The mask overlay shares the base image's rect (1:1 in image space).
+            if let Some(ov) = overlay {
+                painter.image(ov, rect, uv(), Color32::WHITE);
+            }
         }
         if loading {
             draw_spinner(&painter, img_area, ctx.input(|i| i.time));

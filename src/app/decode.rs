@@ -218,11 +218,14 @@ impl CimApp {
                 let (lo, hi) = frame.display_bounds(contrast.clips());
                 frame.render_into(lo, hi, &mut self.render_scratch);
                 let [w, h] = frame.size;
-                if contrast == ContrastMode::LutAlpha {
-                    crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
-                }
-                if self.panes[idx].details {
-                    crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
+                // A boolean mask renders black/white; the tone operators don't apply.
+                if !frame.is_mask() {
+                    if contrast == ContrastMode::LutAlpha {
+                        crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
+                    }
+                    if self.panes[idx].details {
+                        crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
+                    }
                 }
                 let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
                 let p = &mut self.panes[idx];
@@ -243,5 +246,45 @@ impl CimApp {
             let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
             (last, true)
         }
+    }
+
+    /// Ensure the tinted overlay texture for pane `idx` is current, returning it
+    /// to draw over the pane's image. Sources the mask from the pane referenced
+    /// by `overlay.src_id`, at that mask's currently shown frame. Returns `None`
+    /// when there's no overlay, the mask pane is gone, or its frame isn't
+    /// resident yet.
+    pub(super) fn prepare_overlay(&mut self, ctx: &egui::Context, idx: usize) -> Option<TextureId> {
+        let ov = self.panes[idx].overlay.as_ref()?;
+        let (src_id, color, opacity) = (ov.src_id, ov.color, ov.opacity);
+        let src = self.panes.iter().position(|p| p.id == src_id)?;
+        let f = self.frame_disp(src);
+        let frame = self.panes[src].media.resident(f)?; // owned Arc; borrow ends here
+
+        let rgb = [color.r(), color.g(), color.b()];
+        let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
+
+        let ov = self.panes[idx].overlay.as_mut().unwrap();
+        let need = match &ov.tex {
+            Some(t) => t.shown != f,
+            None => true,
+        };
+        if need {
+            let mut buf = Vec::new();
+            frame.render_mask_rgba(rgb, alpha, &mut buf);
+            let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
+            let opts = TextureOptions::NEAREST;
+            match &mut ov.tex {
+                Some(t) => {
+                    t.handle.set(img, opts);
+                    t.shown = f;
+                }
+                None => {
+                    let handle =
+                        ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
+                    ov.tex = Some(CachedTex { handle, shown: f });
+                }
+            }
+        }
+        Some(ov.tex.as_ref().unwrap().handle.id())
     }
 }

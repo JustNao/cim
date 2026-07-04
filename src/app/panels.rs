@@ -272,10 +272,18 @@ impl CimApp {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::Grid::new("media_table")
-                        .num_columns(10)
+                        .num_columns(11)
                         .striped(true)
                         .spacing([10.0, 6.0])
                         .show(ui, |ui| {
+                            // Mask media available to overlay onto other panes.
+                            let masks: Vec<(u64, String)> = self
+                                .panes
+                                .iter()
+                                .filter(|p| p.media.is_mask())
+                                .map(|p| (p.id, p.media.name().to_string()))
+                                .collect();
+
                             ui.label("Show");
                             ui.label("#");
                             ui.label("Name");
@@ -285,6 +293,7 @@ impl CimApp {
                             ui.label("Sync");
                             ui.label("Tone");
                             ui.label("Detail");
+                            ui.label("Overlay");
                             ui.label("");
                             ui.end_row();
 
@@ -361,6 +370,7 @@ impl CimApp {
                                         }
                                     }
                                 }
+                                ui.label(""); // Overlay (per-pane only)
                                 if ui
                                     .small_button("⟳")
                                     .on_hover_text("Reload all from disk")
@@ -447,6 +457,78 @@ impl CimApp {
                                 {
                                     self.panes[i].details = det;
                                     self.panes[i].tex = None; // rebuild with new mapping
+                                }
+
+                                // Overlay: tint a loaded mask over this pane. Not
+                                // shown for mask media themselves, or if none loaded.
+                                if self.panes[i].media.is_mask() || masks.is_empty() {
+                                    ui.label("—");
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        let cur =
+                                            self.panes[i].overlay.as_ref().map(|o| o.src_id);
+                                        let sel_text = cur
+                                            .and_then(|id| masks.iter().find(|(m, _)| *m == id))
+                                            .map(|(_, n)| ellipsize(n, 10))
+                                            .unwrap_or_else(|| "None".into());
+                                        egui::ComboBox::from_id_salt(("overlay", i))
+                                            .selected_text(sel_text)
+                                            .width(90.0)
+                                            .show_ui(ui, |ui| {
+                                                if ui
+                                                    .selectable_label(cur.is_none(), "None")
+                                                    .clicked()
+                                                {
+                                                    self.panes[i].overlay = None;
+                                                }
+                                                for (mid, mname) in &masks {
+                                                    if ui
+                                                        .selectable_label(
+                                                            cur == Some(*mid),
+                                                            ellipsize(mname, 16),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        match &mut self.panes[i].overlay {
+                                                            Some(o) => {
+                                                                o.src_id = *mid;
+                                                                o.tex = None;
+                                                            }
+                                                            None => {
+                                                                self.panes[i].overlay =
+                                                                    Some(MaskOverlay {
+                                                                        src_id: *mid,
+                                                                        color: Color32::from_rgb(
+                                                                            240, 60, 60,
+                                                                        ),
+                                                                        opacity: 0.5,
+                                                                        tex: None,
+                                                                    });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                        if let Some(o) = &mut self.panes[i].overlay {
+                                            let mut col = o.color;
+                                            if ui.color_edit_button_srgba(&mut col).changed() {
+                                                o.color = col;
+                                                o.tex = None; // recolour
+                                            }
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(&mut o.opacity)
+                                                        .speed(0.02)
+                                                        .range(0.0..=1.0)
+                                                        .fixed_decimals(2)
+                                                        .prefix("α "),
+                                                )
+                                                .changed()
+                                            {
+                                                o.tex = None; // re-alpha
+                                            }
+                                        }
+                                    });
                                 }
 
                                 ui.horizontal(|ui| {

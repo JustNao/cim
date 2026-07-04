@@ -37,6 +37,10 @@ pub struct FrameData {
     /// path otherwise re-scans the whole image on every redraw.
     bounds_full: OnceLock<(f32, f32)>,
     bounds_clip: OnceLock<(f32, f32)>,
+    /// Decoded from a 1-bit bilevel TIFF: a boolean mask. Rendered as pure
+    /// black/white (false/true) rather than through the tone mapping, and
+    /// available to tint another pane as an overlay.
+    mask: bool,
 }
 
 /// Per-channel histogram plus the true value extent, for the Visualise panel.
@@ -55,7 +59,20 @@ impl FrameData {
             samples,
             bounds_full: OnceLock::new(),
             bounds_clip: OnceLock::new(),
+            mask: false,
         }
+    }
+
+    /// Like [`FrameData::new`] but flagged as a boolean mask (1-bit source).
+    pub fn new_mask(size: [usize; 2], channels: usize, samples: Samples) -> Self {
+        let mut f = Self::new(size, channels, samples);
+        f.mask = true;
+        f
+    }
+
+    /// True when this frame is a boolean mask (decoded from a 1-bit TIFF).
+    pub fn is_mask(&self) -> bool {
+        self.mask
     }
 
     /// Bytes held by the sample buffer, for the cache memory budget.
@@ -323,6 +340,18 @@ impl FrameData {
         out.clear();
         out.resize(px * 4, 255); // alpha stays 255; rgb overwritten below
 
+        // A boolean mask ignores the tone window: false → black, true → white.
+        if self.mask {
+            match &self.samples {
+                Samples::U8(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { 255 } else { 0 }),
+                Samples::U16(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { 255 } else { 0 }),
+                Samples::F32(v) => {
+                    fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { 255 } else { 0 })
+                }
+            }
+            return;
+        }
+
         let denom = hi - lo;
         let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
         let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
@@ -338,6 +367,25 @@ impl FrameData {
             }
             // Floats have no bounded domain to tabulate; map arithmetically.
             Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
+        }
+    }
+
+    /// Build an RGBA overlay from this mask: true pixels take `rgb` at `alpha`,
+    /// false pixels are fully transparent. Used to tint a boolean mask over
+    /// another pane. `out` is resized to `w*h*4`.
+    pub fn render_mask_rgba(&self, rgb: [u8; 3], alpha: u8, out: &mut Vec<u8>) {
+        let px = self.size[0] * self.size[1];
+        let ch = self.channels;
+        out.clear();
+        out.resize(px * 4, 0); // transparent by default
+        for i in 0..px {
+            if self.sample(i * ch) != 0 {
+                let o = i * 4;
+                out[o] = rgb[0];
+                out[o + 1] = rgb[1];
+                out[o + 2] = rgb[2];
+                out[o + 3] = alpha;
+            }
         }
     }
 
@@ -484,6 +532,8 @@ pub struct TiffSeq {
     path: PathBuf,
     size: [usize; 2],
     hi_depth: bool,
+    /// Page 0 is 1-bit bilevel → this is a boolean-mask sequence.
+    is_mask: bool,
     /// Frames known so far. Grows lazily as later pages are decoded — we never
     /// walk the whole file to learn its length.
     frames: SeqCache,
@@ -565,6 +615,12 @@ impl Media {
             Media::FileSeq(f) => f.hi_depth,
             Media::ConcatSeq(c) => c.hi_depth,
         }
+    }
+
+    /// A boolean-mask media (1-bit bilevel TIFF): rendered black/white and
+    /// available to tint another pane as an overlay. Only TIFFs are masks.
+    pub fn is_mask(&self) -> bool {
+        matches!(self, Media::TiffSeq(t) if t.is_mask)
     }
 
     pub fn resident(&self, idx: usize) -> Option<Arc<FrameData>> {
@@ -758,7 +814,9 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
     let mut dec = Decoder::new(BufReader::new(file))?;
 
     let (w, h) = dec.dimensions()?;
-    let hi_depth = color_bits(dec.colortype()?) > 8;
+    let ct = dec.colortype()?;
+    let hi_depth = color_bits(ct) > 8;
+    let is_mask = matches!(ct, ColorType::Gray(1));
 
     // Only page 0 is inspected here. The page count is discovered lazily as
     // later frames are shown — walking every IFD up front would stall opening a
@@ -768,6 +826,7 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
         path: path.to_path_buf(),
         size: [w as usize, h as usize],
         hi_depth,
+        is_mask,
         frames: SeqCache::new(1),
         at_end: false,
     }))
@@ -949,7 +1008,12 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
         return Err(anyhow!("short TIFF buffer: {got} < {expected}"));
     }
 
-    Ok(FrameData::new([w, h], channels, samples))
+    // A 1-bit bilevel page is a boolean mask.
+    if matches!(color, ColorType::Gray(1)) {
+        Ok(FrameData::new_mask([w, h], channels, samples))
+    } else {
+        Ok(FrameData::new([w, h], channels, samples))
+    }
 }
 
 #[cfg(test)]
@@ -1042,6 +1106,26 @@ mod tests {
         assert_eq!(map[3], (0, 3), "frame 3 = file 0 page 3 (last of clip_000)");
         assert_eq!(map[4], (1, 0), "frame 4 rolls into file 1 page 0");
         assert_eq!(map[6], (1, 2), "frame 6 = file 1 page 2 (last of clip_001)");
+    }
+
+    /// A boolean mask renders as pure black/white regardless of the tone
+    /// window, and its overlay buffer tints true pixels while leaving false
+    /// pixels transparent.
+    #[test]
+    fn mask_renders_black_white_and_overlay() {
+        // 2x1 mask: [false, true].
+        let m = FrameData::new_mask([2, 1], 1, Samples::U8(vec![0, 1]));
+        assert!(m.is_mask());
+
+        // Render ignores lo/hi: 0 → black, nonzero → white (alpha 255).
+        let mut got = Vec::new();
+        m.render_into(1000.0, 2000.0, &mut got);
+        assert_eq!(got, vec![0, 0, 0, 255, 255, 255, 255, 255]);
+
+        // Overlay: false → fully transparent; true → rgb at the given alpha.
+        let mut ov = Vec::new();
+        m.render_mask_rgba([10, 20, 30], 128, &mut ov);
+        assert_eq!(ov, vec![0, 0, 0, 0, 10, 20, 30, 128]);
     }
 
     /// Inserting a frame accounts its bytes; evicting frees them and keeps the

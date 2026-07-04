@@ -57,6 +57,15 @@ struct CachedTex {
     shown: usize, // frame index currently uploaded
 }
 
+/// A boolean mask from another pane, tinted and drawn over this pane.
+struct MaskOverlay {
+    src_id: u64,   // stable id of the mask pane supplying the overlay
+    color: Color32,
+    opacity: f32, // 0..1
+    /// Cached tinted texture; rebuilt when the mask frame or colour changes.
+    tex: Option<CachedTex>,
+}
+
 /// Cached histogram for the media shown in the Visualise panel.
 struct HistCache {
     key: (u64, usize), // (pane id, frame) this was computed for
@@ -88,6 +97,8 @@ struct Pane {
     contrast: ContrastMode,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
+    /// Optional boolean-mask overlay drawn on top of this pane.
+    overlay: Option<MaskOverlay>,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
     /// "Load all" requested: keep requesting missing + frontier frames until the
@@ -416,6 +427,7 @@ impl CimApp {
             visible: true,
             contrast,
             details: false,
+            overlay: None,
             error: None,
             eager: false,
         });
@@ -425,8 +437,15 @@ impl CimApp {
         if i >= self.panes.len() {
             return;
         }
-        self.decoder.forget(self.panes[i].id); // drop its persistent reader
+        let removed_id = self.panes[i].id;
+        self.decoder.forget(removed_id); // drop its persistent reader
         self.panes.remove(i);
+        // Drop any overlay that pointed at the removed mask.
+        for p in &mut self.panes {
+            if p.overlay.as_ref().is_some_and(|o| o.src_id == removed_id) {
+                p.overlay = None;
+            }
+        }
         let n = self.panes.len();
         let fix = |v: &mut usize| {
             if *v > i {
