@@ -254,11 +254,19 @@ pub struct Config {
     /// Global UI zoom factor for buttons/text (egui zoom_factor).
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Soft ceiling, in MiB, on decoded frames kept resident across all
+    /// sequences before the least-recently-viewed ones are evicted.
+    #[serde(default = "default_cache_budget_mb")]
+    pub cache_budget_mb: usize,
     pub keybindings: Keybindings,
 }
 
 fn default_ui_scale() -> f32 {
     1.0
+}
+
+fn default_cache_budget_mb() -> usize {
+    1536 // 1.5 GiB
 }
 
 impl Default for Config {
@@ -267,6 +275,7 @@ impl Default for Config {
             max_columns: 3,
             vis: VisSettings::default(),
             ui_scale: default_ui_scale(),
+            cache_budget_mb: default_cache_budget_mb(),
             keybindings: Keybindings::default(),
         }
     }

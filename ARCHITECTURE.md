@@ -215,8 +215,9 @@ set pane `error`).
 Frames are held at native bit depth and never freed by decode alone, so a long/
 large sequence could OOM. Guard:
 
-- `CACHE_BUDGET_BYTES` (in `app/mod.rs`) = **1.5 GiB** soft ceiling across *all*
-  sequences. Tunable constant (could be surfaced in settings later).
+- `CimApp::cache_budget_bytes()` = the soft ceiling across *all* sequences, from
+  `config.cache_budget_mb` (**default 1.5 GiB**, adjustable via the **Frame
+  cache** slider in Settings, 128 MiB–32 GiB, persisted like other config).
 - `CimApp.clock` increments each update; frames are `touch`ed on decode (in
   `pump_decoder`) and on display (in `prepare`) → LRU recency in `last_used`.
 - When total `resident_bytes()` exceeds budget: gather resident frames that are
@@ -442,7 +443,7 @@ GUI) or `Cli::Exit(code)`.
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, vis: { interp }, ui_scale, keybindings }`, saved as JSON
+`Config { max_columns, vis: { interp }, ui_scale, cache_budget_mb, keybindings }`, saved as JSON
 via `directories::ProjectDirs("dev","cim","cim")` → `config.json`. Loaded on
 start, saved on exit / explicit save.
 

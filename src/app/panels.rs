@@ -959,6 +959,18 @@ impl CimApp {
                             .fixed_decimals(2),
                     );
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Frame cache");
+                    ui.add(
+                        egui::Slider::new(&mut self.config.cache_budget_mb, 128..=32768)
+                            .suffix(" MiB")
+                            .logarithmic(true),
+                    )
+                    .on_hover_text(
+                        "Memory ceiling for decoded frames kept resident across all \
+                         sequences; oldest unshown frames are evicted beyond it.",
+                    );
+                });
 
                 ui.add_space(8.0);
                 ui.separator();

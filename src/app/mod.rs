@@ -43,11 +43,10 @@ const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 /// reads distinct from the amber export-region rectangle).
 const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
 
-/// Soft ceiling on decoded frames kept resident across all sequences. Beyond
-/// it the least-recently-viewed frames are evicted (they re-decode on demand),
-/// so a long sequence can't grow memory without bound. Sized to stay
-/// comfortable on a modest VNC host; raise it if the machine has RAM to spare.
-const CACHE_BUDGET_BYTES: usize = 1536 * 1024 * 1024; // 1.5 GiB
+// Soft ceiling on decoded frames kept resident across all sequences. Beyond it
+// the least-recently-viewed frames are evicted (they re-decode on demand), so a
+// long sequence can't grow memory without bound. Configurable in Settings
+// (`config.cache_budget_mb`); see `CimApp::cache_budget_bytes`.
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -709,6 +708,12 @@ impl CimApp {
         (0..self.panes.len())
             .filter(|&i| self.panes[i].visible)
             .collect()
+    }
+
+    /// The resident-frame memory ceiling in bytes, from the configured budget
+    /// (at least 1 MiB so eviction always has a target below the total).
+    pub(super) fn cache_budget_bytes(&self) -> usize {
+        self.config.cache_budget_mb.max(1) * 1024 * 1024
     }
 
     // ---- statistics region ----------------------------------------------

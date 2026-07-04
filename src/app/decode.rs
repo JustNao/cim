@@ -134,8 +134,9 @@ impl CimApp {
     /// budget. Each pane's currently shown frame is protected so the view never
     /// blanks, and an over-budget "Load all" is stopped rather than thrashing.
     pub(super) fn enforce_cache_budget(&mut self) {
+        let budget = self.cache_budget_bytes();
         let mut total: usize = self.panes.iter().map(|p| p.media.resident_bytes()).sum();
-        if total <= CACHE_BUDGET_BYTES {
+        if total <= budget {
             return;
         }
 
@@ -161,7 +162,7 @@ impl CimApp {
         }
         cands.sort_unstable_by_key(|c| c.0);
         for (_, i, frame, bytes) in cands {
-            if total <= CACHE_BUDGET_BYTES {
+            if total <= budget {
                 break;
             }
             self.panes[i].media.evict(frame);

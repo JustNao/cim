@@ -754,7 +754,7 @@ impl CimApp {
         let on = self.panes[idx].region_tone;
         let resp = ui.put(
             btn_rect,
-            egui::SelectableLabel::new(on, "compute LUT from region"),
+            egui::SelectableLabel::new(on, "LUT from region"),
         );
         if resp.clicked() {
             self.apply_region_tone(!on);
@@ -785,7 +785,7 @@ impl CimApp {
         let left = r.left().clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
         let btn_rect = Rect::from_min_size(Pos2::new(left, top), size);
         if ui
-            .put(btn_rect, egui::Button::new("σ stats"))
+            .put(btn_rect, egui::Button::new("Stats"))
             .on_hover_text("Show region stats")
             .clicked()
         {
