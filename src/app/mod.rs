@@ -62,13 +62,14 @@ struct CachedTex {
     shown: usize, // frame index currently uploaded
 }
 
-/// A boolean mask from another pane, tinted and drawn over this pane.
-struct MaskOverlay {
-    src_id: u64,   // stable id of the mask pane supplying the overlay
+/// A boolean mask from another pane, tinted and drawn over a pane. Config only
+/// (no texture), so it can be shared across tone-synced panes; the tinted
+/// texture is cached separately per pane in `Pane.overlay_tex`.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct OverlaySpec {
+    src_id: u64, // stable id of the mask pane supplying the overlay
     color: Color32,
     opacity: f32, // 0..1
-    /// Cached tinted texture; rebuilt when the mask frame or colour changes.
-    tex: Option<CachedTex>,
 }
 
 /// Cached histogram for the media shown in the Visualise panel.
@@ -133,8 +134,12 @@ struct Pane {
     show_opts: bool,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
-    /// Optional boolean-mask overlay drawn on top of this pane.
-    overlay: Option<MaskOverlay>,
+    /// Optional boolean-mask overlay drawn on top of this pane (config only;
+    /// shared across synced panes via `overlay_of`).
+    overlay: Option<OverlaySpec>,
+    /// Cached tinted overlay texture for this pane (rebuilt when the effective
+    /// overlay config or the mask's shown frame changes).
+    overlay_tex: Option<CachedTex>,
     /// When set, this pane's tone bounds come from the shared stats region
     /// instead of the whole image (min/max, or 0.01% clip). Replicated to every
     /// pane by the "Tone ⟵ region" button.
@@ -167,6 +172,8 @@ pub struct CimApp {
     shared_contrast: ContrastMode,
     shared_tone: ToneOptions,
     shared_details: bool,
+    /// Shared mask overlay (rides the same `sync_tone` as the tone).
+    shared_overlay: Option<OverlaySpec>,
     /// A requested timeline frame not yet reachable because the sequence's
     /// length is still being discovered (e.g. from `--frame` at launch). While
     /// set, discovery is driven forward until this frame exists, then the
@@ -308,6 +315,7 @@ impl CimApp {
             shared_contrast: ContrastMode::LinearClip,
             shared_tone: ToneOptions::default(),
             shared_details: false,
+            shared_overlay: None,
             pending_seek: None,
             mode: Mode::Grid,
             current: 0,
@@ -584,6 +592,7 @@ impl CimApp {
             show_opts: false,
             details: false,
             overlay: None,
+            overlay_tex: None,
             region_tone: false,
             stats: None,
             hist: None,
@@ -600,11 +609,19 @@ impl CimApp {
         let removed_id = self.panes[i].id;
         self.decoder.forget(removed_id); // drop its persistent reader
         self.panes.remove(i);
-        // Drop any overlay that pointed at the removed mask.
+        // Drop any overlay (own or shared) that pointed at the removed mask, and
+        // clear cached overlay textures that referenced it.
+        if self
+            .shared_overlay
+            .is_some_and(|o| o.src_id == removed_id)
+        {
+            self.shared_overlay = None;
+        }
         for p in &mut self.panes {
-            if p.overlay.as_ref().is_some_and(|o| o.src_id == removed_id) {
+            if p.overlay.is_some_and(|o| o.src_id == removed_id) {
                 p.overlay = None;
             }
+            p.overlay_tex = None;
         }
         let n = self.panes.len();
         let fix = |v: &mut usize| {
@@ -647,13 +664,17 @@ impl CimApp {
                 self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
-                // If this is a mask, invalidate overlay textures sourced from it
-                // so they rebuild from the reloaded contents (same frame index).
+                // If this is a mask, invalidate overlay textures whose effective
+                // source is it, so they rebuild from the reloaded contents.
+                let shared_src = self.shared_overlay.map(|o| o.src_id);
                 for p in &mut self.panes {
-                    if let Some(o) = &mut p.overlay {
-                        if o.src_id == id {
-                            o.tex = None;
-                        }
+                    let eff = if p.sync_tone {
+                        shared_src
+                    } else {
+                        p.overlay.map(|o| o.src_id)
+                    };
+                    if eff == Some(id) {
+                        p.overlay_tex = None;
                     }
                 }
                 // Frame position is left untouched; frame_disp clamps it if the
@@ -827,19 +848,29 @@ impl CimApp {
         }
     }
 
+    pub(super) fn overlay_of(&self, i: usize) -> Option<OverlaySpec> {
+        if self.panes[i].sync_tone {
+            self.shared_overlay
+        } else {
+            self.panes[i].overlay
+        }
+    }
+
     /// Invalidate the textures of every tone-synced pane (after the shared
-    /// Transformations change), so they re-render with the new mapping.
+    /// Transformations change), so they re-render with the new mapping — base
+    /// image and tinted overlay both.
     pub(super) fn invalidate_synced_tone(&mut self) {
         for p in &mut self.panes {
             if p.sync_tone {
                 p.tex = None;
+                p.overlay_tex = None;
             }
         }
     }
 
     /// Set a pane's tone-sync flag. Turning it **off** snapshots the shared
-    /// Transformations into the pane so nothing jumps; either way the pane
-    /// re-renders.
+    /// Transformations (tone + overlay) into the pane so nothing jumps; either
+    /// way the pane re-renders.
     pub(super) fn set_sync_tone(&mut self, i: usize, on: bool) {
         if self.panes[i].sync_tone == on {
             return;
@@ -848,9 +879,11 @@ impl CimApp {
             self.panes[i].contrast = self.shared_contrast;
             self.panes[i].tone = self.shared_tone;
             self.panes[i].details = self.shared_details;
+            self.panes[i].overlay = self.shared_overlay;
         }
         self.panes[i].sync_tone = on;
         self.panes[i].tex = None;
+        self.panes[i].overlay_tex = None;
     }
 
     /// Length of the shared timeline: the **control** media drives the loop.

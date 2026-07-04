@@ -286,15 +286,20 @@ impl CimApp {
     }
 
     /// Ensure the tinted overlay texture for pane `idx` is current, returning it
-    /// to draw over the pane's image. Sources the mask from the pane referenced
-    /// by `overlay.src_id`, at that mask's currently shown frame. Returns `None`
-    /// when there's no overlay or the mask pane is gone.
+    /// to draw over the pane's image. The overlay config is the pane's
+    /// *effective* one (`overlay_of` — shared when tone-synced); the mask is
+    /// taken from the referenced pane at its currently shown frame, and the
+    /// tinted texture is cached in `Pane.overlay_tex`. Returns `None` when
+    /// there's no overlay, the mask pane is gone, or this is itself a mask pane.
     ///
     /// The mask is decoded on demand here, so the overlay works even when the
     /// mask pane itself isn't drawn (hidden in the manager, or just reloaded).
     /// While the frame decodes, the last overlay texture keeps showing.
     pub(super) fn prepare_overlay(&mut self, ctx: &egui::Context, idx: usize) -> Option<TextureId> {
-        let ov = self.panes[idx].overlay.as_ref()?;
+        if self.panes[idx].media.is_mask() {
+            return None; // don't tint an overlay onto a mask pane itself
+        }
+        let ov = self.overlay_of(idx)?;
         let (src_id, color, opacity) = (ov.src_id, ov.color, ov.opacity);
         let src = self.panes.iter().position(|p| p.id == src_id)?;
         let f = self.frame_disp(src);
@@ -302,17 +307,16 @@ impl CimApp {
             // Not decoded yet: request it and keep the previous overlay texture.
             self.request(src, f);
             return self.panes[idx]
-                .overlay
+                .overlay_tex
                 .as_ref()
-                .and_then(|o| o.tex.as_ref().map(|t| t.handle.id()));
+                .map(|t| t.handle.id());
         };
         self.panes[src].media.touch(f, self.clock); // keep it hot so it isn't evicted
 
         let rgb = [color.r(), color.g(), color.b()];
         let alpha = (opacity.clamp(0.0, 1.0) * 255.0) as u8;
 
-        let ov = self.panes[idx].overlay.as_mut().unwrap();
-        let need = match &ov.tex {
+        let need = match &self.panes[idx].overlay_tex {
             Some(t) => t.shown != f,
             None => true,
         };
@@ -321,18 +325,17 @@ impl CimApp {
             frame.render_mask_rgba(rgb, alpha, &mut buf);
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
             let opts = TextureOptions::NEAREST;
-            match &mut ov.tex {
+            match &mut self.panes[idx].overlay_tex {
                 Some(t) => {
                     t.handle.set(img, opts);
                     t.shown = f;
                 }
                 None => {
-                    let handle =
-                        ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
-                    ov.tex = Some(CachedTex { handle, shown: f });
+                    let handle = ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
+                    self.panes[idx].overlay_tex = Some(CachedTex { handle, shown: f });
                 }
             }
         }
-        Some(ov.tex.as_ref().unwrap().handle.id())
+        Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
     }
 }

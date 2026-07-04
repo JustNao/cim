@@ -338,16 +338,20 @@ panes independently.
 - **A/B wipe:** `draw_ab` shows `slot_a`/`slot_b` split at `ab_split` (draggable
   divider, `HANDLE_HIT` grab zone); pan/zoom acts on the side under the cursor.
 
-**Mask overlays.** A pane may carry a `MaskOverlay { src_id, color, opacity,
-tex }` — a boolean-mask media (referenced by stable pane id) tinted and drawn on
-top. `app/decode.rs::prepare_overlay` builds/caches the tinted texture from the
-mask's currently shown frame (via `render_mask_rgba`) and `draw_pane` paints it
-over the base image at the *same* image-space rect (1:1). The mask frame is
-**decoded on demand** there, so the overlay works even when the mask pane isn't
-drawn (hidden, or just reloaded — `reload` invalidates dependent overlay
-textures). Configured per pane in the **Transformations** popup's **Overlay**
-row (mask picker + colour + α); cleared when its source mask is closed. Aligns
-pixel-for-pixel, so a mask is expected to match its target's dimensions.
+**Mask overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }`
+— a boolean-mask media (referenced by stable pane id) tinted and drawn on top.
+The spec is **config only** so it rides the Transformations sync (`overlay_of`
+returns the shared spec when `sync_tone`); the tinted texture is cached
+separately per pane in `Pane.overlay_tex`. `app/decode.rs::prepare_overlay`
+builds/caches that texture from the mask's currently shown frame (via
+`render_mask_rgba`) and `draw_pane` paints it over the base image at the *same*
+image-space rect (1:1); it returns `None` on a mask pane itself. The mask frame
+is **decoded on demand** there, so the overlay works even when the mask pane
+isn't drawn (hidden, or just reloaded — `reload` invalidates dependent
+`overlay_tex`). Configured per pane in the **Transformations** popup's **Overlay**
+row (mask picker + colour + α), sharing across synced panes; cleared when its
+source mask is closed. Aligns pixel-for-pixel, so a mask is expected to match its
+target's dimensions.
 
 Per pane: `image_area(cell)` (between `HEADER_H` header and `FOOTER_H` footer),
 `draw_header` (index, name, `frame/known(+)`, `in mem`, sync markers, close ×),
@@ -418,11 +422,13 @@ and the image area shrinks to match.
 
 **Transformations sync (`Pane.sync_tone`).** Like the Pos/Time view syncs, a pane
 can follow the **shared** Transformations (`shared_contrast` / `shared_tone` /
-`shared_details`) instead of its own — toggled by the **Transf** checkbox in the
-manager's Sync column (per-row and aggregate). `contrast_of` / `tone_of` /
-`details_of` return the effective value (shared when synced) and are what
-`prepare`, `export_pane`, and `view_command` read; editing a synced pane's popup
-writes the shared set and `invalidate_synced_tone` refreshes every synced pane.
+`shared_details` / `shared_overlay`) instead of its own — toggled by the
+**Transf** checkbox in the manager's Sync column (per-row and aggregate).
+`contrast_of` / `tone_of` / `details_of` / `overlay_of` return the effective
+value (shared when synced) and are what `prepare`, `prepare_overlay`,
+`export_pane`, and `view_command` read; editing a synced pane's popup writes the
+shared set and `invalidate_synced_tone` refreshes every synced pane (base and
+overlay textures).
 `set_sync_tone(false)` snapshots the shared values into the pane so nothing jumps
 (mirroring the Pos/Time off-toggle). **Default on**: the first opened media seeds
 the shared set (`add_pane`), so its depth-appropriate tone becomes the group

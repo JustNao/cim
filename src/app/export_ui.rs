@@ -70,7 +70,9 @@ impl CimApp {
             p.frame,
             self.export_source(idx),
         );
-        if let Some(ov) = &p.overlay {
+        // Use the effective overlay (shared when the pane is tone-synced), and
+        // skip mask panes (they don't take an overlay), matching prepare_overlay.
+        if let Some(ov) = self.overlay_of(idx).filter(|_| !p.media.is_mask()) {
             if let Some(m) = self.panes.iter().position(|q| q.id == ov.src_id) {
                 let mp = &self.panes[m];
                 pane.set_overlay(

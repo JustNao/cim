@@ -876,7 +876,7 @@ impl CimApp {
             .map(|p| (p.id, p.media.name().to_string()))
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
-        let (mut ov_src, mut ov_color, mut ov_alpha) = match &self.panes[idx].overlay {
+        let (mut ov_src, mut ov_color, mut ov_alpha) = match self.overlay_of(idx) {
             Some(o) => (Some(o.src_id), o.color, o.opacity),
             None => (None, Color32::from_rgb(240, 60, 60), 0.5),
         };
@@ -1011,19 +1011,26 @@ impl CimApp {
                 });
             });
 
-        // Reconcile the mask overlay (rebuild the tinted texture on any change).
-        let cur = self.panes[idx]
-            .overlay
-            .as_ref()
-            .map(|o| (o.src_id, o.color, o.opacity));
-        let new = ov_src.map(|id| (id, ov_color, ov_alpha));
-        if cur != new {
-            self.panes[idx].overlay = ov_src.map(|src_id| MaskOverlay {
-                src_id,
-                color: ov_color,
-                opacity: ov_alpha,
-                tex: None,
-            });
+        // Reconcile the mask overlay. It rides the tone-sync: when synced, edit
+        // the shared overlay and rebuild every synced pane's tinted texture;
+        // otherwise just this pane's.
+        let new = ov_src.map(|src_id| OverlaySpec {
+            src_id,
+            color: ov_color,
+            opacity: ov_alpha,
+        });
+        if self.overlay_of(idx) != new {
+            if synced {
+                self.shared_overlay = new;
+                for p in &mut self.panes {
+                    if p.sync_tone {
+                        p.overlay_tex = None;
+                    }
+                }
+            } else {
+                self.panes[idx].overlay = new;
+                self.panes[idx].overlay_tex = None;
+            }
         }
 
         // `interp` now lives inside `tone`, so the tone write-back below (own or
