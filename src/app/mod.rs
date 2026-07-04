@@ -1392,8 +1392,7 @@ fn draw_tone_options(
                 egui::DragValue::new(&mut tone.clip.percent)
                     .speed(0.005)
                     .range(0.0..=49.0)
-                    .max_decimals(3)
-                    .suffix(" %"),
+                    .max_decimals(3),
             )
             .on_hover_text("Percentile clipped at each tail before the stretch");
             ui.end_row();

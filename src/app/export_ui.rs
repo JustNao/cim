@@ -494,14 +494,11 @@ impl CimApp {
                 });
                 ui.label(
                     egui::RichText::new(format!(
-                        "→ {}",
-                        ellipsize(
+                        "{}",
                             &std::env::current_dir()
                                 .unwrap_or_default()
                                 .display()
                                 .to_string(),
-                            40
-                        )
                     ))
                     .weak()
                     .small(),

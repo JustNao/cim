@@ -39,42 +39,18 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Build the window icon: a white "C" on black, drawn procedurally (no asset
-/// file) so the app no longer falls back to eframe's default "e" logo.
+/// The window icon, decoded at startup from the PNG baked into the binary.
+/// eframe wants raw RGBA8 pixels (`IconData`), not an encoded PNG, so we decode
+/// it with the `image` crate. `include_bytes!` embeds the file into the exe at
+/// build time, so the icon ships with it — there's no runtime path to find.
 fn app_icon() -> egui::IconData {
-    const N: usize = 64;
-    let center = (N as f32 - 1.0) / 2.0;
-    let ro = 0.42 * N as f32; // outer radius of the ring
-    let ri = 0.24 * N as f32; // inner radius of the ring
-    let gap = 0.62_f32; // half-angle (radians) of the C's opening, facing +x
-
-    let mut rgba = Vec::with_capacity(N * N * 4);
-    for y in 0..N {
-        for x in 0..N {
-            // 3x3 supersample for anti-aliasing.
-            let mut cover = 0.0_f32;
-            for sy in 0..3 {
-                for sx in 0..3 {
-                    let px = x as f32 + (sx as f32 + 0.5) / 3.0 - 0.5;
-                    let py = y as f32 + (sy as f32 + 0.5) / 3.0 - 0.5;
-                    let dx = px - center;
-                    let dy = py - center;
-                    let r = (dx * dx + dy * dy).sqrt();
-                    let in_ring = r >= ri && r <= ro;
-                    let in_gap = dx > 0.0 && dy.atan2(dx).abs() < gap;
-                    if in_ring && !in_gap {
-                        cover += 1.0 / 9.0;
-                    }
-                }
-            }
-            let v = (cover * 255.0).round() as u8;
-            rgba.extend_from_slice(&[v, v, v, 255]);
-        }
-    }
-
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("decode embedded app icon")
+        .to_rgba8();
+    let (width, height) = img.dimensions();
     egui::IconData {
-        rgba,
-        width: N as u32,
-        height: N as u32,
+        rgba: img.into_raw(),
+        width,
+        height,
     }
 }
