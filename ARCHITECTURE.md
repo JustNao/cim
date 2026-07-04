@@ -311,7 +311,9 @@ to the working dir). Skipped by `view_command`.
 
 The app builds a self-contained **`ExportPlan`** (snapshot of layout, views, clip,
 sources, frame range) decoupled from live state, composites each output frame on the
-CPU, and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264).
+CPU, and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264). Because the plan is a
+snapshot, the whole compose+encode loop runs on a **worker thread** — the UI stays
+responsive and interaction can't corrupt the export.
 
 - `ExportPane` holds a snapshot view/clip/source plus its **own `SeqReader`** and a
   1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
@@ -325,8 +327,10 @@ CPU, and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264).
   crop's pixel size.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window. A warning + "Load all" appears when a length isn't discovered yet.
-- Output filename typed in the panel, written to the **cwd**. `Encoder` streams one
-  frame per update; `export_tick` drives it.
+- Output filename typed in the panel, written to the **cwd**. `start_export` spawns
+  `run_export` (compose + `Encoder` write per frame) on a **worker thread**, sharing an
+  `AtomicUsize` progress + `AtomicBool` cancel; `export_tick` just polls it each update,
+  relaying cancel and joining the thread for the final outcome (`ExportOutcome`).
 
 ---
 
@@ -378,10 +382,10 @@ is a sequence), central panel, the compute draft, windows
 `export_tick`; then a **paced repaint**.
 
 **Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
-export runs at full speed (one encoded frame per update), playback requests
-`request_repaint_after(1/fps)`, a pending background decode polls every `DECODE_POLL`
-(~30 fps, enough to pick up frames + spin the spinner), and a fully idle app requests
-no repaint at all.
+playback requests `request_repaint_after(1/fps)`; a pending background decode **or a
+running export** (which encodes on its own thread — we just poll progress) wakes every
+`DECODE_POLL` (~30 fps, enough to pick up frames + spin the spinner); a fully idle app
+requests no repaint at all.
 
 Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_create`,
 `error_popup`) avoid mutating panes mid-draw.

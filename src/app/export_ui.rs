@@ -1,16 +1,57 @@
-//! The export panel: building an `ExportPlan` from live app state, driving a
-//! run one frame per update, and the export window UI. The composition and
-//! ffmpeg encoding live in `crate::export`.
+//! The export panel: building an `ExportPlan` from live app state, running it on
+//! a background thread (compose + ffmpeg encode), and the export window UI. The
+//! composition and ffmpeg encoding live in `crate::export`.
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 use super::*;
 
-/// An in-progress export: encoder + snapshotted plan + progress.
+/// An in-progress export: a worker thread that owns the encoder + snapshotted
+/// plan and composites/encodes every frame off the UI thread. The UI polls
+/// `progress` for the bar and flips `cancel` to stop it; `handle` yields the
+/// final outcome once the thread ends.
 pub(super) struct ExportRun {
-    enc: Encoder,
-    plan: ExportPlan,
-    frame: usize,
+    handle: Option<thread::JoinHandle<ExportOutcome>>,
+    progress: Arc<AtomicUsize>, // frames written so far
+    cancel: Arc<AtomicBool>,
     total: usize,
     path: String,
+}
+
+/// How a finished export thread ended.
+enum ExportOutcome {
+    Done(usize), // frames written
+    Cancelled,
+    Failed(String),
+}
+
+/// Worker body: compose + encode every frame, publishing progress and honouring
+/// a cancel request between frames. Runs on its own thread.
+fn run_export(
+    mut enc: Encoder,
+    mut plan: ExportPlan,
+    total: usize,
+    progress: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
+) -> ExportOutcome {
+    for t in 0..total {
+        if cancel.load(Ordering::Relaxed) {
+            enc.kill();
+            return ExportOutcome::Cancelled;
+        }
+        let buf = plan.compose(t);
+        if let Err(e) = enc.write_frame(&buf) {
+            enc.kill();
+            return ExportOutcome::Failed(format!("Export failed: {e}"));
+        }
+        progress.store(t + 1, Ordering::Relaxed);
+    }
+    match enc.finish() {
+        Ok(()) => ExportOutcome::Done(total),
+        Err(e) => ExportOutcome::Failed(e),
+    }
 }
 
 impl CimApp {
@@ -246,50 +287,58 @@ impl CimApp {
             }
         };
         let (w, h, total) = (plan.out_w, plan.out_h, plan.total);
-        match Encoder::start(&path, w, h, self.export_fps, self.crf) {
-            Ok(enc) => {
-                self.export_status = format!("Exporting {total} frames…");
-                self.export_run = Some(ExportRun {
-                    enc,
-                    plan,
-                    frame: 0,
-                    total,
-                    path: path.display().to_string(),
-                });
+        let enc = match Encoder::start(&path, w, h, self.export_fps, self.crf) {
+            Ok(enc) => enc,
+            Err(e) => {
+                self.export_status = e;
+                return;
             }
-            Err(e) => self.export_status = e,
-        }
+        };
+        // Compose + encode on a worker thread so the UI stays responsive; the
+        // plan is a self-contained snapshot, so live edits don't affect it.
+        let progress = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (pc, cc) = (progress.clone(), cancel.clone());
+        let handle = thread::spawn(move || run_export(enc, plan, total, pc, cc));
+        self.export_status = format!("Exporting {total} frames…");
+        self.export_run = Some(ExportRun {
+            handle: Some(handle),
+            progress,
+            cancel,
+            total,
+            path: path.display().to_string(),
+        });
     }
 
-    /// Encode one frame per call; driven from `update` while a run is active.
+    /// Poll the export worker from `update`: relay a cancel request and, once the
+    /// thread has finished, join it for the outcome and report it. The heavy
+    /// compose/encode work runs on the worker, not here.
     pub(super) fn export_tick(&mut self) {
-        let Some(mut run) = self.export_run.take() else {
+        let Some(run) = self.export_run.as_mut() else {
             return;
         };
         if self.cancel_export {
             self.cancel_export = false;
-            run.enc.kill();
-            self.export_status = "Export cancelled".into();
-            return; // run dropped
+            run.cancel.store(true, Ordering::Relaxed);
+            self.export_status = "Cancelling…".into();
         }
-        if run.frame >= run.total {
-            self.export_status = match run.enc.finish() {
-                Ok(()) => format!("Exported {} frames → {}", run.total, run.path),
-                Err(e) => e,
-            };
-            return; // run dropped
+        // Still encoding? leave the run in place and poll again next update.
+        if !run.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
         }
-        let buf = run.plan.compose(run.frame);
-        match run.enc.write_frame(&buf) {
-            Ok(()) => {
-                run.frame += 1;
-                self.export_run = Some(run);
-            }
-            Err(e) => {
-                run.enc.kill();
-                self.export_status = format!("Export failed: {e}");
-            }
-        }
+        let outcome = run
+            .handle
+            .take()
+            .unwrap()
+            .join()
+            .unwrap_or_else(|_| ExportOutcome::Failed("Export thread panicked".into()));
+        let path = std::mem::take(&mut run.path);
+        self.export_run = None;
+        self.export_status = match outcome {
+            ExportOutcome::Done(n) => format!("Exported {n} frames → {path}"),
+            ExportOutcome::Cancelled => "Export cancelled".into(),
+            ExportOutcome::Failed(e) => e,
+        };
     }
 
     pub(super) fn draw_export(&mut self, ctx: &egui::Context) {
@@ -464,9 +513,10 @@ impl CimApp {
 
                 ui.separator();
                 if let Some(run) = &self.export_run {
+                    let done = run.progress.load(Ordering::Relaxed);
                     ui.add(
-                        egui::ProgressBar::new(run.frame as f32 / run.total.max(1) as f32)
-                            .text(format!("{}/{}", run.frame, run.total)),
+                        egui::ProgressBar::new(done as f32 / run.total.max(1) as f32)
+                            .text(format!("{}/{}", done, run.total)),
                     );
                     if ui.button("Cancel").clicked() {
                         self.cancel_export = true;

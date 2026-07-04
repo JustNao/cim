@@ -2,9 +2,9 @@
 //!
 //! The app builds a self-contained [`ExportPlan`] (a snapshot of layout, views,
 //! tone/detail settings and media sources), then composites each timeline frame on the CPU
-//! and pipes raw RGBA to the `ffmpeg` CLI, which encodes H.264. Keeping the plan
-//! decoupled from live app state means an in-progress export is stable even if
-//! the user keeps interacting, and it could move to a worker thread later.
+//! and pipes raw RGBA to the `ffmpeg` CLI, which encodes H.264. Because the plan
+//! is decoupled from live app state, the whole compose+encode loop runs on a
+//! worker thread (`app/export_ui.rs::run_export`) while the UI keeps interacting.
 
 use std::io::{Read, Write};
 use std::path::Path;

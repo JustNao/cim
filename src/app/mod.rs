@@ -1263,16 +1263,14 @@ impl eframe::App for CimApp {
 
         // Keep animating, but pace repaints to what's actually happening rather
         // than busy-spinning at monitor rate (pure waste over VNC / no-GPU).
-        // Export advances one encoded frame per update, so it needs full speed;
-        // playback only needs its own frame interval; a pending background decode
-        // just needs an occasional poll to pick up landed frames + spin the
-        // spinner. Idle with nothing pending: no repaint is requested at all.
-        if self.export_run.is_some() || self.cancel_export {
-            ctx.request_repaint();
-        } else if self.playing {
+        // Playback needs its own frame interval; a pending background decode or a
+        // running export (which encodes on a worker thread — we just poll its
+        // progress) only needs an occasional wake-up. Idle with nothing pending:
+        // no repaint is requested at all.
+        if self.playing {
             let dt = (1.0 / self.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
-        } else if !self.inflight.is_empty() {
+        } else if self.export_run.is_some() || self.cancel_export || !self.inflight.is_empty() {
             ctx.request_repaint_after(DECODE_POLL);
         }
     }
