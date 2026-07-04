@@ -326,8 +326,8 @@ impl CimApp {
         }
 
         // "Compute" button: next to Transformations on one row, or under it
-        // (row 2) when stacked. Creates a Compute pane sourced from this pane
-        // (deferred so we don't grow `panes` mid-draw).
+        // (row 2) when stacked. Opens the floating "new compute" config panel
+        // where it was clicked; the pane itself is created from there.
         let compute = if two_row {
             Rect::from_min_size(
                 Pos2::new(header.min.x, header.min.y + HEADER_H),
@@ -357,7 +357,16 @@ impl CimApp {
             Color32::from_gray(225),
         );
         if comp_resp.clicked() {
-            self.pending_compute = Some(self.panes[idx].id);
+            let id = self.panes[idx].id;
+            let pos = comp_resp.interact_pointer_pos().unwrap_or_else(|| compute.center());
+            // Default source A to the clicked pane when it can be one.
+            let source_id = (self.panes[idx].compute.is_none()).then_some(id);
+            self.compute_draft = Some(ComputeDraft {
+                pos,
+                kind: media::Reduce::Mean,
+                source_id,
+                source_b: None,
+            });
         }
 
         let count = self.panes[idx].media.frame_count();
@@ -1061,24 +1070,25 @@ impl CimApp {
 
     // ---- compute pane controls -------------------------------------------
 
-    /// Overlay a Compute pane with its controls: a top-left foreground `Area`
-    /// pinned to `img_area` holding the reduction kind + source sequence,
-    /// Recompute, and an inline Save (a button that expands into a name field).
-    /// Edits are written back and a recompute / save is dispatched after.
+    /// Overlay a realized Compute pane with its controls: a top-left foreground
+    /// `Area` pinned to `img_area` holding the mode + source combos, a **Refresh**
+    /// button with an **Auto refresh** toggle, and an inline Save. Edits are
+    /// written back and a recompute / save is dispatched after.
     fn draw_compute_ui(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect) {
         let pane_id = self.panes[idx].id;
-        // Sources: any non-compute sequence (needs ≥2 frames to reduce).
-        let sources: Vec<(u64, String)> = self
-            .panes
-            .iter()
-            .filter(|p| p.compute.is_none() && p.media.frame_count() > 1)
-            .map(|p| (p.id, p.media.name().to_string()))
-            .collect();
-
-        let (mut kind, mut source_id, mut saving, mut save_name, status) = {
+        let (mut kind, mut source_id, mut source_b, mut auto, mut saving, mut save_name, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
-            (c.kind, c.source_id, c.saving, c.save_name.clone(), c.status.clone())
+            (
+                c.kind,
+                c.source_id,
+                c.source_b,
+                c.auto,
+                c.saving,
+                c.save_name.clone(),
+                c.status.clone(),
+            )
         };
+        let sources = self.compute_sources(kind);
         let mut recompute = false;
         let mut do_save = false;
 
@@ -1090,49 +1100,25 @@ impl CimApp {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);
+                    if compute_config_rows(
+                        ui,
+                        pane_id,
+                        &sources,
+                        &mut kind,
+                        &mut source_id,
+                        &mut source_b,
+                    ) {
+                        recompute = true;
+                    }
                     ui.horizontal(|ui| {
-                        ui.label("Compute");
-                        egui::ComboBox::from_id_salt(("ckind", pane_id))
-                            .selected_text(kind.label())
-                            .show_ui(ui, |ui| {
-                                for k in [media::Reduce::Mean, media::Reduce::Std] {
-                                    if ui.selectable_value(&mut kind, k, k.label()).clicked() {
-                                        recompute = true;
-                                    }
-                                }
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Source ");
-                        let sel = source_id
-                            .and_then(|id| sources.iter().find(|(m, _)| *m == id))
-                            .map(|(_, n)| ellipsize(n, 16))
-                            .unwrap_or_else(|| "—".into());
-                        egui::ComboBox::from_id_salt(("csrc", pane_id))
-                            .selected_text(sel)
-                            .show_ui(ui, |ui| {
-                                for (mid, mname) in &sources {
-                                    if ui
-                                        .selectable_value(
-                                            &mut source_id,
-                                            Some(*mid),
-                                            ellipsize(mname, 20),
-                                        )
-                                        .clicked()
-                                    {
-                                        recompute = true;
-                                    }
-                                }
-                            });
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Recompute from memory").clicked() {
+                        if ui.button("Refresh").clicked() {
                             recompute = true;
                         }
-                        if !saving && ui.button("Save").clicked() {
-                            saving = true;
-                        }
+                        ui.checkbox(&mut auto, "Auto refresh");
                     });
+                    if !saving && ui.button("Save").clicked() {
+                        saving = true;
+                    }
                     // Inline save: a name field (relative to the working dir).
                     if saving {
                         ui.add(
@@ -1160,6 +1146,8 @@ impl CimApp {
             let c = self.panes[idx].compute.as_mut().unwrap();
             c.kind = kind;
             c.source_id = source_id;
+            c.source_b = source_b;
+            c.auto = auto;
             c.saving = saving;
             c.save_name = save_name.clone();
         }
@@ -1168,6 +1156,64 @@ impl CimApp {
         }
         if do_save {
             self.save_computed(idx, &save_name);
+        }
+    }
+
+    /// The floating "new compute" panel, shown at the click location before a
+    /// result pane exists. Picks the mode + source(s); **Compute** realizes it
+    /// into a pane (deferred), **Cancel** dismisses it.
+    pub(super) fn draw_compute_draft(&mut self, ctx: &egui::Context) {
+        let Some(d) = self.compute_draft.as_ref() else {
+            return;
+        };
+        let pos = d.pos;
+        let (mut kind, mut source_id, mut source_b) = (d.kind, d.source_id, d.source_b);
+        let sources = self.compute_sources(kind);
+        let mut create = false;
+        let mut cancel = false;
+
+        egui::Area::new(Id::new("compute_draft"))
+            .order(egui::Order::Foreground)
+            .constrain_to(self.last_area)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(240.0);
+                    ui.label(egui::RichText::new("New compute").strong());
+                    compute_config_rows(
+                        ui,
+                        u64::MAX,
+                        &sources,
+                        &mut kind,
+                        &mut source_id,
+                        &mut source_b,
+                    );
+                    ui.horizontal(|ui| {
+                        let ready = source_id.is_some()
+                            && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Compute"))
+                            .clicked()
+                        {
+                            create = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+
+        if let Some(d) = self.compute_draft.as_mut() {
+            d.kind = kind;
+            d.source_id = source_id;
+            d.source_b = source_b;
+        }
+        if create {
+            self.pending_compute_create = true;
+        }
+        if cancel {
+            self.compute_draft = None;
         }
     }
 
@@ -1190,4 +1236,59 @@ impl CimApp {
             self.show_stats = true;
         }
     }
+}
+
+/// The mode + source combo rows shared by the floating compute draft and a
+/// realized Compute pane. `salt` disambiguates widget ids between the two.
+/// `sources` is the caller's kind-filtered source list. Returns true if any
+/// selection changed (so the caller can recompute). Diff shows an A and a B
+/// picker; the reductions show a single Source.
+fn compute_config_rows(
+    ui: &mut egui::Ui,
+    salt: u64,
+    sources: &[(u64, String)],
+    kind: &mut Reduce,
+    source_id: &mut Option<u64>,
+    source_b: &mut Option<u64>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Mode");
+        egui::ComboBox::from_id_salt(("ckind", salt))
+            .selected_text(kind.label())
+            .show_ui(ui, |ui| {
+                for k in [Reduce::Mean, Reduce::Std, Reduce::Diff] {
+                    if ui.selectable_value(kind, k, k.label()).clicked() {
+                        changed = true;
+                    }
+                }
+            });
+    });
+    let diff = matches!(*kind, Reduce::Diff);
+    let mut pick = |ui: &mut egui::Ui, label: &str, id: &str, sel: &mut Option<u64>| {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let cur = sel
+                .and_then(|s| sources.iter().find(|(m, _)| *m == s))
+                .map(|(_, n)| ellipsize(n, 16))
+                .unwrap_or_else(|| "—".into());
+            egui::ComboBox::from_id_salt((id, salt))
+                .selected_text(cur)
+                .show_ui(ui, |ui| {
+                    for (mid, mname) in sources {
+                        if ui
+                            .selectable_value(sel, Some(*mid), ellipsize(mname, 20))
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+        });
+    };
+    pick(ui, if diff { "A " } else { "Source " }, "csrc", source_id);
+    if diff {
+        pick(ui, "B ", "csrcb", source_b);
+    }
+    changed
 }

@@ -282,16 +282,28 @@ it. **"compute LUT from region"** pins every pane's tone to the region (§7); a 
 corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
 are **primary-button-only** so the right-drag isn't stolen.
 
-**Compute panes.** The header's **Compute** button queues `pending_compute` →
-`open_compute(prefer)`, adding a pane whose image is *generated*, sourced from the
-clicked pane when it's a sequence (else the first): `Pane.compute` holds the reduction
-`kind` (`media::Reduce::Mean | Std`) and source id. `recompute_pane` gathers the
-source's **resident** frames and calls `media::reduce_frames` (per-pixel/per-channel,
-`f64` accumulation → `f32` `Media::still`); `Source::Computed` makes the manager's ⟳
-**recompute from memory**. `draw_compute_ui` overlays kind/source combos, Recompute,
-and an inline **Save** (`media::save_frame` writes `.tif` as **32-bit float** or
-`.png`/`.jpg` as the 8-bit view, relative to the working dir). Skipped by
-`view_command`.
+**Compute panes.** A *generated* pane whose image is derived from other panes.
+Two-phase flow: the header's **Compute** button opens a floating **`ComputeDraft`**
+panel (`draw_compute_draft`) *where it was clicked* — mode + source pickers with no
+pane yet; its **Compute** button sets `pending_compute_create`, and the deferred
+`open_compute(draft)` realizes it into a pane, after which the controls live on that
+pane (`draw_compute_ui`, `Refresh` + **Auto refresh**) and the draft is dropped.
+`Pane.compute` holds the `kind`, source id(s), and the auto-refresh flag.
+`media::Reduce` modes:
+- **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
+  **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
+  accumulation → `f32`).
+- **Diff** — `compute_diff` takes **two** sources' *current* frames
+  (`frame_disp`, both must be resident) and calls `media::diff_frames` (signed
+  `A − B`, float). Sources may be stills; reductions need ≥2 frames
+  (`compute_sources`).
+
+Results become an `f32` `Media::still` (default tone Linear+Clip). **Auto refresh**
+recomputes when inputs change: `refresh_auto_compute` compares `compute_sig` (shown
+frames for Diff, source resident-count for reductions) against `Compute.last_sig`
+each update. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
+(`media::save_frame`, `.tif` **32-bit float** or `.png`/`.jpg` 8-bit view, relative
+to the working dir). Skipped by `view_command`.
 
 ---
 

@@ -62,11 +62,14 @@ pub struct RegionStats {
     pub count: usize,
 }
 
-/// A per-pixel reduction across a stack of frames, for the Compute panel.
+/// A Compute-panel operation. `Mean`/`Std` reduce a stack of frames from one
+/// source (see [`reduce_frames`]); `Diff` is a binary per-pixel difference of
+/// two sources' current frames (see [`diff_frames`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Reduce {
     Mean,
     Std,
+    Diff,
 }
 
 impl Reduce {
@@ -74,6 +77,7 @@ impl Reduce {
         match self {
             Reduce::Mean => "Mean",
             Reduce::Std => "Std",
+            Reduce::Diff => "Diff",
         }
     }
 }
@@ -116,10 +120,24 @@ pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameDat
             match kind {
                 Reduce::Mean => m as f32,
                 Reduce::Std => ((sumsq[i] * inv - m * m).max(0.0)).sqrt() as f32,
+                // Diff is a binary op (see `diff_frames`), never a stack reduction.
+                Reduce::Diff => m as f32,
             }
         })
         .collect();
     Some(FrameData::new(size, ch, Samples::F32(out)))
+}
+
+/// Per-pixel signed difference `a - b` of two same-shape frames, as a float
+/// frame so negatives and sub-integer deltas survive. Returns `None` if the
+/// frames differ in size or channel count.
+pub fn diff_frames(a: &FrameData, b: &FrameData) -> Option<FrameData> {
+    if a.size != b.size || a.channels != b.channels {
+        return None;
+    }
+    let n = a.size[0] * a.size[1] * a.channels;
+    let out: Vec<f32> = (0..n).map(|i| a.sample_f(i) - b.sample_f(i)).collect();
+    Some(FrameData::new(a.size, a.channels, Samples::F32(out)))
 }
 
 /// A small neutral still, used as the initial image of a fresh Compute pane
@@ -1648,6 +1666,14 @@ mod tests {
 
         // Empty input reduces to nothing.
         assert!(reduce_frames(&[], Reduce::Mean).is_none());
+
+        // Per-pixel signed difference, as a float frame (negatives survive).
+        let da = FrameData::new([2, 1], 1, Samples::U8(vec![0, 10]));
+        let db = FrameData::new([2, 1], 1, Samples::U8(vec![4, 20]));
+        assert_eq!(diff_frames(&da, &db).expect("diff").color_f32().1, vec![-4.0, -10.0]);
+        // Mismatched shapes don't diff.
+        let wide = FrameData::new([3, 1], 1, Samples::U8(vec![0, 0, 0]));
+        assert!(diff_frames(&da, &wide).is_none());
 
         let dir = std::env::temp_dir().join("cim_compute_test");
         let _ = std::fs::create_dir_all(&dir);

@@ -98,17 +98,37 @@ enum Source {
     Computed,
 }
 
-/// A Compute pane: reduces another pane's frames (mean / std across those
-/// currently in memory) into a single displayed image, with an inline Save.
+/// A Compute pane: derives a single displayed image from other panes — a
+/// mean/std reduction across one source's resident frames, or a per-pixel
+/// difference of two sources' current frames — with an inline Save.
 struct Compute {
     kind: Reduce,
-    /// Stable id of the source sequence pane, if chosen.
+    /// Stable id of the source pane (source A for `Diff`), if chosen.
     source_id: Option<u64>,
+    /// Second source (B) for `Diff`; unused by the reductions.
+    source_b: Option<u64>,
+    /// Recompute automatically whenever the inputs' shown frame(s) change.
+    auto: bool,
+    /// Input signature at the last (attempted) compute, so auto-refresh only
+    /// recomputes when something actually changed. See `compute_sig`.
+    last_sig: u64,
     /// Save UI expanded (showing the file-name input).
     saving: bool,
     save_name: String,
     /// Short result / error line shown in the controls.
     status: String,
+}
+
+/// A Compute panel being configured before its result pane exists: shown as a
+/// floating panel where the header "Compute" button was clicked. Picks the mode
+/// and source(s); its "Compute" button realizes the result pane (`open_compute`),
+/// after which the controls live on that pane (see [`Compute`]).
+struct ComputeDraft {
+    /// Top-left of the floating panel (the click location).
+    pos: Pos2,
+    kind: Reduce,
+    source_id: Option<u64>,
+    source_b: Option<u64>,
 }
 
 /// One opened media plus its per-pane view/timeline state.
@@ -211,10 +231,12 @@ pub struct CimApp {
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
     rebinding: Option<Action>,
-    /// A header "Compute" button was clicked: create a Compute pane after the
-    /// draw, preferring this pane id as the source. Deferred to avoid mutating
-    /// `panes` mid-draw.
-    pending_compute: Option<u64>,
+    /// The Compute panel being configured (opened by a header "Compute" button,
+    /// floating where it was clicked) before its result pane exists.
+    compute_draft: Option<ComputeDraft>,
+    /// The draft's "Compute" button was clicked: realize `compute_draft` into a
+    /// pane after the draw (deferred to avoid growing `panes` mid-draw).
+    pending_compute_create: bool,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
     /// Toggled by the button in the panel's top-left corner; when off, a small
@@ -334,7 +356,8 @@ impl CimApp {
             show_manager: false,
             show_viewcmd: false,
             rebinding: None,
-            pending_compute: None,
+            compute_draft: None,
+            pending_compute_create: false,
             show_stats: true,
             stats_region: None,
             stats_gen: 0,
@@ -692,14 +715,24 @@ impl CimApp {
 
     // ---- compute panes ---------------------------------------------------
 
-    /// Open a new Compute pane in the comparator and compute it right away. The
-    /// source defaults to `prefer` when it names a usable sequence (e.g. the
-    /// pane whose header "Compute" button was clicked), else the first sequence.
-    pub(super) fn open_compute(&mut self, prefer: Option<u64>) {
-        let is_source = |p: &Pane| p.compute.is_none() && p.media.frame_count() > 1;
-        let source_id = prefer
-            .filter(|id| self.panes.iter().any(|p| p.id == *id && is_source(p)))
-            .or_else(|| self.panes.iter().find(|p| is_source(p)).map(|p| p.id));
+    /// Panes usable as a Compute source for `kind`: any non-compute pane, but
+    /// the reductions (mean/std) also need ≥2 frames. `Diff` accepts stills.
+    pub(super) fn compute_sources(&self, kind: Reduce) -> Vec<(u64, String)> {
+        self.panes
+            .iter()
+            .filter(|p| p.compute.is_none())
+            .filter(|p| matches!(kind, Reduce::Diff) || p.media.frame_count() > 1)
+            .map(|p| (p.id, p.media.name().to_string()))
+            .collect()
+    }
+
+    fn pane_idx(&self, id: u64) -> Option<usize> {
+        self.panes.iter().position(|p| p.id == id)
+    }
+
+    /// Realize a configured `ComputeDraft` into a new Compute pane and compute it
+    /// once. The floating draft panel is gone; its controls now live on the pane.
+    fn open_compute(&mut self, draft: ComputeDraft) {
         let was_empty = self.panes.is_empty();
         self.add_pane(
             media::Media::still("Compute".into(), media::placeholder_frame()),
@@ -707,8 +740,11 @@ impl CimApp {
         );
         let i = self.panes.len() - 1;
         self.panes[i].compute = Some(Compute {
-            kind: Reduce::Mean,
-            source_id,
+            kind: draft.kind,
+            source_id: draft.source_id,
+            source_b: draft.source_b,
+            auto: false,
+            last_sig: 0,
             saving: false,
             save_name: "computed.tif".into(),
             status: String::new(),
@@ -720,31 +756,76 @@ impl CimApp {
         self.recompute_pane(i);
     }
 
-    /// Recompute a Compute pane from its source's frames currently in memory,
-    /// replacing its displayed still. Float results default to Linear+Clip so
-    /// they're legible.
-    pub(super) fn recompute_pane(&mut self, idx: usize) {
-        let Some(c) = self.panes[idx].compute.as_ref() else {
-            return;
-        };
-        let kind = c.kind;
-        let Some(src_id) = c.source_id else {
-            self.set_compute_status(idx, "Pick a source sequence".into());
-            return;
-        };
-        let Some(src) = self.panes.iter().find(|p| p.id == src_id) else {
-            self.set_compute_status(idx, "Source no longer available".into());
-            return;
-        };
+    /// Mean/std reduction of a source's resident frames → (frame, name, status).
+    fn compute_reduce(
+        &self,
+        source_id: Option<u64>,
+        kind: Reduce,
+    ) -> Result<(media::FrameData, String, String), String> {
+        let src_id = source_id.ok_or_else(|| "Pick a source sequence".to_string())?;
+        let src = self
+            .panes
+            .iter()
+            .find(|p| p.id == src_id)
+            .ok_or_else(|| "Source no longer available".to_string())?;
         let base = src.media.name().to_string();
         let cnt = src.media.frame_count();
         let frames: Vec<std::sync::Arc<media::FrameData>> =
             (0..cnt).filter_map(|f| src.media.resident(f)).collect();
         let used = frames.len();
-        match media::reduce_frames(&frames, kind) {
-            Some(fr) => {
+        let fr =
+            media::reduce_frames(&frames, kind).ok_or_else(|| "No source frames in memory".to_string())?;
+        let name = format!("{} · {}", kind.label(), base);
+        let status = format!("{} of {used} frame(s) in memory", kind.label());
+        Ok((fr, name, status))
+    }
+
+    /// Per-pixel difference of two sources' *current* frames → (frame, name,
+    /// status). Both current frames must be resident and share size/channels.
+    fn compute_diff(
+        &self,
+        a_id: Option<u64>,
+        b_id: Option<u64>,
+    ) -> Result<(media::FrameData, String, String), String> {
+        let a_id = a_id.ok_or_else(|| "Pick source A".to_string())?;
+        let b_id = b_id.ok_or_else(|| "Pick source B".to_string())?;
+        let ia = self.pane_idx(a_id).ok_or_else(|| "Source A no longer available".to_string())?;
+        let ib = self.pane_idx(b_id).ok_or_else(|| "Source B no longer available".to_string())?;
+        let (fa, fb) = (self.frame_disp(ia), self.frame_disp(ib));
+        let a = self.panes[ia]
+            .media
+            .resident(fa)
+            .ok_or_else(|| "A's current frame not in memory".to_string())?;
+        let b = self.panes[ib]
+            .media
+            .resident(fb)
+            .ok_or_else(|| "B's current frame not in memory".to_string())?;
+        let fr = media::diff_frames(&a, &b)
+            .ok_or_else(|| "A and B differ in size / channels".to_string())?;
+        let name = format!(
+            "Diff · {} − {}",
+            self.panes[ia].media.name(),
+            self.panes[ib].media.name()
+        );
+        let status = format!("Diff of frame {} − {}", fa + 1, fb + 1);
+        Ok((fr, name, status))
+    }
+
+    /// Recompute a Compute pane from current memory, replacing its displayed
+    /// still. Float results default to Linear+Clip so they're legible. The input
+    /// signature is recorded either way, so auto-refresh doesn't spin on failure.
+    pub(super) fn recompute_pane(&mut self, idx: usize) {
+        let Some(c) = self.panes[idx].compute.as_ref() else {
+            return;
+        };
+        let (kind, a, b) = (c.kind, c.source_id, c.source_b);
+        let result = match kind {
+            Reduce::Diff => self.compute_diff(a, b),
+            _ => self.compute_reduce(a, kind),
+        };
+        match result {
+            Ok((fr, name, status)) => {
                 let hi = fr.hi_depth();
-                let name = format!("{} · {}", kind.label(), base);
                 self.panes[idx].media = media::Media::still(name, fr);
                 self.panes[idx].tex = None;
                 self.panes[idx].hist = None; // recompute for the new result
@@ -753,12 +834,47 @@ impl CimApp {
                 } else {
                     ContrastMode::Linear
                 };
-                self.set_compute_status(
-                    idx,
-                    format!("{} of {used} frame(s) in memory", kind.label()),
-                );
+                self.set_compute_status(idx, status);
             }
-            None => self.set_compute_status(idx, "No source frames in memory".into()),
+            Err(msg) => self.set_compute_status(idx, msg),
+        }
+        let sig = self.compute_sig(idx);
+        if let Some(c) = self.panes[idx].compute.as_mut() {
+            c.last_sig = sig;
+        }
+    }
+
+    /// A cheap signature of a Compute pane's inputs, so auto-refresh recomputes
+    /// only when they change: the shown frames for `Diff`, the source's resident
+    /// count for the reductions (which grows as playback decodes more frames).
+    fn compute_sig(&self, idx: usize) -> u64 {
+        let Some(c) = self.panes[idx].compute.as_ref() else {
+            return 0;
+        };
+        let frame_sig = |id: Option<u64>| -> u64 {
+            id.and_then(|id| self.pane_idx(id))
+                .map(|i| self.frame_disp(i) as u64 + 1)
+                .unwrap_or(0)
+        };
+        match c.kind {
+            Reduce::Diff => (frame_sig(c.source_id) << 32) ^ frame_sig(c.source_b),
+            _ => c
+                .source_id
+                .and_then(|id| self.pane_idx(id))
+                .map(|i| self.panes[i].media.resident_count() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Recompute every auto-refresh Compute pane whose inputs changed this frame.
+    pub(super) fn refresh_auto_compute(&mut self) {
+        for i in 0..self.panes.len() {
+            let Some(c) = self.panes[i].compute.as_ref() else {
+                continue;
+            };
+            if c.auto && self.compute_sig(i) != c.last_sig {
+                self.recompute_pane(i);
+            }
         }
     }
 
@@ -1053,6 +1169,9 @@ impl eframe::App for CimApp {
             self.shared_frame = tl - 1;
         }
 
+        // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
+        self.refresh_auto_compute();
+
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(2.0);
             self.draw_toolbar(ui);
@@ -1078,6 +1197,9 @@ impl eframe::App for CimApp {
             .show(ctx, |ui| {
                 self.draw_central(ui, ctx);
             });
+
+        // The floating "new compute" config panel, if one is being set up.
+        self.draw_compute_draft(ctx);
 
         if self.show_manager {
             self.draw_manager(ctx);
@@ -1122,8 +1244,10 @@ impl eframe::App for CimApp {
         if let Some(i) = self.pending_reload.take() {
             self.reload(i);
         }
-        if let Some(src) = self.pending_compute.take() {
-            self.open_compute(Some(src));
+        if std::mem::take(&mut self.pending_compute_create) {
+            if let Some(draft) = self.compute_draft.take() {
+                self.open_compute(draft);
+            }
         }
 
         // Encode one frame per frame while an export is running.
