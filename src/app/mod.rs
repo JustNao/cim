@@ -41,6 +41,12 @@ const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 const COMPUTE_W: f32 = 62.0; // width of the header "Compute" button
 
+/// How often to repaint while background decodes are pending (and we're not
+/// playing or exporting): often enough to pick up landed frames and keep the
+/// loading spinner turning, but far below monitor rate so we don't busy-spin —
+/// the dominant idle cost over VNC / software rendering. ~30 fps.
+const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
+
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
 const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
@@ -60,6 +66,10 @@ enum Mode {
 struct CachedTex {
     handle: TextureHandle,
     shown: usize, // frame index currently uploaded
+    /// Integer downscale factor of the uploaded texture (1 = native). Frames
+    /// shown below 100% get a box-downsampled texture (see `prepare`); a change
+    /// here re-renders just like a frame change.
+    scale: usize,
 }
 
 /// A boolean mask from another pane, tinted and drawn over a pane. Config only
@@ -1255,9 +1265,19 @@ impl eframe::App for CimApp {
             self.export_tick();
         }
 
-        // Keep animating while playing, decoding, or exporting.
-        if self.playing || !self.inflight.is_empty() || self.export_run.is_some() {
+        // Keep animating, but pace repaints to what's actually happening rather
+        // than busy-spinning at monitor rate (pure waste over VNC / no-GPU).
+        // Export advances one encoded frame per update, so it needs full speed;
+        // playback only needs its own frame interval; a pending background decode
+        // just needs an occasional poll to pick up landed frames + spin the
+        // spinner. Idle with nothing pending: no repaint is requested at all.
+        if self.export_run.is_some() || self.cancel_export {
             ctx.request_repaint();
+        } else if self.playing {
+            let dt = (1.0 / self.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
+        } else if !self.inflight.is_empty() {
+            ctx.request_repaint_after(DECODE_POLL);
         }
     }
 

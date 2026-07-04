@@ -158,10 +158,18 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
 ## 7. Rendering pipeline (native samples → texture)
 
 `app/decode.rs::prepare(ctx, idx)` returns `(Option<TextureId>, loading)`: render +
-upload **only when stale** (`tex.shown != f`), else reuse; if not resident, queue a
-decode and keep showing the last texture with a spinner. Pipeline: bounds →
-`render_into(lo, hi, &mut render_scratch)` (a reused buffer) →
-`ColorImage::from_rgba_unmultiplied` → texture `set`/`load`.
+upload **only when stale** (`tex.shown != f` **or** the downscale `tex.scale != k`),
+else reuse; if not resident, queue a decode and keep showing the last texture with a
+spinner. Pipeline: bounds → `render_into(lo, hi, &mut render_scratch)` (a reused
+buffer) → optional **display-downscale** → `ColorImage::from_rgba_unmultiplied` →
+texture `set`/`load`.
+
+**Display-downscale.** Below 100% zoom the image is minified on screen anyway, so the
+finished RGBA is box-averaged by a power-of-two factor `k = downscale_factor(zoom,
+size)` (`downsample_rgba`) before upload — a large cut in texture-upload bytes (the
+bottleneck over VNC) for big images in small cells. `k` is a power of two so it only
+re-renders at octave zoom boundaries; at **≥100% it's 1**, so zoomed-in pixels stay
+exact. Overlays stay native (`scale = 1`).
 
 `render_into` (`media.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
 per frame then table-look-up per pixel; **F32** maps arithmetically. Mono replicates
@@ -371,12 +379,19 @@ field has focus), so typing doesn't trigger views.
 
 Each frame: apply `ui_scale`; `clock += 1`; `pump_decoder` → `handle_input` →
 `advance_playback` → `drive_seek`; `drive_eager` → `ensure_lookahead` →
-`poll_decoding_all` → `enforce_cache_budget`; clamp `shared_frame`; draw toolbar,
-bottom frame bar (shown whenever **any** media is a sequence), central panel, windows
+`poll_decoding_all` → `enforce_cache_budget`; clamp `shared_frame`;
+`refresh_auto_compute`; draw toolbar, bottom frame bar (shown whenever **any** media
+is a sequence), central panel, the compute draft, windows
 (manager/export/settings/view-command), error popup; apply deferred actions;
-`export_tick`; `request_repaint()` while playing/decoding/exporting.
+`export_tick`; then a **paced repaint**.
 
-Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute`,
+**Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
+export runs at full speed (one encoded frame per update), playback requests
+`request_repaint_after(1/fps)`, a pending background decode polls every `DECODE_POLL`
+(~30 fps, enough to pick up frames + spin the spinner), and a fully idle app requests
+no repaint at all.
+
+Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_create`,
 `error_popup`) avoid mutating panes mid-draw.
 
 ---
@@ -400,10 +415,10 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute`,
 ## 15. Performance notes (VNC / no GPU)
 
 Done: lazy length, persistent readers, bounded LRU cache, LUT render + memoized bounds
-+ reused buffer, per-pane histogram cache. Remaining candidates: **repaint
-throttling** while waiting on decodes (`request_repaint_after`); **threaded export**
-(compose+encode off the UI thread); minor per-frame allocations (`Action::all()`,
-`grid_cells`) and display-downscale for large images in tiny cells.
++ reused buffer, per-pane histogram cache, **paced repaints** (§13, no busy-spin while
+decoding/playing), **display-downscale** on texture upload (§7). Remaining candidates:
+**threaded export** (compose+encode off the UI thread); minor per-frame allocations
+(`Action::all()`, `grid_cells`).
 
 ---
 

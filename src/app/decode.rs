@@ -203,8 +203,14 @@ impl CimApp {
         let f = self.frame_disp(idx);
         if let Some(frame) = self.panes[idx].media.resident(f) {
             self.panes[idx].media.touch(f, self.clock); // viewing keeps it hot
+            // Below 100% zoom the image is minified on screen anyway, so upload a
+            // box-downsampled texture instead of the full frame — a big cut in
+            // texture-upload bytes (the bottleneck over VNC) for large images in
+            // small cells. `k` is a power of two so it only steps at octave zoom
+            // boundaries (few re-renders); at ≥100% it's 1, keeping pixels exact.
+            let k = downscale_factor(self.view_ref(idx).zoom, frame.size);
             let need = match &self.panes[idx].tex {
-                Some(t) => t.shown != f,
+                Some(t) => t.shown != f || t.scale != k,
                 None => true,
             };
             if need {
@@ -264,16 +270,28 @@ impl CimApp {
                         crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
                     }
                 }
-                let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
+                // Box-downsample the finished RGBA when zoomed out (k > 1),
+                // otherwise upload the full-res render directly (no extra copy).
+                let img = if k > 1 {
+                    let (small, sz) = downsample_rgba(&self.render_scratch, w, h, k);
+                    ColorImage::from_rgba_unmultiplied(sz, &small)
+                } else {
+                    ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch)
+                };
                 let p = &mut self.panes[idx];
                 match &mut p.tex {
                     Some(t) => {
                         t.handle.set(img, opts);
                         t.shown = f;
+                        t.scale = k;
                     }
                     None => {
                         let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
-                        p.tex = Some(CachedTex { handle, shown: f });
+                        p.tex = Some(CachedTex {
+                            handle,
+                            shown: f,
+                            scale: k,
+                        });
                     }
                 }
             }
@@ -332,10 +350,95 @@ impl CimApp {
                 }
                 None => {
                     let handle = ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
-                    self.panes[idx].overlay_tex = Some(CachedTex { handle, shown: f });
+                    self.panes[idx].overlay_tex = Some(CachedTex {
+                        handle,
+                        shown: f,
+                        scale: 1,
+                    });
                 }
             }
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
+    }
+}
+
+/// The integer texture-downscale factor for a frame of `size` displayed at
+/// `zoom` screen-pixels-per-image-pixel. Returns 1 at ≥100% (native, so zoomed
+/// pixels stay exact); below that, the largest power of two `k` with `k ≤ 1/zoom`
+/// — so the downsampled texture is still at least one texel per screen pixel —
+/// backed off if it would collapse a dimension below one pixel.
+fn downscale_factor(zoom: f32, size: [usize; 2]) -> usize {
+    if zoom >= 1.0 {
+        return 1;
+    }
+    let inv = (1.0 / zoom) as usize; // image pixels per screen pixel (≥ 1)
+    let mut k = 1;
+    while k * 2 <= inv {
+        k *= 2;
+    }
+    while k > 1 && (size[0] / k == 0 || size[1] / k == 0) {
+        k /= 2;
+    }
+    k
+}
+
+/// Box-downsample an RGBA buffer by integer factor `k` (`k ≥ 2`), averaging each
+/// `k×k` block. Returns the reduced buffer and its `[w, h]`. Remainder rows /
+/// columns that don't fill a full block are dropped (they're sub-pixel on
+/// screen). Matches what GPU minification would do, just at far fewer bytes.
+fn downsample_rgba(src: &[u8], w: usize, h: usize, k: usize) -> (Vec<u8>, [usize; 2]) {
+    let dw = (w / k).max(1);
+    let dh = (h / k).max(1);
+    let mut out = vec![0u8; dw * dh * 4];
+    let area = (k * k) as u32;
+    for dy in 0..dh {
+        for dx in 0..dw {
+            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+            for yy in 0..k {
+                let row = (dy * k + yy) * w * 4;
+                for xx in 0..k {
+                    let i = row + (dx * k + xx) * 4;
+                    r += src[i] as u32;
+                    g += src[i + 1] as u32;
+                    b += src[i + 2] as u32;
+                    a += src[i + 3] as u32;
+                }
+            }
+            let o = (dy * dw + dx) * 4;
+            out[o] = (r / area) as u8;
+            out[o + 1] = (g / area) as u8;
+            out[o + 2] = (b / area) as u8;
+            out[o + 3] = (a / area) as u8;
+        }
+    }
+    (out, [dw, dh])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{downsample_rgba, downscale_factor};
+
+    #[test]
+    fn downscale_factor_is_native_until_zoomed_out() {
+        // At or above 100% the texture stays native so pixels are exact.
+        assert_eq!(downscale_factor(1.0, [1000, 1000]), 1);
+        assert_eq!(downscale_factor(2.0, [1000, 1000]), 1);
+        // Below 100%: largest power of two ≤ 1/zoom.
+        assert_eq!(downscale_factor(0.5, [1000, 1000]), 2); // 1/zoom = 2
+        assert_eq!(downscale_factor(0.2, [1000, 1000]), 4); // 1/zoom = 5 → 4
+        assert_eq!(downscale_factor(0.1, [1000, 1000]), 8); // 1/zoom = 10 → 8
+        // Backs off so it never collapses a dimension below one pixel.
+        assert_eq!(downscale_factor(0.01, [6, 6]), 4); // 8 would give 0 rows
+    }
+
+    #[test]
+    fn downsample_averages_each_block() {
+        // 2x2 RGBA, one white and three black pixels → the single 2x2 block
+        // averages to 255/4 ≈ 63 per channel.
+        let mut src = vec![0u8; 16];
+        src[0..4].copy_from_slice(&[255, 255, 255, 255]);
+        let (out, sz) = downsample_rgba(&src, 2, 2, 2);
+        assert_eq!(sz, [1, 1]);
+        assert_eq!(out, vec![63, 63, 63, 63]);
     }
 }
