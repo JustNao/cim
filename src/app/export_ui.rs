@@ -343,19 +343,33 @@ impl CimApp {
                                         if all { None } else { Some((0, tl - 1)) };
                                 }
                                 if let Some((s, e)) = self.export_range {
-                                    // Shown 1-based; stored 0-based inclusive.
-                                    let (mut s1, mut e1) = (s + 1, e + 1);
+                                    // 0-based inclusive (matches the transport bar).
+                                    let (mut s0, mut e0) = (s, e);
                                     ui.add(
-                                        egui::DragValue::new(&mut s1)
-                                            .range(1..=e1)
+                                        egui::DragValue::new(&mut s0)
+                                            .range(0..=e0)
                                             .prefix("from "),
                                     );
                                     ui.add(
-                                        egui::DragValue::new(&mut e1)
-                                            .range(s1..=tl)
+                                        egui::DragValue::new(&mut e0)
+                                            .range(s0..=(tl - 1))
                                             .prefix("to "),
                                     );
-                                    self.export_range = Some((s1 - 1, e1 - 1));
+                                    self.export_range = Some((s0, e0));
+                                }
+                                // Adopt the current playback loop window.
+                                let (llo, lhi) = self.loop_bounds(tl);
+                                if ui
+                                    .add_enabled(
+                                        self.loop_range.is_some(),
+                                        egui::Button::new("Use loop range"),
+                                    )
+                                    .on_hover_text(
+                                        "Set the frame range to the playback loop window",
+                                    )
+                                    .clicked()
+                                {
+                                    self.export_range = Some((llo, lhi));
                                 }
                             });
                             ui.end_row();
