@@ -345,9 +345,9 @@ mask's currently shown frame (via `render_mask_rgba`) and `draw_pane` paints it
 over the base image at the *same* image-space rect (1:1). The mask frame is
 **decoded on demand** there, so the overlay works even when the mask pane isn't
 drawn (hidden, or just reloaded — `reload` invalidates dependent overlay
-textures). Configured per pane in the media manager's **Overlay** column (mask
-picker + colour + α, with an aggregate row); cleared when its source mask is closed. Aligns pixel-for-pixel, so a mask is expected to match
-its target's dimensions.
+textures). Configured per pane in the **Transformations** popup's **Overlay**
+row (mask picker + colour + α); cleared when its source mask is closed. Aligns
+pixel-for-pixel, so a mask is expected to match its target's dimensions.
 
 Per pane: `image_area(cell)` (between `HEADER_H` header and `FOOTER_H` footer),
 `draw_header` (index, name, `frame/known(+)`, `in mem`, sync markers, close ×),
@@ -398,9 +398,9 @@ working dir. Computed panes are skipped by `view_command` (not CLI-reproducible)
 button on the *left* (away from the close ×), toggling `Pane.show_opts`.
 `draw_options_popup` renders a foreground `Area` under the header with the tone
 `ContrastMode`, its mode-specific options, the Details toggle, the per-pane
-magnification **Interp** filter, and this pane's **Histogram** — the old
-*Visualise* window folded in here (`ensure_pane_histogram` + `draw_histogram`),
-so both are now per-pane. Edits invalidate the texture. Per-mode tone options
+magnification **Interp** filter, the mask **Overlay** picker (moved here from the
+Media manager), and this pane's **Histogram** — the old *Visualise* window folded
+in here (`ensure_pane_histogram` + `draw_histogram`), so both are now per-pane. Edits invalidate the texture. Per-mode tone options
 live in `settings::ToneOptions` (one sub-struct per mode, so switching modes
 keeps each mode's settings; `ToneOptions.interp` also carries the magnification
 filter so it rides the tone-sync) and are laid out by the free
@@ -424,8 +424,10 @@ manager's Sync column (per-row and aggregate). `contrast_of` / `tone_of` /
 `prepare`, `export_pane`, and `view_command` read; editing a synced pane's popup
 writes the shared set and `invalidate_synced_tone` refreshes every synced pane.
 `set_sync_tone(false)` snapshots the shared values into the pane so nothing jumps
-(mirroring the Pos/Time off-toggle). Default off (each pane independent, so the
-per-depth tone default is preserved).
+(mirroring the Pos/Time off-toggle). **Default on**: the first opened media seeds
+the shared set (`add_pane`), so its depth-appropriate tone becomes the group
+default. A replayed `--tone`/`--detail` is per-pane, so `apply_view_state`
+unsyncs the panes it sets.
 
 ---
 

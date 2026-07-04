@@ -866,6 +866,21 @@ impl CimApp {
         let mut details = self.details_of(idx);
         let mut close = false;
 
+        // Mask overlay (moved here from the Media manager): the masks available
+        // to tint over this pane, and the current selection/colour/alpha. Not
+        // offered on a mask pane itself.
+        let masks: Vec<(u64, String)> = self
+            .panes
+            .iter()
+            .filter(|p| p.media.is_mask())
+            .map(|p| (p.id, p.media.name().to_string()))
+            .collect();
+        let self_is_mask = self.panes[idx].media.is_mask();
+        let (mut ov_src, mut ov_color, mut ov_alpha) = match &self.panes[idx].overlay {
+            Some(o) => (Some(o.src_id), o.color, o.opacity),
+            None => (None, Color32::from_rgb(240, 60, 60), 0.5),
+        };
+
         // Histogram of this pane's current frame (folded in from Visualise).
         self.ensure_pane_histogram(idx);
         let f = self.frame_disp(idx);
@@ -949,6 +964,43 @@ impl CimApp {
                             ui.end_row();
                         });
 
+                    // Mask overlay picker + colour/alpha (non-mask panes only).
+                    if !self_is_mask && !masks.is_empty() {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Overlay");
+                            let sel = ov_src
+                                .and_then(|id| masks.iter().find(|(m, _)| *m == id))
+                                .map(|(_, n)| ellipsize(n, 12))
+                                .unwrap_or_else(|| "None".into());
+                            egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
+                                .selected_text(sel)
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut ov_src, None, "None");
+                                    for (mid, mname) in &masks {
+                                        ui.selectable_value(
+                                            &mut ov_src,
+                                            Some(*mid),
+                                            ellipsize(mname, 18),
+                                        );
+                                    }
+                                });
+                        });
+                        if ov_src.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.color_edit_button_srgba(&mut ov_color);
+                                ui.add(
+                                    egui::DragValue::new(&mut ov_alpha)
+                                        .speed(0.02)
+                                        .range(0.0..=1.0)
+                                        .fixed_decimals(2)
+                                        .prefix("α "),
+                                );
+                            });
+                        }
+                    }
+
                     ui.separator();
                     ui.strong("Histogram");
                     if have_hist {
@@ -958,6 +1010,21 @@ impl CimApp {
                     }
                 });
             });
+
+        // Reconcile the mask overlay (rebuild the tinted texture on any change).
+        let cur = self.panes[idx]
+            .overlay
+            .as_ref()
+            .map(|o| (o.src_id, o.color, o.opacity));
+        let new = ov_src.map(|id| (id, ov_color, ov_alpha));
+        if cur != new {
+            self.panes[idx].overlay = ov_src.map(|src_id| MaskOverlay {
+                src_id,
+                color: ov_color,
+                opacity: ov_alpha,
+                tex: None,
+            });
+        }
 
         // `interp` now lives inside `tone`, so the tone write-back below (own or
         // shared) picks up an interpolation change too, invalidating textures.

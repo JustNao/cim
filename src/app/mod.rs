@@ -401,7 +401,9 @@ impl CimApp {
             self.shared_frame = f;
             self.pending_seek = Some(f);
         }
-        // Per-pane tone / detail (each list positional over the panes).
+        // Per-pane tone / detail (each list positional over the panes). These
+        // are per-pane, so unsync those panes' Transformations (which default to
+        // synced) — otherwise the restored per-pane tone wouldn't take effect.
         if let Some(tones) = &vs.tones {
             for (p, t) in self.panes.iter_mut().zip(tones) {
                 p.contrast = match t {
@@ -409,12 +411,14 @@ impl CimApp {
                     cli::Tone::LinearClip => ContrastMode::LinearClip,
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
                 };
+                p.sync_tone = false;
                 p.tex = None; // re-render with the restored mapping
             }
         }
         if let Some(details) = &vs.details {
             for (p, d) in self.panes.iter_mut().zip(details) {
                 p.details = *d;
+                p.sync_tone = false;
                 p.tex = None;
             }
         }
@@ -557,6 +561,13 @@ impl CimApp {
             interp: self.config.vis.interp,
             ..ToneOptions::default()
         };
+        // Transformations sync is on by default; the first opened media seeds the
+        // shared set (so its depth-appropriate tone becomes the group default).
+        if self.panes.is_empty() {
+            self.shared_contrast = contrast;
+            self.shared_tone = tone;
+            self.shared_details = false;
+        }
         self.panes.push(Pane {
             id,
             source,
@@ -566,7 +577,7 @@ impl CimApp {
             frame: 0,
             sync_spatial: true,
             sync_temporal: true,
-            sync_tone: false,
+            sync_tone: true,
             visible: true,
             contrast,
             tone,
