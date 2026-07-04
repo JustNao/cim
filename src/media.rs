@@ -998,6 +998,18 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
         }
     };
 
+    // A 1-bit bilevel page comes back with its pixels packed 8-to-a-byte;
+    // expand to one 0/1 byte per pixel so the rest of the pipeline is uniform.
+    let is_mask = matches!(color, ColorType::Gray(1));
+    let samples = if is_mask {
+        match samples {
+            Samples::U8(packed) => Samples::U8(unpack_bilevel(&packed, w, h)),
+            other => other,
+        }
+    } else {
+        samples
+    };
+
     let expected = w * h * channels;
     let got = match &samples {
         Samples::U8(v) => v.len(),
@@ -1008,12 +1020,26 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
         return Err(anyhow!("short TIFF buffer: {got} < {expected}"));
     }
 
-    // A 1-bit bilevel page is a boolean mask.
-    if matches!(color, ColorType::Gray(1)) {
+    if is_mask {
         Ok(FrameData::new_mask([w, h], channels, samples))
     } else {
         Ok(FrameData::new([w, h], channels, samples))
     }
+}
+
+/// Expand a packed 1-bit bilevel buffer — MSB-first, each row padded to a byte
+/// boundary (the TIFF layout) — into one `0`/`1` byte per pixel.
+fn unpack_bilevel(packed: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let stride = w.div_ceil(8);
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        let row = y * stride;
+        for x in 0..w {
+            let byte = packed.get(row + x / 8).copied().unwrap_or(0);
+            out[y * w + x] = (byte >> (7 - (x % 8))) & 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1106,6 +1132,28 @@ mod tests {
         assert_eq!(map[3], (0, 3), "frame 3 = file 0 page 3 (last of clip_000)");
         assert_eq!(map[4], (1, 0), "frame 4 rolls into file 1 page 0");
         assert_eq!(map[6], (1, 2), "frame 6 = file 1 page 2 (last of clip_001)");
+    }
+
+    /// A real 1-bit bilevel TIFF opens as a mask media and decodes to a mask
+    /// frame. Skips gracefully when the fixture isn't present.
+    #[test]
+    fn bilevel_tiff_opens_as_mask() {
+        let path = Path::new("examples/alpes_mask.tif");
+        if !path.exists() {
+            return;
+        }
+        let m = load(path).expect("open mask tiff");
+        assert!(m.is_mask(), "1-bit bilevel TIFF should be a mask media");
+        let frame = SeqReader::open(path)
+            .unwrap()
+            .decode(0)
+            .unwrap()
+            .expect("page 0");
+        assert!(frame.is_mask(), "decoded page should be flagged as a mask");
+        // Renders to something non-empty at native size.
+        let mut out = Vec::new();
+        frame.render_into(0.0, 255.0, &mut out);
+        assert_eq!(out.len(), frame.size[0] * frame.size[1] * 4);
     }
 
     /// A boolean mask renders as pure black/white regardless of the tone
@@ -1237,7 +1285,12 @@ fn color_bits(c: ColorType) -> u8 {
         | ColorType::RGBA(b)
         | ColorType::GrayA(b)
         | ColorType::CMYK(b)
+        | ColorType::CMYKA(b)
         | ColorType::YCbCr(b)
+        | ColorType::Lab(b)
         | ColorType::Palette(b) => b,
+        ColorType::Multiband { bit_depth, .. } => bit_depth,
+        // `ColorType` is #[non_exhaustive]; assume 8-bit for anything new.
+        _ => 8,
     }
 }
