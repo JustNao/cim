@@ -94,30 +94,10 @@ impl CimApp {
             .unwrap_or_default();
 
         ui.horizontal(|ui| {
+            // --- transport group ---
             let play = if self.playing { "Pause" } else { "Play" };
             if ui.button(play).clicked() {
                 self.playing = !self.playing;
-            }
-            if ui
-                .selectable_label(self.loop_playback, "Loop")
-                .on_hover_text("Loop the sequence when it reaches the end")
-                .clicked()
-            {
-                self.loop_playback = !self.loop_playback;
-            }
-            // Loop range: shows the active window and resets to the full
-            // sequence on click. Drag the timeline brackets to set a sub-range.
-            let (lo, hi) = self.loop_bounds(len);
-            let range_label = match self.loop_range {
-                Some(_) => format!("⟺ {}–{}", lo + 1, hi + 1),
-                None => "⟺ full".to_string(),
-            };
-            if ui
-                .add_enabled(self.loop_range.is_some(), egui::Button::new(range_label))
-                .on_hover_text("Loop range — click to reset to the whole sequence")
-                .clicked()
-            {
-                self.loop_range = None;
             }
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
@@ -136,6 +116,40 @@ impl CimApp {
                 }
             }
             ui.separator();
+
+            // --- loop group: enable, reset-to-full, and start/end fields ---
+            if ui
+                .selectable_label(self.loop_playback, "Loop")
+                .on_hover_text("Loop playback when it reaches the window end")
+                .clicked()
+            {
+                self.loop_playback = !self.loop_playback;
+            }
+            if ui
+                .add_enabled(self.loop_range.is_some(), egui::Button::new("Full"))
+                .on_hover_text("Reset the loop range to the whole sequence")
+                .clicked()
+            {
+                self.loop_range = None;
+            }
+            // 1-based start/end fields (typeable or draggable). Editing either
+            // sets a sub-range; they mirror the timeline brackets.
+            let (lo, hi) = self.loop_bounds(len);
+            let (mut s, mut e) = (lo + 1, hi + 1);
+            ui.label("[");
+            let s_resp = ui.add(egui::DragValue::new(&mut s).range(1..=(hi + 1)).speed(0.25));
+            ui.label("–");
+            let e_resp = ui.add(egui::DragValue::new(&mut e).range((lo + 1)..=len).speed(0.25));
+            ui.label("]");
+            if s_resp.changed() {
+                self.loop_range = Some((s.saturating_sub(1).min(hi), hi));
+            }
+            if e_resp.changed() {
+                self.loop_range = Some((lo, e.saturating_sub(1).clamp(lo, len - 1)));
+            }
+            ui.separator();
+
+            // --- rate / load group ---
             ui.add(
                 egui::Slider::new(&mut self.fps, 1.0..=60.0)
                     .suffix(" fps")
@@ -271,17 +285,18 @@ impl CimApp {
         if len <= 1 {
             return;
         }
-        let grab = 8.0;
+        // A generous grab zone on either side of each bracket so they're easy
+        // to catch; when both are in reach, the nearer one wins.
+        let grab = 18.0;
         let frame_at = |p: Pos2| -> usize {
             let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
             (t * span).round() as usize
         };
         if resp.drag_started() {
             self.loop_drag = resp.interact_pointer_pos().and_then(|p| {
-                if (p.x - xlo).abs() <= grab {
-                    Some(true)
-                } else if (p.x - xhi).abs() <= grab {
-                    Some(false)
+                let (dlo, dhi) = ((p.x - xlo).abs(), (p.x - xhi).abs());
+                if dlo <= grab || dhi <= grab {
+                    Some(dlo <= dhi) // true = start bracket (the nearer one)
                 } else {
                     None
                 }
