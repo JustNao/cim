@@ -236,6 +236,11 @@ impl CimApp {
         // Right-drag statistics region (selection + outline + stats panel).
         self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
 
+        // Compute-pane controls (source / kind / recompute + inline save).
+        if self.panes[idx].compute.is_some() {
+            self.draw_compute_ui(ctx, idx, img_area);
+        }
+
         self.draw_header(ui, idx, cell);
         self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
 
@@ -770,6 +775,136 @@ impl CimApp {
             .clicked()
         {
             self.show_stats = false;
+        }
+    }
+
+    // ---- compute pane controls -------------------------------------------
+
+    /// Overlay a Compute pane with its controls (top-left: reduction kind +
+    /// source sequence + recompute) and an inline Save (bottom-right). Both are
+    /// foreground `Area`s pinned to `img_area`; edits are written back and a
+    /// recompute / save is dispatched after the frame.
+    fn draw_compute_ui(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect) {
+        let pane_id = self.panes[idx].id;
+        // Sources: any non-compute sequence (needs ≥2 frames to reduce).
+        let sources: Vec<(u64, String)> = self
+            .panes
+            .iter()
+            .filter(|p| p.compute.is_none() && p.media.frame_count() > 1)
+            .map(|p| (p.id, p.media.name().to_string()))
+            .collect();
+
+        let (mut kind, mut source_id, mut saving, mut save_name, status) = {
+            let c = self.panes[idx].compute.as_ref().unwrap();
+            (c.kind, c.source_id, c.saving, c.save_name.clone(), c.status.clone())
+        };
+        let mut recompute = false;
+        let mut do_save = false;
+
+        // Controls, top-left.
+        egui::Area::new(Id::new(("compute_ctrl", pane_id)))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .constrain_to(img_area)
+            .fixed_pos(img_area.left_top() + Vec2::splat(6.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(240.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Compute");
+                        egui::ComboBox::from_id_salt(("ckind", pane_id))
+                            .selected_text(kind.label())
+                            .show_ui(ui, |ui| {
+                                for k in [media::Reduce::Mean, media::Reduce::Std] {
+                                    if ui.selectable_value(&mut kind, k, k.label()).clicked() {
+                                        recompute = true;
+                                    }
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Source ");
+                        let sel = source_id
+                            .and_then(|id| sources.iter().find(|(m, _)| *m == id))
+                            .map(|(_, n)| ellipsize(n, 16))
+                            .unwrap_or_else(|| "—".into());
+                        egui::ComboBox::from_id_salt(("csrc", pane_id))
+                            .selected_text(sel)
+                            .show_ui(ui, |ui| {
+                                for (mid, mname) in &sources {
+                                    if ui
+                                        .selectable_value(
+                                            &mut source_id,
+                                            Some(*mid),
+                                            ellipsize(mname, 20),
+                                        )
+                                        .clicked()
+                                    {
+                                        recompute = true;
+                                    }
+                                }
+                            });
+                    });
+                    if ui.button("Recompute from memory").clicked() {
+                        recompute = true;
+                    }
+                    if !status.is_empty() {
+                        ui.label(egui::RichText::new(&status).weak().small());
+                    }
+                });
+            });
+
+        // Save, bottom-right.
+        egui::Area::new(Id::new(("compute_save", pane_id)))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .constrain_to(img_area)
+            .fixed_pos(img_area.right_bottom() - Vec2::splat(8.0))
+            .pivot(Align2::RIGHT_BOTTOM)
+            .show(ctx, |ui| {
+                if !saving {
+                    if ui.button("Save").clicked() {
+                        saving = true;
+                    }
+                } else {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(260.0);
+                        ui.label("Save computed image");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut save_name)
+                                .desired_width(240.0)
+                                .hint_text("name.tif"),
+                        );
+                        ui.label(
+                            egui::RichText::new(".tif = float values · .png/.jpg = 8-bit view")
+                                .weak()
+                                .small(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                do_save = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                saving = false;
+                            }
+                        });
+                    });
+                }
+            });
+
+        // Write edits back, then dispatch heavier work outside the closures.
+        {
+            let c = self.panes[idx].compute.as_mut().unwrap();
+            c.kind = kind;
+            c.source_id = source_id;
+            c.saving = saving;
+            c.save_name = save_name.clone();
+        }
+        if recompute {
+            self.recompute_pane(idx);
+        }
+        if do_save {
+            self.save_computed(idx, &save_name);
         }
     }
 

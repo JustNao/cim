@@ -9,6 +9,13 @@ impl CimApp {
             if ui.button("Open").clicked() {
                 self.open_dialog();
             }
+            if ui
+                .button("Compute")
+                .on_hover_text("Add a panel that computes mean / std across a sequence")
+                .clicked()
+            {
+                self.open_compute();
+            }
             ui.separator();
             for (mode, label) in [
                 (Mode::Grid, "Grid"),

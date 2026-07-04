@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use tiff::decoder::{Decoder, DecodingResult};
+use tiff::encoder::{colortype, TiffEncoder};
 use tiff::ColorType;
 
 /// Original interleaved samples, at native bit depth.
@@ -59,6 +60,110 @@ pub struct RegionStats {
     pub mean: Vec<f32>,
     pub std: Vec<f32>,
     pub count: usize,
+}
+
+/// A per-pixel reduction across a stack of frames, for the Compute panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Reduce {
+    Mean,
+    Std,
+}
+
+impl Reduce {
+    pub fn label(self) -> &'static str {
+        match self {
+            Reduce::Mean => "Mean",
+            Reduce::Std => "Std",
+        }
+    }
+}
+
+/// Reduce a stack of same-shape frames to a single frame, per pixel and per
+/// channel: the arithmetic **mean** or population **standard deviation**. Frames
+/// whose size / channel count differ from the first are skipped. Returns `None`
+/// if nothing usable was supplied. The result is always float, so fractional
+/// means and small deviations aren't quantised.
+pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameData> {
+    let first = frames.first()?;
+    let size = first.size;
+    let ch = first.channels;
+    let n = size[0] * size[1] * ch;
+
+    let need_sq = matches!(kind, Reduce::Std);
+    let mut sum = vec![0f64; n];
+    let mut sumsq = if need_sq { vec![0f64; n] } else { Vec::new() };
+    let mut count = 0usize;
+    for f in frames {
+        if f.size != size || f.channels != ch {
+            continue;
+        }
+        for i in 0..n {
+            let v = f.sample_f(i) as f64;
+            sum[i] += v;
+            if need_sq {
+                sumsq[i] += v * v;
+            }
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    let inv = 1.0 / count as f64;
+    let out: Vec<f32> = (0..n)
+        .map(|i| {
+            let m = sum[i] * inv;
+            match kind {
+                Reduce::Mean => m as f32,
+                Reduce::Std => ((sumsq[i] * inv - m * m).max(0.0)).sqrt() as f32,
+            }
+        })
+        .collect();
+    Some(FrameData::new(size, ch, Samples::F32(out)))
+}
+
+/// A small neutral still, used as the initial image of a fresh Compute pane
+/// before a source has been chosen / reduced.
+pub fn placeholder_frame() -> FrameData {
+    FrameData::new([64, 64], 1, Samples::U8(vec![40; 64 * 64]))
+}
+
+/// Write a single frame to disk. `.tif`/`.tiff` preserves the native values as a
+/// 32-bit float TIFF (mono or RGB); `.png`/`.jpg`/`.jpeg` writes the 8-bit
+/// display rendering (native range mapped to `[0, 255]`), dropping any alpha.
+pub fn save_frame(frame: &FrameData, path: &Path) -> Result<()> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let [w, h] = frame.size;
+    match ext.as_str() {
+        "tif" | "tiff" => {
+            let mut file =
+                File::create(path).with_context(|| format!("create {}", path.display()))?;
+            let mut enc = TiffEncoder::new(&mut file)?;
+            let (cc, data) = frame.color_f32();
+            if cc == 1 {
+                enc.write_image::<colortype::Gray32Float>(w as u32, h as u32, &data)?;
+            } else {
+                enc.write_image::<colortype::RGB32Float>(w as u32, h as u32, &data)?;
+            }
+            Ok(())
+        }
+        "png" | "jpg" | "jpeg" => {
+            let rgba = frame.render_rgba(false);
+            let mut rgb = Vec::with_capacity(w * h * 3);
+            for px in rgba.chunks_exact(4) {
+                rgb.extend_from_slice(&px[..3]);
+            }
+            image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
+                .with_context(|| format!("save {}", path.display()))?;
+            Ok(())
+        }
+        other => Err(anyhow!(
+            "unsupported format '.{other}' — use .tif, .png or .jpg"
+        )),
+    }
 }
 
 impl FrameData {
@@ -159,6 +264,22 @@ impl FrameData {
         } else {
             (min, max)
         }
+    }
+
+    /// The colour samples as interleaved `f32`, alpha excluded: returns the
+    /// colour-channel count (1 or 3) and a `w*h*cc` buffer. Used to write a
+    /// computed frame out as a float TIFF.
+    pub fn color_f32(&self) -> (usize, Vec<f32>) {
+        let cc = self.color_channels();
+        let px = self.size[0] * self.size[1];
+        let mut out = Vec::with_capacity(px * cc);
+        for i in 0..px {
+            let base = i * self.channels;
+            for c in 0..cc {
+                out.push(self.sample_f(base + c));
+            }
+        }
+        (cc, out)
     }
 
     /// Channels that carry colour (alpha excluded) — used for stats.
@@ -824,6 +945,17 @@ pub struct ConcatSeq {
 }
 
 impl Media {
+    /// Wrap an in-memory frame as an always-resident still (e.g. a computed
+    /// image). Not backed by a file.
+    pub fn still(name: String, frame: FrameData) -> Media {
+        let hi_depth = frame.hi_depth();
+        Media::Still(Still {
+            name,
+            frame: Arc::new(frame),
+            hi_depth,
+        })
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Media::Still(s) => &s.name,
@@ -1485,6 +1617,41 @@ mod tests {
 
         // Whole-image full-range bounds still span the outlier.
         assert_eq!(f.display_bounds(false), (0.0, 255.0));
+    }
+
+    /// Reducing a stack of frames yields the per-pixel mean / std, and the
+    /// result round-trips through a float TIFF and an 8-bit PNG.
+    #[test]
+    fn reduce_frames_and_save_roundtrip() {
+        // Two 2x1 mono frames: [0,10] and [4,20].
+        let a = Arc::new(FrameData::new([2, 1], 1, Samples::U8(vec![0, 10])));
+        let b = Arc::new(FrameData::new([2, 1], 1, Samples::U8(vec![4, 20])));
+
+        let mean = reduce_frames(&[a.clone(), b.clone()], Reduce::Mean).expect("mean");
+        assert_eq!(mean.color_f32().1, vec![2.0, 15.0]);
+
+        let std = reduce_frames(&[a, b], Reduce::Std).expect("std");
+        let sv = std.color_f32().1; // population std of {0,4}=2, {10,20}=5
+        assert!((sv[0] - 2.0).abs() < 1e-4 && (sv[1] - 5.0).abs() < 1e-4);
+
+        // Empty input reduces to nothing.
+        assert!(reduce_frames(&[], Reduce::Mean).is_none());
+
+        let dir = std::env::temp_dir().join("cim_compute_test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Float TIFF preserves the fractional values (re-openable, right size).
+        let tif = dir.join("mean.tif");
+        save_frame(&mean, &tif).expect("save tif");
+        assert_eq!(load(&tif).expect("reload tif").size(), [2, 1]);
+
+        // PNG writes the 8-bit view.
+        let png = dir.join("mean.png");
+        save_frame(&mean, &png).expect("save png");
+        assert!(png.exists());
+
+        // Unsupported extension is rejected.
+        assert!(save_frame(&mean, &dir.join("mean.gif")).is_err());
     }
 
     /// The LUT render path must produce exactly what the straightforward

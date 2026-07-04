@@ -29,7 +29,7 @@ use eframe::egui::{
 use crate::cli;
 use crate::decoder::BackgroundDecoder;
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource};
-use crate::media::{self, HistData, Media, RegionStats};
+use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Config, ContrastMode, Interpolation};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
@@ -90,6 +90,22 @@ enum Source {
     /// A numbered still sequence: the compact `PREFIX%0Nd,START,END.EXT` token
     /// it was opened from, plus the individual frame files.
     Sequence { token: String, files: Vec<PathBuf> },
+    /// A computed image (Compute pane) — generated in memory from another pane's
+    /// frames, not backed by a file. `reload` recomputes it.
+    Computed,
+}
+
+/// A Compute pane: reduces another pane's frames (mean / std across those
+/// currently in memory) into a single displayed image, with an inline Save.
+struct Compute {
+    kind: Reduce,
+    /// Stable id of the source sequence pane, if chosen.
+    source_id: Option<u64>,
+    /// Save UI expanded (showing the file-name input).
+    saving: bool,
+    save_name: String,
+    /// Short result / error line shown in the controls.
+    status: String,
 }
 
 /// One opened media plus its per-pane view/timeline state.
@@ -115,6 +131,8 @@ struct Pane {
     region_tone: bool,
     /// Cached statistics of the shared region for this pane's current frame.
     stats: Option<RegionStatsCache>,
+    /// Present iff this is a Compute pane (its media is a generated still).
+    compute: Option<Compute>,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
     /// "Load all" requested: keep requesting missing + frontier frames until the
@@ -408,6 +426,8 @@ impl CimApp {
             match &p.source {
                 Source::File(path) => parts.push(quote_path(path)),
                 Source::Sequence { token, .. } => parts.push(quote_arg(token)),
+                // A computed image isn't reproducible from a CLI path; skip it.
+                Source::Computed => {}
             }
         }
         let mode = match self.mode {
@@ -527,6 +547,7 @@ impl CimApp {
             overlay: None,
             region_tone: false,
             stats: None,
+            compute: None,
             error: None,
             eager: false,
         });
@@ -565,9 +586,15 @@ impl CimApp {
         if i >= self.panes.len() {
             return;
         }
+        // A Compute pane has no file to reload; refresh it from current memory.
+        if matches!(self.panes[i].source, Source::Computed) {
+            self.recompute_pane(i);
+            return;
+        }
         let loaded = match &self.panes[i].source {
             Source::File(p) => media::load(p),
             Source::Sequence { token, files } => media::load_sequence(files, token.clone()),
+            Source::Computed => unreachable!(),
         };
         match loaded {
             Ok(m) => {
@@ -598,6 +625,106 @@ impl CimApp {
     pub(super) fn reload_all(&mut self) {
         for i in 0..self.panes.len() {
             self.reload(i);
+        }
+    }
+
+    // ---- compute panes ---------------------------------------------------
+
+    /// Open a new Compute pane in the comparator, defaulting its source to the
+    /// first available sequence and computing it right away.
+    pub(super) fn open_compute(&mut self) {
+        let source_id = self
+            .panes
+            .iter()
+            .find(|p| p.compute.is_none() && p.media.frame_count() > 1)
+            .map(|p| p.id);
+        let was_empty = self.panes.is_empty();
+        self.add_pane(
+            media::Media::still("Compute".into(), media::placeholder_frame()),
+            Source::Computed,
+        );
+        let i = self.panes.len() - 1;
+        self.panes[i].compute = Some(Compute {
+            kind: Reduce::Mean,
+            source_id,
+            saving: false,
+            save_name: "computed.tif".into(),
+            status: String::new(),
+        });
+        self.current = i;
+        if was_empty {
+            self.shared_view.needs_fit = true;
+        }
+        self.recompute_pane(i);
+    }
+
+    /// Recompute a Compute pane from its source's frames currently in memory,
+    /// replacing its displayed still. Float results default to Linear+Clip so
+    /// they're legible.
+    pub(super) fn recompute_pane(&mut self, idx: usize) {
+        let Some(c) = self.panes[idx].compute.as_ref() else {
+            return;
+        };
+        let kind = c.kind;
+        let Some(src_id) = c.source_id else {
+            self.set_compute_status(idx, "Pick a source sequence".into());
+            return;
+        };
+        let Some(src) = self.panes.iter().find(|p| p.id == src_id) else {
+            self.set_compute_status(idx, "Source no longer available".into());
+            return;
+        };
+        let base = src.media.name().to_string();
+        let cnt = src.media.frame_count();
+        let frames: Vec<std::sync::Arc<media::FrameData>> =
+            (0..cnt).filter_map(|f| src.media.resident(f)).collect();
+        let used = frames.len();
+        match media::reduce_frames(&frames, kind) {
+            Some(fr) => {
+                let hi = fr.hi_depth();
+                let name = format!("{} · {}", kind.label(), base);
+                self.panes[idx].media = media::Media::still(name, fr);
+                self.panes[idx].tex = None;
+                self.panes[idx].contrast = if hi {
+                    ContrastMode::LinearClip
+                } else {
+                    ContrastMode::Linear
+                };
+                self.set_compute_status(
+                    idx,
+                    format!("{} of {used} frame(s) in memory", kind.label()),
+                );
+            }
+            None => self.set_compute_status(idx, "No source frames in memory".into()),
+        }
+    }
+
+    /// Write the computed image to `name` (relative to the working dir), leaving
+    /// the result in memory. Format follows the extension (.tif/.png/.jpg).
+    pub(super) fn save_computed(&mut self, idx: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.set_compute_status(idx, "Enter a file name".into());
+            return;
+        }
+        let Some(frame) = self.panes[idx].media.resident(0) else {
+            self.set_compute_status(idx, "Nothing computed to save".into());
+            return;
+        };
+        match media::save_frame(&frame, Path::new(name)) {
+            Ok(()) => {
+                if let Some(c) = self.panes[idx].compute.as_mut() {
+                    c.saving = false;
+                }
+                self.set_compute_status(idx, format!("Saved {name}"));
+            }
+            Err(e) => self.set_compute_status(idx, format!("Save failed: {e}")),
+        }
+    }
+
+    fn set_compute_status(&mut self, idx: usize, msg: String) {
+        if let Some(c) = self.panes[idx].compute.as_mut() {
+            c.status = msg;
         }
     }
 

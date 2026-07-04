@@ -370,6 +370,20 @@ see §7). A **–** button in the panel's top-left corner collapses it
 Pan/reorder are switched to **primary-button-only** so the right-drag is never
 stolen.
 
+**Compute panes.** The toolbar **"Compute"** button (`open_compute`) adds a pane
+whose image is *generated* rather than loaded: `Pane.compute: Option<Compute>`
+holds the reduction `kind` (`media::Reduce::Mean | Std`) and the source pane id.
+`recompute_pane` gathers the source's **resident** frames and calls
+`media::reduce_frames` (per-pixel/per-channel mean or population std, in `f64`,
+emitting an `f32` `Media::still`); the pane's `Source::Computed` makes the media
+manager's ⟳ **recompute from current memory** instead of reloading a file.
+`draw_compute_ui` overlays two foreground `Area`s on the pane: top-left controls
+(kind + source combos + "Recompute from memory") and a bottom-right **Save** that
+expands into a file-name field. `media::save_frame` writes `.tif`/`.tiff` as a
+**32-bit float** TIFF (native values preserved, via the `tiff` encoder) or
+`.png`/`.jpg`/`.jpeg` as the 8-bit display rendering; the path is relative to the
+working dir. Computed panes are skipped by `view_command` (not CLI-reproducible).
+
 ---
 
 ## 10. Export (`export.rs` + `app/export_ui.rs`)
