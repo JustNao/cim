@@ -325,9 +325,9 @@ impl CimApp {
                                 let mut all_tone = self.panes[0].contrast;
                                 egui::ComboBox::from_id_salt("tone_all")
                                     .selected_text(all_tone.label())
-                                    .width(90.0)
+                                    .width(100.0)
                                     .show_ui(ui, |ui| {
-                                        for m in [ContrastMode::Linear, ContrastMode::LutAlpha] {
+                                        for m in ContrastMode::ORDER {
                                             if ui
                                                 .selectable_value(&mut all_tone, m, m.label())
                                                 .clicked()
@@ -421,9 +421,9 @@ impl CimApp {
                                 let mut tone = self.panes[i].contrast;
                                 egui::ComboBox::from_id_salt(("tone", i))
                                     .selected_text(tone.label())
-                                    .width(90.0)
+                                    .width(100.0)
                                     .show_ui(ui, |ui| {
-                                        for m in [ContrastMode::Linear, ContrastMode::LutAlpha] {
+                                        for m in ContrastMode::ORDER {
                                             ui.selectable_value(&mut tone, m, m.label());
                                         }
                                     });

@@ -381,12 +381,6 @@ impl CimApp {
     fn add_pane(&mut self, media: Media, source: Source) {
         let id = self.next_id;
         self.next_id += 1;
-        // >8-bit sources auto-contrast by default — now via LUT_ALPHA.
-        let contrast = if media.hi_depth() {
-            ContrastMode::LutAlpha
-        } else {
-            ContrastMode::Linear
-        };
         self.panes.push(Pane {
             id,
             source,
@@ -397,7 +391,7 @@ impl CimApp {
             sync_spatial: true,
             sync_temporal: true,
             visible: true,
-            contrast,
+            contrast: ContrastMode::default(), // Linear + Clip
             details: false,
             error: None,
             eager: false,

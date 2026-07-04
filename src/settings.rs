@@ -192,25 +192,41 @@ pub enum Interpolation {
     Bilinear,
 }
 
-/// Per-pane tone-mapping mode, chosen in the media manager. Replaces the old
-/// 0.01%-percentile clip toggle: `LutAlpha` routes the rendered image through
-/// the proprietary LUT_ALPHA auto-contrast (see `crate::imageproc`).
+/// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
+/// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
+/// `crate::imageproc`); the other two are built-in mappings.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum ContrastMode {
-    /// Straight full-range mapping (native samples → [0, 255]).
+    /// Full-range mapping with a 0.01% percentile clip (robust auto-contrast).
+    /// The default.
     #[default]
-    Linear,
+    LinearClip,
     /// Proprietary LUT_ALPHA auto-contrast, applied to the rendered image.
     LutAlpha,
+    /// Straight full-range mapping (native range → [0, 255], no clip).
+    Linear,
 }
 
 impl ContrastMode {
+    /// The modes in dropdown order.
+    pub const ORDER: [ContrastMode; 3] = [
+        ContrastMode::LinearClip,
+        ContrastMode::LutAlpha,
+        ContrastMode::Linear,
+    ];
+
     /// Short label for the media-manager dropdown.
     pub fn label(self) -> &'static str {
         match self {
-            ContrastMode::Linear => "Linear",
+            ContrastMode::LinearClip => "Linear + Clip",
             ContrastMode::LutAlpha => "LUT_ALPHA",
+            ContrastMode::Linear => "Linear",
         }
+    }
+
+    /// Whether the built-in render should apply the 0.01% percentile clip.
+    pub fn clips(self) -> bool {
+        matches!(self, ContrastMode::LinearClip)
     }
 }
 

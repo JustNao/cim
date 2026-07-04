@@ -140,10 +140,10 @@ impl ExportPane {
             }
         };
         self.cur_size = frame.size;
-        // Full-range render, then the same proprietary operators the live view
-        // applies, so an export matches what's on screen.
+        // Built-in render (full range or 0.01% clip), then the same proprietary
+        // operators the live view applies, so an export matches what's on screen.
         let [w, h] = frame.size;
-        let mut rgba = frame.render_rgba(false);
+        let mut rgba = frame.render_rgba(self.contrast.clips());
         if self.contrast == ContrastMode::LutAlpha {
             crate::imageproc::lut_alpha(&mut rgba, w, h);
         }
