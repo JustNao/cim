@@ -211,6 +211,13 @@ impl CimApp {
     /// pane keeps showing its last texture with a spinner until the result lands
     /// (uploaded by `pump_render`), so a slow operator never blocks the UI thread.
     pub(super) fn prepare(&mut self, ctx: &egui::Context, idx: usize) -> (Option<TextureId>, bool) {
+        // While a seek past the frontier is in flight, freeze the display: keep
+        // the last texture and show a spinner instead of rendering every frame
+        // the frontier probe rides through on the way to the target.
+        if self.pending_seek.is_some() {
+            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
+            return (last, true);
+        }
         let f = self.frame_disp(idx);
         let Some(frame) = self.panes[idx].media.resident(f) else {
             // Not decoded yet: queue it and keep the last frame + spinner.

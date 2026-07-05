@@ -209,6 +209,11 @@ pub struct CimApp {
     /// set, discovery is driven forward until this frame exists, then the
     /// timeline jumps to it. Cleared by any manual frame navigation.
     pending_seek: Option<usize>,
+    /// Edit buffer for the typeable frame-index field in the frame bar. Mirrors
+    /// `shared_frame` unless the field currently has focus (the user is typing a
+    /// target), so a jump can be committed on Enter without stepping through the
+    /// intervening frames.
+    frame_edit: String,
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
@@ -386,6 +391,7 @@ impl CimApp {
             shared_details: false,
             shared_overlay: None,
             pending_seek: None,
+            frame_edit: String::new(),
             mode: Mode::Grid,
             current: 0,
             control: 0,
@@ -1147,6 +1153,30 @@ impl CimApp {
             .max(1)
     }
 
+    /// Jump the shared timeline to `target`. Within the discovered length this is
+    /// instant. Past the frontier of a still-discovering sequence it arms a
+    /// `pending_seek` so `drive_seek` rides the frontier as fast as it can — with
+    /// the panes frozen behind a spinner (see `prepare`) so none of the
+    /// intervening frames are ever rendered — then snaps to `target`.
+    pub(super) fn seek_to(&mut self, target: usize) {
+        if self.panes.is_empty() {
+            return;
+        }
+        let len = self.timeline_len();
+        if target < len {
+            self.pending_seek = None;
+            self.shared_frame = target;
+        } else if self.current_at_end() {
+            // Past a fully-discovered end: clamp to the last real frame.
+            self.pending_seek = None;
+            self.shared_frame = len.saturating_sub(1);
+        } else {
+            // Beyond the frontier: discover forward without drawing each step.
+            self.playing = false;
+            self.pending_seek = Some(target);
+        }
+    }
+
     /// Whether the timeline-driving media's true end is known. Until it is, the
     /// timeline holds at the last discovered frame rather than wrapping early.
     pub(super) fn current_at_end(&self) -> bool {
@@ -1308,6 +1338,15 @@ impl eframe::App for CimApp {
         }
 
         self.clock = self.clock.wrapping_add(1);
+
+        // Linux (esp. Wayland) frequently ignores `with_maximized(true)` from the
+        // `ViewportBuilder` at window creation, so the window opens at the
+        // restored size. Re-assert it once the window actually exists (first
+        // frame) — Windows already honoured the builder, and re-sending is a
+        // no-op there.
+        if self.clock == 1 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
 
         self.pump_decoder();
         self.pump_render(ctx);

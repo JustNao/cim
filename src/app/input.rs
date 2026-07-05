@@ -126,6 +126,17 @@ impl CimApp {
         }
     }
 
+    /// Put the current view command line on the system clipboard (shared by the
+    /// Ctrl+Shift+C shortcut and the "View command" window's button). Uses egui's
+    /// clipboard channel so it goes through eframe's backend on every platform.
+    pub(super) fn copy_view_command(&mut self, ctx: &egui::Context) {
+        if self.panes.is_empty() {
+            return;
+        }
+        ctx.copy_text(self.view_command());
+        self.status = "View command copied to clipboard".into();
+    }
+
     // ---- input -----------------------------------------------------------
 
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
@@ -161,6 +172,13 @@ impl CimApp {
                     }
                 }
             }
+        }
+
+        // Ctrl+Shift+C copies the reopen command line from anywhere, not just via
+        // the "View command" window's button. A dedicated combo (rather than plain
+        // Ctrl+C) so it never collides with copying selected text in a field.
+        if ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::C)) {
+            self.copy_view_command(ctx);
         }
 
         // Tab cycles the view mode (default `ToggleView`), but egui also treats

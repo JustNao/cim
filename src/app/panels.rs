@@ -185,7 +185,27 @@ impl CimApp {
                 } else {
                     format!("{last}+")
                 };
-                ui.monospace(format!("frame {} / {}", self.shared_frame, count));
+                ui.monospace(format!("/ {count}"));
+                // Typeable current index: jump straight to any frame. A target
+                // past the discovered end rides the frontier (spinner, no
+                // intermediate frames drawn) via `pending_seek`/`drive_seek`.
+                let field = egui::TextEdit::singleline(&mut self.frame_edit)
+                    .desired_width(52.0)
+                    .horizontal_align(egui::Align::Max)
+                    .font(egui::TextStyle::Monospace);
+                let resp = ui.add(field);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    // Commit the typed target on Enter (focus is already lost here,
+                    // so this must be checked before the not-focused sync below).
+                    if let Ok(target) = self.frame_edit.trim().parse::<usize>() {
+                        self.seek_to(target);
+                    }
+                    self.frame_edit = self.shared_frame.to_string();
+                } else if !resp.has_focus() {
+                    // Keep the buffer showing the live frame while not editing.
+                    self.frame_edit = self.shared_frame.to_string();
+                }
+                ui.monospace("frame");
             });
         });
 
@@ -367,9 +387,12 @@ impl CimApp {
                         .font(egui::TextStyle::Monospace),
                 );
                 ui.add_space(6.0);
-                if ui.button("Copy to clipboard").clicked() {
-                    ui.output_mut(|o| o.copied_text = cmd.clone());
-                    self.status = "View command copied to clipboard".into();
+                if ui
+                    .button("Copy to clipboard")
+                    .on_hover_text("Or press Ctrl+Shift+C anywhere")
+                    .clicked()
+                {
+                    self.copy_view_command(ui.ctx());
                 }
             });
         self.show_viewcmd = open;

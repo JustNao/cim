@@ -358,9 +358,17 @@ impl CimApp {
             self.panes[idx].show_opts = !open;
         }
 
+        // "Hide" and "Close" text buttons at the top-right (matching styles).
+        // Hide sets visible = false (keeps the pane); Close removes it.
+        let close_w = 44.0;
+        let hide_w = 34.0;
+
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
-        let title = if count > 1 {
+        // The index number is the one part that must always show; the filename is
+        // dropped below if the cell is too narrow for the full title.
+        let idx_str = format!("{}", idx + 1);
+        let (title_full, title_short) = if count > 1 {
             let resident = self.panes[idx].media.resident_count();
             let sync = match (
                 self.panes[idx].sync_spatial,
@@ -378,32 +386,41 @@ impl CimApp {
             } else {
                 format!("{count}+")
             };
-            format!(
-                "{}  {}   {}/{}  ({} in mem){}",
-                idx + 1,
-                name,
+            let tail = format!(
+                "   {}/{}  ({} in mem){}",
                 self.frame_disp(idx) + 1,
                 count_str,
                 resident,
                 sync
-            )
+            );
+            (format!("{idx_str}  {name}{tail}"), format!("{idx_str}{tail}"))
         } else {
-            format!("{}  {}", idx + 1, name)
+            (format!("{idx_str}  {name}"), idx_str.clone())
         };
-        // Title after the Transformations button.
+
+        // Title after the Transformations button, up to the Hide button. When the
+        // full title (with the filename) doesn't fit that span, fall back to the
+        // name-less form so the index/frame info stays readable in small cells.
         let title_x = header.min.x + MODIFY_W + 8.0;
+        let title_right = header.max.x - close_w - hide_w - 6.0;
+        let font = FontId::proportional(13.0);
+        let fits = |ui: &egui::Ui, s: &str| {
+            let w = ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).rect.width());
+            w <= (title_right - title_x)
+        };
+        let title = if fits(ui, &title_full) {
+            title_full
+        } else {
+            title_short
+        };
         hp.text(
             Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
             Align2::LEFT_CENTER,
             title,
-            FontId::proportional(13.0),
+            font,
             Color32::from_gray(220),
         );
 
-        // "Hide" and "Close" text buttons at the top-right (matching styles).
-        // Hide sets visible = false (keeps the pane); Close removes it.
-        let close_w = 44.0;
-        let hide_w = 34.0;
         let close = Rect::from_min_size(
             Pos2::new(header.max.x - close_w, header.min.y),
             Vec2::new(close_w, HEADER_H),
