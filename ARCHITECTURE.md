@@ -255,9 +255,9 @@ per-pane footer values are always shown. In A/B the single footer (`draw_ab_foot
 shows the shared position with **both** A and B values.
 
 The header is a **single row** (`header_h_for`, feeding `image_area`): the
-**Transformations** button on the left, the title, then a **hide** button (sets
-`visible = false` — keeps the pane, unlike **×** which removes it) and the close **×**
-on the right. `image_area` is **flush** to the header/footer bars (no margin), and
+**Transformations** button on the left, the title, then **Hide** (sets
+`visible = false` — keeps the pane) and **Close** (removes it) text buttons on the
+right, matching styles (Close tints red on hover to flag that it removes the pane). `image_area` is **flush** to the header/footer bars (no margin), and
 egui window/popup **shadows are disabled** in `new` so nothing casts under panes or the
 Compute form.
 

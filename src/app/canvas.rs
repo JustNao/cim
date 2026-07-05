@@ -400,13 +400,14 @@ impl CimApp {
             Color32::from_gray(220),
         );
 
-        // Close × at the top-right, with a "hide" button just to its left that
-        // hides the pane (keeps it — unlike ×, which removes it).
-        let close = Rect::from_min_size(
-            Pos2::new(header.max.x - HEADER_H, header.min.y),
-            Vec2::splat(HEADER_H),
-        );
+        // "Hide" and "Close" text buttons at the top-right (matching styles).
+        // Hide sets visible = false (keeps the pane); Close removes it.
+        let close_w = 44.0;
         let hide_w = 34.0;
+        let close = Rect::from_min_size(
+            Pos2::new(header.max.x - close_w, header.min.y),
+            Vec2::new(close_w, HEADER_H),
+        );
         let hide = Rect::from_min_size(
             Pos2::new(close.min.x - hide_w, header.min.y),
             Vec2::new(hide_w, HEADER_H),
@@ -418,7 +419,7 @@ impl CimApp {
         hp.text(
             hide.center(),
             Align2::CENTER_CENTER,
-            "hide",
+            "Hide",
             FontId::proportional(12.0),
             if hide_resp.hovered() {
                 Color32::from_gray(235)
@@ -431,15 +432,19 @@ impl CimApp {
         }
 
         let close_resp = ui.interact(close, Id::new(("close", idx)), Sense::click());
+        if close_resp.hovered() {
+            hp.rect_filled(close, 0.0, Color32::from_gray(70));
+        }
         hp.text(
             close.center(),
             Align2::CENTER_CENTER,
-            "×",
-            FontId::proportional(18.0),
+            "Close",
+            FontId::proportional(12.0),
+            // Red-tinted on hover to flag that Close removes the pane.
             if close_resp.hovered() {
                 Color32::from_rgb(230, 120, 120)
             } else {
-                Color32::from_gray(160)
+                Color32::from_gray(170)
             },
         );
         if close_resp.clicked() {
@@ -1015,7 +1020,7 @@ impl CimApp {
                         .num_columns(2)
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
-                            ui.label("Tone");
+                            ui.label("LUT");
                             egui::ComboBox::from_id_salt(("opt_tone", pane_id))
                                 .selected_text(contrast.label())
                                 .width(130.0)
@@ -1028,9 +1033,9 @@ impl CimApp {
 
                             draw_tone_options(ui, pane_id, contrast, &mut tone);
 
-                            ui.label("Details");
+                            ui.label("RC");
                             ui.add(egui::Checkbox::without_text(&mut details))
-                                .on_hover_text("DETAILS_ENHANCED detail enhancement");
+                                .on_hover_text("Rehaussement / sharpening");
                             ui.end_row();
                         });
 
