@@ -290,6 +290,10 @@ pub struct CimApp {
     /// Global error not tied to a sequence — rendered as a modal popup.
     error_popup: Option<String>,
     last_area: Rect,
+    /// The hovered pane's cursor position in **image space**, recomputed each
+    /// frame in `draw_central`. Replicated across every pane (a red dot + the
+    /// per-pane pixel value) so the same source pixel can be read everywhere.
+    cursor_img: Option<Vec2>,
     drag_src: Option<usize>,
     /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
     manager_drag: Option<usize>,
@@ -392,6 +396,7 @@ impl CimApp {
             status: String::new(),
             error_popup: None,
             last_area: Rect::NOTHING,
+            cursor_img: None,
             drag_src: None,
             manager_drag: None,
             pending_remove: None,

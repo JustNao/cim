@@ -240,6 +240,13 @@ index, name, `frame/known(+)`, `in mem`, sync markers, close ×), `draw_footer`
 (`h×w`, cursor `x y`, native value). Borders show **only during ctrl-drag**; focus is
 the header tint. While `selecting_region` (export crop), pane pan/zoom is disabled.
 
+**Shared cursor (`cursor_img`).** `draw_central` records the hovered pane's cursor in
+**image space** (only when it's over a real pixel, via `hover_img_pos`), then every
+pane replicates it: a red dot (`draw_cursor_dot`, image→screen per pane's own view)
+and its own native value at that pixel in the footer (`value_string`). So the same
+source pixel is read across all panes at once. In A/B the single footer
+(`draw_ab_footer`) shows the shared position with **both** A and B values.
+
 The header is **one or two rows** (`header_rows`/`header_h_for`, feeding
 `image_area`): when a cell is too narrow to fit the two buttons + a little title, the
 **Compute** button drops onto a second row under **Transformations** and the image
@@ -270,9 +277,9 @@ boolean-mask media tinted over it. The spec is **config only** so it rides the
 Transformations sync; the tinted texture is cached separately per pane in
 `overlay_tex`. `prepare_overlay` builds it from the mask's shown frame (decoded on
 demand, so it works even when the mask pane isn't drawn) and returns `None` on a mask
-pane itself; `draw_pane` paints it at the base image's rect (1:1). Configured in the
-popup's **Overlay** row; cleared when its source mask closes. Expected to match the
-target's dimensions.
+pane itself; `draw_pane` **and `draw_ab_side`** paint it at the base image's rect (1:1),
+so overlays show in Grid, Single and A/B alike. Configured in the popup's **Overlay**
+row; cleared when its source mask closes. Expected to match the target's dimensions.
 
 **Statistics region (right-drag).** A **right-button drag** selects a rectangle,
 stored in **image space** (`stats_region`) so the region and each pane's own stats

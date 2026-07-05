@@ -7,6 +7,9 @@ impl CimApp {
     pub(super) fn draw_central(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let area = ui.available_rect_before_wrap();
         self.last_area = area;
+        // Recomputed below from whichever pane the cursor is over; the panes then
+        // replicate it (red dot + per-pane pixel value).
+        self.cursor_img = None;
 
         if self.panes.is_empty() {
             ui.painter().text(
@@ -19,9 +22,12 @@ impl CimApp {
             return;
         }
 
+        let hover = ctx.input(|i| i.pointer.hover_pos());
         match self.mode {
             Mode::Single => {
                 let idx = self.current.min(self.panes.len() - 1);
+                let ia = image_area(area);
+                self.cursor_img = hover.and_then(|p| self.hover_img_pos(idx, ia, ia, p));
                 self.draw_pane(ui, ctx, idx, area);
             }
             Mode::Grid => {
@@ -37,6 +43,16 @@ impl CimApp {
                     return;
                 }
                 let cells = self.grid_cells(&vis, area);
+                // The cursor's image position comes from whichever cell it's over.
+                if let Some(p) = hover {
+                    for &(idx, cell) in &cells {
+                        let ia = image_area(cell);
+                        if let Some(ci) = self.hover_img_pos(idx, ia, ia, p) {
+                            self.cursor_img = Some(ci);
+                            break;
+                        }
+                    }
+                }
                 for &(idx, cell) in &cells {
                     self.draw_pane(ui, ctx, idx, cell);
                 }
@@ -197,6 +213,9 @@ impl CimApp {
                 painter.image(ov, rect, uv(), Color32::WHITE);
             }
         }
+        // Replicate the shared cursor here (also on the hovered pane, marking the
+        // exact pixel under the cursor).
+        self.draw_cursor_dot(&painter, idx, img_area, img_area);
         if loading {
             draw_spinner(&painter, img_area, ctx.input(|i| i.time));
         }
@@ -246,7 +265,7 @@ impl CimApp {
         if self.panes[idx].show_opts {
             self.draw_options_popup(ctx, idx, cell);
         }
-        self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
+        self.draw_footer(ui, idx, footer_area(cell));
 
         // The ctrl-drag reorder border is drawn in a separate pass over all
         // cells (`draw_reorder_borders`), after every pane, so it can't be
@@ -447,37 +466,87 @@ impl CimApp {
         }
     }
 
-    /// Bottom status strip: resolution (h×w), cursor pixel, native value.
-    pub(super) fn draw_footer(
-        &self,
-        ui: &egui::Ui,
-        idx: usize,
-        hover: Option<Pos2>,
-        img_area: Rect,
-        footer: Rect,
-    ) {
+    /// The image-space position under screen point `pos` for pane `idx`, but only
+    /// when it lands on a real pixel of that pane (so the shared cursor tracks an
+    /// actual source sample). `coord_area` maps screen↔image; `clip` bounds where
+    /// the pointer counts as being over this pane.
+    pub(super) fn hover_img_pos(&self, idx: usize, coord_area: Rect, clip: Rect, pos: Pos2) -> Option<Vec2> {
+        if !clip.contains(pos) {
+            return None;
+        }
+        let p = self.view_ref(idx).screen_to_img(pos, coord_area);
+        let [w, h] = self.disp_size(idx);
+        (p.x >= 0.0 && p.y >= 0.0 && (p.x as usize) < w && (p.y as usize) < h).then_some(p)
+    }
+
+    /// The native pixel value at the shared image cursor for pane `idx`: the
+    /// value string when on a resident pixel, `…` when the frame isn't loaded,
+    /// or `—` when the cursor falls outside this pane's image.
+    fn value_string(&self, idx: usize, cursor: Vec2) -> String {
+        let [w, h] = self.disp_size(idx);
+        let (x, y) = (cursor.x.floor() as i64, cursor.y.floor() as i64);
+        if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+            return "—".into();
+        }
+        let f = self.frame_disp(idx);
+        match self.panes[idx].media.resident(f) {
+            Some(frame) => frame.pixel_string(x as usize, y as usize),
+            None => "…".into(),
+        }
+    }
+
+    /// Paint the shared cursor as a red dot at its image position on pane `idx`.
+    /// `coord_area` maps image→screen; `clip` hides it when it maps off the pane.
+    fn draw_cursor_dot(&self, painter: &egui::Painter, idx: usize, coord_area: Rect, clip: Rect) {
+        let Some(ci) = self.cursor_img else { return };
+        let sp = self.view_ref(idx).img_to_screen(ci, coord_area);
+        if !clip.contains(sp) {
+            return;
+        }
+        painter.circle_filled(sp, 3.5, Color32::from_rgb(235, 40, 40));
+        painter.circle_stroke(sp, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+    }
+
+    /// Bottom status strip: resolution (h×w), the shared cursor pixel, and this
+    /// pane's native value there.
+    pub(super) fn draw_footer(&self, ui: &egui::Ui, idx: usize, footer: Rect) {
         let fp = ui.painter_at(footer);
         fp.rect_filled(footer, 0.0, Color32::from_gray(28));
 
         let [w, h] = self.disp_size(idx);
         let mut text = format!("{h}×{w}");
-
-        if let Some(pos) = hover {
-            if img_area.contains(pos) {
-                let p = self.view_ref(idx).screen_to_img(pos, img_area);
-                let (x, y) = (p.x.floor() as i64, p.y.floor() as i64);
-                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                    let (x, y) = (x as usize, y as usize);
-                    let f = self.frame_disp(idx);
-                    if let Some(frame) = self.panes[idx].media.resident(f) {
-                        text = format!("{h}×{w}    x {x}  y {y}    {}", frame.pixel_string(x, y));
-                    } else {
-                        text = format!("{h}×{w}    x {x}  y {y}");
-                    }
-                }
+        if let Some(ci) = self.cursor_img {
+            let (x, y) = (ci.x.floor() as i64, ci.y.floor() as i64);
+            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                text = format!("{h}×{w}    x {x}  y {y}    {}", self.value_string(idx, ci));
             }
         }
 
+        fp.text(
+            footer.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            text,
+            FontId::monospace(12.0),
+            Color32::from_gray(200),
+        );
+    }
+
+    /// A/B footer: the shared cursor position with **both** sides' native values,
+    /// since the single strip stands in for both panes.
+    fn draw_ab_footer(&self, ui: &egui::Ui, a: usize, b: usize, footer: Rect) {
+        let fp = ui.painter_at(footer);
+        fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+        let [w, h] = self.disp_size(a);
+        let text = match self.cursor_img {
+            Some(ci) => format!(
+                "{h}×{w}    x {}  y {}    A {}   B {}",
+                ci.x.floor() as i64,
+                ci.y.floor() as i64,
+                self.value_string(a, ci),
+                self.value_string(b, ci),
+            ),
+            None => format!("{h}×{w}"),
+        };
         fp.text(
             footer.left_center() + Vec2::new(8.0, 0.0),
             Align2::LEFT_CENTER,
@@ -511,13 +580,25 @@ impl CimApp {
 
         let (ta, la) = self.prepare(ctx, a);
         let (tb, lb) = self.prepare(ctx, b);
+        // Mask overlays apply in A/B too (each side over its own image).
+        let oa = self.prepare_overlay(ctx, a);
+        let ob = self.prepare_overlay(ctx, b);
         let now = ctx.input(|i| i.time);
         let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
         let left = Rect::from_min_max(img.min, Pos2::new(split_x, img.max.y));
         let right = Rect::from_min_max(Pos2::new(split_x, img.min.y), img.max);
 
-        self.draw_ab_side(ui, a, ta, la, img, left, true, now);
-        self.draw_ab_side(ui, b, tb, lb, img, right, false, now);
+        // Shared cursor from whichever side the pointer is over.
+        self.cursor_img = ctx.input(|i| i.pointer.hover_pos()).and_then(|p| {
+            if p.x < split_x {
+                self.hover_img_pos(a, img, left, p)
+            } else {
+                self.hover_img_pos(b, img, right, p)
+            }
+        });
+
+        self.draw_ab_side(ui, a, ta, la, oa, img, left, true, now);
+        self.draw_ab_side(ui, b, tb, lb, ob, img, right, false, now);
         self.draw_pane_error(ui, a, left);
         self.draw_pane_error(ui, b, right);
 
@@ -573,10 +654,8 @@ impl CimApp {
             }
         }
 
-        // Footer readout for whichever side the cursor is over.
-        let hover = resp.hover_pos();
-        let side = hover.map(|pos| if pos.x < split_x { a } else { b });
-        self.draw_footer(ui, side.unwrap_or(a), hover, img, footer);
+        // Footer: shared cursor position with both sides' native values.
+        self.draw_ab_footer(ui, a, b, footer);
 
         // Right-drag statistics region on each side. Both sides share `img` as
         // the coordinate area (image_rect maps against it); the clip rect limits
@@ -593,6 +672,7 @@ impl CimApp {
         idx: usize,
         tex: Option<TextureId>,
         loading: bool,
+        overlay: Option<TextureId>,
         area: Rect,
         clip: Rect,
         is_a: bool,
@@ -603,7 +683,13 @@ impl CimApp {
         if let Some(id) = tex {
             let rect = self.view_ref(idx).image_rect(self.disp_size(idx), area);
             painter.image(id, rect, uv(), Color32::WHITE);
+            // The mask overlay shares the base image's rect (1:1 in image space).
+            if let Some(ov) = overlay {
+                painter.image(ov, rect, uv(), Color32::WHITE);
+            }
         }
+        // Replicate the shared cursor on this side (clipped to it).
+        self.draw_cursor_dot(&painter, idx, area, clip);
         if loading {
             draw_spinner(&painter, clip, now);
         }
