@@ -390,6 +390,12 @@ impl CimApp {
         let shared_tone = self.shared_tone;
         let shared_details = self.shared_details;
 
+        // Row drag-to-reorder: rows collects each media row's (vec index, screen
+        // y-band) so a drop can be mapped to a target; do_move carries the
+        // resolved (from, to) out to be applied after the window closes.
+        let mut rows: Vec<(usize, egui::Rangef)> = Vec::new();
+        let mut do_move: Option<(usize, usize)> = None;
+
         egui::Window::new("☰ Media")
             .open(&mut open)
             .resizable(true)
@@ -498,7 +504,23 @@ impl CimApp {
 
                                 ui.checkbox(&mut self.panes[i].visible, "");
 
-                                ui.monospace(format!("{}", i + 1));
+                                // The index doubles as a drag handle: grab the
+                                // ⠿ grip to reorder the media list.
+                                let handle = ui
+                                    .add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("⠿ {}", i + 1)).monospace(),
+                                        )
+                                        .sense(Sense::drag()),
+                                    )
+                                    .on_hover_text("Drag to reorder");
+                                if handle.hovered() || self.manager_drag == Some(i) {
+                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                }
+                                if handle.drag_started() {
+                                    self.manager_drag = Some(i);
+                                }
+                                rows.push((i, handle.rect.y_range()));
 
                                 let name = self.panes[i].media.name().to_string();
                                 ui.label(ellipsize(&name, 26));
@@ -594,8 +616,44 @@ impl CimApp {
                             }
                         });
                 });
+
+                // Drag-reorder feedback + drop resolution. While a ⠿ handle is
+                // held, draw an amber insertion marker on the target row; on
+                // release, record the move to apply once the window closes.
+                if let Some(from) = self.manager_drag {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                    let ptr = ctx.input(|i| i.pointer.interact_pos());
+                    let target = ptr.and_then(|p| drop_target(&rows, p.y));
+                    if let Some(to) = target {
+                        if to != from {
+                            if let Some(&(_, band)) = rows.iter().find(|(idx, _)| *idx == to) {
+                                let y = if to > from { band.max } else { band.min };
+                                ui.painter().hline(
+                                    ui.max_rect().x_range(),
+                                    y,
+                                    Stroke::new(2.0, Color32::from_rgb(240, 200, 80)),
+                                );
+                            }
+                        }
+                    }
+                    if ctx.input(|i| i.pointer.any_released()) {
+                        do_move = target.map(|to| (from, to));
+                        self.manager_drag = None;
+                    }
+                }
             });
         self.show_manager = open;
+
+        if let Some((from, to)) = do_move {
+            if from != to && from < self.panes.len() && to < self.panes.len() {
+                let p = self.panes.remove(from);
+                self.panes.insert(to, p);
+                remap_move(&mut self.current, from, to);
+                remap_move(&mut self.control, from, to);
+                remap_move(&mut self.slot_a, from, to);
+                remap_move(&mut self.slot_b, from, to);
+            }
+        }
     }
 
     /// Recompute pane `idx`'s cached histogram when its frame changes. The cache

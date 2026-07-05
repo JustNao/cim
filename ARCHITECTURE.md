@@ -47,7 +47,8 @@ src/
     input.rs     apply_action (keybindings), advance_playback, handle_input.
     canvas.rs    Central image area: grid/single/A-B, pan/zoom, reorder, header/
                  footer, per-pane popups (Transformations, stats, Compute).
-    panels.rs    Toolbar, media manager, settings, view-command, bottom frame bar.
+    panels.rs    Toolbar, media manager (drag the ⠿ handle to reorder rows via
+                 `drop_target` + `remap_move`), settings, view-command, frame bar.
     export_ui.rs Export panel UI + building ExportPlan from live app state.
 ```
 
@@ -370,7 +371,11 @@ zoom, load all, open, toggle panels, play/pause, `SelectMedia(0..12)`).
 `Keybindings` is a `BTreeMap<action_id, key_name>` with unique bindings. New default
 bindings do **not** retroactively apply to a saved config (shows `—` until rebound).
 `handle_input` skips the shortcut scan while `ctx.wants_keyboard_input()` (a text
-field has focus), so typing doesn't trigger views.
+field has focus), so typing doesn't trigger views. **Tab** (default `ToggleView`)
+would otherwise be stolen by egui's built-in focus navigation, which lands on the
+first toolbar button and traps every shortcut (a focused widget makes
+`wants_keyboard_input` true); `handle_input` absorbs that focus move onto a throwaway
+id each frame so Tab cleanly cycles the view and no button ever holds focus.
 
 ---
 

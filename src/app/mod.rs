@@ -291,6 +291,8 @@ pub struct CimApp {
     error_popup: Option<String>,
     last_area: Rect,
     drag_src: Option<usize>,
+    /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
+    manager_drag: Option<usize>,
     pending_remove: Option<usize>,
     pending_reload: Option<usize>,
     pending_reload_all: bool,
@@ -391,6 +393,7 @@ impl CimApp {
             error_popup: None,
             last_area: Rect::NOTHING,
             drag_src: None,
+            manager_drag: None,
             pending_remove: None,
             pending_reload: None,
             pending_reload_all: false,
@@ -1460,6 +1463,30 @@ fn remap(v: &mut usize, src: usize, dst: usize) {
     } else if *v == dst {
         *v = src;
     }
+}
+
+/// Update an index after moving the pane at `from` to index `to`
+/// (`remove(from)` then `insert(to)`) — the reorder used by the Media manager.
+fn remap_move(v: &mut usize, from: usize, to: usize) {
+    if *v == from {
+        *v = to;
+    } else if from < *v && *v <= to {
+        *v -= 1;
+    } else if to <= *v && *v < from {
+        *v += 1;
+    }
+}
+
+/// The Media-manager row (its pane vec index) that a drop at screen-`y` targets:
+/// the row directly under the cursor, else the nearest one (so drops in the gaps
+/// or past either end still resolve).
+fn drop_target(rows: &[(usize, egui::Rangef)], y: f32) -> Option<usize> {
+    if let Some(&(idx, _)) = rows.iter().find(|(_, band)| band.contains(y)) {
+        return Some(idx);
+    }
+    rows.iter()
+        .min_by(|a, b| (a.1.center() - y).abs().total_cmp(&(b.1.center() - y).abs()))
+        .map(|&(idx, _)| idx)
 }
 
 /// Zoom sensitivity per scroll unit; Shift doubles it.
