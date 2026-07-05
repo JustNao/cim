@@ -220,14 +220,12 @@ impl ExportPane {
         self.cur_size = frame.size;
         // Built-in render (full range or 0.01% clip), then the same proprietary
         // operators the live view applies, so an export matches what's on screen.
+        // `ToneOptions` are live-only, so the export always applies LUT_ALPHA at
+        // full strength (blend 1.0) rather than a partial mix.
         let [w, h] = frame.size;
         let mut rgba = frame.render_rgba(self.contrast.clips());
-        if self.contrast == ContrastMode::LutAlpha {
-            crate::imageproc::lut_alpha(&mut rgba, w, h);
-        }
-        if self.details {
-            crate::imageproc::details_enhanced(&mut rgba, w, h);
-        }
+        let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
+        crate::imageproc::apply_operators(&mut rgba, w, h, lut_blend, self.details);
         self.cur_display = Some(rgba);
         self.cur_idx = Some(idx);
     }

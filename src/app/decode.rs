@@ -271,19 +271,8 @@ impl CimApp {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             frame.render_into(lo, hi, &mut self.render_scratch);
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
-            let opts = TextureOptions::NEAREST;
-            let p = &mut self.panes[idx];
-            match &mut p.tex {
-                Some(t) => {
-                    t.handle.set(img, opts);
-                    t.shown = f;
-                    t.sig = sig;
-                }
-                None => {
-                    let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
-                    p.tex = Some(CachedTex { handle, shown: f, sig });
-                }
-            }
+            let name = format!("m{}", self.panes[idx].id);
+            set_cached_tex(&mut self.panes[idx].tex, ctx, name, img, f, sig);
             (Some(self.panes[idx].tex.as_ref().unwrap().handle.id()), false)
         }
     }
@@ -291,19 +280,8 @@ impl CimApp {
     /// Upload an RGBA buffer as pane `idx`'s texture, tagged with `(f, sig)`.
     fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
-        let opts = TextureOptions::NEAREST;
-        let p = &mut self.panes[idx];
-        match &mut p.tex {
-            Some(t) => {
-                t.handle.set(img, opts);
-                t.shown = f;
-                t.sig = sig;
-            }
-            None => {
-                let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
-                p.tex = Some(CachedTex { handle, shown: f, sig });
-            }
-        }
+        let name = format!("m{}", self.panes[idx].id);
+        set_cached_tex(&mut self.panes[idx].tex, ctx, name, img, f, sig);
     }
 
     /// Parameter-only hash of a pane's effective tone: everything that changes the
@@ -395,18 +373,36 @@ impl CimApp {
             let mut buf = Vec::new();
             frame.render_mask_rgba(rgb, alpha, &mut buf);
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
-            let opts = TextureOptions::NEAREST;
-            match &mut self.panes[idx].overlay_tex {
-                Some(t) => {
-                    t.handle.set(img, opts);
-                    t.shown = f;
-                }
-                None => {
-                    let handle = ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
-                    self.panes[idx].overlay_tex = Some(CachedTex { handle, shown: f, sig: 0 });
-                }
-            }
+            // Overlay textures don't tone-map, so their signature stays 0.
+            let name = format!("ov{}_{}", idx, src_id);
+            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, 0);
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
+    }
+}
+
+/// Set (or create) a cached texture slot from a freshly rendered image, tagging
+/// it with the frame it shows and its tone signature. Shared by the pane image,
+/// the tinted overlay, and the off-thread render upload, so the set-or-create
+/// dance (and the `NEAREST` filtering the tool depends on) lives in one place.
+fn set_cached_tex(
+    slot: &mut Option<CachedTex>,
+    ctx: &egui::Context,
+    name: String,
+    img: ColorImage,
+    shown: usize,
+    sig: u64,
+) {
+    let opts = TextureOptions::NEAREST;
+    match slot {
+        Some(t) => {
+            t.handle.set(img, opts);
+            t.shown = shown;
+            t.sig = sig;
+        }
+        None => {
+            let handle = ctx.load_texture(name, img, opts);
+            *slot = Some(CachedTex { handle, shown, sig });
+        }
     }
 }

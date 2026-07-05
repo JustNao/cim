@@ -86,33 +86,12 @@ fn render(job: RenderJob) -> RenderDone {
     let [w, h] = size;
     let mut rgba = Vec::new();
     job.data.render_into(job.lo, job.hi, &mut rgba);
-    if let Some(blend) = job.lut_blend {
-        let blend = blend.clamp(0.0, 1.0);
-        if blend >= 1.0 {
-            crate::imageproc::lut_alpha(&mut rgba, w, h);
-        } else {
-            // Mix the operator's output back toward the plain linear image.
-            let base = rgba.clone();
-            crate::imageproc::lut_alpha(&mut rgba, w, h);
-            blend_rgba(&mut rgba, &base, blend);
-        }
-    }
-    if job.details {
-        crate::imageproc::details_enhanced(&mut rgba, w, h);
-    }
+    crate::imageproc::apply_operators(&mut rgba, w, h, job.lut_blend, job.details);
     RenderDone {
         id: job.id,
         frame: job.frame,
         sig: job.sig,
         size,
         rgba,
-    }
-}
-
-/// Blend `out` toward `base` by `1 - t`: `out = t·out + (1 - t)·base` per byte.
-fn blend_rgba(out: &mut [u8], base: &[u8], t: f32) {
-    let t = t.clamp(0.0, 1.0);
-    for (o, &b) in out.iter_mut().zip(base) {
-        *o = (b as f32 * (1.0 - t) + *o as f32 * t).round().clamp(0.0, 255.0) as u8;
     }
 }
