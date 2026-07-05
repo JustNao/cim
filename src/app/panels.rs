@@ -44,6 +44,15 @@ impl CimApp {
             if ui.selectable_label(self.show_settings, "Settings").clicked() {
                 self.show_settings = !self.show_settings;
             }
+
+            // Transient notifications (e.g. "Settings saved") sit on the far
+            // right of this same row, at normal size; they auto-clear after
+            // `STATUS_TTL` (see `update`).
+            if !self.status.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(&self.status);
+                });
+            }
         });
 
         // A/B operand pickers.
@@ -53,10 +62,6 @@ impl CimApp {
                 ui.separator();
                 self.ab_picker(ui, false);
             });
-        }
-
-        if !self.status.is_empty() {
-            ui.label(egui::RichText::new(&self.status).weak().small());
         }
     }
 

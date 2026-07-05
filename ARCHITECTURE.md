@@ -401,10 +401,18 @@ id each frame so Tab cleanly cycles the view and no button ever holds focus.
 Each frame: apply `ui_scale`; `clock += 1`; `pump_decoder` → `handle_input` →
 `advance_playback` → `drive_seek`; `drive_eager` → `ensure_lookahead` →
 `poll_decoding_all` → `enforce_cache_budget`; clamp `shared_frame`;
-`refresh_auto_compute`; draw toolbar, bottom frame bar (shown whenever **any** media
-is a sequence), central panel, the compute draft, windows
-(manager/export/settings/view-command), error popup; apply deferred actions;
+`refresh_auto_compute`; expire the transient `status` note; draw toolbar, bottom frame
+bar (shown whenever **any** media is a sequence), central panel, the compute draft,
+windows (manager/export/settings/view-command), error popup; apply deferred actions;
 `export_tick`; then a **paced repaint**.
+
+**Transient notifications (`status`).** A single line shown **top-right in the toolbar**
+at normal size (e.g. "Settings saved", "View command copied"). `update` shadows the
+last value (`status_shadow`) to detect a fresh message, stamps `status_at`, and clears
+it after `STATUS_TTL` (10 s) — so every `self.status = …` site, current and future,
+auto-expires for free (and a `request_repaint_after` wakes an idle app to clear it).
+Per-media decode spinners / errors are **not** this: they stay centred in their pane
+(`draw_pane_error`), as does the modal `error_popup`.
 
 **Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
 playback requests `request_repaint_after(1/fps)`; a pending background decode **or a

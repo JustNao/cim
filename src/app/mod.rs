@@ -47,6 +47,10 @@ const COMPUTE_W: f32 = 62.0; // width of the header "Compute" button
 /// the dominant idle cost over VNC / software rendering. ~30 fps.
 const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 
+/// How long a transient status notification (top toolbar, far right) stays up
+/// before it auto-clears.
+const STATUS_TTL: f64 = 10.0;
+
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
 const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
@@ -291,7 +295,14 @@ pub struct CimApp {
     export_run: Option<ExportRun>,
     cancel_export: bool,
     export_status: String,
+    /// Transient notification shown top-right in the toolbar (e.g. "Settings
+    /// saved"). Any assignment to it auto-expires after `STATUS_TTL`: `update`
+    /// shadows the last value in `status_shadow` to detect a fresh message and
+    /// stamps `status_at`, so every current/future `self.status = …` gets the
+    /// timeout for free.
     status: String,
+    status_shadow: String,
+    status_at: f64,
     /// Global error not tied to a sequence — rendered as a modal popup.
     error_popup: Option<String>,
     last_area: Rect,
@@ -404,6 +415,8 @@ impl CimApp {
             cancel_export: false,
             export_status: String::new(),
             status: String::new(),
+            status_shadow: String::new(),
+            status_at: 0.0,
             error_popup: None,
             last_area: Rect::NOTHING,
             cursor_img: None,
@@ -1263,6 +1276,25 @@ impl eframe::App for CimApp {
 
         // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
         self.refresh_auto_compute();
+
+        // Expire a transient status notification after `STATUS_TTL`. Shadowing
+        // the last value detects a fresh message, so every `self.status = …`
+        // site (current and future) inherits the timeout without extra work.
+        let now = ctx.input(|i| i.time);
+        if self.status != self.status_shadow {
+            self.status_shadow = self.status.clone();
+            self.status_at = now;
+        }
+        if !self.status.is_empty() {
+            let remaining = STATUS_TTL - (now - self.status_at);
+            if remaining <= 0.0 {
+                self.status.clear();
+                self.status_shadow.clear();
+            } else {
+                // Wake up to clear it even when the app is otherwise idle.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+            }
+        }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.add_space(2.0);
