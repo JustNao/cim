@@ -140,8 +140,8 @@ impl CimApp {
             });
             if let Some(k) = key {
                 if k != Key::Escape {
+                    // Live immediately; persisted only on an explicit Save.
                     self.config.keybindings.set(action, k);
-                    self.config.save();
                 }
                 self.rebinding = None;
             }

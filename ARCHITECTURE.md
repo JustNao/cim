@@ -375,10 +375,13 @@ responsive and interaction can't corrupt the export.
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { max_columns, ui_scale, cache_budget_mb, cursor_dot, keybindings }`,
-saved as JSON via `ProjectDirs("dev","cim","cim")` (Windows:
-`%APPDATA%\cim\cim\config\config.json`). Loaded on start, saved on exit / explicit
-save. New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved config
-still loads.
+saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
+`%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
+start; **written only on an explicit "Save settings"** (never on exit). `config` is
+edited live while `saved_config` holds the on-disk copy; Settings shows an **"Unsaved
+changes"** warning whenever they differ (`config != saved_config`, needing `PartialEq`).
+New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved config still
+loads.
 
 `Action` = all bindable actions (view toggles, next/prev media & frame, fit/actual/
 zoom, load all, open, toggle panels, play/pause, `SelectMedia(0..12)`).

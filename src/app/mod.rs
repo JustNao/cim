@@ -186,6 +186,11 @@ struct Pane {
 
 pub struct CimApp {
     config: Config,
+    /// The config as last written to disk. `config` is edited live; the two
+    /// differ while there are unsaved Settings changes (surfaced as a warning),
+    /// and the config is written only on an explicit **Save settings** — never
+    /// on exit.
+    saved_config: Config,
     panes: Vec<Pane>,
     next_id: u64,
 
@@ -343,8 +348,10 @@ impl CimApp {
             .map(|n| n.get().clamp(2, 6))
             .unwrap_or(4);
 
+        let config = Config::load();
         let mut app = Self {
-            config: Config::load(),
+            saved_config: config.clone(),
+            config,
             panes: Vec::new(),
             next_id: 0,
             shared_view: ViewTransform::default(),
@@ -1354,9 +1361,6 @@ impl eframe::App for CimApp {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.config.save();
-    }
 }
 
 // ---- shared free helpers -------------------------------------------------

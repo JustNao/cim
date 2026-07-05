@@ -813,7 +813,6 @@ impl CimApp {
                                     }
                                     if ui.small_button("Clear").clicked() {
                                         self.config.keybindings.clear(action);
-                                        self.config.save();
                                     }
                                 });
                                 ui.end_row();
@@ -823,10 +822,22 @@ impl CimApp {
 
                 ui.add_space(8.0);
                 ui.separator();
-                if ui.button("Save settings").clicked() {
-                    self.config.save();
-                    self.status = "Settings saved".into();
-                }
+                // Settings are written only here — never on exit — so warn while
+                // the live config differs from what's on disk.
+                let dirty = self.config != self.saved_config;
+                ui.horizontal(|ui| {
+                    if ui.button("Save settings").clicked() {
+                        self.config.save();
+                        self.saved_config = self.config.clone();
+                        self.status = "Settings saved".into();
+                    }
+                    if dirty {
+                        ui.label(
+                            egui::RichText::new("⚠ Unsaved changes — not written until you save")
+                                .color(Color32::from_rgb(240, 200, 120)),
+                        );
+                    }
+                });
             });
         self.show_settings = open;
     }

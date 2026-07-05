@@ -114,7 +114,7 @@ impl Action {
 }
 
 /// Maps action ids -> key names. Serialized as a plain string map.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Keybindings {
     #[serde(flatten)]
     map: BTreeMap<String, String>,
@@ -258,7 +258,7 @@ pub struct ToneOptions {
     pub lut_alpha: LutAlphaOptions,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub max_columns: usize,
     /// Global UI zoom factor for buttons/text (egui zoom_factor).
@@ -302,7 +302,14 @@ impl Default for Config {
 impl Config {
     fn path() -> Option<PathBuf> {
         let dirs = directories::ProjectDirs::from("dev", "cim", "cim")?;
-        Some(dirs.config_dir().join("config.json"))
+        // On Linux the XDG config dir is `~/.config/cim`, so the file lands at
+        // `~/.config/cim/cim.json`. Other platforms keep `config.json`.
+        let name = if cfg!(target_os = "linux") {
+            "cim.json"
+        } else {
+            "config.json"
+        };
+        Some(dirs.config_dir().join(name))
     }
 
     pub fn load() -> Self {
