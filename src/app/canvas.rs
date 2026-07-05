@@ -40,6 +40,7 @@ impl CimApp {
                 for &(idx, cell) in &cells {
                     self.draw_pane(ui, ctx, idx, cell);
                 }
+                self.draw_reorder_borders(ui, ctx, &cells);
                 self.finish_reorder(ctx, &cells);
             }
             Mode::Ab => self.draw_ab(ui, ctx, area),
@@ -247,24 +248,32 @@ impl CimApp {
         }
         self.draw_footer(ui, idx, resp.hover_pos(), img_area, footer_area(cell));
 
-        // No persistent pane border (it doubles up at zero gap, breaking the
-        // middle pane). Borders show only during a ctrl-drag reorder: blue on
-        // the pane being moved, green on the pane it would swap with. Drawn
-        // *inside* the image area (inset by the stroke width, and excluding the
-        // header/footer info bars) so the full outline stays visible even with
-        // no gap between cells.
+        // The ctrl-drag reorder border is drawn in a separate pass over all
+        // cells (`draw_reorder_borders`), after every pane, so it can't be
+        // painted over by a later-drawn neighbour.
+    }
+
+    /// Reorder feedback borders for the grid, drawn in one pass **after** every
+    /// pane so no later-drawn neighbour can cover an earlier pane's outline.
+    /// Inset *inside* the image area (excluding the header/footer info bars) so
+    /// the whole outline stays visible even with no gap between cells — blue on
+    /// the pane being moved, green on the pane it would swap with.
+    pub(super) fn draw_reorder_borders(&self, ui: &egui::Ui, ctx: &egui::Context, cells: &[(usize, Rect)]) {
+        let Some(src) = self.drag_src else { return };
         let bw = 2.0;
-        let border = img_area.shrink(bw / 2.0);
-        if self.drag_src == Some(idx) {
-            ui.painter()
-                .rect_stroke(border, 0.0, Stroke::new(bw, Color32::from_rgb(120, 170, 240)));
-        } else if self.drag_src.is_some()
-            && ctx
-                .input(|i| i.pointer.interact_pos())
-                .is_some_and(|p| cell.contains(p))
-        {
-            ui.painter()
-                .rect_stroke(border, 0.0, Stroke::new(bw, Color32::from_rgb(120, 210, 120)));
+        let ptr = ctx.input(|i| i.pointer.interact_pos());
+        for &(idx, cell) in cells {
+            let color = if idx == src {
+                Color32::from_rgb(120, 170, 240)
+            } else if ptr.is_some_and(|p| cell.contains(p)) {
+                Color32::from_rgb(120, 210, 120)
+            } else {
+                continue;
+            };
+            // Inset by a full stroke width so the outline sits clear of the cell
+            // edges (and the screen edge for the outermost panes).
+            let border = image_area(cell).shrink(bw);
+            ui.painter().rect_stroke(border, 0.0, Stroke::new(bw, color));
         }
     }
 
