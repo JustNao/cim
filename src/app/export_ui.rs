@@ -219,10 +219,7 @@ impl CimApp {
             Mode::Ab => {
                 let a = self.slot_a.min(n - 1);
                 let b = self.slot_b.min(n - 1);
-                let img = Rect::from_min_max(
-                    area.min,
-                    Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
-                );
+                let img = ab_image_rect(area);
                 // A and B share the image area spatially; cover both.
                 self.pane_content_in(a, img)
                     .union(self.pane_content_in(b, img))
@@ -347,10 +344,7 @@ impl CimApp {
                         pb.view = region_view(reg);
                         Rect::from_min_size(Pos2::ZERO, reg.size())
                     }
-                    None => Rect::from_min_max(
-                        area.min,
-                        Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
-                    ),
+                    None => ab_image_rect(area),
                 };
                 panes.push(pa);
                 panes.push(pb);

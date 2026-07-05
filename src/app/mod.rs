@@ -1509,6 +1509,14 @@ fn footer_area(cell: Rect) -> Rect {
     Rect::from_min_max(Pos2::new(cell.min.x, cell.max.y - FOOTER_H), cell.max)
 }
 
+/// The image sub-rect of the A/B view: the whole `area` minus the shared footer
+/// strip at the bottom (both wipe sides share this rect). Kept in one place so
+/// the live drawing and the export composition can't drift on how much the
+/// footer reserves.
+fn ab_image_rect(area: Rect) -> Rect {
+    Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0))
+}
+
 fn uv() -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
 }

@@ -125,10 +125,7 @@ impl CimApp {
                 .collect(),
             // The wipe shares one image area; both sides are spatially the same
             // place, so pane A's view is representative.
-            Mode::Ab => vec![(
-                self.slot_a.min(self.panes.len() - 1),
-                Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0)),
-            )],
+            Mode::Ab => vec![(self.slot_a.min(self.panes.len() - 1), ab_image_rect(area))],
         };
         for (idx, img_area) in panes_areas {
             let v = self.view_ref(idx);
@@ -575,10 +572,7 @@ impl CimApp {
         let b = self.slot_b.min(n - 1);
 
         // Reserve a footer strip; images live in `img`.
-        let img = Rect::from_min_max(
-            area.min,
-            Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
-        );
+        let img = ab_image_rect(area);
         let footer = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - FOOTER_H), area.max);
 
         for &idx in &[a, b] {
