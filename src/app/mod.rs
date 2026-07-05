@@ -1636,12 +1636,38 @@ fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) {
         let nb = chan.len().max(2);
         let mut pts = Vec::with_capacity(nb);
         for (v, &count) in chan.iter().enumerate() {
+            // Skip empty bins: a zero-count bin would pin the curve to the
+            // baseline, so a channel with no values in some sub-range (or sparse
+            // data with gaps) would show sharp drops. Plotting only populated
+            // bins connects each straight to the next non-zero value instead.
+            if count == 0 {
+                continue;
+            }
             let x = rect.left() + (v as f32 / (nb - 1) as f32) * rect.width();
             let hh = (count as f32 / peak).sqrt();
             let y = rect.bottom() - hh * rect.height();
             pts.push(Pos2::new(x, y));
         }
         painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
+    }
+
+    // For a single grey (mono) curve, mark the most-frequent value — the peak
+    // (mode) — with a short vertical tick on the axis, so the dominant value is
+    // easy to read off. Multi-channel histograms would need one tick per channel
+    // and get cluttered, so it's mono-only.
+    if hist.mono {
+        if let Some(chan) = hist.bins.first() {
+            if let Some((peak_bin, &cnt)) = chan.iter().enumerate().max_by_key(|&(_, &c)| c) {
+                if cnt > 0 {
+                    let nb = chan.len().max(2);
+                    let x = rect.left() + (peak_bin as f32 / (nb - 1) as f32) * rect.width();
+                    painter.line_segment(
+                        [Pos2::new(x, rect.bottom()), Pos2::new(x, rect.bottom() - 8.0)],
+                        Stroke::new(1.5, Color32::from_rgb(240, 200, 80)),
+                    );
+                }
+            }
+        }
     }
 }
 
