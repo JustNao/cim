@@ -362,10 +362,18 @@ video compose+encode loop runs on a **worker thread** — the UI stays responsiv
 interaction can't corrupt the export. The output **format is chosen by the file
 extension** (`export_format`): a bare name or `.mp4` → video; `.png`/`.jpg`/`.jpeg` → a
 still of the frame currently on screen (`export_still_image`, composed inline — one
-frame is cheap). Uncovered pixels (gutters, letterboxing) composite with alpha 0, and a
-still is then **cropped to its content bounding box** (`crop_to_content`), so the
-background is cut off entirely rather than exported as a border. MP4's `yuv420p` ignores
-alpha, so its dark `BG` is unchanged. **The output format is validated** by extension
+frame is cheap).
+
+**No background in the output.** With no crop, the export region is the image **content**
+on screen, not the full view (`content_region`): panning/zooming so the view shows part
+image + part background no longer exports that background. Single/AB take the visible
+image rect (`pane_content_in` = `image_rect ∩ area`); **Grid packs each pane's content
+flush** (`packed_grid`, per-column widths / per-row heights) so there are no gaps
+*between* panes either. Grid decouples each cell's composition slot from its view
+reference — `GridCell { place, area, content }`: a point in `place` is remapped into the
+`content` sub-rect (same size) before the pane's `view` samples it, so a flush slot still
+reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and MP4's
+`yuv420p` ignores the alpha-0 background. **The output format is validated** by extension
 (`.mp4`/`.png`/`.jpg`/`.jpeg`, or none → MP4); any other extension (e.g. a stray dot in
 `clip.v2`) is rejected instead of handed to ffmpeg with an unusable name.
 
@@ -373,10 +381,10 @@ alpha, so its dark `BG` is unchanged. **The output format is validated** by exte
   1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
   (`set_overlay` + `blend_overlay`), so overlays appear in the video. `ExportSource =
   Still | Seq { path } | Files { paths } | Concat { files, map }`.
-- `ExportLayout = Grid | Single | Ab`. `ExportPlan.compose(t)` maps each output pixel
-  back through the pane's view, sampling **nearest** — upscaling to a larger output
-  just replicates source pixels, never blends them. `start` offsets so output
-  frame `t` = timeline `start+t`.
+- `ExportLayout = Grid(Vec<GridCell>) | Single | Ab`. `ExportPlan.compose(t)` maps each
+  output pixel back through the pane's view (Grid via `GridCell`'s place→content remap),
+  sampling **nearest** — upscaling to a larger output just replicates source pixels, never
+  blends them. `start` offsets so output frame `t` = timeline `start+t`.
 - **Region crop** is chosen in image space ("Select…" forces Single): a **right-drag**
   draws the crop (secondary-button edge detection in `region_overlay`, like the stats
   region) while **left-drag pans and the wheel zooms** so the user can move around first;
@@ -504,8 +512,8 @@ decoding/playing). Remaining candidates: minor per-frame allocations (`Action::a
 Inline `#[cfg(test)]` (skip when fixtures/ffmpeg absent): `cli` token
 expansion/grouping; `media` lazy length, eviction, **LUT render matches the float
 reference** bit-for-bit, region stats + save round-trip; `export` full compose→ffmpeg
-encode + **pixel-exact region crop** + still background crop (`crop_to_content` trims to
-the content bounding box).
+encode + **pixel-exact region crop** + content-only export (`content_region` excludes
+background) + still background crop (`crop_to_content` trims to the content bounding box).
 
 ---
 

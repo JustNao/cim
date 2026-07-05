@@ -136,9 +136,108 @@ impl CimApp {
         pane
     }
 
+    /// The on-screen rect actually covered by pane `idx`'s image within its view
+    /// reference `area_ref` — the image's rect clipped to the visible area, i.e.
+    /// content with the surrounding background excluded.
+    fn pane_content_in(&self, idx: usize, area_ref: Rect) -> Rect {
+        self.view_ref(idx)
+            .image_rect(self.disp_size(idx), area_ref)
+            .intersect(area_ref)
+    }
+
+    /// Pack each visible pane's on-screen **content** flush into a grid (per-column
+    /// widths / per-row heights), removing the inter-cell gaps and the background
+    /// margins around each panned/zoomed image. Returns the total composition rect
+    /// and the cells (each carrying its slot `place`, view reference `area`, and
+    /// the `content` sub-rect shown). `None` when nothing is visible.
+    fn packed_grid(&self) -> Option<(Rect, Vec<GridCell>)> {
+        let vis = self.visible_indices();
+        if vis.is_empty() {
+            return None;
+        }
+        let cells = self.grid_cells(&vis, self.last_area);
+        let cols = self.config.max_columns.max(1).min(vis.len()).max(1);
+        let rows = vis.len().div_ceil(cols);
+        // (media index, content sub-rect, view-reference area) per pane, in order.
+        let items: Vec<(usize, Rect, Rect)> = cells
+            .iter()
+            .map(|&(idx, cell)| {
+                let area = image_area(cell);
+                (idx, self.pane_content_in(idx, area), area)
+            })
+            .collect();
+
+        let mut col_w = vec![0f32; cols];
+        let mut row_h = vec![0f32; rows];
+        for (k, (_, content, _)) in items.iter().enumerate() {
+            col_w[k % cols] = col_w[k % cols].max(content.width());
+            row_h[k / cols] = row_h[k / cols].max(content.height());
+        }
+        let mut col_x = vec![0f32; cols + 1];
+        for i in 0..cols {
+            col_x[i + 1] = col_x[i] + col_w[i];
+        }
+        let mut row_y = vec![0f32; rows + 1];
+        for i in 0..rows {
+            row_y[i + 1] = row_y[i] + row_h[i];
+        }
+        let region = Rect::from_min_size(Pos2::ZERO, Vec2::new(col_x[cols], row_y[rows]));
+        if !region.is_positive() {
+            return None;
+        }
+        let packed = items
+            .into_iter()
+            .enumerate()
+            .map(|(k, (idx, content, area))| GridCell {
+                pane: idx, // remapped to the plan-pane index by the caller
+                place: Rect::from_min_size(
+                    Pos2::new(col_x[k % cols], row_y[k / cols]),
+                    content.size(),
+                ),
+                area,
+                content,
+            })
+            .collect();
+        Some((region, packed))
+    }
+
+    /// Composition-space region covering only image **content** (no surrounding
+    /// background) for the current mode — used when no explicit crop is set, so
+    /// panning the image into a corner doesn't export the empty background.
+    /// `None` when nothing is on screen (falls back to the full area).
+    fn content_region(&self) -> Option<Rect> {
+        if self.panes.is_empty() {
+            return None;
+        }
+        let area = self.last_area;
+        let n = self.panes.len();
+        let r = match self.export_mode {
+            Mode::Single => {
+                let idx = self.current.min(n - 1);
+                self.pane_content_in(idx, image_area(area))
+            }
+            Mode::Ab => {
+                let a = self.slot_a.min(n - 1);
+                let b = self.slot_b.min(n - 1);
+                let img = Rect::from_min_max(
+                    area.min,
+                    Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0),
+                );
+                // A and B share the image area spatially; cover both.
+                self.pane_content_in(a, img)
+                    .union(self.pane_content_in(b, img))
+                    .intersect(img)
+            }
+            // Grid packs content flush, so its region is the packed total.
+            Mode::Grid => return self.packed_grid().map(|(r, _)| r),
+        };
+        r.is_positive().then_some(r)
+    }
+
     /// The composition-space rect the export renders (fixes the output aspect).
     /// With an image-space crop, panes become cells of exactly the crop's pixel
-    /// size laid out side by side; without one it's the live screen area.
+    /// size laid out side by side; without one it's the image content on screen
+    /// (background around a panned/zoomed image is excluded).
     pub(super) fn export_canvas(&self) -> Rect {
         match self.export_region {
             Some(reg) => {
@@ -158,7 +257,7 @@ impl CimApp {
                     }
                 }
             }
-            None => self.last_area,
+            None => self.content_region().unwrap_or(self.last_area),
         }
     }
 
@@ -206,13 +305,19 @@ impl CimApp {
                         let mut pane = self.export_pane(idx);
                         pane.view = region_view(reg);
                         panes.push(pane);
-                        v.push((k, cell));
+                        // Crop already fills the cell 1:1: place = area = content.
+                        v.push(GridCell { pane: k, place: cell, area: cell, content: cell });
                     }
                 } else {
-                    let cells = self.grid_cells(&vis, area);
-                    for (k, &(idx, cell)) in cells.iter().enumerate() {
-                        panes.push(self.export_pane(idx));
-                        v.push((k, image_area(cell)));
+                    // No crop: pack each pane's on-screen content flush, so the
+                    // export has no background around or between the images.
+                    let (_, packed) = self
+                        .packed_grid()
+                        .ok_or("No visible media (enable some in ☰ Media)")?;
+                    for (k, mut cell) in packed.into_iter().enumerate() {
+                        panes.push(self.export_pane(cell.pane));
+                        cell.pane = k; // remap media index → plan-pane index
+                        v.push(cell);
                     }
                 }
                 ExportLayout::Grid(v)
@@ -398,7 +503,7 @@ impl CimApp {
         let path = std::mem::take(&mut run.path);
         self.export_run = None;
         self.export_status = match outcome {
-            ExportOutcome::Done(n) => format!("Exported {n} frames → {path}"),
+            ExportOutcome::Done(n) => format!("Exported {n} frames at {path}"),
             ExportOutcome::Cancelled => "Export cancelled".into(),
             ExportOutcome::Failed(e) => e,
         };

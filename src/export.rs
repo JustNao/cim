@@ -285,11 +285,24 @@ impl ExportPane {
     }
 }
 
+/// One cell of a grid export. `place` is the slot in composition space; `area`
+/// is the screen rect the pane's `view` was calibrated to; `content` is the
+/// sub-rect of `area` that `place` shows. Decoupling `place` from `area` lets the
+/// export pack each pane's *content* flush (no gaps or background margins)
+/// regardless of how it was panned/zoomed on screen: a composition point in
+/// `place` is remapped into `content` (same size) before the view samples it.
+pub struct GridCell {
+    pub pane: usize,
+    pub place: Rect,
+    pub area: Rect,
+    pub content: Rect,
+}
+
 /// Which pane occupies which region of the composited frame.
 pub enum ExportLayout {
-    Grid(Vec<(usize, Rect)>),          // (plan pane index, image area)
-    Single(usize, Rect),               // pane, image area
-    Ab {                               // wipe
+    Grid(Vec<GridCell>),
+    Single(usize, Rect), // pane, image area
+    Ab {                 // wipe
         a: usize,
         b: usize,
         img: Rect,
@@ -297,14 +310,32 @@ pub enum ExportLayout {
     },
 }
 
+/// A resolved hit: which pane, the screen area its view maps against, and the
+/// point (in that area's space) to sample.
+struct Located {
+    pane: usize,
+    area: Rect,
+    sample: Pos2,
+}
+
 impl ExportLayout {
-    fn locate(&self, c: Pos2) -> Option<(usize, Rect)> {
+    fn locate(&self, c: Pos2) -> Option<Located> {
         match self {
-            ExportLayout::Grid(cells) => cells.iter().find(|(_, r)| r.contains(c)).copied(),
-            ExportLayout::Single(i, r) => r.contains(c).then_some((*i, *r)),
-            ExportLayout::Ab { a, b, img, split_x } => img
-                .contains(c)
-                .then_some((if c.x < *split_x { *a } else { *b }, *img)),
+            ExportLayout::Grid(cells) => cells.iter().find(|g| g.place.contains(c)).map(|g| Located {
+                pane: g.pane,
+                area: g.area,
+                sample: g.content.min + (c - g.place.min),
+            }),
+            ExportLayout::Single(i, r) => r.contains(c).then_some(Located {
+                pane: *i,
+                area: *r,
+                sample: c,
+            }),
+            ExportLayout::Ab { a, b, img, split_x } => img.contains(c).then_some(Located {
+                pane: if c.x < *split_x { *a } else { *b },
+                area: *img,
+                sample: c,
+            }),
         }
     }
 }
@@ -341,9 +372,9 @@ impl ExportPlan {
                 // crops them off (`crop_to_content`); MP4 (yuv420p) ignores alpha,
                 // so its dark `BG` is unchanged.
                 let mut col = [BG[0], BG[1], BG[2], 0];
-                if let Some((pi, area)) = self.layout.locate(c) {
-                    let pane = &self.panes[pi];
-                    let ip = pane.view.screen_to_img(c, area);
+                if let Some(loc) = self.layout.locate(c) {
+                    let pane = &self.panes[loc.pane];
+                    let ip = pane.view.screen_to_img(loc.sample, loc.area);
                     if let Some(rgb) = pane.sample(ip) {
                         col = [rgb[0], rgb[1], rgb[2], 255];
                     }
@@ -597,6 +628,43 @@ mod tests {
                     assert_eq!(px, [100, 100, 100], "off-diagonal ({x},{y}) base");
                 }
             }
+        }
+    }
+
+    /// With the image panned so it only partly covers the view, exporting the
+    /// **content** region (not the full view) yields no background pixels.
+    #[test]
+    fn content_region_excludes_background() {
+        let frame = FrameData::new([4, 4], 1, Samples::U8((0..16).collect()));
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(10.0, 10.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(2.0, 2.0),
+            needs_fit: false,
+        };
+        // The image occupies only a 4×4 sub-rect of the 10×10 view.
+        let content = view.image_rect([4, 4], area).intersect(area);
+        let pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(frame)),
+        );
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, area),
+            region: content,
+            out_w: 4,
+            out_h: 4,
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+        for i in 0..4 * 4 {
+            assert_eq!(buf[i * 4 + 3], 255, "pixel {i} must be content, not background");
         }
     }
 
