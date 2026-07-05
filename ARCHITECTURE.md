@@ -41,6 +41,8 @@ src/
   imageproc.rs   cxx bridge to the proprietary C++ operators (LUT_ALPHA,
                  DETAILS_ENHANCED); C++ lives in cpp/, built by build.rs.
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
+  renderer.rs    Off-thread tone-render pool: builds the display RGBA (LUT render
+                 + LUT_ALPHA / details) for heavy panes so the UI never blocks.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
@@ -187,9 +189,22 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
 
 Plus a per-pane **DETAILS_ENHANCED** toggle. `render_into` produces the 8-bit RGBA,
 then the `imageproc.rs` operators (`lut_alpha`, `details_enhanced`) transform it in
-place. Both run in `prepare` (live) and `export.rs::ensure_frame` (export) so
-exports match the screen. (Export uses the default clip percentile; `ToneOptions`
-are live-view only.) See `INTEGRATION_CPP.md` for the C++ contract.
+place. The same pipeline runs in three places, matching pixel-for-pixel:
+`export.rs::ensure_frame` (export worker), and — for live view — split by weight in
+`prepare`: **Linear / Linear+Clip and masks render synchronously** (cheap LUT only),
+while **LUT_ALPHA / details render off the UI thread** on the `renderer.rs`
+`RenderPool` (`renderer::render`). (Export uses the default clip percentile;
+`ToneOptions` are live-view only.) See `INTEGRATION_CPP.md` for the C++ contract.
+
+**Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
+computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and
+if the cached texture's `(shown frame, sig)` is stale, submits a `RenderJob`
+(frame `Arc`, pre-computed `lo/hi` bounds, `lut_blend`, `details`) and returns the
+**last** texture with a spinner. `render_inflight` (a set of pane ids) caps it to one
+render per pane, so rapid tone/frame changes coalesce. `pump_render` (each update)
+drains finished jobs and uploads them; `CachedTex.sig` lets a landed texture be
+recognised as current or re-requested. The pool has **one worker** so the proprietary
+operators are serialised (safe without assuming they're reentrant).
 
 **Region-driven tone (`Pane.region_tone`).** When pinned (§9), a pane's linear
 bounds come from the shared stats region via `region_display_bounds` — the region's
@@ -405,13 +420,13 @@ id each frame so Tab cleanly cycles the view and no button ever holds focus.
 
 ## 13. The update loop (`app/mod.rs::update`)
 
-Each frame: apply `ui_scale`; `clock += 1`; `pump_decoder` → `handle_input` →
-`advance_playback` → `drive_seek`; `drive_eager` → `ensure_lookahead` →
-`poll_decoding_all` → `enforce_cache_budget`; clamp `shared_frame`;
-`refresh_auto_compute`; expire the transient `status` note; draw toolbar, bottom frame
-bar (shown whenever **any** media is a sequence), central panel, the compute draft,
-windows (manager/export/settings/view-command), error popup; apply deferred actions;
-`export_tick`; then a **paced repaint**.
+Each frame: apply `ui_scale`; `clock += 1`; `pump_decoder` → `pump_render` (upload
+finished tone renders) → `handle_input` → `advance_playback` → `drive_seek`;
+`drive_eager` → `ensure_lookahead` → `poll_decoding_all` → `enforce_cache_budget`; clamp
+`shared_frame`; `refresh_auto_compute`; expire the transient `status` note; draw toolbar,
+bottom frame bar (shown whenever **any** media is a sequence), central panel, the compute
+draft, windows (manager/export/settings/view-command), error popup; apply deferred
+actions; `export_tick`; then a **paced repaint**.
 
 **Transient notifications (`status`).** A single line shown **top-right in the toolbar**
 at normal size (e.g. "Settings saved", "View command copied"). `update` shadows the
@@ -422,10 +437,10 @@ Per-media decode spinners / errors are **not** this: they stay centred in their 
 (`draw_pane_error`), as does the modal `error_popup`.
 
 **Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
-playback requests `request_repaint_after(1/fps)`; a pending background decode **or a
-running export** (which encodes on its own thread — we just poll progress) wakes every
-`DECODE_POLL` (~30 fps, enough to pick up frames + spin the spinner); a fully idle app
-requests no repaint at all.
+playback requests `request_repaint_after(1/fps)`; a pending background decode, an
+**in-flight tone render** (`render_inflight`), **or a running export** (which encodes on
+its own thread — we just poll progress) wakes every `DECODE_POLL` (~30 fps, enough to
+pick up frames + spin the spinner); a fully idle app requests no repaint at all.
 
 Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_create`,
 `error_popup`) avoid mutating panes mid-draw.

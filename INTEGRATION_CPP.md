@@ -73,11 +73,15 @@ void cim::details_enhanced(rust::Slice<uint8_t> data, size_t width, size_t heigh
   `lut_alpha` sees it. If the proprietary auto-contrast needs the native 16-bit
   data, widen the bridge to pass `u16` samples + bit depth and render *after*
   the operator instead — happy to wire that variant if needed.
-- **Threading.** Today the operators run on the UI thread inside `prepare`
-  (live) and one-frame-per-tick during export. If a call is heavy, that will
-  stutter the UI; the fix is the already-planned "threaded export" and/or moving
-  the live operator onto the decode pool. Make sure the C++ is thread-safe (or
-  guard it) before parallelising.
+- **Threading.** The live operators now run **off the UI thread** on a dedicated
+  render pool (`src/renderer.rs`): `prepare` submits a job for a heavy pane
+  (LUT_ALPHA or details) and keeps showing the last texture + spinner until the
+  result lands, so a slow operator never stutters the UI. Export runs them on its
+  own worker thread. The render pool is created with **one** worker
+  (`RenderPool::new(1)` in `CimApp::new`), so operator calls are serialised — safe
+  even if the proprietary code isn't reentrant. **If (and only if) LUT_ALPHA /
+  DETAILS_ENHANCED are thread-safe, raise that thread count** to render several
+  panes in parallel; otherwise leave it at 1 (or add your own internal locking).
 - **Determinism / caching.** cim only re-runs an operator when a frame's texture
   is stale (frame changed, or the user toggled the mode — which sets
   `pane.tex = None`). The operators must be pure functions of their input for

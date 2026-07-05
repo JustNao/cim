@@ -6,6 +6,7 @@ mod decoder;
 mod export;
 mod imageproc;
 mod media;
+mod renderer;
 mod settings;
 mod view;
 

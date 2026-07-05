@@ -69,6 +69,10 @@ enum Mode {
 struct CachedTex {
     handle: TextureHandle,
     shown: usize, // frame index currently uploaded
+    /// Tone signature the texture was rendered with (`CimApp::tone_sig`); with
+    /// `shown` it tells a still-current texture from a stale one. The overlay
+    /// texture doesn't tone-map, so it leaves this at 0.
+    sig: u64,
 }
 
 /// A boolean mask from another pane, tinted and drawn over a pane. Config only
@@ -310,6 +314,11 @@ pub struct CimApp {
 
     decoder: BackgroundDecoder,
     inflight: HashSet<(u64, usize)>,
+    /// Off-thread tone renderer for panes using the heavy operators (LUT_ALPHA /
+    /// details); `render_inflight` holds the pane ids with a render in flight so
+    /// at most one runs per pane at a time (rapid tone/frame changes coalesce).
+    renderer: crate::renderer::RenderPool,
+    render_inflight: HashSet<u64>,
     /// True while a "Load all" batch is still decoding, so the status line can
     /// be cleared once every queued frame has landed.
     decoding_all: bool,
@@ -432,6 +441,12 @@ impl CimApp {
             pending_reload_all: false,
             decoder: BackgroundDecoder::new(threads),
             inflight: HashSet::new(),
+            // One render worker: serialises the proprietary operators (whose
+            // thread-safety we can't assume) while still keeping all of that work
+            // off the UI thread. Raise this once LUT_ALPHA / DETAILS_ENHANCED are
+            // known to be reentrant, to render several panes in parallel.
+            renderer: crate::renderer::RenderPool::new(1),
+            render_inflight: HashSet::new(),
             decoding_all: false,
             clock: 0,
             render_scratch: Vec::new(),
@@ -1271,6 +1286,7 @@ impl eframe::App for CimApp {
         self.clock = self.clock.wrapping_add(1);
 
         self.pump_decoder();
+        self.pump_render(ctx);
         self.handle_input(ctx);
         self.advance_playback(ctx);
         self.drive_seek();
@@ -1398,11 +1414,14 @@ impl eframe::App for CimApp {
         if self.playing {
             let dt = (1.0 / self.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
-        } else if self.export_run.is_some() || self.cancel_export || !self.inflight.is_empty() {
+        } else if self.export_run.is_some()
+            || self.cancel_export
+            || !self.inflight.is_empty()
+            || !self.render_inflight.is_empty()
+        {
             ctx.request_repaint_after(DECODE_POLL);
         }
     }
-
 }
 
 // ---- shared free helpers -------------------------------------------------
@@ -1470,15 +1489,6 @@ fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
         let bright = 1.0 - behind as f32 / n as f32;
         let alpha = (40.0 + 215.0 * bright) as u8;
         painter.circle_filled(pos, 2.0, Color32::from_white_alpha(alpha));
-    }
-}
-
-/// Lerp `out` toward `base` per byte: `out = base*(1-t) + out*t`. Used to blend
-/// a tone operator's RGBA result back toward the plain linear image.
-fn blend_rgba(out: &mut [u8], base: &[u8], t: f32) {
-    let t = t.clamp(0.0, 1.0);
-    for (o, &b) in out.iter_mut().zip(base) {
-        *o = (b as f32 * (1.0 - t) + *o as f32 * t).round().clamp(0.0, 255.0) as u8;
     }
 }
 

@@ -182,96 +182,160 @@ impl CimApp {
 
     // ---- textures --------------------------------------------------------
 
+    /// Take finished tone renders off the pool and upload them. Uploads whatever
+    /// landed (even if the pane has since advanced) so it shows progress like a
+    /// decoded frame; `prepare` re-requests when the result is stale.
+    pub(super) fn pump_render(&mut self, ctx: &egui::Context) {
+        for d in self.renderer.drain() {
+            self.render_inflight.remove(&d.id);
+            if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
+                self.upload_tex(ctx, idx, d.size, &d.rgba, d.frame, d.sig);
+            }
+        }
+    }
+
     /// Ensure pane `idx` shows the best texture available for its current frame.
-    /// Returns `(texture, loading)`: if the target frame is resident it uploads
-    /// and returns it (`loading = false`); otherwise it queues a decode and
-    /// returns the *previously shown* texture with `loading = true`, so the pane
-    /// keeps displaying the last frame while the new one decodes.
+    /// Returns `(texture, loading)`. The plain LUT render (Linear / Linear+Clip,
+    /// and masks) is cheap and stays **synchronous**. The heavy proprietary
+    /// operators (LUT_ALPHA / details) render on the [`RenderPool`] instead: the
+    /// pane keeps showing its last texture with a spinner until the result lands
+    /// (uploaded by `pump_render`), so a slow operator never blocks the UI thread.
     pub(super) fn prepare(&mut self, ctx: &egui::Context, idx: usize) -> (Option<TextureId>, bool) {
         let f = self.frame_disp(idx);
-        if let Some(frame) = self.panes[idx].media.resident(f) {
-            self.panes[idx].media.touch(f, self.clock); // viewing keeps it hot
-            let need = match &self.panes[idx].tex {
-                Some(t) => t.shown != f,
-                None => true,
-            };
-            if need {
-                // Only run the (expensive) render + upload when the texture is
-                // stale. Bounds are memoized on the frame; render into a reused
-                // scratch buffer via the LUT path.
-                // Always nearest, at any zoom: the value under the cursor must be
-                // a true source sample, never a blend of neighbours.
-                let opts = TextureOptions::NEAREST;
-                // Built-in mapping to 8-bit (full range, or 0.01% clip for
-                // Linear+Clip); the LUT_ALPHA / detail operators (the
-                // proprietary C++) then transform the rendered RGBA in place.
-                let contrast = self.contrast_of(idx);
+        let Some(frame) = self.panes[idx].media.resident(f) else {
+            // Not decoded yet: queue it and keep the last frame + spinner.
+            self.request(idx, f);
+            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
+            return (last, true);
+        };
+        self.panes[idx].media.touch(f, self.clock); // viewing keeps it hot
+
+        // Cheap, parameter-only signature of everything that changes the toned
+        // output (bar the frame itself). With `shown` it tells a still-current
+        // texture from a stale one without recomputing the (possibly O(N)) bounds.
+        let sig = self.tone_sig(idx);
+        if let Some(t) = &self.panes[idx].tex {
+            if t.shown == f && t.sig == sig {
+                return (Some(t.handle.id()), false);
+            }
+        }
+
+        let contrast = self.contrast_of(idx);
+        let heavy = !frame.is_mask()
+            && (contrast == ContrastMode::LutAlpha || self.details_of(idx));
+
+        if heavy {
+            // Render off-thread. One render per pane at a time, so rapid tone /
+            // frame changes coalesce instead of piling up jobs.
+            let id = self.panes[idx].id;
+            if !self.render_inflight.contains(&id) {
+                let (lo, hi) = self.tone_bounds(idx, &frame);
                 let tone = self.tone_of(idx);
-                let clip = contrast.clips();
-                let pct = tone.clip.percent;
-                // The built-in linear bounds. `clip` uses the per-tail percentile
-                // (Modify → Clip %); otherwise the full range / float extent.
-                let base_bounds = |clip: bool| {
-                    if clip {
-                        frame.clip_bounds(pct)
-                    } else {
-                        frame.display_bounds(false)
-                    }
-                };
-                // With region-tone pinned, derive the linear bounds from the
-                // shared stats region instead of the whole image. Pixels outside
-                // the region that fall beyond these bounds are clamped by the
-                // render — the region drives the contrast and extremes elsewhere
-                // saturate. LUT_ALPHA below is unaffected: it still runs over the
-                // whole rendered image.
-                let (lo, hi) = if self.panes[idx].region_tone {
-                    self.stats_region
-                        .and_then(|reg| pixel_bounds(reg, frame.size))
-                        .map(|(x0, y0, x1, y1)| {
-                            frame.region_display_bounds(x0, y0, x1, y1, clip, pct)
-                        })
-                        .unwrap_or_else(|| base_bounds(clip))
-                } else {
-                    base_bounds(clip)
-                };
-                frame.render_into(lo, hi, &mut self.render_scratch);
-                let [w, h] = frame.size;
-                // A boolean mask renders black/white; the tone operators don't apply.
-                if !frame.is_mask() {
-                    if contrast == ContrastMode::LutAlpha {
-                        let blend = tone.lut_alpha.blend.clamp(0.0, 1.0);
-                        if blend >= 1.0 {
-                            crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
-                        } else {
-                            // Mix the operator's output back toward the plain
-                            // linear image (Modify → LUT_ALPHA Blend).
-                            let base = self.render_scratch.clone();
-                            crate::imageproc::lut_alpha(&mut self.render_scratch, w, h);
-                            blend_rgba(&mut self.render_scratch, &base, blend);
-                        }
-                    }
-                    if self.details_of(idx) {
-                        crate::imageproc::details_enhanced(&mut self.render_scratch, w, h);
-                    }
+                let lut_blend = (contrast == ContrastMode::LutAlpha)
+                    .then(|| tone.lut_alpha.blend.clamp(0.0, 1.0));
+                self.renderer.request(crate::renderer::RenderJob {
+                    id,
+                    frame: f,
+                    sig,
+                    data: frame.clone(),
+                    lo,
+                    hi,
+                    lut_blend,
+                    details: self.details_of(idx),
+                });
+                self.render_inflight.insert(id);
+            }
+            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
+            (last, true)
+        } else {
+            // Synchronous LUT render (no proprietary operators). Always nearest,
+            // at any zoom: the value under the cursor must be a true source
+            // sample, never a blend of neighbours.
+            let (lo, hi) = self.tone_bounds(idx, &frame);
+            frame.render_into(lo, hi, &mut self.render_scratch);
+            let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
+            let opts = TextureOptions::NEAREST;
+            let p = &mut self.panes[idx];
+            match &mut p.tex {
+                Some(t) => {
+                    t.handle.set(img, opts);
+                    t.shown = f;
+                    t.sig = sig;
                 }
-                let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
-                let p = &mut self.panes[idx];
-                match &mut p.tex {
-                    Some(t) => {
-                        t.handle.set(img, opts);
-                        t.shown = f;
-                    }
-                    None => {
-                        let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
-                        p.tex = Some(CachedTex { handle, shown: f });
-                    }
+                None => {
+                    let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
+                    p.tex = Some(CachedTex { handle, shown: f, sig });
                 }
             }
             (Some(self.panes[idx].tex.as_ref().unwrap().handle.id()), false)
+        }
+    }
+
+    /// Upload an RGBA buffer as pane `idx`'s texture, tagged with `(f, sig)`.
+    fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
+        let img = ColorImage::from_rgba_unmultiplied(size, rgba);
+        let opts = TextureOptions::NEAREST;
+        let p = &mut self.panes[idx];
+        match &mut p.tex {
+            Some(t) => {
+                t.handle.set(img, opts);
+                t.shown = f;
+                t.sig = sig;
+            }
+            None => {
+                let handle = ctx.load_texture(format!("m{}", p.id), img, opts);
+                p.tex = Some(CachedTex { handle, shown: f, sig });
+            }
+        }
+    }
+
+    /// Parameter-only hash of a pane's effective tone: everything that changes the
+    /// rendered RGBA for a given frame. Deliberately excludes the frame index (the
+    /// texture's `shown` covers that) and never touches the pixels, so it's cheap
+    /// to compute every frame.
+    pub(super) fn tone_sig(&self, idx: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let c = match self.contrast_of(idx) {
+            ContrastMode::Linear => 0u8,
+            ContrastMode::LinearClip => 1,
+            ContrastMode::LutAlpha => 2,
+        };
+        let tone = self.tone_of(idx);
+        c.hash(&mut h);
+        tone.clip.percent.to_bits().hash(&mut h);
+        tone.lut_alpha.blend.to_bits().hash(&mut h);
+        self.details_of(idx).hash(&mut h);
+        let region = self.panes[idx].region_tone;
+        region.hash(&mut h);
+        if region {
+            // Region-tone bounds move with the shared stats region.
+            self.stats_gen.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// The linear display bounds `[lo, hi]` for pane `idx`'s current tone: the
+    /// per-tail percentile clip, the full range / float extent, or — when
+    /// region-tone is pinned — the shared stats region's bounds.
+    fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
+        let contrast = self.contrast_of(idx);
+        let pct = self.tone_of(idx).clip.percent;
+        let clip = contrast.clips();
+        let base = |clip: bool| {
+            if clip {
+                frame.clip_bounds(pct)
+            } else {
+                frame.display_bounds(false)
+            }
+        };
+        if self.panes[idx].region_tone {
+            self.stats_region
+                .and_then(|reg| pixel_bounds(reg, frame.size))
+                .map(|(x0, y0, x1, y1)| frame.region_display_bounds(x0, y0, x1, y1, clip, pct))
+                .unwrap_or_else(|| base(clip))
         } else {
-            self.request(idx, f);
-            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
-            (last, true)
+            base(clip)
         }
     }
 
@@ -322,7 +386,7 @@ impl CimApp {
                 }
                 None => {
                     let handle = ctx.load_texture(format!("ov{}_{}", idx, src_id), img, opts);
-                    self.panes[idx].overlay_tex = Some(CachedTex { handle, shown: f });
+                    self.panes[idx].overlay_tex = Some(CachedTex { handle, shown: f, sig: 0 });
                 }
             }
         }
