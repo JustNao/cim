@@ -388,7 +388,7 @@ impl CimApp {
             loop_playback: true,
             loop_range: None,
             loop_drag: None,
-            fps: 12.0,
+            fps: 25.0,
             play_accum: 0.0,
             show_settings: false,
             show_manager: false,

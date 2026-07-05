@@ -1288,14 +1288,14 @@ fn compute_config_rows(
             ui.label(label);
             let cur = sel
                 .and_then(|s| sources.iter().find(|(m, _)| *m == s))
-                .map(|(_, n)| ellipsize(n, 16))
+                .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| "—".into());
             egui::ComboBox::from_id_salt((id, salt))
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
                     for (mid, mname) in sources {
                         if ui
-                            .selectable_value(sel, Some(*mid), ellipsize(mname, 20))
+                            .selectable_value(sel, Some(*mid), format!("{} {}", mid, mname))
                             .clicked()
                         {
                             changed = true;

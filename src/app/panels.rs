@@ -412,7 +412,7 @@ impl CimApp {
             .default_width(560.0)
             .show(ctx, |ui| {
                 if self.panes.is_empty() {
-                    ui.label("No media open. Use 📂 Open or drop files onto the window.");
+                    ui.label("No media open. Use Open or drop files onto the window.");
                     return;
                 }
 
@@ -428,9 +428,9 @@ impl CimApp {
                             ui.label("Frames");
                             ui.label("Single");
                             ui.label("A / B");
-                            ui.label("Sync")
+                            ui.label("Synchronize")
                                 .on_hover_text(
-                                    "Pos / Time / Transformations sync (Transf shares the \
+                                    "Pos / Time / Transformations sync (Transformations shares the \
                                      per-pane Transformations popup) and the timeline Control",
                                 );
                             ui.label("");
@@ -479,7 +479,7 @@ impl CimApp {
                                     let mut all_ts = self.panes.iter().all(|p| p.sync_tone);
                                     if ui
                                         .checkbox(&mut all_ts, "Transformations")
-                                        .on_hover_text("Sync the Transformations popup across all")
+                                        .on_hover_text("Synchronize the Transformations popup across all panes")
                                         .changed()
                                     {
                                         for p in &mut self.panes {
@@ -534,7 +534,7 @@ impl CimApp {
                                 rows.push((i, handle.rect.y_range()));
 
                                 let name = self.panes[i].media.name().to_string();
-                                ui.label(ellipsize(&name, 26));
+                                ui.label(name);
 
                                 if count > 1 {
                                     ui.monospace(format!("{count}  ({resident}◈)"));
@@ -582,7 +582,7 @@ impl CimApp {
                                     if ui
                                         .checkbox(&mut ts, "Transformations")
                                         .on_hover_text(
-                                            "Sync the Transformations popup with other Transf panes",
+                                            "Synchronize the Transformations popup with other Transf panes",
                                         )
                                         .changed()
                                     {
