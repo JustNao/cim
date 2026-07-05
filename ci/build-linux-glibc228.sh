@@ -30,11 +30,15 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 export PATH="$CARGO_HOME/bin:$PATH"
 
 rustc --version
-ldd --version | head -1
+# Informational only. `… | head -1` closes the pipe early, so the writer gets
+# SIGPIPE (exit 141) — under `set -o pipefail` + `set -e` that would abort the
+# build, so swallow it. The `|| true` must be outside the pipeline.
+{ ldd --version || true; } | head -1 || true
 
 cargo build --release --locked
 
 BIN="$CARGO_TARGET_DIR/release/cim"
 echo "=== highest glibc symbol required by the binary ==="
-objdump -T "$BIN" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
+# Also informational; never let it fail the build (SIGPIPE / no match / etc.).
+{ objdump -T "$BIN" | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1; } || true
 file "$BIN"
