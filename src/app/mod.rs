@@ -1215,6 +1215,30 @@ impl CimApp {
             .collect()
     }
 
+    /// Panes whose image is actually on screen right now, given the current mode:
+    /// Single shows only `current`, Grid the visible cells, A/B the two slots.
+    /// Used to gate background decode (lookahead) so loaded-but-hidden sequences
+    /// don't keep decoding and starving the pane the user is looking at.
+    pub(super) fn displayed_indices(&self) -> Vec<usize> {
+        if self.panes.is_empty() {
+            return Vec::new();
+        }
+        let n = self.panes.len();
+        match self.mode {
+            Mode::Single => vec![self.current.min(n - 1)],
+            Mode::Grid => self.visible_indices(),
+            Mode::Ab => {
+                let a = self.slot_a.min(n - 1);
+                let b = self.slot_b.min(n - 1);
+                if a == b {
+                    vec![a]
+                } else {
+                    vec![a, b]
+                }
+            }
+        }
+    }
+
     /// The resident-frame memory ceiling in bytes, from the configured budget
     /// (at least 1 MiB so eviction always has a target below the total).
     pub(super) fn cache_budget_bytes(&self) -> usize {

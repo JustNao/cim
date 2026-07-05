@@ -116,9 +116,19 @@ impl CimApp {
 
     /// Keep the next page discovered for panes the user is browsing, so stepping
     /// forward and the timeline length stay ahead of the cursor without ever
-    /// decoding past what's actually being viewed.
+    /// decoding past what's actually being viewed. Only panes actually on screen
+    /// (see `displayed_indices`) are probed — a loaded-but-hidden sequence would
+    /// otherwise keep decoding its frontier and starve the shown pane, making the
+    /// UI laggy even when a single media is displayed.
     pub(super) fn ensure_lookahead(&mut self) {
-        for i in 0..self.panes.len() {
+        // The control pane drives the shared timeline/scrubber even when it isn't
+        // on screen, so it must keep discovering its frontier too.
+        let mut targets = self.displayed_indices();
+        let ctrl = self.control.min(self.panes.len().saturating_sub(1));
+        if !targets.contains(&ctrl) {
+            targets.push(ctrl);
+        }
+        for i in targets {
             if self.panes[i].eager || self.panes[i].media.at_end() {
                 continue;
             }
