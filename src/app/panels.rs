@@ -726,9 +726,10 @@ impl CimApp {
             return;
         };
         let data = &hist.data;
-        draw_hist_curves(&painter, rect, data);
+        let peak_val = draw_hist_curves(&painter, rect, data);
 
-        // True value extent under the graph: min at left, max at right.
+        // True value extent under the graph: min at left, max at right, and the
+        // peak (mode) value centred between them in the tick's amber (mono only).
         // Whole numbers (integer sources) print plainly; floats get 4 digits.
         let fmt = |v: f32| -> String {
             if v.fract() == 0.0 {
@@ -737,9 +738,18 @@ impl CimApp {
                 format!("{v:.4}")
             }
         };
-        ui.horizontal(|ui| {
-            ui.monospace(format!("min {}", fmt(data.min)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.columns(3, |cols| {
+            cols[0].monospace(format!("min {}", fmt(data.min)));
+            if let Some(pv) = peak_val {
+                cols[1].vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("peak {}", fmt(pv)))
+                            .monospace()
+                            .color(Color32::from_rgb(240, 200, 80)),
+                    );
+                });
+            }
+            cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.monospace(format!("max {}", fmt(data.max)));
             });
         });

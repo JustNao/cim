@@ -902,9 +902,10 @@ impl CimApp {
             Pos2::new(panel.left() + pad, panel.top() + pad + head_h),
             Vec2::new(w - 2.0 * pad, hist_h),
         );
-        draw_hist_curves(&painter, hist_rect, &data.hist);
+        let peak_val = draw_hist_curves(&painter, hist_rect, &data.hist);
 
-        // Min / max labelled at the histogram's two ends.
+        // Min / max labelled at the histogram's two ends, and the peak (mode)
+        // value centred under it in the tick's amber (mono histograms only).
         let axis_font = FontId::monospace(9.0);
         let axis_col = Color32::from_gray(170);
         painter.text(
@@ -914,6 +915,15 @@ impl CimApp {
             axis_font.clone(),
             axis_col,
         );
+        if let Some(pv) = peak_val {
+            painter.text(
+                Pos2::new(hist_rect.center().x, hist_rect.bottom() + 2.0),
+                Align2::CENTER_TOP,
+                format!("peak = {}", fmt(pv)),
+                axis_font.clone(),
+                Color32::from_rgb(240, 200, 80),
+            );
+        }
         painter.text(
             Pos2::new(hist_rect.right(), hist_rect.bottom() + 2.0),
             Align2::RIGHT_TOP,

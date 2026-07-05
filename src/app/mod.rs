@@ -1614,7 +1614,11 @@ fn draw_tone_options(
 /// curve when mono, else R/G/B, each sqrt-scaled so the tails stay legible.
 /// Shared by the pane Transformations histogram (`draw_histogram`) and the
 /// region-stats mini histogram (`draw_stats_panel`).
-fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) {
+///
+/// For a mono histogram it also draws a full-height tick at the most-frequent
+/// value (the peak / mode) and returns that value, so the caller can label it
+/// under the graph next to min/max; returns `None` for multi-channel histograms.
+fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) -> Option<f32> {
     painter.rect_filled(rect, 0.0, Color32::from_gray(16));
     let peak = hist
         .bins
@@ -1652,23 +1656,25 @@ fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) {
     }
 
     // For a single grey (mono) curve, mark the most-frequent value — the peak
-    // (mode) — with a short vertical tick on the axis, so the dominant value is
-    // easy to read off. Multi-channel histograms would need one tick per channel
-    // and get cluttered, so it's mono-only.
-    if hist.mono {
-        if let Some(chan) = hist.bins.first() {
-            if let Some((peak_bin, &cnt)) = chan.iter().enumerate().max_by_key(|&(_, &c)| c) {
-                if cnt > 0 {
-                    let nb = chan.len().max(2);
-                    let x = rect.left() + (peak_bin as f32 / (nb - 1) as f32) * rect.width();
-                    painter.line_segment(
-                        [Pos2::new(x, rect.bottom()), Pos2::new(x, rect.bottom() - 8.0)],
-                        Stroke::new(1.5, Color32::from_rgb(240, 200, 80)),
-                    );
-                }
-            }
-        }
+    // (mode) — with a full-height vertical line, and return its value so the
+    // caller can print it under the graph. Multi-channel histograms would need
+    // one per channel and get cluttered, so it's mono-only.
+    if !hist.mono {
+        return None;
     }
+    let chan = hist.bins.first()?;
+    let (peak_bin, &cnt) = chan.iter().enumerate().max_by_key(|&(_, &c)| c)?;
+    if cnt == 0 {
+        return None;
+    }
+    let nb = chan.len().max(2);
+    let frac = peak_bin as f32 / (nb - 1) as f32;
+    let x = rect.left() + frac * rect.width();
+    painter.line_segment(
+        [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+        Stroke::new(1.5, Color32::from_rgb(240, 200, 80)),
+    );
+    Some(hist.min + frac * (hist.max - hist.min))
 }
 
 /// The view that maps an export cell of exactly `reg`'s pixel size onto the
