@@ -27,6 +27,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
+            // Open filling the screen; the inner size above is the restored size.
+            .with_maximized(true)
             .with_title("cim")
             .with_icon(app_icon()),
         ..Default::default()
