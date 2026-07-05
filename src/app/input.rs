@@ -150,7 +150,9 @@ impl CimApp {
 
         // Don't fire shortcuts while the user is typing in a text field (e.g. the
         // Compute pane's Save name, or the export name) — the keystrokes belong
-        // to that widget, not the view.
+        // to that widget, not the view. Buttons never *hold* focus here (see the
+        // Tab handling below), so `wants_keyboard_input` is true only for genuine
+        // text editors.
         if !ctx.wants_keyboard_input() {
             for action in Action::all() {
                 if let Some(key) = self.config.keybindings.key_for(action) {
@@ -159,6 +161,21 @@ impl CimApp {
                     }
                 }
             }
+        }
+
+        // Tab cycles the view mode (default `ToggleView`), but egui also treats
+        // Tab as "focus the next widget". Left alone it parks on the first
+        // toolbar button and stays there, which both traps every shortcut (a
+        // focused widget makes `wants_keyboard_input` true) and turns further
+        // Tabs into focus-hopping instead of view cycling. On any Tab, drop
+        // widget focus and absorb egui's pending focus move onto a throwaway id
+        // so nothing lands on (or lingers over) a button. Runs unconditionally
+        // so tabbing out of a text field can't re-trap us on a button.
+        if ctx.input(|i| i.key_pressed(Key::Tab)) {
+            ctx.memory_mut(|m| {
+                m.stop_text_input();
+                m.interested_in_focus(Id::new("cim_tab_focus_sink"));
+            });
         }
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
