@@ -1,2 +1,5 @@
 # Keep shell scripts LF so they run inside Linux CI containers.
 *.sh text eol=lf
+# Embedded assets are binary — never apply line-ending conversion.
+*.ttf binary
+*.png binary

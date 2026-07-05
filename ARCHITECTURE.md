@@ -23,6 +23,10 @@
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.9, `rfd` 0.14,
   `serde`/`serde_json`, `directories` 5, `anyhow`, `cxx` 1 (C++ FFI — needs a host
   C++ compiler, see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**.
+- **Embedded assets** (`assets/`, baked in via `include_bytes!`): `icon.png` (window
+  icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
+  `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
+  drag-handle grip — render instead of tofu).
 
 ---
 
@@ -41,8 +45,8 @@ src/
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
   app/           The CimApp type (egui App), split by concern:
-    mod.rs       State struct, consts, new(), loading/reload, per-pane state
-                 resolution, the update loop, shared free helpers.
+    mod.rs       State struct, consts, new() (style, embedded fallback font,
+                 loading/reload), per-pane state resolution, update loop, helpers.
     decode.rs    Decode plumbing, cache-budget eviction, texture prepare().
     input.rs     apply_action (keybindings), advance_playback, handle_input.
     canvas.rs    Central image area: grid/single/A-B, pan/zoom, reorder, header/

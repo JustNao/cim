@@ -346,6 +346,20 @@ impl CimApp {
         style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
         cc.egui_ctx.set_style(style);
 
+        // Embed a small font (a subset of DejaVu Sans covering the Braille block)
+        // so glyphs the bundled fonts lack — notably the ⠿ drag-handle grip —
+        // render instead of showing tofu. Appended as a *fallback*, so the
+        // default proportional/monospace faces are still preferred.
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "cimicons".to_owned(),
+            egui::FontData::from_static(include_bytes!("../../assets/cimicons.ttf")),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("cimicons".to_owned());
+        }
+        cc.egui_ctx.set_fonts(fonts);
+
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 6))
             .unwrap_or(4);

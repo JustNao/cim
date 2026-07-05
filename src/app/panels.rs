@@ -36,7 +36,7 @@ impl CimApp {
                 self.show_manager = !self.show_manager;
             }
             if ui
-                .button("Compute")
+                .selectable_label(false, "Compute")
                 .on_hover_text("Add a Compute pane (mean / std / diff of other media)")
                 .clicked()
             {
@@ -74,16 +74,23 @@ impl CimApp {
 
     pub(super) fn ab_picker(&mut self, ui: &mut egui::Ui, is_a: bool) {
         let n = self.panes.len();
-        let slot = if is_a { &mut self.slot_a } else { &mut self.slot_b };
-        *slot = (*slot).min(n - 1);
+        let cur = (if is_a { self.slot_a } else { self.slot_b }).min(n - 1);
         ui.label(if is_a { "A:" } else { "B:" });
-        if ui.small_button("◀").clicked() {
-            *slot = (*slot + n - 1) % n;
-        }
-        let name = self.panes[*slot].media.name().to_string();
-        ui.monospace(format!("{}·{}", *slot + 1, ellipsize(&name, 16)));
-        if ui.small_button("▶").clicked() {
-            *slot = (*slot + 1) % n;
+        // A dropdown listing every open media (1-based index · name).
+        let cur_text = format!("{}·{}", cur + 1, ellipsize(self.panes[cur].media.name(), 16));
+        let mut chosen = cur;
+        egui::ComboBox::from_id_salt(if is_a { "ab_pick_a" } else { "ab_pick_b" })
+            .selected_text(cur_text)
+            .show_ui(ui, |ui| {
+                for i in 0..n {
+                    let label = format!("{}·{}", i + 1, ellipsize(self.panes[i].media.name(), 20));
+                    ui.selectable_value(&mut chosen, i, label);
+                }
+            });
+        if is_a {
+            self.slot_a = chosen;
+        } else {
+            self.slot_b = chosen;
         }
     }
 
@@ -364,17 +371,6 @@ impl CimApp {
                     ui.output_mut(|o| o.copied_text = cmd.clone());
                     self.status = "View command copied to clipboard".into();
                 }
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Captures files, layout, columns, shared zoom/pan, frame, \
-                         per-pane tone/detail/visibility/Transformations-sync, the \
-                         focused and control panes, loop range and the A/B split. \
-                         Defaults are omitted.",
-                    )
-                    .weak()
-                    .small(),
-                );
             });
         self.show_viewcmd = open;
     }
