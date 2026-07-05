@@ -1,10 +1,12 @@
-//! MP4 comparison export.
+//! Comparison export (MP4 video or a single PNG/JPEG still).
 //!
 //! The app builds a self-contained [`ExportPlan`] (a snapshot of layout, views,
-//! tone/detail settings and media sources), then composites each timeline frame on the CPU
-//! and pipes raw RGBA to the `ffmpeg` CLI, which encodes H.264. Because the plan
-//! is decoupled from live app state, the whole compose+encode loop runs on a
-//! worker thread (`app/export_ui.rs::run_export`) while the UI keeps interacting.
+//! tone/detail settings and media sources), then composites each timeline frame on the CPU.
+//! For **video** it pipes raw RGBA to the `ffmpeg` CLI (H.264) on a worker thread
+//! (`app/export_ui.rs::run_export`) while the UI keeps interacting; for a **still**
+//! it composes one frame and writes it with [`save_image`]. Uncovered pixels
+//! (gutters / letterboxing) are composited **transparent**, so a still never bakes
+//! in the dark background (MP4 ignores alpha, keeping its `BG`).
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -334,7 +336,11 @@ impl ExportPlan {
                 let cx = self.region.min.x + (ox as f32 + 0.5) / w as f32 * rw;
                 let c = Pos2::new(cx, cy);
                 let o = (oy * w + ox) * 4;
-                let mut col = BG;
+                // Uncovered pixels (gutters between panes, letterboxing around an
+                // image) are left **transparent** — the still-image export drops
+                // the background entirely, and MP4 (yuv420p) ignores alpha so its
+                // dark `BG` is unchanged.
+                let mut col = [BG[0], BG[1], BG[2], 0];
                 if let Some((pi, area)) = self.layout.locate(c) {
                     let pane = &self.panes[pi];
                     let ip = pane.view.screen_to_img(c, area);
@@ -419,6 +425,35 @@ impl Encoder {
         self.stdin.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Save one composited RGBA frame as a still image, format chosen by extension.
+/// PNG keeps the alpha channel (transparent background); JPEG has no alpha, so
+/// transparent (background) pixels are flattened onto **white** rather than the
+/// dark gutter colour, so the export never bakes in a black background.
+pub fn save_image(path: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => image::save_buffer(path, rgba, w as u32, h as u32, image::ColorType::Rgba8)
+            .map_err(|e| format!("write PNG: {e}")),
+        "jpg" | "jpeg" => {
+            let mut rgb = vec![0u8; w * h * 3];
+            for i in 0..w * h {
+                if rgba[i * 4 + 3] == 0 {
+                    rgb[i * 3..i * 3 + 3].copy_from_slice(&[255, 255, 255]);
+                } else {
+                    rgb[i * 3..i * 3 + 3].copy_from_slice(&rgba[i * 4..i * 4 + 3]);
+                }
+            }
+            image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
+                .map_err(|e| format!("write JPEG: {e}"))
+        }
+        other => Err(format!("unsupported image extension '.{other}' — use .png or .jpg")),
     }
 }
 
@@ -533,6 +568,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// PNG keeps the transparent background; JPEG (no alpha) flattens it to white
+    /// — never the dark gutter colour.
+    #[test]
+    fn save_image_png_transparent_jpeg_white() {
+        // Pixel 0: opaque red (covered). Pixel 1: transparent BG (uncovered).
+        let (w, h) = (2usize, 1usize);
+        let rgba = vec![200, 0, 0, 255, BG[0], BG[1], BG[2], 0];
+
+        let png = std::env::temp_dir().join("cim_still_test.png");
+        save_image(&png, w, h, &rgba).expect("write png");
+        let img = image::open(&png).expect("read png").to_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0, [200, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0[3], 0, "background stays transparent");
+
+        let jpg = std::env::temp_dir().join("cim_still_test.jpg");
+        save_image(&jpg, w, h, &rgba).expect("write jpg");
+        let jimg = image::open(&jpg).expect("read jpg").to_rgb8();
+        let p = jimg.get_pixel(1, 0).0; // lossy, so allow a little slack
+        assert!(p[0] > 240 && p[1] > 240 && p[2] > 240, "background flattened to white, got {p:?}");
     }
 
     /// Full compose → ffmpeg encode of a few frames. Skips gracefully if the

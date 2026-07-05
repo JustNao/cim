@@ -354,9 +354,15 @@ to the working dir). Skipped by `view_command`.
 
 The app builds a self-contained **`ExportPlan`** (snapshot of layout, views, clip,
 sources, frame range) decoupled from live state, composites each output frame on the
-CPU, and pipes raw RGBA to the `ffmpeg` CLI (H.264, libx264). Because the plan is a
-snapshot, the whole compose+encode loop runs on a **worker thread** — the UI stays
-responsive and interaction can't corrupt the export.
+CPU, and either pipes raw RGBA to the `ffmpeg` CLI (**MP4**, H.264/libx264) or writes a
+single frame as a **still** (`export::save_image`). Because the plan is a snapshot, the
+video compose+encode loop runs on a **worker thread** — the UI stays responsive and
+interaction can't corrupt the export. The output **format is chosen by the file
+extension** (`export_format`): a bare name or `.mp4` → video; `.png`/`.jpg`/`.jpeg` → a
+still of the frame currently on screen (`export_still_image`, composed inline — one
+frame is cheap). Uncovered pixels (gutters, letterboxing) composite **transparent**:
+PNG keeps the alpha (no background), JPEG flattens it onto **white**, and MP4's
+`yuv420p` ignores alpha so its dark `BG` is unchanged.
 
 - `ExportPane` holds a snapshot view/clip/source plus its **own `SeqReader`** and a
   1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
@@ -371,10 +377,11 @@ responsive and interaction can't corrupt the export.
   crop's pixel size.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window. A warning + "Load all" appears when a length isn't discovered yet.
-- Output filename typed in the panel, written to the **cwd**. `start_export` spawns
-  `run_export` (compose + `Encoder` write per frame) on a **worker thread**, sharing an
-  `AtomicUsize` progress + `AtomicBool` cancel; `export_tick` just polls it each update,
-  relaying cancel and joining the thread for the final outcome (`ExportOutcome`).
+- Output filename typed in the panel, written to the **cwd**. For video `start_export`
+  spawns `run_export` (compose + `Encoder` write per frame) on a **worker thread**,
+  sharing an `AtomicUsize` progress + `AtomicBool` cancel; `export_tick` just polls it
+  each update, relaying cancel and joining the thread for the final outcome
+  (`ExportOutcome`). A still skips all that and saves synchronously.
 
 ---
 
@@ -490,7 +497,8 @@ decoding/playing). Remaining candidates: minor per-frame allocations (`Action::a
 Inline `#[cfg(test)]` (skip when fixtures/ffmpeg absent): `cli` token
 expansion/grouping; `media` lazy length, eviction, **LUT render matches the float
 reference** bit-for-bit, region stats + save round-trip; `export` full compose→ffmpeg
-encode + **pixel-exact region crop**.
+encode + **pixel-exact region crop** + still-image save (PNG keeps transparency, JPEG
+flattens to white).
 
 ---
 

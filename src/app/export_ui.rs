@@ -20,6 +20,13 @@ pub(super) struct ExportRun {
     path: String,
 }
 
+/// What the current output name exports to (chosen by its file extension).
+#[derive(PartialEq)]
+enum ExportFormat {
+    Video, // .mp4 (or a bare name) → ffmpeg H.264
+    Image, // .png / .jpg / .jpeg → one composited still
+}
+
 /// How a finished export thread ended.
 enum ExportOutcome {
     Done(usize), // frames written
@@ -263,18 +270,38 @@ impl CimApp {
         })
     }
 
+    /// Format an export produces, decided by the output file's extension
+    /// (defaulting to MP4 when none is given).
+    fn export_format(&self) -> ExportFormat {
+        let name = self.export_name.trim();
+        match Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("png") | Some("jpg") | Some("jpeg") => ExportFormat::Image,
+            _ => ExportFormat::Video,
+        }
+    }
+
     pub(super) fn start_export(&mut self) {
         let name = self.export_name.trim();
         if name.is_empty() {
             self.export_status = "Enter an output file name first".into();
             return;
         }
+        // Bare names default to MP4; a .png/.jpg/.jpeg name exports a single still.
         let name = if Path::new(name).extension().is_some() {
             name.to_string()
         } else {
             format!("{name}.mp4")
         };
         let path = PathBuf::from(&name); // relative -> current working directory
+        if self.export_format() == ExportFormat::Image {
+            self.export_still_image(path);
+            return;
+        }
         let plan = match self.build_export_plan() {
             Ok(p) => p,
             Err(e) => {
@@ -304,6 +331,28 @@ impl CimApp {
             total,
             path: path.display().to_string(),
         });
+    }
+
+    /// Export a single composited still (PNG/JPEG) — the same layout, region,
+    /// tone and overlays as the MP4 path, but one frame (the one on screen) and
+    /// no ffmpeg. Fast enough to run inline on the UI thread.
+    fn export_still_image(&mut self, path: PathBuf) {
+        let mut plan = match self.build_export_plan() {
+            Ok(p) => p,
+            Err(e) => {
+                self.export_status = e;
+                return;
+            }
+        };
+        // A still shows exactly the current timeline frame, not a range.
+        plan.start = self.shared_frame.min(self.timeline_len().saturating_sub(1));
+        plan.total = 1;
+        let (w, h) = (plan.out_w, plan.out_h);
+        let rgba = plan.compose(0);
+        self.export_status = match export::save_image(&path, w, h, &rgba) {
+            Ok(()) => format!("Exported image → {}", path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        };
     }
 
     /// Poll the export worker from `update`: relay a cancel request and, once the
@@ -480,16 +529,24 @@ impl CimApp {
                     });
                 }
 
-                ui.label(format!(
-                    "{total} frames · {:.1}s",
-                    total as f32 / self.export_fps.max(1.0),
-                ));
+                let is_image = self.export_format() == ExportFormat::Image;
+                if is_image {
+                    ui.label("1 still image (the current frame)");
+                } else {
+                    ui.label(format!(
+                        "{total} frames · {:.1}s",
+                        total as f32 / self.export_fps.max(1.0),
+                    ));
+                }
 
                 ui.horizontal(|ui| {
                     ui.label("Save as");
                     ui.add_enabled(
                         !running,
                         egui::TextEdit::singleline(&mut self.export_name).desired_width(180.0),
+                    )
+                    .on_hover_text(
+                        "Extension picks the format: .mp4 (video), or .png / .jpg for a still",
                     );
                 });
                 ui.label(
@@ -516,7 +573,12 @@ impl CimApp {
                     }
                 } else {
                     let ready = !self.export_name.trim().is_empty();
-                    if ui.add_enabled(ready, egui::Button::new("Export MP4")).clicked() {
+                    let label = if self.export_format() == ExportFormat::Image {
+                        "Export image"
+                    } else {
+                        "Export MP4"
+                    };
+                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                         self.start_export();
                     }
                 }
