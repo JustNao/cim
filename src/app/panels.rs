@@ -511,6 +511,7 @@ impl CimApp {
                                         egui::Label::new(
                                             egui::RichText::new(format!("⠿ {}", i + 1)).monospace(),
                                         )
+                                        .selectable(false) // drag it, don't select the text
                                         .sense(Sense::drag()),
                                     )
                                     .on_hover_text("Drag to reorder");
@@ -624,6 +625,14 @@ impl CimApp {
                     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                     let ptr = ctx.input(|i| i.pointer.interact_pos());
                     let target = ptr.and_then(|p| drop_target(&rows, p.y));
+                    // Tint the row in motion so it's clear which one is dragging.
+                    if let Some(&(_, band)) = rows.iter().find(|(idx, _)| *idx == from) {
+                        ui.painter().rect_filled(
+                            Rect::from_x_y_ranges(ui.max_rect().x_range(), band),
+                            0.0,
+                            Color32::from_rgba_unmultiplied(56, 104, 162, 80),
+                        );
+                    }
                     if let Some(to) = target {
                         if to != from {
                             if let Some(&(_, band)) = rows.iter().find(|(idx, _)| *idx == to) {
