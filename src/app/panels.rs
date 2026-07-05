@@ -356,7 +356,9 @@ impl CimApp {
                 ui.label(
                     egui::RichText::new(
                         "Captures files, layout, columns, shared zoom/pan, frame, \
-                         focus and the A/B split.",
+                         per-pane tone/detail/visibility/Transformations-sync, the \
+                         focused and control panes, loop range and the A/B split. \
+                         Defaults are omitted.",
                     )
                     .weak()
                     .small(),

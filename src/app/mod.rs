@@ -462,6 +462,31 @@ impl CimApp {
                 p.tex = None;
             }
         }
+        // Transformations sync flags, applied *after* per-pane tone/detail (which
+        // unsync the panes they set). Re-seed the shared set from the first synced
+        // pane so panes that follow it show the captured look.
+        if let Some(sync) = &vs.tsync {
+            if let Some(k) = sync.iter().position(|&s| s) {
+                if let Some(p) = self.panes.get(k) {
+                    self.shared_contrast = p.contrast;
+                    self.shared_details = p.details;
+                }
+            }
+            for (p, &s) in self.panes.iter_mut().zip(sync) {
+                p.sync_tone = s;
+                p.tex = None;
+            }
+        }
+        if let Some(vis) = &vs.visible {
+            for (p, &v) in self.panes.iter_mut().zip(vis) {
+                p.visible = v;
+            }
+        }
+        if let Some(c) = vs.control {
+            if n > 0 {
+                self.control = c.min(n - 1);
+            }
+        }
         if let Some((lo, hi)) = vs.loop_range {
             self.loop_range = Some((lo, hi));
         }
@@ -480,7 +505,9 @@ impl CimApp {
 
     /// Build a `cim …` command line that reopens the current files at the
     /// current shared view. Captures the layout, columns, shared zoom/pan, the
-    /// timeline frame, the focused pane and (in A/B) the operands + split.
+    /// timeline frame, per-pane tone/detail/visibility/Transformations-sync, the
+    /// focused and control panes, the loop range and (in A/B) the operands +
+    /// split. Anything left at its default is omitted to keep the line short.
     ///
     /// Only the *shared* view is captured — panes with their own view (sync off)
     /// fall back to it. Sequences are listed as their individual files (the
@@ -497,40 +524,84 @@ impl CimApp {
                 Source::Computed => {}
             }
         }
-        let mode = match self.mode {
-            Mode::Grid => "grid",
-            Mode::Single => "single",
-            Mode::Ab => "ab",
-        };
-        parts.push(format!("--mode {mode}"));
-        parts.push(format!("--cols {}", self.config.max_columns));
+        // Only emit a flag when it differs from the app's default, so the line
+        // stays short. Layout:
+        if self.mode != Mode::Grid {
+            let mode = match self.mode {
+                Mode::Grid => "grid",
+                Mode::Single => "single",
+                Mode::Ab => "ab",
+            };
+            parts.push(format!("--mode {mode}"));
+        }
+        if self.config.max_columns != Config::default().max_columns {
+            parts.push(format!("--cols {}", self.config.max_columns));
+        }
+        // Zoom / centre are the point of the command (they capture where you are
+        // in the image), so they're always emitted.
         let v = self.shared_view;
         parts.push(format!("--zoom {:.4}", v.zoom));
         parts.push(format!("--center {:.2},{:.2}", v.center.x, v.center.y));
-        if self.timeline_len() > 1 {
+        if self.timeline_len() > 1 && self.shared_frame != 0 {
             parts.push(format!("--frame {}", self.shared_frame));
         }
-        // Per-pane tone / detail (effective — shared when tone-synced), in pane
-        // order, so a replay reproduces them.
-        if !self.panes.is_empty() {
-            let tones: Vec<&str> = (0..self.panes.len())
+        let n = self.panes.len();
+        if n > 0 {
+            // Per-pane tone (effective — shared when tone-synced). Omit when every
+            // pane sits at its depth-appropriate default (Linear+Clip for >8-bit,
+            // Linear otherwise).
+            let tones: Vec<&str> = (0..n)
                 .map(|i| match self.contrast_of(i) {
                     ContrastMode::Linear => "linear",
                     ContrastMode::LinearClip => "linearclip",
                     ContrastMode::LutAlpha => "lutalpha",
                 })
                 .collect();
-            parts.push(format!("--tone {}", tones.join(",")));
-            let details: Vec<&str> = (0..self.panes.len())
-                .map(|i| if self.details_of(i) { "1" } else { "0" })
-                .collect();
-            parts.push(format!("--detail {}", details.join(",")));
+            let tone_default = |i: usize| {
+                if self.panes[i].media.hi_depth() {
+                    "linearclip"
+                } else {
+                    "linear"
+                }
+            };
+            if (0..n).any(|i| tones[i] != tone_default(i)) {
+                parts.push(format!("--tone {}", tones.join(",")));
+            }
+            // Details / show / Transformations-sync — omit when all at default
+            // (details off, all visible, all synced).
+            if (0..n).any(|i| self.details_of(i)) {
+                let details: Vec<&str> = (0..n)
+                    .map(|i| if self.details_of(i) { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--detail {}", details.join(",")));
+            }
+            if self.panes.iter().any(|p| !p.visible) {
+                let show: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.visible { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--show {}", show.join(",")));
+            }
+            if self.panes.iter().any(|p| !p.sync_tone) {
+                let ts: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.sync_tone { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--tsync {}", ts.join(",")));
+            }
         }
         if let Some((lo, hi)) = self.loop_range {
             parts.push(format!("--loop {lo},{hi}"));
         }
-        if !self.panes.is_empty() {
-            parts.push(format!("--pane {}", self.current.min(self.panes.len() - 1)));
+        if n > 0 {
+            if self.current != 0 {
+                parts.push(format!("--pane {}", self.current.min(n - 1)));
+            }
+            if self.control != 0 {
+                parts.push(format!("--control {}", self.control.min(n - 1)));
+            }
             if self.mode == Mode::Ab {
                 parts.push(format!(
                     "--ab {},{},{:.3}",
