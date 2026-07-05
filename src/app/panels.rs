@@ -720,41 +720,13 @@ impl CimApp {
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 140.0), Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, Color32::from_gray(16));
 
-        let Some(hist) = &self.panes[idx].hist else { return };
-        let data = &hist.data;
-
-        // Peak across every channel/bin; sqrt scaling makes tails legible.
-        let peak = data
-            .bins
-            .iter()
-            .flat_map(|c| c.iter().copied())
-            .max()
-            .unwrap_or(1)
-            .max(1) as f32;
-
-        let colors: &[Color32] = if data.mono {
-            &[Color32::from_gray(210)]
-        } else {
-            &[
-                Color32::from_rgb(230, 90, 90),
-                Color32::from_rgb(90, 210, 90),
-                Color32::from_rgb(100, 140, 240),
-            ]
+        let Some(hist) = &self.panes[idx].hist else {
+            painter.rect_filled(rect, 0.0, Color32::from_gray(16));
+            return;
         };
-
-        for (ci, chan) in data.bins.iter().enumerate() {
-            let nb = chan.len().max(2);
-            let mut pts = Vec::with_capacity(nb);
-            for (v, &count) in chan.iter().enumerate() {
-                let x = rect.left() + (v as f32 / (nb - 1) as f32) * rect.width();
-                let h = (count as f32 / peak).sqrt();
-                let y = rect.bottom() - h * rect.height();
-                pts.push(Pos2::new(x, y));
-            }
-            painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
-        }
+        let data = &hist.data;
+        draw_hist_curves(&painter, rect, data);
 
         // True value extent under the graph: min at left, max at right.
         // Whole numbers (integer sources) print plainly; floats get 4 digits.

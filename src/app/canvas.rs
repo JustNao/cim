@@ -908,7 +908,7 @@ impl CimApp {
             Pos2::new(panel.left() + pad, panel.top() + pad + head_h),
             Vec2::new(w - 2.0 * pad, hist_h),
         );
-        draw_region_hist(&painter, hist_rect, data);
+        draw_hist_curves(&painter, hist_rect, &data.hist);
 
         // Min / max labelled at the histogram's two ends.
         let axis_font = FontId::monospace(9.0);

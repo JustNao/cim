@@ -1602,19 +1602,20 @@ fn draw_tone_options(
     }
 }
 
-/// Draw a region's per-channel histogram into `rect` (Visualise-panel style:
-/// sqrt-scaled line curves over a dark base).
-fn draw_region_hist(painter: &egui::Painter, rect: Rect, stats: &RegionStats) {
+/// Draw a histogram's per-channel curves into `rect` over a dark base: one grey
+/// curve when mono, else R/G/B, each sqrt-scaled so the tails stay legible.
+/// Shared by the pane Transformations histogram (`draw_histogram`) and the
+/// region-stats mini histogram (`draw_stats_panel`).
+fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) {
     painter.rect_filled(rect, 0.0, Color32::from_gray(16));
-    let peak = stats
-        .hist
+    let peak = hist
         .bins
         .iter()
         .flat_map(|c| c.iter().copied())
         .max()
         .unwrap_or(1)
         .max(1) as f32;
-    let colors: &[Color32] = if stats.hist.mono {
+    let colors: &[Color32] = if hist.mono {
         &[Color32::from_gray(210)]
     } else {
         &[
@@ -1623,7 +1624,7 @@ fn draw_region_hist(painter: &egui::Painter, rect: Rect, stats: &RegionStats) {
             Color32::from_rgb(100, 140, 240),
         ]
     };
-    for (ci, chan) in stats.hist.bins.iter().enumerate() {
+    for (ci, chan) in hist.bins.iter().enumerate() {
         let nb = chan.len().max(2);
         let mut pts = Vec::with_capacity(nb);
         for (v, &count) in chan.iter().enumerate() {
