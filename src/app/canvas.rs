@@ -79,20 +79,24 @@ impl CimApp {
         }
 
         if self.selecting_region {
-            let resp = ui.interact(area, Id::new("region_sel"), Sense::drag());
+            // The crop is dragged with the **right** button, so the left button
+            // stays free to pan/zoom around the image while choosing it (the pane
+            // interaction handles that). Edge-detect the secondary button like the
+            // stats region rather than a competing full-area drag interact.
+            let down = ctx.input(|i| i.pointer.secondary_down());
             let pos = ctx.input(|i| i.pointer.interact_pos());
-            if resp.drag_started() {
-                self.sel_start = pos;
-            }
-            if resp.dragged() {
+            if down {
+                if self.sel_start.is_none() {
+                    // Begin only if the press starts inside the view.
+                    self.sel_start = pos.filter(|p| area.contains(*p));
+                }
                 if let (Some(s), Some(c)) = (self.sel_start, pos) {
                     self.sel_rect = Some(Rect::from_two_pos(s, c).intersect(area));
                 }
-            }
-            if resp.drag_stopped() {
+            } else if self.sel_start.is_some() {
+                // Right button released: finalize (a near-zero drag clears it).
                 self.selecting_region = false;
                 self.sel_start = None;
-                // Discard a zero-size accidental click, then map to image space.
                 self.export_region = self
                     .sel_rect
                     .take()
@@ -224,40 +228,39 @@ impl CimApp {
         }
         self.draw_pane_error(ui, idx, img_area);
 
-        // Interaction: zoom / pan / ctrl-drag reorder. Disabled while the user
-        // is dragging out an export region (so that drag isn't stolen).
-        let sense = if self.selecting_region {
-            Sense::hover()
-        } else {
-            Sense::click_and_drag()
-        };
-        let resp = ui.interact(img_area, Id::new(("pane", idx)), sense);
-        if !self.selecting_region {
-            let ctrl = ctx.input(|i| i.modifiers.ctrl);
-            if resp.hovered() {
-                let scroll = wheel_delta(ctx);
-                if scroll != 0.0 {
-                    let anchor = ctx
-                        .input(|i| i.pointer.hover_pos())
-                        .unwrap_or(img_area.center());
-                    let speed = zoom_speed(ctx);
-                    self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
-                }
-            }
-            if resp.drag_started_by(PointerButton::Primary) && ctrl {
-                self.drag_src = Some(idx);
-            }
-            if resp.dragged_by(PointerButton::Primary) && self.drag_src.is_none() {
-                let d = resp.drag_delta();
-                self.view_mut(idx).pan(d);
-            }
-            if resp.clicked() {
-                self.current = idx;
+        // Interaction: left-drag pans and the wheel zooms — allowed even while
+        // choosing an export crop, so the user can move around the image first
+        // (the crop itself is a right-drag, handled in `region_overlay`).
+        // Ctrl-drag reorder, click-to-focus and the right-drag stats region are
+        // suppressed during crop selection (the right button drives the crop).
+        let resp = ui.interact(img_area, Id::new(("pane", idx)), Sense::click_and_drag());
+        let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        if resp.hovered() {
+            let scroll = wheel_delta(ctx);
+            if scroll != 0.0 {
+                let anchor = ctx
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or(img_area.center());
+                let speed = zoom_speed(ctx);
+                self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
             }
         }
+        if !self.selecting_region && resp.drag_started_by(PointerButton::Primary) && ctrl {
+            self.drag_src = Some(idx);
+        }
+        if resp.dragged_by(PointerButton::Primary) && self.drag_src.is_none() {
+            let d = resp.drag_delta();
+            self.view_mut(idx).pan(d);
+        }
+        if !self.selecting_region && resp.clicked() {
+            self.current = idx;
+        }
 
-        // Right-drag statistics region (selection + outline + stats panel).
-        self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
+        // Right-drag statistics region (selection + outline + stats panel) — not
+        // while a crop selection owns the right button.
+        if !self.selecting_region {
+            self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
+        }
 
         // Compute-pane controls (source / kind / recompute + inline save).
         if self.panes[idx].compute.is_some() {

@@ -265,7 +265,9 @@ dropped** when the header is too narrow to fit the full title — measured again
 Hide/Close span — leaving the index number and frame info so small grid cells stay
 readable), `draw_footer`
 (`h×w`, cursor `x y`, native value). Borders show **only during ctrl-drag**; focus is
-the header tint. While `selecting_region` (export crop), pane pan/zoom is disabled.
+the header tint. While `selecting_region` (export crop) the left button still pans and
+the wheel zooms; the **right** button draws the crop (so reorder/click-focus/stats-region
+are suppressed).
 
 **Shared cursor (`cursor_img`/`cursor_pane`).** `draw_central` records the hovered
 pane's cursor in **image space** (only when it's over a real pixel, via
@@ -360,9 +362,12 @@ video compose+encode loop runs on a **worker thread** — the UI stays responsiv
 interaction can't corrupt the export. The output **format is chosen by the file
 extension** (`export_format`): a bare name or `.mp4` → video; `.png`/`.jpg`/`.jpeg` → a
 still of the frame currently on screen (`export_still_image`, composed inline — one
-frame is cheap). Uncovered pixels (gutters, letterboxing) composite **transparent**:
-PNG keeps the alpha (no background), JPEG flattens it onto **white**, and MP4's
-`yuv420p` ignores alpha so its dark `BG` is unchanged.
+frame is cheap). Uncovered pixels (gutters, letterboxing) composite with alpha 0, and a
+still is then **cropped to its content bounding box** (`crop_to_content`), so the
+background is cut off entirely rather than exported as a border. MP4's `yuv420p` ignores
+alpha, so its dark `BG` is unchanged. **The output format is validated** by extension
+(`.mp4`/`.png`/`.jpg`/`.jpeg`, or none → MP4); any other extension (e.g. a stray dot in
+`clip.v2`) is rejected instead of handed to ffmpeg with an unusable name.
 
 - `ExportPane` holds a snapshot view/clip/source plus its **own `SeqReader`** and a
   1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
@@ -372,9 +377,11 @@ PNG keeps the alpha (no background), JPEG flattens it onto **white**, and MP4's
   back through the pane's view, sampling **nearest** — upscaling to a larger output
   just replicates source pixels, never blends them. `start` offsets so output
   frame `t` = timeline `start+t`.
-- **Region crop** is chosen in image space ("Select…" forces Single;
-  `screen_rect_to_image` on release), applied to every pane as a cell of exactly the
-  crop's pixel size.
+- **Region crop** is chosen in image space ("Select…" forces Single): a **right-drag**
+  draws the crop (secondary-button edge detection in `region_overlay`, like the stats
+  region) while **left-drag pans and the wheel zooms** so the user can move around first;
+  `screen_rect_to_image` on release maps it to image space, applied to every pane as a
+  cell of exactly the crop's pixel size.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window. A warning + "Load all" appears when a length isn't discovered yet.
 - Output filename typed in the panel, written to the **cwd**. For video `start_export`
@@ -497,8 +504,8 @@ decoding/playing). Remaining candidates: minor per-frame allocations (`Action::a
 Inline `#[cfg(test)]` (skip when fixtures/ffmpeg absent): `cli` token
 expansion/grouping; `media` lazy length, eviction, **LUT render matches the float
 reference** bit-for-bit, region stats + save round-trip; `export` full compose→ffmpeg
-encode + **pixel-exact region crop** + still-image save (PNG keeps transparency, JPEG
-flattens to white).
+encode + **pixel-exact region crop** + still background crop (`crop_to_content` trims to
+the content bounding box).
 
 ---
 

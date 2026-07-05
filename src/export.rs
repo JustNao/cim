@@ -337,9 +337,9 @@ impl ExportPlan {
                 let c = Pos2::new(cx, cy);
                 let o = (oy * w + ox) * 4;
                 // Uncovered pixels (gutters between panes, letterboxing around an
-                // image) are left **transparent** — the still-image export drops
-                // the background entirely, and MP4 (yuv420p) ignores alpha so its
-                // dark `BG` is unchanged.
+                // image) get alpha 0 — flagged as background. The still export
+                // crops them off (`crop_to_content`); MP4 (yuv420p) ignores alpha,
+                // so its dark `BG` is unchanged.
                 let mut col = [BG[0], BG[1], BG[2], 0];
                 if let Some((pi, area)) = self.layout.locate(c) {
                     let pane = &self.panes[pi];
@@ -428,10 +428,40 @@ impl Encoder {
     }
 }
 
+/// Crop an RGBA buffer to the bounding box of its **content** (pixels with
+/// alpha > 0), discarding the surrounding background so a still export cuts the
+/// gutters/letterboxing off entirely. Returns `None` when everything is
+/// background. Interior background (e.g. a grid gutter) can't be removed from a
+/// rectangle, so those pixels keep alpha 0.
+pub fn crop_to_content(rgba: &[u8], w: usize, h: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (usize::MAX, usize::MAX, 0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            if rgba[(y * w + x) * 4 + 3] != 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x > max_x {
+        return None; // no content
+    }
+    let (cw, ch) = (max_x - min_x + 1, max_y - min_y + 1);
+    let mut out = vec![0u8; cw * ch * 4];
+    for y in 0..ch {
+        let src = ((min_y + y) * w + min_x) * 4;
+        let dst = y * cw * 4;
+        out[dst..dst + cw * 4].copy_from_slice(&rgba[src..src + cw * 4]);
+    }
+    Some((cw, ch, out))
+}
+
 /// Save one composited RGBA frame as a still image, format chosen by extension.
-/// PNG keeps the alpha channel (transparent background); JPEG has no alpha, so
-/// transparent (background) pixels are flattened onto **white** rather than the
-/// dark gutter colour, so the export never bakes in a black background.
+/// The background is already cropped off by [`crop_to_content`]; any residual
+/// (interior) transparent pixels are kept as-is for PNG, and flattened onto white
+/// for JPEG (which has no alpha) so a black background is never baked in.
 pub fn save_image(path: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<(), String> {
     let ext = path
         .extension()
@@ -570,25 +600,20 @@ mod tests {
         }
     }
 
-    /// PNG keeps the transparent background; JPEG (no alpha) flattens it to white
-    /// — never the dark gutter colour.
+    /// The background (alpha 0) is cropped off, leaving only the content's
+    /// bounding box.
     #[test]
-    fn save_image_png_transparent_jpeg_white() {
-        // Pixel 0: opaque red (covered). Pixel 1: transparent BG (uncovered).
-        let (w, h) = (2usize, 1usize);
-        let rgba = vec![200, 0, 0, 255, BG[0], BG[1], BG[2], 0];
-
-        let png = std::env::temp_dir().join("cim_still_test.png");
-        save_image(&png, w, h, &rgba).expect("write png");
-        let img = image::open(&png).expect("read png").to_rgba8();
-        assert_eq!(img.get_pixel(0, 0).0, [200, 0, 0, 255]);
-        assert_eq!(img.get_pixel(1, 0).0[3], 0, "background stays transparent");
-
-        let jpg = std::env::temp_dir().join("cim_still_test.jpg");
-        save_image(&jpg, w, h, &rgba).expect("write jpg");
-        let jimg = image::open(&jpg).expect("read jpg").to_rgb8();
-        let p = jimg.get_pixel(1, 0).0; // lossy, so allow a little slack
-        assert!(p[0] > 240 && p[1] > 240 && p[2] > 240, "background flattened to white, got {p:?}");
+    fn crop_to_content_trims_background() {
+        // 4×3 buffer, a single opaque pixel at (2,1) surrounded by background.
+        let (w, h) = (4usize, 3usize);
+        let mut rgba = vec![BG[0], BG[1], BG[2], 0].repeat(w * h);
+        let i = (1 * w + 2) * 4;
+        rgba[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
+        let (cw, ch, out) = crop_to_content(&rgba, w, h).expect("has content");
+        assert_eq!((cw, ch), (1, 1));
+        assert_eq!(&out[..4], &[10, 20, 30, 255]);
+        // An all-background buffer yields nothing to export.
+        assert!(crop_to_content(&vec![0u8; w * h * 4], w, h).is_none());
     }
 
     /// Full compose → ffmpeg encode of a few frames. Skips gracefully if the

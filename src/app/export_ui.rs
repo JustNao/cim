@@ -291,11 +291,24 @@ impl CimApp {
             self.export_status = "Enter an output file name first".into();
             return;
         }
-        // Bare names default to MP4; a .png/.jpg/.jpeg name exports a single still.
-        let name = if Path::new(name).extension().is_some() {
-            name.to_string()
-        } else {
-            format!("{name}.mp4")
+        // Resolve the output format from the extension. A bare name defaults to
+        // MP4; a recognised extension is kept; anything else (e.g. a stray "." in
+        // the name like "clip.v2") is rejected rather than handed to ffmpeg with
+        // an unusable output name.
+        let name = match Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+        {
+            None => format!("{name}.mp4"),
+            Some(ext) if matches!(ext.as_str(), "mp4" | "png" | "jpg" | "jpeg") => name.to_string(),
+            Some(ext) => {
+                self.export_status = format!(
+                    "Unsupported extension '.{ext}' — use .mp4, .png or .jpg \
+                     (or no extension for MP4)"
+                );
+                return;
+            }
         };
         let path = PathBuf::from(&name); // relative -> current working directory
         if self.export_format() == ExportFormat::Image {
@@ -349,8 +362,13 @@ impl CimApp {
         plan.total = 1;
         let (w, h) = (plan.out_w, plan.out_h);
         let rgba = plan.compose(0);
-        self.export_status = match export::save_image(&path, w, h, &rgba) {
-            Ok(()) => format!("Exported image → {}", path.display()),
+        // Cut the background off: crop to the actual image content.
+        let Some((cw, ch, cropped)) = export::crop_to_content(&rgba, w, h) else {
+            self.export_status = "Nothing to export (all background)".into();
+            return;
+        };
+        self.export_status = match export::save_image(&path, cw, ch, &cropped) {
+            Ok(()) => format!("Exported image ({cw}x{ch}) {}", path.display()),
             Err(e) => format!("Export failed: {e}"),
         };
     }
@@ -424,8 +442,9 @@ impl CimApp {
                                 if ui
                                     .button("Select…")
                                     .on_hover_text(
-                                        "Drag the crop on a single image; it then applies \
-                                         to every pane of the comparison",
+                                        "Right-drag the crop on a single image (left-drag pans, \
+                                         wheel zooms); it then applies to every pane of the \
+                                         comparison",
                                     )
                                     .clicked()
                                 {
