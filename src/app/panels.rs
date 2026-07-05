@@ -774,6 +774,11 @@ impl CimApp {
                          sequences; oldest unshown frames are evicted beyond it.",
                     );
                 });
+                ui.checkbox(&mut self.config.cursor_dot, "Cursor dot on other panes")
+                    .on_hover_text(
+                        "Mark the hovered pixel on every other pane with a red dot, so \
+                         the same location is easy to compare across panes.",
+                    );
 
                 ui.add_space(8.0);
                 ui.separator();

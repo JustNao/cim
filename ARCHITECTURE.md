@@ -240,12 +240,15 @@ index, name, `frame/known(+)`, `in mem`, sync markers, close ×), `draw_footer`
 (`h×w`, cursor `x y`, native value). Borders show **only during ctrl-drag**; focus is
 the header tint. While `selecting_region` (export crop), pane pan/zoom is disabled.
 
-**Shared cursor (`cursor_img`).** `draw_central` records the hovered pane's cursor in
-**image space** (only when it's over a real pixel, via `hover_img_pos`), then every
-pane replicates it: a red dot (`draw_cursor_dot`, image→screen per pane's own view)
-and its own native value at that pixel in the footer (`value_string`). So the same
-source pixel is read across all panes at once. In A/B the single footer
-(`draw_ab_footer`) shows the shared position with **both** A and B values.
+**Shared cursor (`cursor_img`/`cursor_pane`).** `draw_central` records the hovered
+pane's cursor in **image space** (only when it's over a real pixel, via
+`hover_img_pos`) plus which pane it came from, then every pane replicates it: a red dot
+(`draw_cursor_dot`, image→screen per pane's own view) and its own native value at that
+pixel in the footer (`value_string`). So the same source pixel is read across all panes
+at once. The dot is **not** drawn on `cursor_pane` (its OS cursor already marks the
+spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
+per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
+shows the shared position with **both** A and B values.
 
 The header is **one or two rows** (`header_rows`/`header_h_for`, feeding
 `image_area`): when a cell is too narrow to fit the two buttons + a little title, the
@@ -371,9 +374,11 @@ responsive and interaction can't corrupt the export.
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, ui_scale, cache_budget_mb, keybindings }`,
-saved as JSON via `ProjectDirs("dev","cim","cim")`. Loaded on start, saved on
-exit / explicit save.
+`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot, keybindings }`,
+saved as JSON via `ProjectDirs("dev","cim","cim")` (Windows:
+`%APPDATA%\cim\cim\config\config.json`). Loaded on start, saved on exit / explicit
+save. New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved config
+still loads.
 
 `Action` = all bindable actions (view toggles, next/prev media & frame, fit/actual/
 zoom, load all, open, toggle panels, play/pause, `SelectMedia(0..12)`).

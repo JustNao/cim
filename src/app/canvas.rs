@@ -10,6 +10,7 @@ impl CimApp {
         // Recomputed below from whichever pane the cursor is over; the panes then
         // replicate it (red dot + per-pane pixel value).
         self.cursor_img = None;
+        self.cursor_pane = None;
 
         if self.panes.is_empty() {
             ui.painter().text(
@@ -28,6 +29,7 @@ impl CimApp {
                 let idx = self.current.min(self.panes.len() - 1);
                 let ia = image_area(area);
                 self.cursor_img = hover.and_then(|p| self.hover_img_pos(idx, ia, ia, p));
+                self.cursor_pane = self.cursor_img.map(|_| idx);
                 self.draw_pane(ui, ctx, idx, area);
             }
             Mode::Grid => {
@@ -49,6 +51,7 @@ impl CimApp {
                         let ia = image_area(cell);
                         if let Some(ci) = self.hover_img_pos(idx, ia, ia, p) {
                             self.cursor_img = Some(ci);
+                            self.cursor_pane = Some(idx);
                             break;
                         }
                     }
@@ -497,7 +500,12 @@ impl CimApp {
 
     /// Paint the shared cursor as a red dot at its image position on pane `idx`.
     /// `coord_area` maps image→screen; `clip` hides it when it maps off the pane.
+    /// Skipped when disabled in Settings, and never drawn on the pane the cursor
+    /// is actually over (its own OS cursor already marks the spot).
     fn draw_cursor_dot(&self, painter: &egui::Painter, idx: usize, coord_area: Rect, clip: Rect) {
+        if !self.config.cursor_dot || self.cursor_pane == Some(idx) {
+            return;
+        }
         let Some(ci) = self.cursor_img else { return };
         let sp = self.view_ref(idx).img_to_screen(ci, coord_area);
         if !clip.contains(sp) {
@@ -589,13 +597,12 @@ impl CimApp {
         let right = Rect::from_min_max(Pos2::new(split_x, img.min.y), img.max);
 
         // Shared cursor from whichever side the pointer is over.
-        self.cursor_img = ctx.input(|i| i.pointer.hover_pos()).and_then(|p| {
-            if p.x < split_x {
-                self.hover_img_pos(a, img, left, p)
-            } else {
-                self.hover_img_pos(b, img, right, p)
-            }
-        });
+        if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
+            let side = if p.x < split_x { a } else { b };
+            let clip = if p.x < split_x { left } else { right };
+            self.cursor_img = self.hover_img_pos(side, img, clip, p);
+            self.cursor_pane = self.cursor_img.map(|_| side);
+        }
 
         self.draw_ab_side(ui, a, ta, la, oa, img, left, true, now);
         self.draw_ab_side(ui, b, tb, lb, ob, img, right, false, now);

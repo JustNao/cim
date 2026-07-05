@@ -268,11 +268,19 @@ pub struct Config {
     /// sequences before the least-recently-viewed ones are evicted.
     #[serde(default = "default_cache_budget_mb")]
     pub cache_budget_mb: usize,
+    /// Replicate the hovered pixel onto the other panes as a red dot (the pane
+    /// under the cursor is skipped — its own cursor marks the spot).
+    #[serde(default = "default_true")]
+    pub cursor_dot: bool,
     pub keybindings: Keybindings,
 }
 
 fn default_ui_scale() -> f32 {
     1.0
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_cache_budget_mb() -> usize {
@@ -285,6 +293,7 @@ impl Default for Config {
             max_columns: 3,
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
+            cursor_dot: true,
             keybindings: Keybindings::default(),
         }
     }

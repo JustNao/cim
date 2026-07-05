@@ -294,6 +294,9 @@ pub struct CimApp {
     /// frame in `draw_central`. Replicated across every pane (a red dot + the
     /// per-pane pixel value) so the same source pixel can be read everywhere.
     cursor_img: Option<Vec2>,
+    /// The pane the cursor is over (the source of `cursor_img`). The red dot is
+    /// **not** drawn on it — its own OS cursor already marks the spot.
+    cursor_pane: Option<usize>,
     drag_src: Option<usize>,
     /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
     manager_drag: Option<usize>,
@@ -397,6 +400,7 @@ impl CimApp {
             error_popup: None,
             last_area: Rect::NOTHING,
             cursor_img: None,
+            cursor_pane: None,
             drag_src: None,
             manager_drag: None,
             pending_remove: None,
