@@ -250,10 +250,12 @@ spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
 per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
 shows the shared position with **both** A and B values.
 
-The header is **one or two rows** (`header_rows`/`header_h_for`, feeding
-`image_area`): when a cell is too narrow to fit the two buttons + a little title, the
-**Compute** button drops onto a second row under **Transformations** and the image
-area shrinks to match.
+The header is a **single row** (`header_h_for`, feeding `image_area`): the
+**Transformations** button on the left, the title, then a **hide** button (sets
+`visible = false` — keeps the pane, unlike **×** which removes it) and the close **×**
+on the right. `image_area` is **flush** to the header/footer bars (no margin), and
+egui window/popup **shadows are disabled** in `new` so nothing casts under panes or the
+Compute form.
 
 **Transformations popup** (`draw_options_popup`). The header's **Transformations**
 button (left, away from ×) toggles `Pane.show_opts`, opening a foreground `Area`
@@ -295,14 +297,15 @@ it. **"compute LUT from region"** pins every pane's tone to the region (§7); a 
 corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
 are **primary-button-only** so the right-drag isn't stolen.
 
-**Compute panes.** A *generated* pane whose image is derived from other panes.
-Two-phase flow: the header's **Compute** button opens a floating **`ComputeDraft`**
-panel (`draw_compute_draft`) *where it was clicked* — mode + source pickers with no
-pane yet; its **Compute** button sets `pending_compute_create`, and the deferred
-`open_compute(draft)` realizes it into a pane, after which the controls live on that
-pane (`draw_compute_ui`, `Refresh` + **Auto refresh**) and the draft is dropped.
-`Pane.compute` holds the `kind`, source id(s), and the auto-refresh flag.
-`media::Reduce` modes:
+**Compute panes.** A *generated* pane whose image is derived from other panes. The
+**toolbar** "Compute" button sets `pending_compute_create`; the deferred
+`add_compute_pane` adds an **unconfigured** Compute pane. `draw_compute_ui` (a
+top-left foreground `Area` over the pane) has two states keyed on `Compute.computed`:
+while `false` it shows the **config form** (mode + source combos + a **Compute**
+button); that button runs `recompute_pane`, which on success sets `computed = true`,
+so the **result image** then shows with the **Refresh** / **Save** / **Auto refresh**
+controls instead. `Pane.compute` holds the `kind`, source id(s), `computed`, and the
+auto-refresh flag. `media::Reduce` modes:
 - **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
   accumulation → `f32`).

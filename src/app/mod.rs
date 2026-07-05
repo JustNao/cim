@@ -39,7 +39,6 @@ const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
-const COMPUTE_W: f32 = 62.0; // width of the header "Compute" button
 
 /// How often to repaint while background decodes are pending (and we're not
 /// playing or exporting): often enough to pick up landed frames and keep the
@@ -117,6 +116,10 @@ struct Compute {
     source_id: Option<u64>,
     /// Second source (B) for `Diff`; unused by the reductions.
     source_b: Option<u64>,
+    /// False while the pane is still being configured (the in-pane form is
+    /// shown); set once a compute succeeds, after which the result image shows
+    /// with the Refresh / Save / Auto-refresh controls top-left.
+    computed: bool,
     /// Recompute automatically whenever the inputs' shown frame(s) change.
     auto: bool,
     /// Input signature at the last (attempted) compute, so auto-refresh only
@@ -127,18 +130,6 @@ struct Compute {
     save_name: String,
     /// Short result / error line shown in the controls.
     status: String,
-}
-
-/// A Compute panel being configured before its result pane exists: shown as a
-/// floating panel where the header "Compute" button was clicked. Picks the mode
-/// and source(s); its "Compute" button realizes the result pane (`open_compute`),
-/// after which the controls live on that pane (see [`Compute`]).
-struct ComputeDraft {
-    /// Top-left of the floating panel (the click location).
-    pos: Pos2,
-    kind: Reduce,
-    source_id: Option<u64>,
-    source_b: Option<u64>,
 }
 
 /// One opened media plus its per-pane view/timeline state.
@@ -246,11 +237,8 @@ pub struct CimApp {
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
     rebinding: Option<Action>,
-    /// The Compute panel being configured (opened by a header "Compute" button,
-    /// floating where it was clicked) before its result pane exists.
-    compute_draft: Option<ComputeDraft>,
-    /// The draft's "Compute" button was clicked: realize `compute_draft` into a
-    /// pane after the draw (deferred to avoid growing `panes` mid-draw).
+    /// The toolbar "Compute" button was clicked: add a new Compute pane after the
+    /// draw (deferred to avoid growing `panes` mid-draw).
     pending_compute_create: bool,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
@@ -353,6 +341,9 @@ impl CimApp {
         ] {
             w.rounding = sq;
         }
+        // No drop shadows under windows / popups (e.g. the Compute pane form).
+        style.visuals.window_shadow = egui::epaint::Shadow::NONE;
+        style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
         cc.egui_ctx.set_style(style);
 
         let threads = std::thread::available_parallelism()
@@ -389,7 +380,6 @@ impl CimApp {
             show_manager: false,
             show_viewcmd: false,
             rebinding: None,
-            compute_draft: None,
             pending_compute_create: false,
             show_stats: true,
             stats_region: None,
@@ -835,19 +825,28 @@ impl CimApp {
         self.panes.iter().position(|p| p.id == id)
     }
 
-    /// Realize a configured `ComputeDraft` into a new Compute pane and compute it
-    /// once. The floating draft panel is gone; its controls now live on the pane.
-    fn open_compute(&mut self, draft: ComputeDraft) {
+    /// Add a new, *unconfigured* Compute pane (from the toolbar "Compute"
+    /// button). It shows the in-pane config form (mode + source pickers + a
+    /// Compute button); the result appears once that button computes it.
+    fn add_compute_pane(&mut self) {
         let was_empty = self.panes.is_empty();
         self.add_pane(
             media::Media::still("Compute".into(), media::placeholder_frame()),
             Source::Computed,
         );
         let i = self.panes.len() - 1;
+        // Default source A to the previously focused pane when it can be one.
+        let prev = self.current.min(i.saturating_sub(1));
+        let default_src = self
+            .panes
+            .get(prev)
+            .filter(|p| p.compute.is_none())
+            .map(|p| p.id);
         self.panes[i].compute = Some(Compute {
-            kind: draft.kind,
-            source_id: draft.source_id,
-            source_b: draft.source_b,
+            kind: Reduce::Mean,
+            source_id: default_src,
+            source_b: None,
+            computed: false,
             auto: false,
             last_sig: 0,
             saving: false,
@@ -858,7 +857,6 @@ impl CimApp {
         if was_empty {
             self.shared_view.needs_fit = true;
         }
-        self.recompute_pane(i);
     }
 
     /// Mean/std reduction of a source's resident frames → (frame, name, status).
@@ -939,6 +937,9 @@ impl CimApp {
                 } else {
                     ContrastMode::Linear
                 };
+                if let Some(c) = self.panes[idx].compute.as_mut() {
+                    c.computed = true; // switch from the config form to the result
+                }
                 self.set_compute_status(idx, status);
             }
             Err(msg) => self.set_compute_status(idx, msg),
@@ -1322,9 +1323,6 @@ impl eframe::App for CimApp {
                 self.draw_central(ui, ctx);
             });
 
-        // The floating "new compute" config panel, if one is being set up.
-        self.draw_compute_draft(ctx);
-
         if self.show_manager {
             self.draw_manager(ctx);
         }
@@ -1369,9 +1367,7 @@ impl eframe::App for CimApp {
             self.reload(i);
         }
         if std::mem::take(&mut self.pending_compute_create) {
-            if let Some(draft) = self.compute_draft.take() {
-                self.open_compute(draft);
-            }
+            self.add_compute_pane();
         }
 
         // Encode one frame per frame while an export is running.
@@ -1397,27 +1393,18 @@ impl eframe::App for CimApp {
 
 // ---- shared free helpers -------------------------------------------------
 
-/// Header rows for a cell of `width`: **two** (Compute stacks under
-/// Transformations) when it's too narrow to fit both buttons plus a little
-/// title on one line, else **one**.
-fn header_rows(width: f32) -> f32 {
-    if width < MODIFY_W + COMPUTE_W + 44.0 {
-        2.0
-    } else {
-        1.0
-    }
+/// Total header height for a cell. A single row now that the header holds only
+/// the Transformations button (Compute moved to the toolbar).
+fn header_h_for(_width: f32) -> f32 {
+    HEADER_H
 }
 
-/// Total header height for a cell of `width` (one or two `HEADER_H` rows).
-fn header_h_for(width: f32) -> f32 {
-    header_rows(width) * HEADER_H
-}
-
-/// The image sub-rect of a cell, between its header (one or two rows) and footer.
+/// The image sub-rect of a cell, flush between its header and footer bars (no
+/// margin, so nothing shows through between the image and those strips).
 fn image_area(cell: Rect) -> Rect {
     Rect::from_min_max(
-        Pos2::new(cell.min.x, cell.min.y + header_h_for(cell.width()) + 2.0),
-        Pos2::new(cell.max.x, cell.max.y - FOOTER_H - 2.0),
+        Pos2::new(cell.min.x, cell.min.y + header_h_for(cell.width())),
+        Pos2::new(cell.max.x, cell.max.y - FOOTER_H),
     )
 }
 

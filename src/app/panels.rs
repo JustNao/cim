@@ -35,6 +35,13 @@ impl CimApp {
             if ui.selectable_label(self.show_manager, "Media").clicked() {
                 self.show_manager = !self.show_manager;
             }
+            if ui
+                .button("Compute")
+                .on_hover_text("Add a Compute pane (mean / std / diff of other media)")
+                .clicked()
+            {
+                self.pending_compute_create = true;
+            }
             if ui.selectable_label(self.show_export, "Export").clicked() {
                 self.toggle_export();
             }

@@ -318,9 +318,6 @@ impl CimApp {
     }
 
     pub(super) fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, cell: Rect) {
-        // Two rows when the cell is too narrow to fit both buttons + a little
-        // title on one line: Compute drops under Transformations.
-        let two_row = header_rows(cell.width()) > 1.0;
         let header = Rect::from_min_size(cell.min, Vec2::new(cell.width(), header_h_for(cell.width())));
         let hp = ui.painter_at(header);
         let focused = idx == self.current;
@@ -361,50 +358,6 @@ impl CimApp {
             self.panes[idx].show_opts = !open;
         }
 
-        // "Compute" button: next to Transformations on one row, or under it
-        // (row 2) when stacked. Opens the floating "new compute" config panel
-        // where it was clicked; the pane itself is created from there.
-        let compute = if two_row {
-            Rect::from_min_size(
-                Pos2::new(header.min.x, header.min.y + HEADER_H),
-                Vec2::new(COMPUTE_W, HEADER_H),
-            )
-        } else {
-            Rect::from_min_size(
-                Pos2::new(header.min.x + MODIFY_W, header.min.y),
-                Vec2::new(COMPUTE_W, HEADER_H),
-            )
-        };
-        let comp_resp = ui.interact(compute, Id::new(("compute_btn", idx)), Sense::click());
-        hp.rect_filled(
-            compute,
-            0.0,
-            if comp_resp.hovered() {
-                Color32::from_gray(70)
-            } else {
-                Color32::from_gray(52)
-            },
-        );
-        hp.text(
-            compute.center(),
-            Align2::CENTER_CENTER,
-            "Compute",
-            FontId::proportional(12.0),
-            Color32::from_gray(225),
-        );
-        if comp_resp.clicked() {
-            let id = self.panes[idx].id;
-            let pos = comp_resp.interact_pointer_pos().unwrap_or_else(|| compute.center());
-            // Default source A to the clicked pane when it can be one.
-            let source_id = (self.panes[idx].compute.is_none()).then_some(id);
-            self.compute_draft = Some(ComputeDraft {
-                pos,
-                kind: media::Reduce::Mean,
-                source_id,
-                source_b: None,
-            });
-        }
-
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
         let title = if count > 1 {
@@ -437,8 +390,8 @@ impl CimApp {
         } else {
             format!("{}  {}", idx + 1, name)
         };
-        // Title on row 1, after Transformations (and Compute when inline).
-        let title_x = header.min.x + if two_row { MODIFY_W } else { MODIFY_W + COMPUTE_W } + 8.0;
+        // Title after the Transformations button.
+        let title_x = header.min.x + MODIFY_W + 8.0;
         hp.text(
             Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
             Align2::LEFT_CENTER,
@@ -447,11 +400,36 @@ impl CimApp {
             Color32::from_gray(220),
         );
 
-        // Close × at the top-right (row 1).
+        // Close × at the top-right, with a "hide" button just to its left that
+        // hides the pane (keeps it — unlike ×, which removes it).
         let close = Rect::from_min_size(
             Pos2::new(header.max.x - HEADER_H, header.min.y),
             Vec2::splat(HEADER_H),
         );
+        let hide_w = 34.0;
+        let hide = Rect::from_min_size(
+            Pos2::new(close.min.x - hide_w, header.min.y),
+            Vec2::new(hide_w, HEADER_H),
+        );
+        let hide_resp = ui.interact(hide, Id::new(("hide", idx)), Sense::click());
+        if hide_resp.hovered() {
+            hp.rect_filled(hide, 0.0, Color32::from_gray(70));
+        }
+        hp.text(
+            hide.center(),
+            Align2::CENTER_CENTER,
+            "hide",
+            FontId::proportional(12.0),
+            if hide_resp.hovered() {
+                Color32::from_gray(235)
+            } else {
+                Color32::from_gray(170)
+            },
+        );
+        if hide_resp.clicked() {
+            self.panes[idx].visible = false;
+        }
+
         let close_resp = ui.interact(close, Id::new(("close", idx)), Sense::click());
         hp.text(
             close.center(),
@@ -1152,18 +1130,20 @@ impl CimApp {
 
     // ---- compute pane controls -------------------------------------------
 
-    /// Overlay a realized Compute pane with its controls: a top-left foreground
-    /// `Area` pinned to `img_area` holding the mode + source combos, a **Refresh**
-    /// button with an **Auto refresh** toggle, and an inline Save. Edits are
-    /// written back and a recompute / save is dispatched after.
+    /// Overlay a Compute pane with a top-left foreground `Area`. Two states:
+    /// **unconfigured** shows the config form (mode + source combos + a
+    /// **Compute** button that runs it); once computed, the result image shows
+    /// with the **Refresh** / **Save** / **Auto refresh** controls instead.
+    /// Edits are written back and a recompute / save is dispatched after.
     fn draw_compute_ui(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect) {
         let pane_id = self.panes[idx].id;
-        let (mut kind, mut source_id, mut source_b, mut auto, mut saving, mut save_name, status) = {
+        let (mut kind, mut source_id, mut source_b, computed, mut auto, mut saving, mut save_name, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
             (
                 c.kind,
                 c.source_id,
                 c.source_b,
+                c.computed,
                 c.auto,
                 c.saving,
                 c.save_name.clone(),
@@ -1182,40 +1162,49 @@ impl CimApp {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);
-                    if compute_config_rows(
-                        ui,
-                        pane_id,
-                        &sources,
-                        &mut kind,
-                        &mut source_id,
-                        &mut source_b,
-                    ) {
-                        recompute = true;
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Refresh").clicked() {
+                    if !computed {
+                        // Config form: pick the mode + source(s), then Compute.
+                        ui.label(egui::RichText::new("New compute").strong());
+                        compute_config_rows(
+                            ui,
+                            pane_id,
+                            &sources,
+                            &mut kind,
+                            &mut source_id,
+                            &mut source_b,
+                        );
+                        let ready = source_id.is_some()
+                            && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
+                        if ui.add_enabled(ready, egui::Button::new("Compute")).clicked() {
                             recompute = true;
                         }
-                        ui.checkbox(&mut auto, "Auto refresh");
-                    });
-                    if !saving && ui.button("Save").clicked() {
-                        saving = true;
-                    }
-                    // Inline save: a name field (relative to the working dir).
-                    if saving {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut save_name)
-                                .desired_width(220.0)
-                                .hint_text("name.tif"),
-                        );
+                    } else {
+                        // Result controls (the form is replaced by the output).
                         ui.horizontal(|ui| {
-                            if ui.button("Save").clicked() {
-                                do_save = true;
+                            if ui.button("Refresh").clicked() {
+                                recompute = true;
                             }
-                            if ui.button("Cancel").clicked() {
-                                saving = false;
+                            if !saving && ui.button("Save").clicked() {
+                                saving = true;
                             }
+                            ui.checkbox(&mut auto, "Auto refresh");
                         });
+                        // Inline save: a name field (relative to the working dir).
+                        if saving {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut save_name)
+                                    .desired_width(220.0)
+                                    .hint_text("name.tif"),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    do_save = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    saving = false;
+                                }
+                            });
+                        }
                     }
                     if !status.is_empty() {
                         ui.label(egui::RichText::new(&status).weak().small());
@@ -1238,64 +1227,6 @@ impl CimApp {
         }
         if do_save {
             self.save_computed(idx, &save_name);
-        }
-    }
-
-    /// The floating "new compute" panel, shown at the click location before a
-    /// result pane exists. Picks the mode + source(s); **Compute** realizes it
-    /// into a pane (deferred), **Cancel** dismisses it.
-    pub(super) fn draw_compute_draft(&mut self, ctx: &egui::Context) {
-        let Some(d) = self.compute_draft.as_ref() else {
-            return;
-        };
-        let pos = d.pos;
-        let (mut kind, mut source_id, mut source_b) = (d.kind, d.source_id, d.source_b);
-        let sources = self.compute_sources(kind);
-        let mut create = false;
-        let mut cancel = false;
-
-        egui::Area::new(Id::new("compute_draft"))
-            .order(egui::Order::Foreground)
-            .constrain_to(self.last_area)
-            .fixed_pos(pos)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(240.0);
-                    ui.label(egui::RichText::new("New compute").strong());
-                    compute_config_rows(
-                        ui,
-                        u64::MAX,
-                        &sources,
-                        &mut kind,
-                        &mut source_id,
-                        &mut source_b,
-                    );
-                    ui.horizontal(|ui| {
-                        let ready = source_id.is_some()
-                            && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
-                        if ui
-                            .add_enabled(ready, egui::Button::new("Compute"))
-                            .clicked()
-                        {
-                            create = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
-                        }
-                    });
-                });
-            });
-
-        if let Some(d) = self.compute_draft.as_mut() {
-            d.kind = kind;
-            d.source_id = source_id;
-            d.source_b = source_b;
-        }
-        if create {
-            self.pending_compute_create = true;
-        }
-        if cancel {
-            self.compute_draft = None;
         }
     }
 
