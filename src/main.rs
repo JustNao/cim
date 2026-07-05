@@ -25,7 +25,6 @@ fn main() -> eframe::Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([640.0, 400.0])
             // Open filling the screen; the inner size above is the restored size.
             .with_maximized(true)
