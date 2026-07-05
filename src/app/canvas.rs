@@ -249,17 +249,22 @@ impl CimApp {
 
         // No persistent pane border (it doubles up at zero gap, breaking the
         // middle pane). Borders show only during a ctrl-drag reorder: blue on
-        // the pane being moved, green on the pane it would swap with.
+        // the pane being moved, green on the pane it would swap with. Drawn
+        // *inside* the image area (inset by the stroke width, and excluding the
+        // header/footer info bars) so the full outline stays visible even with
+        // no gap between cells.
+        let bw = 2.0;
+        let border = img_area.shrink(bw / 2.0);
         if self.drag_src == Some(idx) {
             ui.painter()
-                .rect_stroke(cell, 0.0, Stroke::new(2.0, Color32::from_rgb(120, 170, 240)));
+                .rect_stroke(border, 0.0, Stroke::new(bw, Color32::from_rgb(120, 170, 240)));
         } else if self.drag_src.is_some()
             && ctx
                 .input(|i| i.pointer.interact_pos())
                 .is_some_and(|p| cell.contains(p))
         {
             ui.painter()
-                .rect_stroke(cell, 0.0, Stroke::new(2.0, Color32::from_rgb(120, 210, 120)));
+                .rect_stroke(border, 0.0, Stroke::new(bw, Color32::from_rgb(120, 210, 120)));
         }
     }
 
