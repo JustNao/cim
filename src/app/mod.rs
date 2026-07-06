@@ -1110,17 +1110,17 @@ impl CimApp {
         }
     }
 
-    /// Whether pane `i`'s currently shown frame is 16-bit unsigned — the format
-    /// the proprietary operators require. Used (with `imageproc::lut_alpha_available`
-    /// / `details_available`) to gate the LUT_ALPHA mode and the Details toggle in
-    /// the popup. A not-yet-
-    /// resident frame reads as unsupported until it loads.
-    pub(super) fn pane_is_u16(&self, i: usize) -> bool {
+    /// Whether pane `i`'s currently shown frame is single-channel 16-bit — the
+    /// only input the proprietary operators accept. Used (with
+    /// `imageproc::lut_alpha_available` / `details_available`) to gate the
+    /// LUT_ALPHA mode and the Details toggle in the popup. A not-yet-resident
+    /// frame reads as unsupported until it loads.
+    pub(super) fn pane_is_op_input(&self, i: usize) -> bool {
         let f = self.frame_disp(i);
         self.panes[i]
             .media
             .resident(f)
-            .map(|fr| fr.is_u16())
+            .map(|fr| fr.is_op_input())
             .unwrap_or(false)
     }
 

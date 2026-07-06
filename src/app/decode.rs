@@ -241,11 +241,11 @@ impl CimApp {
         }
 
         let contrast = self.contrast_of(idx);
-        // The proprietary operators only run on 16-bit frames with the library
-        // loaded; otherwise LUT_ALPHA / Details fall back to a plain render, so
-        // there's nothing heavy to push off-thread.
+        // The proprietary operators only run on single-channel 16-bit frames with
+        // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
+        // render, so there's nothing heavy to push off-thread.
         let heavy = !frame.is_mask()
-            && frame.is_u16()
+            && frame.is_op_input()
             && ((contrast == ContrastMode::LutAlpha && crate::imageproc::lut_alpha_available())
                 || (self.details_of(idx) && crate::imageproc::details_available()));
 

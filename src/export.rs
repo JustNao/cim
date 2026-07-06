@@ -222,20 +222,26 @@ impl ExportPane {
         // operators the live view applies, so an export matches what's on screen.
         // `ToneOptions` are live-only, so the export always applies LUT_ALPHA at
         // full strength (blend 1.0) rather than a partial mix. The operators run
-        // on a 16-bit render and only for 16-bit frames with the library loaded
-        // (mirroring the live view); everything else is the plain 8-bit render.
+        // on a single-channel 16-bit render and only for single-channel 16-bit
+        // frames with the library loaded (mirroring the live view); everything
+        // else is the plain 8-bit render.
         let [w, h] = frame.size;
-        let use_ops = frame.is_u16()
+        let use_ops = frame.is_op_input()
             && ((self.contrast == ContrastMode::LutAlpha
                 && crate::imageproc::lut_alpha_available())
                 || (self.details && crate::imageproc::details_available()));
         let rgba = if use_ops {
-            let mut buf16 = frame.render_rgba_u16(self.contrast.clips());
+            let mut gray = frame.render_gray_u16(self.contrast.clips());
             let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
-            crate::imageproc::apply_operators(&mut buf16, w, h, lut_blend, self.details);
-            let mut out = vec![0u8; buf16.len()];
-            for (o, &s) in out.iter_mut().zip(&buf16) {
-                *o = (s >> 8) as u8;
+            crate::imageproc::apply_operators(&mut gray, w, h, lut_blend, self.details);
+            // Expand the processed grey back to 8-bit RGBA.
+            let mut out = vec![255u8; gray.len() * 4];
+            for (i, &s) in gray.iter().enumerate() {
+                let g = (s >> 8) as u8;
+                let o = i * 4;
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
             }
             out
         } else {

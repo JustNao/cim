@@ -1,15 +1,16 @@
 // C ABI exposed by the optional proprietary image-processing library.
 //
-// cim loads this library at **runtime** (not at link time) via `libloading`
-// (see src/imageproc.rs) from the path set in Settings. Build it as a shared
-// library (`.so` / `.dll`) — for example with CMake `add_library(cim_ops SHARED …)`
-// — that exports these two C symbols. cim resolves them by these exact names,
-// so they must be `extern "C"` (unmangled) and, on Windows, exported.
+// cim loads these libraries at **runtime** (not at link time) via `libloading`
+// (see src/imageproc.rs) by hard-coded file name, resolved through the loader
+// search path (`LD_LIBRARY_PATH`). Each operator lives in its own shared library
+// (`.so` / `.dll`) — for example with CMake `add_library(... SHARED …)` — that
+// exports its one C symbol. cim resolves them by these exact names, so they must
+// be `extern "C"` (unmangled) and, on Windows, exported.
 //
-// Each operator receives the frame as an interleaved **16-bit RGBA** buffer
-// (`len == width * height * 4` u16 samples, row-major) and transforms it **in
-// place**, keeping the dimensions and leaving the alpha sample (every 4th)
-// untouched. They are only ever called for genuinely 16-bit images.
+// Each operator receives the frame as a **single-channel 16-bit** buffer
+// (`len == width * height` u16 samples, one per pixel, row-major) and transforms
+// it **in place**, keeping the dimensions. They are only ever called for
+// single-channel 16-bit images; cim expands the result back to grey RGBA.
 #pragma once
 
 #include <cstddef>

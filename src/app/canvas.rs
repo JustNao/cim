@@ -1000,20 +1000,20 @@ impl CimApp {
         let mut close = false;
 
         // The proprietary operators (LUT_ALPHA / Details) each need their own
-        // loaded library and a 16-bit frame; gate their controls independently
-        // and explain why when disabled.
-        let is_u16 = self.pane_is_u16(idx);
-        let lut_ok = crate::imageproc::lut_alpha_available() && is_u16;
-        let details_ok = crate::imageproc::details_available() && is_u16;
+        // loaded library and a single-channel 16-bit frame; gate their controls
+        // independently and explain why when disabled.
+        let op_input = self.pane_is_op_input(idx);
+        let lut_ok = crate::imageproc::lut_alpha_available() && op_input;
+        let details_ok = crate::imageproc::details_available() && op_input;
         let lut_hint: &str = if !crate::imageproc::lut_alpha_available() {
             "LUT_ALPHA operator library not found"
         } else {
-            "Only available for 16-bit (uint16) images"
+            "Only available for single-channel 16-bit (uint16) images"
         };
         let details_hint: &str = if !crate::imageproc::details_available() {
             "Details operator library not found"
         } else {
-            "Only available for 16-bit (uint16) images"
+            "Only available for single-channel 16-bit (uint16) images"
         };
 
         // Mask overlay (moved here from the Media manager): the masks available

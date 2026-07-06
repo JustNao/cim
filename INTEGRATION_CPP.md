@@ -37,15 +37,15 @@ extern "C" void cim_lut_alpha(uint16_t* data, size_t len, size_t width, size_t h
 extern "C" void cim_details_enhanced(uint16_t* data, size_t len, size_t width, size_t height);
 ```
 
-- `data` is **interleaved 16-bit RGBA**, `len == width * height * 4` samples,
-  row-major (`len` is passed so you can bounds-check).
+- `data` is a **single-channel 16-bit** buffer, `len == width * height` samples
+  (one per pixel), row-major (`len` is passed so you can bounds-check).
 - Transform **in place**, keep the same dimensions.
-- Leave the alpha sample (every 4th) untouched — cim keeps it at 65535.
-- **16-bit only.** cim invokes the operators *only* for images whose native
-  format is 16-bit unsigned, rendering to a 16-bit RGBA buffer first so you see
-  full precision; the result is downscaled to 8 bits for display *after* your
-  operator runs. For 8-bit / float images the operators are never called and the
-  UI disables them.
+- **Single-channel 16-bit only.** cim invokes the operators *only* for images
+  whose native format is single-channel (grayscale) 16-bit unsigned, rendering to
+  a single-channel 16-bit buffer first so you see full precision; the result is
+  expanded back to grey RGBA and downscaled to 8 bits for display *after* your
+  operator runs. For multi-channel, 8-bit, or float images the operators are
+  never called and the UI disables them.
 
 The symbols must be **`extern "C"`** (so the names aren't C++-mangled) and, on
 Windows, **exported** from the DLL (`__declspec(dllexport)` — `imageproc.h` does
@@ -114,7 +114,7 @@ the path.
 ## Filling in the operators
 
 Replace the placeholder bodies in `cpp/imageproc.cpp` with calls into your
-classes, converting the 16-bit RGBA buffer to/from whatever your API expects
+classes, converting the single-channel 16-bit buffer to/from whatever your API expects
 (there's a worked RGB example in that file's header comment).
 
 Put the built libraries on the loader path under the names cim expects

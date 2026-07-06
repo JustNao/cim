@@ -200,27 +200,29 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
 - **Linear** — plain full-range map, no clip.
 
 Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
-(`imageproc.rs`) run on a **16-bit** render (`render_into_u16`, mapping the same
-`[lo,hi]` bounds to `[0,65535]`) so they see full native precision, then the
-result is downscaled to 8-bit for the texture. **They run only for 16-bit
-(`uint16`) frames with the operator library loaded** — otherwise LUT_ALPHA /
-Details fall back to the plain 8-bit LUT render (`render_into`), and the UI
-disables those controls (`pane_is_u16` + `imageproc::is_available`). The same
-pipeline runs in three places, matching pixel-for-pixel: `export.rs::ensure_frame`
-(export worker), and — for live view — split by weight in `prepare`: **Linear /
-Linear+Clip, masks, and any non-U16 or library-absent case render synchronously**
-(cheap LUT only), while **LUT_ALPHA / details on a U16 frame render off the UI
-thread** on the `renderer.rs` `RenderPool` (`renderer::render`). (Export uses the
+(`imageproc.rs`) run on a **single-channel 16-bit** render
+(`render_into_gray_u16`, mapping the same `[lo,hi]` bounds to `[0,65535]`, one
+sample per pixel) so they see full native precision, then the result is expanded
+back to grey RGBA and downscaled to 8-bit for the texture. **They run only for
+single-channel 16-bit (`uint16`) frames with the operator library loaded** —
+otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
+(`render_into`), and the UI disables those controls (`pane_is_op_input` +
+`imageproc::lut_alpha_available`/`details_available`). The same pipeline runs in
+three places, matching pixel-for-pixel: `export.rs::ensure_frame` (export worker),
+and — for live view — split by weight in `prepare`: **Linear / Linear+Clip, masks,
+and any non-single-channel-U16 or library-absent case render synchronously** (cheap
+LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off the
+UI thread** on the `renderer.rs` `RenderPool` (`renderer::render`). (Export uses the
 default clip percentile; `ToneOptions` are live-view only.)
 
 The operators are **loaded at runtime** (`libloading`) at startup
 (`imageproc::init`) from **two separate libraries**, one per operator, by their
 hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`) resolved via
 the loader search path (set `LD_LIBRARY_PATH`) — not linked at build time; a
-16-bit RGBA C ABI (`cim_lut_alpha` / `cim_details_enhanced`). Each operator is
-independent: a missing library disables only its own feature
-(`lut_alpha_available` / `details_available`). See `INTEGRATION_CPP.md` for the
-contract and how to build the `.so`/`.dll`.
+**single-channel 16-bit** C ABI (`cim_lut_alpha` / `cim_details_enhanced`, `len
+== width*height`). Each operator is independent: a missing library disables only
+its own feature (`lut_alpha_available` / `details_available`). See
+`INTEGRATION_CPP.md` for the contract and how to build the `.so`/`.dll`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and

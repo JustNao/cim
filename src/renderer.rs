@@ -87,19 +87,24 @@ fn render(job: RenderJob) -> RenderDone {
     let size = job.data.size;
     let [w, h] = size;
     let mut rgba = Vec::new();
-    // The proprietary operators run on a 16-bit render (so they see full native
-    // precision) and only for 16-bit frames with the library loaded. Everything
-    // else takes the plain 8-bit LUT render.
-    let use_ops = job.data.is_u16()
+    // The proprietary operators run on a single-channel 16-bit render (so they
+    // see full native precision) and only for single-channel 16-bit frames with
+    // the library loaded. Everything else takes the plain 8-bit LUT render.
+    let use_ops = job.data.is_op_input()
         && ((job.lut_blend.is_some() && crate::imageproc::lut_alpha_available())
             || (job.details && crate::imageproc::details_available()));
     if use_ops {
-        let mut buf16 = Vec::new();
-        job.data.render_into_u16(job.lo, job.hi, &mut buf16);
-        crate::imageproc::apply_operators(&mut buf16, w, h, job.lut_blend, job.details);
-        rgba.resize(buf16.len(), 0);
-        for (o, &s) in rgba.iter_mut().zip(&buf16) {
-            *o = (s >> 8) as u8;
+        let mut gray = Vec::new();
+        job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
+        crate::imageproc::apply_operators(&mut gray, w, h, job.lut_blend, job.details);
+        // Expand the processed grey back to 8-bit RGBA for the texture.
+        rgba.resize(gray.len() * 4, 255);
+        for (i, &s) in gray.iter().enumerate() {
+            let g = (s >> 8) as u8;
+            let o = i * 4;
+            rgba[o] = g;
+            rgba[o + 1] = g;
+            rgba[o + 2] = g;
         }
     } else {
         job.data.render_into(job.lo, job.hi, &mut rgba);

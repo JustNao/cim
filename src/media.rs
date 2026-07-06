@@ -242,12 +242,20 @@ impl FrameData {
         matches!(self.samples, Samples::F32(_))
     }
 
-    /// 16-bit unsigned samples — the only format the proprietary operators
-    /// (LUT_ALPHA / DETAILS_ENHANCED) accept, so their availability is gated on
-    /// this (plus a loaded library).
+    /// 16-bit unsigned samples — the underlying sample format the proprietary
+    /// operators require.
     #[inline]
     pub fn is_u16(&self) -> bool {
         matches!(self.samples, Samples::U16(_))
+    }
+
+    /// A **single-channel 16-bit** frame — the only input the proprietary
+    /// operators (LUT_ALPHA / DETAILS_ENHANCED) accept. Their availability is
+    /// gated on this (plus a loaded library): they receive one 16-bit sample per
+    /// pixel, not an interleaved RGBA buffer.
+    #[inline]
+    pub fn is_op_input(&self) -> bool {
+        self.channels == 1 && self.is_u16()
     }
 
     /// Short native-format label for the footer readout (`uint8` / `uint16` /
@@ -504,12 +512,13 @@ impl FrameData {
         out
     }
 
-    /// The 16-bit RGBA render (for the proprietary operators), using the same
-    /// display bounds as [`render_rgba`]. Used by the export worker.
-    pub fn render_rgba_u16(&self, clip: bool) -> Vec<u16> {
+    /// The single-channel 16-bit render (for the proprietary operators), using
+    /// the same display bounds as [`render_rgba`]. Used by the export worker.
+    /// Only valid for single-channel frames (see [`is_op_input`]).
+    pub fn render_gray_u16(&self, clip: bool) -> Vec<u16> {
         let (lo, hi) = self.display_bounds(clip);
         let mut out = Vec::new();
-        self.render_into_u16(lo, hi, &mut out);
+        self.render_into_gray_u16(lo, hi, &mut out);
         out
     }
 
@@ -557,25 +566,24 @@ impl FrameData {
         }
     }
 
-    /// Render an interleaved **16-bit** RGBA display buffer into `out` (resized
-    /// to fit), mapping native samples through `[lo, hi] → [0, 65535]`. This is
-    /// the input the proprietary operators receive (`crate::imageproc`), so they
-    /// see genuine 16-bit precision; the result is downscaled to 8 bits for the
-    /// texture only after the operators have run. Mirrors [`render_into`].
-    pub fn render_into_u16(&self, lo: f32, hi: f32, out: &mut Vec<u16>) {
+    /// Render a **single-channel 16-bit** buffer into `out` (resized to
+    /// `width*height`), mapping native samples through `[lo, hi] → [0, 65535]`.
+    /// This is the input the proprietary operators receive (`crate::imageproc`):
+    /// one 16-bit sample per pixel, at genuine 16-bit precision, expanded back to
+    /// RGBA (and downscaled to 8 bits) for the texture only after the operators
+    /// have run. Only called for single-channel frames (see [`is_op_input`]);
+    /// the first channel is taken for any wider source. Mirrors [`render_into`].
+    pub fn render_into_gray_u16(&self, lo: f32, hi: f32, out: &mut Vec<u16>) {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
-        let cc = self.color_channels();
         out.clear();
-        out.resize(px * 4, u16::MAX); // alpha stays max; rgb overwritten below
+        out.resize(px, u16::MAX);
 
         if self.mask {
             match &self.samples {
-                Samples::U8(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { u16::MAX } else { 0 }),
-                Samples::U16(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { u16::MAX } else { 0 }),
-                Samples::F32(v) => {
-                    fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { u16::MAX } else { 0 })
-                }
+                Samples::U8(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u16::MAX } else { 0 }),
+                Samples::U16(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u16::MAX } else { 0 }),
+                Samples::F32(v) => fill_gray(out, v, ch, px, |s| if s != 0.0 { u16::MAX } else { 0 }),
             }
             return;
         }
@@ -587,13 +595,13 @@ impl FrameData {
         match &self.samples {
             Samples::U8(v) => {
                 let lut: Vec<u16> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+                fill_gray(out, v, ch, px, |s| lut[s as usize]);
             }
             Samples::U16(v) => {
                 let lut: Vec<u16> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+                fill_gray(out, v, ch, px, |s| lut[s as usize]);
             }
-            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
+            Samples::F32(v) => fill_gray(out, v, ch, px, map_f),
         }
     }
 
@@ -1885,6 +1893,14 @@ fn fill_rgba<T: Copy, U: Copy>(
             out[o + 1] = map(v[base + 1]);
             out[o + 2] = map(v[base + 2]);
         }
+    }
+}
+
+/// Write the first channel of each interleaved pixel into a single-channel
+/// buffer through `map`. `out` must already be `px` long.
+fn fill_gray<T: Copy, U: Copy>(out: &mut [U], v: &[T], ch: usize, px: usize, map: impl Fn(T) -> U) {
+    for i in 0..px {
+        out[i] = map(v[i * ch]);
     }
 }
 
