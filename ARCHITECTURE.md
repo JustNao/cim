@@ -20,9 +20,10 @@
   gracefully when fixtures or `ffmpeg` are absent). Fixtures in `examples/`.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
-- **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.9, `rfd` 0.14,
-  `serde`/`serde_json`, `directories` 5, `anyhow`, `cxx` 1 (C++ FFI — needs a host
-  C++ compiler, see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**.
+- **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
+  `serde`/`serde_json`, `directories` 5, `anyhow`, `libloading` 0.8 (runtime load
+  of the optional proprietary C++ operators — **no** C++ compiler needed to build
+  cim; see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**.
 - **Embedded assets** (`assets/`, baked in via `include_bytes!`): `icon.png` (window
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
@@ -38,8 +39,9 @@ src/
   cli.rs         CLI: --help, shell completion, sequence-token expansion.
   media.rs       Data model: FrameData/Samples, Media (Still|TiffSeq|…),
                  SeqReader (persistent TIFF decoder), rendering, histograms, stats.
-  imageproc.rs   cxx bridge to the proprietary C++ operators (LUT_ALPHA,
-                 DETAILS_ENHANCED); C++ lives in cpp/, built by build.rs.
+  imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
+                 (LUT_ALPHA, DETAILS_ENHANCED); C++ in cpp/ is built separately
+                 into a .so/.dll and loaded from a settings path (16-bit only).
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (LUT render
                  + LUT_ALPHA / details) for heavy panes so the UI never blocks.
@@ -77,6 +79,11 @@ src/
   (`new_mask`/`is_mask`). `render_into` paints false→black/true→white (bypassing
   tone), and `render_mask_rgba(rgb, alpha)` builds a tinted overlay buffer. Only
   TIFFs are masks; `Media::is_mask()` lets the UI list them as overlay sources.
+  Mask truth is the **stored sample bit** (what the author set — e.g. `numpy`
+  `True`), *not* the pixel's black/white look: `mask_bits` reads
+  `PhotometricInterpretation` and un-inverts WhiteIsZero pages (the TIFF default,
+  and what `tifffile` writes for a bool array — the `tiff` decoder normalises
+  those to intensity, flipping the bit), so a mask isn't shown inverted.
 
 ### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq`
 Unified interface: `name`, `size`, `frame_count`, `hi_depth`; `resident(idx)` /
@@ -192,14 +199,24 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   `blend_rgba`). More knobs slot into `LutAlphaOptions` + `draw_tone_options`.
 - **Linear** — plain full-range map, no clip.
 
-Plus a per-pane **DETAILS_ENHANCED** toggle. `render_into` produces the 8-bit RGBA,
-then the `imageproc.rs` operators (`lut_alpha`, `details_enhanced`) transform it in
-place. The same pipeline runs in three places, matching pixel-for-pixel:
-`export.rs::ensure_frame` (export worker), and — for live view — split by weight in
-`prepare`: **Linear / Linear+Clip and masks render synchronously** (cheap LUT only),
-while **LUT_ALPHA / details render off the UI thread** on the `renderer.rs`
-`RenderPool` (`renderer::render`). (Export uses the default clip percentile;
-`ToneOptions` are live-view only.) See `INTEGRATION_CPP.md` for the C++ contract.
+Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
+(`imageproc.rs`) run on a **16-bit** render (`render_into_u16`, mapping the same
+`[lo,hi]` bounds to `[0,65535]`) so they see full native precision, then the
+result is downscaled to 8-bit for the texture. **They run only for 16-bit
+(`uint16`) frames with the operator library loaded** — otherwise LUT_ALPHA /
+Details fall back to the plain 8-bit LUT render (`render_into`), and the UI
+disables those controls (`pane_is_u16` + `imageproc::is_available`). The same
+pipeline runs in three places, matching pixel-for-pixel: `export.rs::ensure_frame`
+(export worker), and — for live view — split by weight in `prepare`: **Linear /
+Linear+Clip, masks, and any non-U16 or library-absent case render synchronously**
+(cheap LUT only), while **LUT_ALPHA / details on a U16 frame render off the UI
+thread** on the `renderer.rs` `RenderPool` (`renderer::render`). (Export uses the
+default clip percentile; `ToneOptions` are live-view only.)
+
+The operator library is **loaded at runtime** (`libloading`) from
+`Config.ops_library_path` — set in Settings, loaded again at startup — not linked
+at build time; a 16-bit RGBA C ABI (`cim_lut_alpha`/`cim_details_enhanced`). See
+`INTEGRATION_CPP.md` for the contract and how to build the `.so`/`.dll`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and
@@ -264,7 +281,8 @@ index, name, `frame/known(+)`, `in mem`, sync markers, close ×; the **filename 
 dropped** when the header is too narrow to fit the full title — measured against the
 Hide/Close span — leaving the index number and frame info so small grid cells stay
 readable), `draw_footer`
-(`h×w`, cursor `x y`, native value). Borders show **only during ctrl-drag**; focus is
+(`h×w`, native format `uint8`/`uint16`/`float32` via `FrameData::kind_label`, cursor
+`x y`, native value). Borders show **only during ctrl-drag**; focus is
 the header tint. While `selecting_region` (export crop) the left button still pans and
 the wheel zooms; the **right** button draws the crop (so reorder/click-focus/stats-region
 are suppressed).
@@ -429,7 +447,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot, keybindings }`,
+`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot, ops_library_path,
+keybindings }` (`ops_library_path`: the optional proprietary operator library
+loaded at runtime — §7),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written only on an explicit "Save settings"** (never on exit). `config` is
