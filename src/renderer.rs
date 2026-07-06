@@ -90,9 +90,9 @@ fn render(job: RenderJob) -> RenderDone {
     // The proprietary operators run on a 16-bit render (so they see full native
     // precision) and only for 16-bit frames with the library loaded. Everything
     // else takes the plain 8-bit LUT render.
-    let use_ops = crate::imageproc::is_available()
-        && job.data.is_u16()
-        && (job.lut_blend.is_some() || job.details);
+    let use_ops = job.data.is_u16()
+        && ((job.lut_blend.is_some() && crate::imageproc::lut_alpha_available())
+            || (job.details && crate::imageproc::details_available()));
     if use_ops {
         let mut buf16 = Vec::new();
         job.data.render_into_u16(job.lo, job.hi, &mut buf16);

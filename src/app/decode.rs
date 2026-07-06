@@ -246,8 +246,8 @@ impl CimApp {
         // there's nothing heavy to push off-thread.
         let heavy = !frame.is_mask()
             && frame.is_u16()
-            && crate::imageproc::is_available()
-            && (contrast == ContrastMode::LutAlpha || self.details_of(idx));
+            && ((contrast == ContrastMode::LutAlpha && crate::imageproc::lut_alpha_available())
+                || (self.details_of(idx) && crate::imageproc::details_available()));
 
         if heavy {
             // Render off-thread. One render per pane at a time, so rapid tone /

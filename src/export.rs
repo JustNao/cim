@@ -225,9 +225,10 @@ impl ExportPane {
         // on a 16-bit render and only for 16-bit frames with the library loaded
         // (mirroring the live view); everything else is the plain 8-bit render.
         let [w, h] = frame.size;
-        let use_ops = crate::imageproc::is_available()
-            && frame.is_u16()
-            && (self.contrast == ContrastMode::LutAlpha || self.details);
+        let use_ops = frame.is_u16()
+            && ((self.contrast == ContrastMode::LutAlpha
+                && crate::imageproc::lut_alpha_available())
+                || (self.details && crate::imageproc::details_available()));
         let rgba = if use_ops {
             let mut buf16 = frame.render_rgba_u16(self.contrast.clips());
             let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);

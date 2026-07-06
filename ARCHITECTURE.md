@@ -213,10 +213,14 @@ Linear+Clip, masks, and any non-U16 or library-absent case render synchronously*
 thread** on the `renderer.rs` `RenderPool` (`renderer::render`). (Export uses the
 default clip percentile; `ToneOptions` are live-view only.)
 
-The operator library is **loaded at runtime** (`libloading`) from
-`Config.ops_library_path` — set in Settings, loaded again at startup — not linked
-at build time; a 16-bit RGBA C ABI (`cim_lut_alpha`/`cim_details_enhanced`). See
-`INTEGRATION_CPP.md` for the contract and how to build the `.so`/`.dll`.
+The operators are **loaded at runtime** (`libloading`) at startup
+(`imageproc::init`) from **two separate libraries**, one per operator, by their
+hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`) resolved via
+the loader search path (set `LD_LIBRARY_PATH`) — not linked at build time; a
+16-bit RGBA C ABI (`cim_lut_alpha` / `cim_details_enhanced`). Each operator is
+independent: a missing library disables only its own feature
+(`lut_alpha_available` / `details_available`). See `INTEGRATION_CPP.md` for the
+contract and how to build the `.so`/`.dll`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and
@@ -447,9 +451,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot, ops_library_path,
-keybindings }` (`ops_library_path`: the optional proprietary operator library
-loaded at runtime — §7),
+`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot,
+keybindings }` (the proprietary operator libraries are loaded at startup by
+hard-coded name — §7 — not configured here),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written only on an explicit "Save settings"** (never on exit). `config` is

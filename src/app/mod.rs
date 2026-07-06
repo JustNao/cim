@@ -379,14 +379,11 @@ impl CimApp {
             .unwrap_or(4);
 
         let config = Config::load();
-        // Load the optional proprietary operator library from the saved path, if
-        // any. A failure just leaves LUT_ALPHA / Details disabled (surfaced when
-        // the user next opens Settings); it must never block startup.
-        if let Some(path) = &config.ops_library_path {
-            if let Err(e) = crate::imageproc::load(path) {
-                eprintln!("cim: could not load image-ops library {path:?}: {e}");
-            }
-        }
+        // Load the optional proprietary operator libraries by their hard-coded
+        // names (resolved via LD_LIBRARY_PATH). Each operator is independent; a
+        // missing library just leaves its feature disabled and never blocks
+        // startup.
+        crate::imageproc::init();
         let mut app = Self {
             saved_config: config.clone(),
             config,
@@ -1114,8 +1111,9 @@ impl CimApp {
     }
 
     /// Whether pane `i`'s currently shown frame is 16-bit unsigned — the format
-    /// the proprietary operators require. Used (with `imageproc::is_available`)
-    /// to gate the LUT_ALPHA mode and the Details toggle in the popup. A not-yet-
+    /// the proprietary operators require. Used (with `imageproc::lut_alpha_available`
+    /// / `details_available`) to gate the LUT_ALPHA mode and the Details toggle in
+    /// the popup. A not-yet-
     /// resident frame reads as unsupported until it loads.
     pub(super) fn pane_is_u16(&self, i: usize) -> bool {
         let f = self.frame_disp(i);

@@ -999,11 +999,19 @@ impl CimApp {
         let mut details = self.details_of(idx);
         let mut close = false;
 
-        // The proprietary operators (LUT_ALPHA / Details) need a loaded library
-        // and a 16-bit frame; gate their controls and explain why when disabled.
-        let ops_ok = crate::imageproc::is_available() && self.pane_is_u16(idx);
-        let ops_hint: &str = if !crate::imageproc::is_available() {
-            "Load the image-processing library in Settings to enable this"
+        // The proprietary operators (LUT_ALPHA / Details) each need their own
+        // loaded library and a 16-bit frame; gate their controls independently
+        // and explain why when disabled.
+        let is_u16 = self.pane_is_u16(idx);
+        let lut_ok = crate::imageproc::lut_alpha_available() && is_u16;
+        let details_ok = crate::imageproc::details_available() && is_u16;
+        let lut_hint: &str = if !crate::imageproc::lut_alpha_available() {
+            "LUT_ALPHA operator library not found"
+        } else {
+            "Only available for 16-bit (uint16) images"
+        };
+        let details_hint: &str = if !crate::imageproc::details_available() {
+            "Details operator library not found"
         } else {
             "Only available for 16-bit (uint16) images"
         };
@@ -1074,14 +1082,14 @@ impl CimApp {
                                         // already the pane's mode, so it stays
                                         // visible / switchable away).
                                         if m == ContrastMode::LutAlpha
-                                            && !ops_ok
+                                            && !lut_ok
                                             && contrast != m
                                         {
                                             ui.add_enabled(
                                                 false,
                                                 egui::SelectableLabel::new(false, m.label()),
                                             )
-                                            .on_disabled_hover_text(ops_hint);
+                                            .on_disabled_hover_text(lut_hint);
                                         } else {
                                             ui.selectable_value(&mut contrast, m, m.label());
                                         }
@@ -1092,9 +1100,9 @@ impl CimApp {
                             draw_tone_options(ui, pane_id, contrast, &mut tone);
 
                             ui.label("RC");
-                            ui.add_enabled(ops_ok, egui::Checkbox::without_text(&mut details))
+                            ui.add_enabled(details_ok, egui::Checkbox::without_text(&mut details))
                                 .on_hover_text("Rehaussement / sharpening")
-                                .on_disabled_hover_text(ops_hint);
+                                .on_disabled_hover_text(details_hint);
                             ui.end_row();
                         });
 

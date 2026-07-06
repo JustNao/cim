@@ -795,55 +795,6 @@ impl CimApp {
 
                 ui.add_space(8.0);
                 ui.separator();
-                ui.heading("Image processing");
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Optional proprietary library (.so / .dll) for the LUT_ALPHA and \
-                         Details operators — 16-bit images only. Loaded at startup from \
-                         this path; when absent, those features are disabled.",
-                    )
-                    .weak()
-                    .small(),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Library:");
-                    let cur = self
-                        .config
-                        .ops_library_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "None".into());
-                    ui.monospace(ellipsize(&cur, 44));
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("Browse…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Shared library", &["so", "dll", "dylib"])
-                            .add_filter("All files", &["*"])
-                            .pick_file()
-                        {
-                            self.status = match crate::imageproc::load(&path) {
-                                Ok(()) => "Image-processing library loaded".into(),
-                                Err(e) => format!("Load failed: {e}"),
-                            };
-                            self.config.ops_library_path = Some(path);
-                        }
-                    }
-                    if ui.button("Clear").clicked() {
-                        crate::imageproc::unload();
-                        self.config.ops_library_path = None;
-                        self.status = "Image-processing library cleared".into();
-                    }
-                    if crate::imageproc::is_available() {
-                        ui.colored_label(Color32::from_rgb(120, 200, 120), "● loaded");
-                    } else {
-                        ui.colored_label(Color32::from_gray(150), "○ not loaded");
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
                 ui.heading("Keyboard shortcuts");
                 ui.add_space(4.0);
 

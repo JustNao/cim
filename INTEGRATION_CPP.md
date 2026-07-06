@@ -1,29 +1,31 @@
 # Integrating the proprietary C++ image functions
 
 cim calls two proprietary C++ operators — **LUT_ALPHA** (auto-contrast) and
-**DETAILS_ENHANCED** (detail/sharpening). They live in a **separately built
-shared library** (`.so` on Linux, `.dll` on Windows) that cim loads **at
+**DETAILS_ENHANCED** (detail/sharpening). Each lives in its **own separately
+built shared library** (`.so` on Linux, `.dll` on Windows) that cim loads **at
 runtime**, not at build time. There is no C++ compiler or `cxx` dependency in
 cim's own build anymore.
 
-Because the library is loaded dynamically:
+Because the libraries are loaded dynamically:
 
 - cim builds and runs with **no** proprietary code present.
-- You point cim at the library file in **Settings → Image processing → Library**
-  (persisted as `ops_library_path`; also loaded at startup).
-- If the path is unset, the file is missing, or a symbol doesn't resolve, the
-  **LUT_ALPHA mode and the Details toggle are disabled** in the UI and cim
-  behaves as a plain viewer.
+- cim loads each library at startup by its **hard-coded file name**
+  (`LUT_ALPHA_LIB` / `DETAILS_LIB` in `src/imageproc.rs` — currently
+  placeholders), resolved through the OS loader's search path. Put the libraries
+  on that path with `LD_LIBRARY_PATH` (Linux) when launching cim.
+- Each operator is **independent**: if its library is missing or its symbol
+  doesn't resolve, only **that** operator's feature is disabled in the UI (the
+  LUT_ALPHA mode, or the Details toggle); the other keeps working and cim
+  otherwise behaves as a plain viewer.
 
 ## Where the pieces live
 
 | File | Role |
 |------|------|
-| `src/imageproc.rs` | Runtime loader (`libloading`): `load`/`unload`/`is_available` + the `apply_operators` tail called by the render pool and export. |
+| `src/imageproc.rs` | Runtime loader (`libloading`): hard-coded library names, `init`/`lut_alpha_available`/`details_available` + the `apply_operators` tail called by the render pool and export. |
 | `cpp/imageproc.h` | The **C ABI** cim resolves by name (`cim_lut_alpha`, `cim_details_enhanced`). |
 | `cpp/imageproc.cpp` | **The integration point** — placeholder bodies to replace with calls into your classes. |
-| `cpp/CMakeLists.txt` | Example build producing `libcim_ops.so` / `cim_ops.dll`. |
-| `src/settings.rs` | `Config.ops_library_path`; `src/app/panels.rs` draws the picker. |
+| `cpp/CMakeLists.txt` | Example build producing the operator `.so` / `.dll`. |
 | `src/renderer.rs` / `src/export.rs` | Apply the operators (live view off-thread; export on its worker) so the two match pixel-for-pixel. |
 
 ## The data contract (do not change without updating both sides)
@@ -92,21 +94,22 @@ static `.a`. Two ways to combine it:
 
 ### Dependency libraries at runtime
 
-If your build produces **many** shared libraries, you do **not** link or register
-all of them with cim. cim loads exactly **one** — the entry library
-(`libcim_ops.so`) exporting the two `cim_*` symbols. The rest are its
-dependencies, pulled in by the OS dynamic loader when the entry library loads,
-**as long as it can find them**. Keep them together in a `lib/` folder and put
-that folder on the loader's search path when launching cim:
+cim loads exactly **two** entry libraries — the ones whose hard-coded names are
+`LUT_ALPHA_LIB` / `DETAILS_LIB` in `src/imageproc.rs`, each exporting its single
+`cim_*` symbol. Any further shared libraries are their dependencies, pulled in by
+the OS dynamic loader when an entry library loads, **as long as it can find
+them**. Keep everything together in a `lib/` folder and put that folder on the
+loader's search path when launching cim:
 
 ```sh
 LD_LIBRARY_PATH=/path/to/lib ./cim        # Linux
 ```
 
-Point cim's **Settings → Image processing → Library** at the entry file itself
-(`/path/to/lib/libcim_ops.so`); the dependencies resolve via `LD_LIBRARY_PATH`.
-`ldd libcim_ops.so` lists what it needs — if cim's load fails with a "cannot open
-shared object" error, a dependency wasn't on the path.
+The entry libraries themselves must also be findable under that same
+`LD_LIBRARY_PATH` (cim loads them by bare name, not absolute path).
+`ldd <lib>.so` lists what each needs — if cim logs a "cannot open shared object"
+error at startup, either an entry library or one of its dependencies wasn't on
+the path.
 
 ## Filling in the operators
 
@@ -114,8 +117,9 @@ Replace the placeholder bodies in `cpp/imageproc.cpp` with calls into your
 classes, converting the 16-bit RGBA buffer to/from whatever your API expects
 (there's a worked RGB example in that file's header comment).
 
-Point cim at the built library and you're done — no rebuild of cim needed to
-swap the library later.
+Put the built libraries on the loader path under the names cim expects
+(`LUT_ALPHA_LIB` / `DETAILS_LIB`) and you're done — no rebuild of cim needed to
+swap a library later.
 
 ## Notes & gotchas
 
