@@ -121,6 +121,9 @@ impl CimApp {
     /// otherwise keep decoding its frontier and starve the shown pane, making the
     /// UI laggy even when a single media is displayed.
     pub(super) fn ensure_lookahead(&mut self) {
+        if self.panes.is_empty() {
+            return;
+        }
         // The control pane drives the shared timeline/scrubber even when it isn't
         // on screen, so it must keep discovering its frontier too.
         let mut targets = self.displayed_indices();
