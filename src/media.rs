@@ -1473,10 +1473,24 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
 
     // A 1-bit bilevel page comes back with its pixels packed 8-to-a-byte;
     // expand to one 0/1 byte per pixel so the rest of the pipeline is uniform.
+    //
+    // A boolean mask's "true" is the raw stored sample bit — what the array
+    // author actually set (e.g. `numpy` `True` → 1) — not the pixel's black/
+    // white *appearance*. Those differ when PhotometricInterpretation is
+    // WhiteIsZero (the TIFF baseline default, and what `tifffile` writes for a
+    // bool array): there the bit `1` means black, and the `tiff` decoder has
+    // already normalised the buffer to intensity (0 = black), flipping the bit.
+    // Undo that here so mask-true == the set bit regardless of photometric.
     let is_mask = matches!(color, ColorType::Gray(1));
     let samples = if is_mask {
+        let white_is_zero = dec
+            .find_tag(tiff::tags::Tag::PhotometricInterpretation)
+            .ok()
+            .flatten()
+            .and_then(|v| v.into_u16().ok())
+            == Some(0);
         match samples {
-            Samples::U8(packed) => Samples::U8(unpack_bilevel(&packed, w, h)),
+            Samples::U8(packed) => Samples::U8(mask_bits(&packed, w, h, white_is_zero)),
             other => other,
         }
     } else {
@@ -1498,6 +1512,20 @@ fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
     } else {
         Ok(FrameData::new([w, h], channels, samples))
     }
+}
+
+/// Boolean-mask bits from a decoded 1-bit page: unpack the bilevel buffer, then
+/// (when the source was WhiteIsZero, so the `tiff` decoder already inverted the
+/// stored bits to intensity) flip them back so a set pixel reads as `1`. The
+/// result is the array author's original truth value, not the black/white look.
+fn mask_bits(packed: &[u8], w: usize, h: usize, white_is_zero: bool) -> Vec<u8> {
+    let mut bits = unpack_bilevel(packed, w, h);
+    if white_is_zero {
+        for b in &mut bits {
+            *b ^= 1;
+        }
+    }
+    bits
 }
 
 /// Expand a packed 1-bit bilevel buffer — MSB-first, each row padded to a byte
@@ -1607,6 +1635,26 @@ mod tests {
         assert_eq!(map[6], (1, 2), "frame 6 = file 1 page 2 (last of clip_001)");
     }
 
+    /// Mask truth is the stored bit the author set, independent of the TIFF's
+    /// black/white sense. The `tiff` decoder normalises to intensity (inverting
+    /// WhiteIsZero), so `mask_bits` flips it back for WhiteIsZero. Both cases
+    /// must recover the same "left half set" pattern a `numpy` `True` block
+    /// would produce. One row of 8 px; the packed byte is the decoder's output.
+    #[test]
+    fn mask_bits_recover_stored_true_regardless_of_photometric() {
+        // BlackIsZero: decoder leaves stored bits as-is (set → 1 → 0b11110000).
+        assert_eq!(
+            mask_bits(&[0b1111_0000], 8, 1, false),
+            vec![1, 1, 1, 1, 0, 0, 0, 0],
+        );
+        // WhiteIsZero: decoder already inverted the stored bits to intensity
+        // (0b00001111); flipping back recovers the same set-region truth.
+        assert_eq!(
+            mask_bits(&[0b0000_1111], 8, 1, true),
+            vec![1, 1, 1, 1, 0, 0, 0, 0],
+        );
+    }
+
     /// A real 1-bit bilevel TIFF opens as a mask media and decodes to a mask
     /// frame. Skips gracefully when the fixture isn't present.
     #[test]
@@ -1626,14 +1674,24 @@ mod tests {
         let [w, h] = frame.size;
         assert_eq!([w, h], [2560, 1706]);
 
-        // Cross-check the bit unpacking (MSB-first, byte-padded rows) against
-        // Pillow's ground truth for this fixture: exact true-pixel count and a
-        // few specific pixels.
+        // Cross-check the bit unpacking (MSB-first, byte-padded rows). The known
+        // ground truth below was captured in the decoder's *intensity* space
+        // (0 = black); mask truth is now the stored bit, so it flips for a
+        // WhiteIsZero source (see `mask_bits`). Read the tag and adjust.
+        let white_is_zero = Decoder::new(BufReader::new(File::open(path).unwrap()))
+            .unwrap()
+            .find_tag(tiff::tags::Tag::PhotometricInterpretation)
+            .ok()
+            .flatten()
+            .and_then(|v| v.into_u16().ok())
+            == Some(0);
+        let flip = |v: u32| if white_is_zero { v ^ 1 } else { v };
         let ones = (0..w * h).filter(|&i| frame.sample(i) != 0).count();
-        assert_eq!(ones, 395048, "true-pixel count");
-        assert_eq!(frame.sample(0), 0, "px (0,0)");
-        assert_eq!(frame.sample((h / 2) * w + w / 2), 0, "px centre");
-        assert_eq!(frame.sample(10 * w + 100), 1, "px (100,10)");
+        let exp_ones = if white_is_zero { w * h - 395048 } else { 395048 };
+        assert_eq!(ones, exp_ones, "true-pixel count");
+        assert_eq!(frame.sample(0), flip(0), "px (0,0)");
+        assert_eq!(frame.sample((h / 2) * w + w / 2), flip(0), "px centre");
+        assert_eq!(frame.sample(10 * w + 100), flip(1), "px (100,10)");
 
         // Renders black/white at native size.
         let mut out = Vec::new();
@@ -1847,3 +1905,4 @@ fn color_bits(c: ColorType) -> u8 {
         _ => 8,
     }
 }
+
