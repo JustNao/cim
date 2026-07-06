@@ -409,7 +409,17 @@ impl CimApp {
                 return;
             }
         };
-        let path = PathBuf::from(&name); // relative -> current working directory
+        // Resolve to an absolute path against the current working directory so
+        // the file lands somewhere predictable (when cim is launched from a
+        // desktop/app launcher the CWD may be `/` or $HOME, not where the user
+        // expects) and the status message shows the full destination. An
+        // absolute name the user typed is kept unchanged.
+        let mut path = PathBuf::from(&name);
+        if path.is_relative() {
+            if let Ok(cwd) = std::env::current_dir() {
+                path = cwd.join(&path);
+            }
+        }
         if self.export_format() == ExportFormat::Image {
             self.export_still_image(path);
             return;
