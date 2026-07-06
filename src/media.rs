@@ -242,6 +242,24 @@ impl FrameData {
         matches!(self.samples, Samples::F32(_))
     }
 
+    /// 16-bit unsigned samples — the only format the proprietary operators
+    /// (LUT_ALPHA / DETAILS_ENHANCED) accept, so their availability is gated on
+    /// this (plus a loaded library).
+    #[inline]
+    pub fn is_u16(&self) -> bool {
+        matches!(self.samples, Samples::U16(_))
+    }
+
+    /// Short native-format label for the footer readout (`uint8` / `uint16` /
+    /// `float32`).
+    pub fn kind_label(&self) -> &'static str {
+        match self.samples {
+            Samples::U8(_) => "uint8",
+            Samples::U16(_) => "uint16",
+            Samples::F32(_) => "float32",
+        }
+    }
+
     /// More than 8 bits per sample (16-bit or float) → clip-on-load default.
     pub fn hi_depth(&self) -> bool {
         !matches!(self.samples, Samples::U8(_))
@@ -486,6 +504,15 @@ impl FrameData {
         out
     }
 
+    /// The 16-bit RGBA render (for the proprietary operators), using the same
+    /// display bounds as [`render_rgba`]. Used by the export worker.
+    pub fn render_rgba_u16(&self, clip: bool) -> Vec<u16> {
+        let (lo, hi) = self.display_bounds(clip);
+        let mut out = Vec::new();
+        self.render_into_u16(lo, hi, &mut out);
+        out
+    }
+
     /// Render the 8-bit RGBA display buffer into `out` (resized to fit), mapping
     /// native samples through `[lo, hi] → [0, 255]`.
     ///
@@ -526,6 +553,46 @@ impl FrameData {
                 fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
             }
             // Floats have no bounded domain to tabulate; map arithmetically.
+            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
+        }
+    }
+
+    /// Render an interleaved **16-bit** RGBA display buffer into `out` (resized
+    /// to fit), mapping native samples through `[lo, hi] → [0, 65535]`. This is
+    /// the input the proprietary operators receive (`crate::imageproc`), so they
+    /// see genuine 16-bit precision; the result is downscaled to 8 bits for the
+    /// texture only after the operators have run. Mirrors [`render_into`].
+    pub fn render_into_u16(&self, lo: f32, hi: f32, out: &mut Vec<u16>) {
+        let px = self.size[0] * self.size[1];
+        let ch = self.channels;
+        let cc = self.color_channels();
+        out.clear();
+        out.resize(px * 4, u16::MAX); // alpha stays max; rgb overwritten below
+
+        if self.mask {
+            match &self.samples {
+                Samples::U8(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { u16::MAX } else { 0 }),
+                Samples::U16(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { u16::MAX } else { 0 }),
+                Samples::F32(v) => {
+                    fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { u16::MAX } else { 0 })
+                }
+            }
+            return;
+        }
+
+        let denom = hi - lo;
+        let scale = if denom > 0.0 { 65535.0 / denom } else { 0.0 };
+        let map_f = |s: f32| -> u16 { (((s - lo) * scale).clamp(0.0, 65535.0)) as u16 };
+
+        match &self.samples {
+            Samples::U8(v) => {
+                let lut: Vec<u16> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+            }
+            Samples::U16(v) => {
+                let lut: Vec<u16> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+            }
             Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
         }
     }
@@ -1739,13 +1806,13 @@ mod tests {
 /// Write interleaved samples into an RGBA buffer through `map`. Mono sources
 /// (1 colour channel) replicate the grey value across R/G/B; alpha is left at
 /// whatever `out` already holds (255). `out` must already be `px * 4` long.
-fn fill_rgba<T: Copy>(
-    out: &mut [u8],
+fn fill_rgba<T: Copy, U: Copy>(
+    out: &mut [U],
     v: &[T],
     ch: usize,
     cc: usize,
     px: usize,
-    map: impl Fn(T) -> u8,
+    map: impl Fn(T) -> U,
 ) {
     for i in 0..px {
         let base = i * ch;

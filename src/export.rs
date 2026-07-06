@@ -221,11 +221,25 @@ impl ExportPane {
         // Built-in render (full range or 0.01% clip), then the same proprietary
         // operators the live view applies, so an export matches what's on screen.
         // `ToneOptions` are live-only, so the export always applies LUT_ALPHA at
-        // full strength (blend 1.0) rather than a partial mix.
+        // full strength (blend 1.0) rather than a partial mix. The operators run
+        // on a 16-bit render and only for 16-bit frames with the library loaded
+        // (mirroring the live view); everything else is the plain 8-bit render.
         let [w, h] = frame.size;
-        let mut rgba = frame.render_rgba(self.contrast.clips());
-        let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
-        crate::imageproc::apply_operators(&mut rgba, w, h, lut_blend, self.details);
+        let use_ops = crate::imageproc::is_available()
+            && frame.is_u16()
+            && (self.contrast == ContrastMode::LutAlpha || self.details);
+        let rgba = if use_ops {
+            let mut buf16 = frame.render_rgba_u16(self.contrast.clips());
+            let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
+            crate::imageproc::apply_operators(&mut buf16, w, h, lut_blend, self.details);
+            let mut out = vec![0u8; buf16.len()];
+            for (o, &s) in out.iter_mut().zip(&buf16) {
+                *o = (s >> 8) as u8;
+            }
+            out
+        } else {
+            frame.render_rgba(self.contrast.clips())
+        };
         self.cur_display = Some(rgba);
         self.cur_idx = Some(idx);
     }

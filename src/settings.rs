@@ -272,6 +272,11 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// Path to the optional proprietary image-processing library (`.so`/`.dll`)
+    /// loaded at runtime for the LUT_ALPHA / Details operators. `None` (or a
+    /// missing file) leaves those features disabled. See `crate::imageproc`.
+    #[serde(default)]
+    pub ops_library_path: Option<PathBuf>,
     pub keybindings: Keybindings,
 }
 
@@ -294,6 +299,7 @@ impl Default for Config {
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
             cursor_dot: true,
+            ops_library_path: None,
             keybindings: Keybindings::default(),
         }
     }

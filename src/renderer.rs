@@ -78,15 +78,32 @@ impl RenderPool {
     }
 }
 
-/// The heavy part, run on a worker: build the 8-bit RGBA (LUT render) then apply
-/// the tone operators in place. Mirrors the live path in `app::decode::prepare`
-/// and the export path in `export::ensure_frame` so all three match pixel-for-pixel.
+/// The heavy part, run on a worker: build the display RGBA (LUT render) and,
+/// for a 16-bit frame with the proprietary library loaded, apply the tone
+/// operators on a 16-bit render before downscaling to 8 bits. Mirrors the live
+/// path in `app::decode::prepare` and the export path in `export::ensure_frame`
+/// so all three match pixel-for-pixel.
 fn render(job: RenderJob) -> RenderDone {
     let size = job.data.size;
     let [w, h] = size;
     let mut rgba = Vec::new();
-    job.data.render_into(job.lo, job.hi, &mut rgba);
-    crate::imageproc::apply_operators(&mut rgba, w, h, job.lut_blend, job.details);
+    // The proprietary operators run on a 16-bit render (so they see full native
+    // precision) and only for 16-bit frames with the library loaded. Everything
+    // else takes the plain 8-bit LUT render.
+    let use_ops = crate::imageproc::is_available()
+        && job.data.is_u16()
+        && (job.lut_blend.is_some() || job.details);
+    if use_ops {
+        let mut buf16 = Vec::new();
+        job.data.render_into_u16(job.lo, job.hi, &mut buf16);
+        crate::imageproc::apply_operators(&mut buf16, w, h, job.lut_blend, job.details);
+        rgba.resize(buf16.len(), 0);
+        for (o, &s) in rgba.iter_mut().zip(&buf16) {
+            *o = (s >> 8) as u8;
+        }
+    } else {
+        job.data.render_into(job.lo, job.hi, &mut rgba);
+    }
     RenderDone {
         id: job.id,
         frame: job.frame,

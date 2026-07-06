@@ -522,11 +522,21 @@ impl CimApp {
         fp.rect_filled(footer, 0.0, Color32::from_gray(28));
 
         let [w, h] = self.disp_size(idx);
-        let mut text = format!("{h}×{w}");
+        // Native sample format (uint8 / uint16 / float32), when the frame is
+        // resident. Kept next to the resolution so the readout reads "H×W type".
+        let kind = self.panes[idx]
+            .media
+            .resident(self.frame_disp(idx))
+            .map(|fr| fr.kind_label());
+        let dims = match kind {
+            Some(k) => format!("{h}×{w}  {k}"),
+            None => format!("{h}×{w}"),
+        };
+        let mut text = dims.clone();
         if let Some(ci) = self.cursor_img {
             let (x, y) = (ci.x.floor() as i64, ci.y.floor() as i64);
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                text = format!("{h}×{w}    x {x}  y {y}    {}", self.value_string(idx, ci));
+                text = format!("{dims}    x {x}  y {y}    {}", self.value_string(idx, ci));
             }
         }
 
@@ -989,6 +999,15 @@ impl CimApp {
         let mut details = self.details_of(idx);
         let mut close = false;
 
+        // The proprietary operators (LUT_ALPHA / Details) need a loaded library
+        // and a 16-bit frame; gate their controls and explain why when disabled.
+        let ops_ok = crate::imageproc::is_available() && self.pane_is_u16(idx);
+        let ops_hint: &str = if !crate::imageproc::is_available() {
+            "Load the image-processing library in Settings to enable this"
+        } else {
+            "Only available for 16-bit (uint16) images"
+        };
+
         // Mask overlay (moved here from the Media manager): the masks available
         // to tint over this pane, and the current selection/colour/alpha. Not
         // offered on a mask pane itself.
@@ -1050,7 +1069,22 @@ impl CimApp {
                                 .width(130.0)
                                 .show_ui(ui, |ui| {
                                     for m in ContrastMode::ORDER {
-                                        ui.selectable_value(&mut contrast, m, m.label());
+                                        // LUT_ALPHA needs the library + a 16-bit
+                                        // frame; disable it otherwise (unless it's
+                                        // already the pane's mode, so it stays
+                                        // visible / switchable away).
+                                        if m == ContrastMode::LutAlpha
+                                            && !ops_ok
+                                            && contrast != m
+                                        {
+                                            ui.add_enabled(
+                                                false,
+                                                egui::SelectableLabel::new(false, m.label()),
+                                            )
+                                            .on_disabled_hover_text(ops_hint);
+                                        } else {
+                                            ui.selectable_value(&mut contrast, m, m.label());
+                                        }
                                     }
                                 });
                             ui.end_row();
@@ -1058,8 +1092,9 @@ impl CimApp {
                             draw_tone_options(ui, pane_id, contrast, &mut tone);
 
                             ui.label("RC");
-                            ui.add(egui::Checkbox::without_text(&mut details))
-                                .on_hover_text("Rehaussement / sharpening");
+                            ui.add_enabled(ops_ok, egui::Checkbox::without_text(&mut details))
+                                .on_hover_text("Rehaussement / sharpening")
+                                .on_disabled_hover_text(ops_hint);
                             ui.end_row();
                         });
 
