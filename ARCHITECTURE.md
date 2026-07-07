@@ -52,7 +52,8 @@ src/
   app/           The CimApp type (egui App), split by concern:
     mod.rs       State struct, consts, new() (style, embedded fallback font,
                  loading/reload), per-pane state resolution, update loop, helpers.
-    decode.rs    Decode plumbing, cache-budget eviction, texture prepare().
+    decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
+                 staging/commit (refresh_textures/stage/pane_texture).
     input.rs     apply_action (keybindings), advance_playback, handle_input.
     canvas.rs    Central image area: grid/single/A-B, pan/zoom, reorder, header/
                  footer, per-pane popups (Transformations, stats, Compute).
@@ -133,10 +134,10 @@ len)` grows length by one.
   frame bar's readout — a `TextEdit` committing on Enter via `seek_to`): `pending_seek`
   holds the target; `drive_seek` rides the frontier probing one page/update until the
   length passes `N` (or the real end), then snaps. While a `pending_seek` is set,
-  `prepare` **freezes every pane** (keeps the last texture + spinner) so the intervening
-  frames the probe rides through are never rendered — the discovery runs as fast as it
-  can and only the target frame is drawn. A within-length target is instant (`seek_to`
-  jumps directly). Any manual navigation clears it.
+  `refresh_textures` **freezes every pane** (keeps the last committed texture) so the
+  intervening frames the probe rides through are never rendered — the discovery runs as
+  fast as it can and only the target frame is drawn. A within-length target is instant
+  (`seek_to` jumps directly). Any manual navigation clears it.
 - **Per-frame resolution:** `disp_size(i)` uses the resident frame's own size
   (page-0 fallback) so drawing/readout don't stretch or go out of bounds.
 - **`ConcatSeq`** reuses all of this: a frontier miss rolls to the next file's
@@ -179,11 +180,26 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
 
 ## 7. Rendering pipeline (native samples → texture)
 
-`app/decode.rs::prepare(ctx, idx)` returns `(Option<TextureId>, loading)`: render +
-upload **only when stale** (`tex.shown != f`), else reuse; if not resident, queue a
-decode and keep showing the last texture with a spinner. Pipeline: bounds →
+**Staged, lock-step textures.** `app/decode.rs::refresh_textures(ctx)` (run once per
+update, after state settles, just before drawing) brings **every on-screen pane**
+(`displayed_indices`) up to date and flips them to their new frame **together**. For
+each pane it computes a `stage_target` (the frame to show — the shared frame, or the
+in-flight playback prefetch, or the pane's own when unsynced) and calls `stage`, which
+renders that frame into the pane's **`pending`** slot *without disturbing the shown
+`tex`* — synchronously for a cheap frame (render **only when stale**: `tex`/`pending`
+already showing `(target, sig)` is reused), or off-thread for a heavy one (lands in
+`pending` via `pump_render`). Only when **all** shown panes report ready does the commit
+loop swap each pane whose `pending` holds the target into `tex` (the swap parks the old
+texture back in `pending` for handle reuse — no per-frame allocation). `pane_texture(idx)`
+(read by drawing) returns the committed `tex`, falling back to `pending` only before the
+first commit so a pane isn't blank while its siblings load. **No spinner:** a pane holds
+its last committed frame until the group flips. The single-pane render pipeline: bounds →
 `render_into(lo, hi, &mut render_scratch)` (a reused buffer) →
 `ColorImage::from_rgba_unmultiplied` → texture `set`/`load`.
+
+*Commit gotcha:* the commit swaps a pane **only when `pending` actually holds the target**
+(not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
+swapping the spent old texture back to the front and flicker between frames.
 
 `render_into` (`media.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
 per frame then table-look-up per pixel; **F32** maps arithmetically. Mono replicates
@@ -211,7 +227,7 @@ otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
 (`render_into`), and the UI disables those controls (`pane_is_op_input` +
 `imageproc::lut_alpha_available`/`details_available`). The same pipeline runs in
 three places, matching pixel-for-pixel: `export.rs::ensure_frame` (export worker),
-and — for live view — split by weight in `prepare`: **Linear / Linear+Clip, masks,
+and — for live view — split by weight in `stage`: **Linear / Linear+Clip, masks,
 and any non-single-channel-U16 or library-absent case render synchronously** (cheap
 LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off the
 UI thread** on the `renderer.rs` `RenderPool` (`renderer::Worker::render`). (Export uses the
@@ -232,14 +248,15 @@ is only ever touched by one thread. Each operator is independent: a missing libr
 disables only its own feature (`lut_alpha_available` / `details_available`). See
 `INTEGRATION_CPP.md` for the contract and how to build the `.so`.
 
-**Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
+**Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `stage`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/details/region), and
-if the cached texture's `(shown frame, sig)` is stale, submits a `RenderJob`
-(frame `Arc`, pre-computed `lo/hi` bounds, `lut_alpha`, `details`) and returns the
-**last** texture with a spinner. `render_inflight` (a set of pane ids) caps it to one
-render per pane, so rapid tone/frame changes coalesce. `pump_render` (each update)
-drains finished jobs and uploads them; `CachedTex.sig` lets a landed texture be
-recognised as current or re-requested. The pool runs **one worker thread per pane**
+if neither the shown `tex` nor the `pending` slot holds `(target frame, sig)`,
+submits a `RenderJob` (frame `Arc`, pre-computed `lo/hi` bounds, `lut_alpha`,
+`details`) and returns not-ready — the pane keeps showing its last committed frame.
+`render_inflight` (a set of pane ids) caps it to one render per pane, so rapid
+tone/frame changes coalesce. `pump_render` (each update) drains finished jobs into
+each pane's `pending` slot (not `tex` — the lock-step commit flips them); `CachedTex.sig`
+lets a landed texture be recognised as current or re-requested. The pool runs **one worker thread per pane**
 (keyed by stable pane `id`, spawned lazily on the pane's first heavy render,
 dropped by `renderer::RenderPool::forget` on close/reload): different panes render
 **in parallel**, while a single pane's operator calls stay **serialised** on its own
@@ -285,6 +302,16 @@ immediately. `draw_scrubber` shades resident frames (contiguous runs merged), di
 outside the window, and draws the brackets. `advance_playback` accumulates
 `stable_dt`, steps at `fps`, and advances unsynced panes independently.
 
+**Render-gated playback (`play_prefetch`).** Playback does **not** bump `shared_frame`
+directly. When the accumulator is due, `advance_playback` picks the next frame and parks
+it in `play_prefetch` (the candidate next shared frame), then stages the panes toward it;
+`refresh_textures` advances `shared_frame` to it only on the commit — i.e. once **every**
+on-screen pane has that frame ready. While a prefetch is in flight the accumulator is
+zeroed (no burst), so a slow proprietary operator **paces** playback instead of the frame
+counter racing ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
+pause, any manual next/prev/seek, and length clamping; unsynced panes advance their own
+frame in step, staged the same way.
+
 ---
 
 ## 9. Modes & central drawing (`app/canvas.rs`)
@@ -327,7 +354,7 @@ Compute form.
 button (left, away from ×) toggles `Pane.show_opts`, opening a foreground `Area`
 under the header with: the tone `ContrastMode` + its mode-specific options
 (`draw_tone_options` — **the single place to add a tone knob**: grow the mode's
-`ToneOptions` sub-struct, add a row, read it in `prepare`), the Details
+`ToneOptions` sub-struct, add a row, read it in `stage`/`tone_sig`), the Details
 toggle, the mask **Overlay** picker, and this
 pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`, cached per pane).
 Edits invalidate the texture. `Action::ToggleVis` (default `V`) toggles it for the
@@ -337,7 +364,7 @@ focused pane.
 pane can follow the shared set (`shared_contrast`/`shared_tone`/`shared_details`/
 `shared_overlay`), toggled by the **Transf** checkbox in the manager's Sync column.
 `contrast_of`/`tone_of`/`details_of`/`overlay_of` return the effective value and are
-read by `prepare`/`prepare_overlay`/`export_pane`/`view_command`; editing a synced
+read by `stage`/`prepare_overlay`/`export_pane`/`view_command`; editing a synced
 pane's popup writes the shared set and `invalidate_synced_tone` refreshes every synced
 pane. `set_sync_tone(false)` snapshots the shared values in so nothing jumps. The
 first opened media seeds the shared set (`add_pane`); a replayed `--tone`/`--detail`
@@ -500,10 +527,13 @@ id each frame so Tab cleanly cycles the view and no button ever holds focus.
 
 Each frame: apply `ui_scale`; `clock += 1` (on the **first** frame re-assert
 `ViewportCommand::Maximized(true)` — Linux/Wayland often ignores `with_maximized` at
-window creation, Windows already honoured it); `pump_decoder` → `pump_render` (upload
-finished tone renders) → `handle_input` → `advance_playback` → `drive_seek`;
+window creation, Windows already honoured it); `pump_decoder` → `pump_render` (stage
+finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `poll_decoding_all` → `enforce_cache_budget`; clamp
-`shared_frame`; `refresh_auto_compute`; expire the transient `status` note; draw toolbar,
+`shared_frame` (and any stale `play_prefetch`); `refresh_textures` (stage on-screen panes
+and, when all ready, flip them + commit a playback step — runs last so it sees settled
+frame/tone state, just before drawing reads the textures); `refresh_auto_compute`; expire
+the transient `status` note; draw toolbar,
 bottom frame bar (shown whenever **any** media is a sequence), central panel, the compute
 draft, windows (manager/export/settings/view-command), error popup; apply deferred
 actions; `export_tick`; then a **paced repaint**.
@@ -513,14 +543,15 @@ at normal size (e.g. "Settings saved", "View command copied"). `update` shadows 
 last value (`status_shadow`) to detect a fresh message, stamps `status_at`, and clears
 it after `STATUS_TTL` (10 s) — so every `self.status = …` site, current and future,
 auto-expires for free (and a `request_repaint_after` wakes an idle app to clear it).
-Per-media decode spinners / errors are **not** this: they stay centred in their pane
-(`draw_pane_error`), as does the modal `error_popup`.
+Per-media errors are **not** this: they stay centred in their pane (`draw_pane_error`),
+as does the modal `error_popup`. (There is no per-pane decode spinner — a pane holds its
+last committed frame while the next one decodes / renders; see §7.)
 
 **Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
 playback requests `request_repaint_after(1/fps)`; a pending background decode, an
 **in-flight tone render** (`render_inflight`), **or a running export** (which encodes on
 its own thread — we just poll progress) wakes every `DECODE_POLL` (~30 fps, enough to
-pick up frames + spin the spinner); a fully idle app requests no repaint at all.
+pick up landed frames and commit them); a fully idle app requests no repaint at all.
 
 Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_create`,
 `error_popup`) avoid mutating panes mid-draw.
