@@ -197,9 +197,8 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
 `ToneOptions` (edited in the Transformations popup, §9):
 - **Linear + Clip** — full-range map with a per-tail percentile clip
   (`clip_bounds(percent)`, editable `ToneOptions.clip`; the default for **>8-bit**).
-- **LUT_ALPHA** — full-range map then the proprietary operator, with a Rust-side
-  **Blend** back toward the linear image (`ToneOptions.lut_alpha.blend`,
-  `blend_rgba`). More knobs slot into `LutAlphaOptions` + `draw_tone_options`.
+- **LUT_ALPHA** — full-range map then the proprietary operator at full strength
+  (no options). Knobs slot in via a `ToneOptions` sub-struct + `draw_tone_options`.
 - **Linear** — plain full-range map, no clip.
 
 Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
@@ -234,9 +233,9 @@ disables only its own feature (`lut_alpha_available` / `details_available`). See
 `INTEGRATION_CPP.md` for the contract and how to build the `.so`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
-computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and
+computes a cheap parameter-only `tone_sig` (contrast/clip%/details/region), and
 if the cached texture's `(shown frame, sig)` is stale, submits a `RenderJob`
-(frame `Arc`, pre-computed `lo/hi` bounds, `lut_blend`, `details`) and returns the
+(frame `Arc`, pre-computed `lo/hi` bounds, `lut_alpha`, `details`) and returns the
 **last** texture with a spinner. `render_inflight` (a set of pane ids) caps it to one
 render per pane, so rapid tone/frame changes coalesce. `pump_render` (each update)
 drains finished jobs and uploads them; `CachedTex.sig` lets a landed texture be

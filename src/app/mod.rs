@@ -1643,15 +1643,9 @@ fn draw_tone_options(
             .on_hover_text("Percentile clipped at each tail before the stretch");
             ui.end_row();
         }
-        ContrastMode::LutAlpha => {
-            ui.label("Blend");
-            ui.add(egui::Slider::new(&mut tone.lut_alpha.blend, 0.0..=1.0).fixed_decimals(2))
-                .on_hover_text("Mix from the linear image (0) to full LUT_ALPHA (1)");
-            ui.end_row();
-            // Add more LUT_ALPHA options here: one row + a field on LutAlphaOptions.
-        }
-        // Plain Linear has no options — emit no row (no wasted space).
-        ContrastMode::Linear => {}
+        // LUT_ALPHA and plain Linear have no options — emit no row (no wasted
+        // space). Add a LUT_ALPHA knob here: one row + a field on `ToneOptions`.
+        ContrastMode::LutAlpha | ContrastMode::Linear => {}
     }
 }
 

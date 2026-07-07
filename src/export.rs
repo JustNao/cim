@@ -230,11 +230,9 @@ impl ExportPane {
         self.cur_size = frame.size;
         // Built-in render (full range or 0.01% clip), then the same proprietary
         // operators the live view applies, so an export matches what's on screen.
-        // `ToneOptions` are live-only, so the export always applies LUT_ALPHA at
-        // full strength (blend 1.0) rather than a partial mix. The operators run
-        // on a single-channel 16-bit render and only for single-channel 16-bit
-        // frames with the library loaded (mirroring the live view); everything
-        // else is the plain 8-bit render.
+        // The operators run on a single-channel 16-bit render and only for
+        // single-channel 16-bit frames with the library loaded (mirroring the live
+        // view); everything else is the plain 8-bit render.
         let [w, h] = frame.size;
         let use_ops = frame.is_op_input()
             && ((self.contrast == ContrastMode::LutAlpha
@@ -242,8 +240,8 @@ impl ExportPane {
                 || (self.details && crate::imageproc::details_available()));
         let rgba = if use_ops {
             let mut gray = frame.render_gray_u16(self.contrast.clips());
-            let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
-            self.ops.apply(&mut gray, w, h, lut_blend, self.details);
+            let lut_alpha = self.contrast == ContrastMode::LutAlpha;
+            self.ops.apply(&mut gray, w, h, lut_alpha, self.details);
             // Expand the processed grey back to 8-bit RGBA.
             let mut out = vec![255u8; gray.len() * 4];
             for (i, &s) in gray.iter().enumerate() {

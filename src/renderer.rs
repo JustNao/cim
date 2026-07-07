@@ -38,10 +38,9 @@ pub struct RenderJob {
     /// Linear display bounds `[lo, hi] → [0, 255]`, computed on the UI thread.
     pub lo: f32,
     pub hi: f32,
-    /// `Some(blend)` runs LUT_ALPHA then mixes back toward the plain linear image
-    /// (`blend` = the operator's weight); `None` skips it (non-LUT_ALPHA tones and
-    /// masks).
-    pub lut_blend: Option<f32>,
+    /// Whether to run LUT_ALPHA on the render (non-LUT_ALPHA tones and masks
+    /// leave it off).
+    pub lut_alpha: bool,
     pub details: bool,
 }
 
@@ -144,12 +143,12 @@ impl Worker {
         // see full native precision) and only for single-channel 16-bit frames with
         // the library loaded. Everything else takes the plain 8-bit LUT render.
         let use_ops = job.data.is_op_input()
-            && ((job.lut_blend.is_some() && crate::imageproc::lut_alpha_available())
+            && ((job.lut_alpha && crate::imageproc::lut_alpha_available())
                 || (job.details && crate::imageproc::details_available()));
         if use_ops {
             let mut gray = Vec::new();
             job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
-            self.ops.apply(&mut gray, w, h, job.lut_blend, job.details);
+            self.ops.apply(&mut gray, w, h, job.lut_alpha, job.details);
             // Expand the processed grey back to 8-bit RGBA for the texture.
             rgba.resize(gray.len() * 4, 255);
             for (i, &s) in gray.iter().enumerate() {

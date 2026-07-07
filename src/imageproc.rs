@@ -156,10 +156,9 @@ pub struct PaneOps {
 
 impl PaneOps {
     /// Apply the tone operators to an already-rendered **single-channel 16-bit**
-    /// buffer (`width * height` samples) in place: optional LUT_ALPHA (mixed back
-    /// toward the linear image by `1 - blend` when `lut_blend = Some(blend)`;
-    /// `None` skips it) followed by the optional details enhancement. Each stage
-    /// is a no-op when its library isn't loaded (callers also gate on
+    /// buffer (`width * height` samples) in place: the optional LUT_ALPHA operator
+    /// (when `lut_alpha` is set) followed by the optional details enhancement. Each
+    /// stage is a no-op when its library isn't loaded (callers also gate on
     /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
     /// instances, rebuilding one only if `width`/`height` changed since last call.
     ///
@@ -171,22 +170,11 @@ impl PaneOps {
         gray: &mut Vec<u16>,
         width: usize,
         height: usize,
-        lut_blend: Option<f32>,
+        lut_alpha: bool,
         details: bool,
     ) {
-        if let Some(blend) = lut_blend {
-            if Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
-                let inst = self.lut_alpha.as_ref().unwrap();
-                let blend = blend.clamp(0.0, 1.0);
-                if blend >= 1.0 {
-                    run(inst, gray);
-                } else {
-                    // Mix the operator's output back toward the plain linear image.
-                    let base = gray.clone();
-                    run(inst, gray);
-                    blend_u16(gray, &base, blend);
-                }
-            }
+        if lut_alpha && Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
+            run(self.lut_alpha.as_ref().unwrap(), gray);
         }
         if details && Self::ensure(&mut self.details, &DETAILS, width, height) {
             run(self.details.as_ref().unwrap(), gray);
@@ -224,12 +212,4 @@ fn run(inst: &Instance, gray: &mut [u16]) {
     // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/writes
     // within it and keeps the dimensions (per the ABI). `handle` matches `apply`.
     unsafe { (inst.apply)(inst.handle, gray.as_mut_ptr(), gray.len()) };
-}
-
-/// Blend `out` toward `base` by `1 - t`: `out = t·out + (1 - t)·base` per sample.
-fn blend_u16(out: &mut [u16], base: &[u16], t: f32) {
-    let t = t.clamp(0.0, 1.0);
-    for (o, &b) in out.iter_mut().zip(base) {
-        *o = (b as f32 * (1.0 - t) + *o as f32 * t).round().clamp(0.0, 65535.0) as u16;
-    }
 }

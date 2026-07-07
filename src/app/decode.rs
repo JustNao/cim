@@ -337,9 +337,7 @@ impl CimApp {
             let id = self.panes[idx].id;
             if !self.render_inflight.contains(&id) {
                 let (lo, hi) = self.tone_bounds(idx, &frame);
-                let tone = self.tone_of(idx);
-                let lut_blend = (contrast == ContrastMode::LutAlpha)
-                    .then(|| tone.lut_alpha.blend.clamp(0.0, 1.0));
+                let lut_alpha = contrast == ContrastMode::LutAlpha;
                 let details = self.details_of(idx);
                 self.renderer.request(crate::renderer::RenderJob {
                     id,
@@ -348,7 +346,7 @@ impl CimApp {
                     data: frame.clone(),
                     lo,
                     hi,
-                    lut_blend,
+                    lut_alpha,
                     details,
                 });
                 self.render_inflight.insert(id);
@@ -390,7 +388,6 @@ impl CimApp {
         let tone = self.tone_of(idx);
         c.hash(&mut h);
         tone.clip.percent.to_bits().hash(&mut h);
-        tone.lut_alpha.blend.to_bits().hash(&mut h);
         self.details_of(idx).hash(&mut h);
         let region = self.panes[idx].region_tone;
         region.hash(&mut h);

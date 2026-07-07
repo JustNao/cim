@@ -171,6 +171,5 @@ the `.so` on the loader path — no rebuild of cim needed to swap a library late
 - **Determinism / caching.** cim only re-runs an operator when a frame's texture
   is stale (frame changed, or the user toggled the mode). `apply` must be a pure
   function of its input (given a fixed size) for that cache to stay correct.
-- **Precision.** The operators receive full 16-bit precision. The Rust-side
-  `blend` (LUT_ALPHA mode) and the 8-bit downscale happen *after* your operator,
-  so it never sees a pre-crushed image.
+- **Precision.** The operators receive full 16-bit precision. The 8-bit downscale
+  happens *after* your operator, so it never sees a pre-crushed image.

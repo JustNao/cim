@@ -234,28 +234,12 @@ impl Default for ClipOptions {
     }
 }
 
-/// Options for the proprietary **LUT_ALPHA** tone. To add a knob: add a field
-/// here, a widget row in `draw_tone_options`, and read it where the operator
-/// runs (`app/decode.rs::prepare`).
-#[derive(Clone, Copy, PartialEq)]
-pub struct LutAlphaOptions {
-    /// Mix between the plain linear image (0.0) and the LUT_ALPHA result (1.0),
-    /// applied Rust-side after the operator. 1.0 = the operator's full output.
-    pub blend: f32,
-}
-
-impl Default for LutAlphaOptions {
-    fn default() -> Self {
-        Self { blend: 1.0 }
-    }
-}
-
 /// Per-pane tone options: one sub-struct per mode, so switching modes keeps each
 /// mode's own settings. Extend a mode by growing its sub-struct (see above).
+/// (LUT_ALPHA currently has no options; it runs the operator at full strength.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
-    pub lut_alpha: LutAlphaOptions,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
