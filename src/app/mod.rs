@@ -456,7 +456,7 @@ impl CimApp {
             // thread-safety we can't assume) while still keeping all of that work
             // off the UI thread. Raise this once LUT_ALPHA / DETAILS_ENHANCED are
             // known to be reentrant, to render several panes in parallel.
-            renderer: crate::renderer::RenderPool::new(1),
+            renderer: crate::renderer::RenderPool::new(),
             render_inflight: HashSet::new(),
             decoding_all: false,
             clock: 0,
@@ -766,6 +766,8 @@ impl CimApp {
         }
         let removed_id = self.panes[i].id;
         self.decoder.forget(removed_id); // drop its persistent reader
+        self.renderer.forget(removed_id); // drop its render thread + operator instances
+        self.render_inflight.remove(&removed_id);
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
@@ -815,6 +817,8 @@ impl CimApp {
             Ok(m) => {
                 let id = self.panes[i].id;
                 self.decoder.forget(id); // reopen the file for its fresh contents
+                self.renderer.forget(id); // rebuild the render thread + instances for fresh contents
+                self.render_inflight.remove(&id);
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;

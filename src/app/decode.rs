@@ -258,6 +258,7 @@ impl CimApp {
                 let tone = self.tone_of(idx);
                 let lut_blend = (contrast == ContrastMode::LutAlpha)
                     .then(|| tone.lut_alpha.blend.clamp(0.0, 1.0));
+                let details = self.details_of(idx);
                 self.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: f,
@@ -266,7 +267,7 @@ impl CimApp {
                     lo,
                     hi,
                     lut_blend,
-                    details: self.details_of(idx),
+                    details,
                 });
                 self.render_inflight.insert(id);
             }

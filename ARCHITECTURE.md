@@ -212,7 +212,7 @@ three places, matching pixel-for-pixel: `export.rs::ensure_frame` (export worker
 and — for live view — split by weight in `prepare`: **Linear / Linear+Clip, masks,
 and any non-single-channel-U16 or library-absent case render synchronously** (cheap
 LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off the
-UI thread** on the `renderer.rs` `RenderPool` (`renderer::render`). (Export uses the
+UI thread** on the `renderer.rs` `RenderPool` (`renderer::Worker::render`). (Export uses the
 default clip percentile; `ToneOptions` are live-view only.)
 
 The operators are **loaded at runtime** (`libloading`) at startup
@@ -231,8 +231,13 @@ if the cached texture's `(shown frame, sig)` is stale, submits a `RenderJob`
 **last** texture with a spinner. `render_inflight` (a set of pane ids) caps it to one
 render per pane, so rapid tone/frame changes coalesce. `pump_render` (each update)
 drains finished jobs and uploads them; `CachedTex.sig` lets a landed texture be
-recognised as current or re-requested. The pool has **one worker** so the proprietary
-operators are serialised (safe without assuming they're reentrant).
+recognised as current or re-requested. The pool runs **one worker thread per pane**
+(keyed by stable pane `id`, spawned lazily on the pane's first heavy render,
+dropped by `renderer::RenderPool::forget` on close/reload): different panes render
+**in parallel**, while a single pane's operator calls stay **serialised** on its own
+thread. That per-pane thread is the sole owner of the pane's (future) proprietary
+operator instances — heavy to construct, dimension-keyed, not assumed reentrant — so
+they need no locking. `render_inflight` still caps each pane to one in-flight job.
 
 **Region-driven tone (`Pane.region_tone`).** When pinned (§9), a pane's linear
 bounds come from the shared stats region via `region_display_bounds` — the region's

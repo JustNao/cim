@@ -71,13 +71,13 @@ fn load_one(lib_name: &str, symbol: &[u8]) -> anyhow::Result<Op> {
 /// at startup. A library that's missing or lacking its symbol simply leaves that
 /// operator unavailable (its feature disabled in the UI); it never fails startup.
 pub fn init() {
-    match load_one(LUT_ALPHA_LIB, b"cim_lut_alpha\0") {
-        Ok(op) => *LUT_ALPHA.write().unwrap() = Some(op),
-        Err(e) => eprintln!("cim: LUT_ALPHA operator unavailable ({LUT_ALPHA_LIB}): {e}"),
+    // A missing or unresolvable library simply leaves that operator unavailable
+    // (its feature disabled in the UI) — silently, with no startup log noise.
+    if let Ok(op) = load_one(LUT_ALPHA_LIB, b"cim_lut_alpha\0") {
+        *LUT_ALPHA.write().unwrap() = Some(op);
     }
-    match load_one(DETAILS_LIB, b"cim_details_enhanced\0") {
-        Ok(op) => *DETAILS.write().unwrap() = Some(op),
-        Err(e) => eprintln!("cim: Details operator unavailable ({DETAILS_LIB}): {e}"),
+    if let Ok(op) = load_one(DETAILS_LIB, b"cim_details_enhanced\0") {
+        *DETAILS.write().unwrap() = Some(op);
     }
 }
 
@@ -117,7 +117,7 @@ fn details_enhanced(gray: &mut [u16], width: usize, height: usize) {
 /// back toward the linear image by `1 - blend` when `lut_blend = Some(blend)`;
 /// `None` skips it) followed by the optional details enhancement. This is the one
 /// shared tail of the render pipeline, run both off-thread for the live view
-/// (`renderer::render`) and by the export worker (`export::ExportPane::ensure_frame`),
+/// (`renderer::Worker::render`) and by the export worker (`export::ExportPane::ensure_frame`),
 /// so the two match pixel-for-pixel. Each stage is a no-op when its library isn't
 /// loaded (the callers also gate on `lut_alpha_available` / `details_available`,
 /// so the buffer is simply the plain linear render in that case).

@@ -123,12 +123,17 @@ swap a library later.
 
 ## Notes & gotchas
 
-- **Threading.** The live operators run **off the UI thread** on a dedicated
-  render pool (`src/renderer.rs`), created with **one** worker
-  (`RenderPool::new(1)` in `CimApp::new`), so operator calls are serialised —
-  safe even if the proprietary code isn't reentrant. Export runs them on its own
-  worker thread. **If (and only if) the operators are thread-safe, raise that
-  worker count** to render several panes in parallel; otherwise leave it at 1.
+- **Threading.** The live operators run **off the UI thread** on the render pool
+  (`src/renderer.rs`), which spawns **one worker thread per pane** (keyed by the
+  stable pane `id`). A given pane's renders all run on that one thread, so its
+  operator instances are only ever touched by a single thread — **serialised per
+  pane, no reliance on the proprietary code being reentrant** — while *different*
+  panes render in parallel. The per-pane worker (`renderer::Worker`) is the sole
+  owner of that pane's operator instances: build them lazily on the first job that
+  needs them and rebuild when a frame's dimensions change (instantiation is
+  media-specific and heavy), and they're destroyed on that thread when the pane is
+  closed/reloaded (`RenderPool::forget`). Export runs the operators on its own
+  worker thread. There is no shared operator state across panes to guard.
 - **Determinism / caching.** cim only re-runs an operator when a frame's texture
   is stale (frame changed, or the user toggled the mode). The operators must be
   pure functions of their input for that cache to stay correct.
