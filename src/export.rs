@@ -203,7 +203,13 @@ impl ExportPane {
         if let Some(frame) = decode_source(&ov.source, idx, &mut ov.reader, &mut ov.cur_file) {
             ov.cur_size = frame.size;
             let mut buf = ov.cur_mask.take().unwrap_or_default();
-            frame.render_mask_rgba(ov.color, ov.alpha, &mut buf);
+            // Match the live view: a boolean mask tints where true, any other
+            // single-channel image tints by normalised intensity.
+            if frame.is_mask() {
+                frame.render_mask_rgba(ov.color, ov.alpha, &mut buf);
+            } else {
+                frame.render_intensity_rgba(ov.color, ov.alpha, &mut buf);
+            }
             ov.cur_mask = Some(buf);
             ov.cur_idx = Some(idx);
         }

@@ -624,6 +624,32 @@ impl FrameData {
         }
     }
 
+    /// Build an RGBA overlay from this **single-channel grayscale** frame: every
+    /// pixel takes the tint `rgb`, with a per-pixel alpha proportional to its
+    /// normalised intensity (through the frame's full display range) scaled by
+    /// `alpha`. This generalises [`render_mask_rgba`] to non-mask images — a
+    /// boolean mask is just the two-value special case — so any single-channel
+    /// image or sequence can tint another pane. `out` is resized to `w*h*4`.
+    pub fn render_intensity_rgba(&self, rgb: [u8; 3], alpha: u8, out: &mut Vec<u8>) {
+        let px = self.size[0] * self.size[1];
+        let ch = self.channels;
+        let (lo, hi) = self.display_bounds(false);
+        let span = (hi - lo).max(f32::MIN_POSITIVE);
+        out.clear();
+        out.resize(px * 4, 0); // transparent by default
+        for i in 0..px {
+            let t = ((self.sample_f(i * ch) - lo) / span).clamp(0.0, 1.0);
+            let a = (t * alpha as f32).round() as u8;
+            if a != 0 {
+                let o = i * 4;
+                out[o] = rgb[0];
+                out[o + 1] = rgb[1];
+                out[o + 2] = rgb[2];
+                out[o + 3] = a;
+            }
+        }
+    }
+
     /// Per-channel histogram binned across the true [min, max] extent.
     pub fn histogram_display(&self, nbins: usize) -> HistData {
         let cc = self.color_channels();
@@ -1725,6 +1751,23 @@ mod tests {
         let mut ov = Vec::new();
         m.render_mask_rgba([10, 20, 30], 128, &mut ov);
         assert_eq!(ov, vec![0, 0, 0, 0, 10, 20, 30, 128]);
+    }
+
+    /// A grayscale single-channel frame overlays by intensity: alpha scales with
+    /// the pixel's value across the full display range, times the given alpha.
+    #[test]
+    fn grayscale_overlay_tints_by_intensity() {
+        // 3x1 8-bit gray: min, mid, max → display range [0, 255].
+        let f = FrameData::new([3, 1], 1, Samples::U8(vec![0, 128, 255]));
+        assert!(!f.is_mask());
+
+        let mut ov = Vec::new();
+        f.render_intensity_rgba([10, 20, 30], 200, &mut ov);
+        // 0 → transparent; 128/255*200 ≈ 100; 255 → full 200. Tint constant.
+        assert_eq!(
+            ov,
+            vec![0, 0, 0, 0, 10, 20, 30, 100, 10, 20, 30, 200]
+        );
     }
 
     /// Inserting a frame accounts its bytes; evicting frees them and keeps the

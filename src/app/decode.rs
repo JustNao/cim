@@ -369,6 +369,13 @@ impl CimApp {
                 .as_ref()
                 .map(|t| t.handle.id());
         };
+        // Never stretch a mismatched overlay onto the base: if the source frame's
+        // size differs from this pane's current frame, skip drawing it. (A newly
+        // selected mismatched source is rejected up front with an error popup, so
+        // this only guards later per-frame size drift in a sequence.)
+        if frame.size != self.disp_size(idx) {
+            return None;
+        }
         self.panes[src].media.touch(f, self.clock); // keep it hot so it isn't evicted
 
         let rgb = [color.r(), color.g(), color.b()];
@@ -380,7 +387,13 @@ impl CimApp {
         };
         if need {
             let mut buf = Vec::new();
-            frame.render_mask_rgba(rgb, alpha, &mut buf);
+            // A boolean mask tints where true; any other single-channel image
+            // tints by normalised intensity (§9).
+            if frame.is_mask() {
+                frame.render_mask_rgba(rgb, alpha, &mut buf);
+            } else {
+                frame.render_intensity_rgba(rgb, alpha, &mut buf);
+            }
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
             // Overlay textures don't tone-map, so their signature stays 0.
             let name = format!("ov{}_{}", idx, src_id);

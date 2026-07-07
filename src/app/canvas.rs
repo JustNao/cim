@@ -1016,14 +1016,16 @@ impl CimApp {
             "Only available for single-channel 16-bit (uint16) images"
         };
 
-        // Mask overlay (moved here from the Media manager): the masks available
-        // to tint over this pane, and the current selection/colour/alpha. Not
-        // offered on a mask pane itself.
-        let masks: Vec<(u64, String)> = self
+        // Overlay (moved here from the Media manager): the single-channel media
+        // available to tint over this pane — a boolean mask or a grayscale image /
+        // sequence — plus the current selection/colour/alpha. Excludes the pane
+        // itself; not offered on a mask pane target.
+        let sources: Vec<(u64, String)> = self
             .panes
             .iter()
-            .filter(|p| p.media.is_mask())
-            .map(|p| (p.id, p.media.name().to_string()))
+            .enumerate()
+            .filter(|(i, _)| *i != idx && self.overlay_source_size(*i).is_some())
+            .map(|(_, p)| (p.id, p.media.name().to_string()))
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
         let (mut ov_src, mut ov_color, mut ov_alpha) = match self.overlay_of(idx) {
@@ -1106,13 +1108,13 @@ impl CimApp {
                             ui.end_row();
                         });
 
-                    // Mask overlay picker + colour/alpha (non-mask panes only).
-                    if !self_is_mask && !masks.is_empty() {
+                    // Overlay picker + colour/alpha (non-mask panes only).
+                    if !self_is_mask && !sources.is_empty() {
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.label("Overlay");
                             let sel = ov_src
-                                .and_then(|id| masks.iter().find(|(m, _)| *m == id))
+                                .and_then(|id| sources.iter().find(|(m, _)| *m == id))
                                 .map(|(_, n)| ellipsize(n, 12))
                                 .unwrap_or_else(|| "None".into());
                             egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
@@ -1120,7 +1122,7 @@ impl CimApp {
                                 .width(120.0)
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut ov_src, None, "None");
-                                    for (mid, mname) in &masks {
+                                    for (mid, mname) in &sources {
                                         ui.selectable_value(
                                             &mut ov_src,
                                             Some(*mid),
@@ -1153,25 +1155,52 @@ impl CimApp {
                 });
             });
 
-        // Reconcile the mask overlay. It rides the tone-sync: when synced, edit
-        // the shared overlay and rebuild every synced pane's tinted texture;
-        // otherwise just this pane's.
+        // Reconcile the overlay. It rides the tone-sync: when synced, edit the
+        // shared overlay and rebuild every synced pane's tinted texture; otherwise
+        // just this pane's. A newly *selected* source must match this pane's pixel
+        // size — reject a mismatch with an error popup (colour/alpha edits on the
+        // same source skip the check).
+        let cur = self.overlay_of(idx);
         let new = ov_src.map(|src_id| OverlaySpec {
             src_id,
             color: ov_color,
             opacity: ov_alpha,
         });
-        if self.overlay_of(idx) != new {
-            if synced {
-                self.shared_overlay = new;
-                for p in &mut self.panes {
-                    if p.sync_tone {
-                        p.overlay_tex = None;
+        if cur != new {
+            let src_changed = new.map(|n| n.src_id) != cur.map(|c| c.src_id);
+            let size_ok = match new.filter(|_| src_changed) {
+                Some(spec) => match self.panes.iter().position(|p| p.id == spec.src_id) {
+                    Some(src) => {
+                        let (base, ov) = (self.disp_size(idx), self.disp_size(src));
+                        if base == ov {
+                            true
+                        } else {
+                            let sname = self.panes[src].media.name().to_string();
+                            self.error_popup = Some(format!(
+                                "Overlay size mismatch\n\n\
+                                 This image is {}×{} but the overlay “{sname}” is {}×{}.\n\
+                                 An overlay must match the image dimensions.",
+                                base[0], base[1], ov[0], ov[1],
+                            ));
+                            false
+                        }
                     }
+                    None => false, // source vanished; leave the overlay unchanged
+                },
+                None => true, // clearing, or a colour/alpha edit on the same source
+            };
+            if size_ok {
+                if synced {
+                    self.shared_overlay = new;
+                    for p in &mut self.panes {
+                        if p.sync_tone {
+                            p.overlay_tex = None;
+                        }
+                    }
+                } else {
+                    self.panes[idx].overlay = new;
+                    self.panes[idx].overlay_tex = None;
                 }
-            } else {
-                self.panes[idx].overlay = new;
-                self.panes[idx].overlay_tex = None;
             }
         }
 

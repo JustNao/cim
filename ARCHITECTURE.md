@@ -78,8 +78,10 @@ src/
   `histogram_display`, `region_stats`.
 - **Boolean masks:** a frame from a **1-bit bilevel TIFF** is flagged `mask`
   (`new_mask`/`is_mask`). `render_into` paints false→black/true→white (bypassing
-  tone), and `render_mask_rgba(rgb, alpha)` builds a tinted overlay buffer. Only
-  TIFFs are masks; `Media::is_mask()` lets the UI list them as overlay sources.
+  tone), and `render_mask_rgba(rgb, alpha)` builds a tinted overlay buffer; any
+  non-mask single-channel frame instead tints by intensity (`render_intensity_rgba`)
+  when used as an overlay (§9). Only TIFFs are masks; any single-channel media can
+  be an overlay source.
   Mask truth is the **stored sample bit** (what the author set — e.g. `numpy`
   `True`), *not* the pixel's black/white look: `mask_bits` reads
   `PhotometricInterpretation` and un-inverts WhiteIsZero pages (the TIFF default,
@@ -342,14 +344,20 @@ pane. `set_sync_tone(false)` snapshots the shared values in so nothing jumps. Th
 first opened media seeds the shared set (`add_pane`); a replayed `--tone`/`--detail`
 is per-pane, so `apply_view_state` unsyncs the panes it sets.
 
-**Mask overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }` — a
-boolean-mask media tinted over it. The spec is **config only** so it rides the
-Transformations sync; the tinted texture is cached separately per pane in
-`overlay_tex`. `prepare_overlay` builds it from the mask's shown frame (decoded on
-demand, so it works even when the mask pane isn't drawn) and returns `None` on a mask
-pane itself; `draw_pane` **and `draw_ab_side`** paint it at the base image's rect (1:1),
-so overlays show in Grid, Single and A/B alike. Configured in the popup's **Overlay**
-row; cleared when its source mask closes. Expected to match the target's dimensions.
+**Overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }` — **any
+single-channel media** (a boolean mask **or** a grayscale image/sequence) tinted over
+it. The source list (`overlay_source_size`, single-channel resident frame, excluding
+the pane itself) is offered in the popup's **Overlay** row. The spec is **config only**
+so it rides the Transformations sync; the tinted texture is cached separately per pane in
+`overlay_tex`. `prepare_overlay` builds it from the source's shown frame (decoded on
+demand, so it works even when the source pane isn't drawn) and returns `None` on a mask
+pane itself; a **boolean mask** tints where true (`render_mask_rgba`), any **other
+single-channel** image tints by normalised intensity (`render_intensity_rgba`, alpha ∝
+value through the frame's display range). `draw_pane` **and `draw_ab_side`** paint it at
+the base image's rect (1:1), so overlays show in Grid, Single and A/B alike; cleared when
+its source closes. **Sizes must match:** a newly selected source whose pixel size differs
+from the target is rejected with an `error_popup`, and `prepare_overlay` skips drawing
+(never stretches) on any later per-frame size drift.
 
 **Statistics region (right-drag).** A **right-button drag** selects a rectangle,
 stored in **image space** (`stats_region`) so the region and each pane's own stats

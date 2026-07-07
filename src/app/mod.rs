@@ -75,12 +75,14 @@ struct CachedTex {
     sig: u64,
 }
 
-/// A boolean mask from another pane, tinted and drawn over a pane. Config only
-/// (no texture), so it can be shared across tone-synced panes; the tinted
-/// texture is cached separately per pane in `Pane.overlay_tex`.
+/// A single-channel media from another pane (a boolean mask or a grayscale
+/// image/sequence), tinted and drawn over a pane. Config only (no texture), so it
+/// can be shared across tone-synced panes; the tinted texture is cached
+/// separately per pane in `Pane.overlay_tex`. The source must match the target's
+/// pixel size (enforced when selected, §9).
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct OverlaySpec {
-    src_id: u64, // stable id of the mask pane supplying the overlay
+    src_id: u64, // stable id of the pane supplying the overlay
     color: Color32,
     opacity: f32, // 0..1
 }
@@ -1248,6 +1250,14 @@ impl CimApp {
         if self.control != before {
             self.loop_range = None;
         }
+    }
+
+    /// Pixel size of pane `i` if it can serve as an overlay source — i.e. its
+    /// current frame is **single-channel** (a boolean mask or a grayscale image /
+    /// sequence). `None` if the frame isn't resident yet or has multiple channels.
+    pub(super) fn overlay_source_size(&self, i: usize) -> Option<[usize; 2]> {
+        let fr = self.panes[i].media.resident(self.frame_disp(i))?;
+        (fr.channels == 1).then_some(fr.size)
     }
 
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a
