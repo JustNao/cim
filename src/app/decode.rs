@@ -143,6 +143,69 @@ impl CimApp {
         }
     }
 
+    /// While playing, pre-decode the next few frames for each on-screen pane so
+    /// playback overlaps decode with display instead of stalling on decode
+    /// latency when it reaches a not-yet-resident frame (worst on the first pass
+    /// through a sequence, and amplified when several sequences advance in
+    /// lock-step). Follows the same loop-window logic as `advance_playback`;
+    /// requests are deduped by `inflight`, and nothing is requested past the known
+    /// length — lazy frontier discovery stays with `ensure_lookahead` — so
+    /// re-running it every update is cheap.
+    pub(super) fn prefetch_playback(&mut self) {
+        if !self.playing || self.panes.is_empty() {
+            return;
+        }
+        let tl = self.timeline_len();
+        let (lo, hi) = self.loop_bounds(tl);
+        let full = self.loop_range.is_none();
+        let at_end = self.current_at_end();
+
+        // Same targets as lookahead: on-screen panes plus the control pane (which
+        // drives the shared timeline even when it isn't displayed).
+        let mut targets = self.displayed_indices();
+        let ctrl = self.control.min(self.panes.len() - 1);
+        if !targets.contains(&ctrl) {
+            targets.push(ctrl);
+        }
+        for i in targets {
+            let known = self.panes[i].media.frame_count();
+            if self.panes[i].sync_temporal {
+                // Walk the loop window forward from where playback is now, wrapping
+                // to the window start when looping — exactly the frames it shows next.
+                let mut f = self.play_prefetch.unwrap_or(self.shared_frame);
+                for _ in 0..PLAY_PREFETCH {
+                    f = if f < hi {
+                        f + 1
+                    } else if full && !at_end {
+                        break; // holding at the frontier; discovery is ensure_lookahead's job
+                    } else if self.loop_playback {
+                        lo // wrap to the window start
+                    } else {
+                        break; // playback will stop at the window end
+                    };
+                    if f >= known {
+                        break;
+                    }
+                    if self.panes[i].media.resident(f).is_none() {
+                        self.request(i, f);
+                    }
+                }
+            } else {
+                // Unsynced pane: look ahead on its own timeline.
+                let base = self.panes[i].frame;
+                for k in 1..=PLAY_PREFETCH {
+                    let f = base + k;
+                    if f >= known {
+                        break;
+                    }
+                    if self.panes[i].media.resident(f).is_none() {
+                        self.request(i, f);
+                    }
+                }
+            }
+        }
+    }
+
     /// Evict least-recently-viewed frames once resident memory exceeds the
     /// budget. Each pane's currently shown frame is protected so the view never
     /// blanks, and an over-budget "Load all" is stopped rather than thrashing.
@@ -227,12 +290,15 @@ impl CimApp {
         if panes.is_empty() {
             return;
         }
+        // Physical pixels per point (OS DPI × UI-scale zoom factor), so decimation
+        // is judged against real screen resolution, not view-space points.
+        let ppp = ctx.pixels_per_point();
         let mut all_ready = true;
         let mut targets = Vec::with_capacity(panes.len());
         for &idx in &panes {
             let target = self.stage_target(idx);
             targets.push(target);
-            if !self.stage(ctx, idx, target) {
+            if !self.stage(ctx, idx, target, ppp) {
                 all_ready = false;
             }
         }
@@ -248,9 +314,11 @@ impl CimApp {
         // texture allocation during playback).
         for (&idx, &target) in panes.iter().zip(&targets) {
             let sig = self.tone_sig(idx);
+            let step = self.want_step(idx, ppp);
             let p = &mut self.panes[idx];
-            let tex_shows = p.tex.as_ref().is_some_and(|t| t.shown == target && t.sig == sig);
-            let pending_shows = p.pending.as_ref().is_some_and(|t| t.shown == target && t.sig == sig);
+            let ready = |t: &CachedTex| t.shown == target && t.sig == sig && t.step == step;
+            let tex_shows = p.tex.as_ref().is_some_and(ready);
+            let pending_shows = p.pending.as_ref().is_some_and(ready);
             if !tex_shows && pending_shows {
                 std::mem::swap(&mut p.tex, &mut p.pending);
             }
@@ -286,6 +354,44 @@ impl CimApp {
         }
     }
 
+    /// Source pixels per screen pixel for pane `idx` at its current zoom — the
+    /// nearest-decimation factor for the synchronous render. `ppp` is the
+    /// physical pixels per point (OS DPI × UI-scale zoom), so decimation is judged
+    /// against real screen resolution: a pane is only decimated once it is truly
+    /// minified below one screen pixel per source pixel.
+    ///
+    /// Returns `1` (full resolution) for any physical scale ≥ 1, so the entire
+    /// ≥1× range **and its whole neighbourhood** render full-resolution — crossing
+    /// 1× never changes what's on screen. It rises to 2, 3, … only as the pane is
+    /// minified further, where full-resolution pixels the screen can't show would
+    /// be pure waste.
+    fn stage_step(&self, idx: usize, ppp: f32) -> usize {
+        let phys = self.view_ref(idx).zoom * ppp.max(1e-3);
+        if phys >= 1.0 {
+            1
+        } else {
+            (1.0 / phys).floor().max(1.0) as usize
+        }
+    }
+
+    /// The decimation factor pane `idx`'s texture is (re)rendered at: `stage_step`
+    /// for a plain LUT pane, forced to `1` for a heavy proprietary-operator pane
+    /// (decimating an operator's input would change its output and thrash the
+    /// size-keyed instances, so those always render full-resolution). Read by both
+    /// `stage` and the lock-step commit so a texture's `step` is compared against
+    /// the one the pane wants right now.
+    fn want_step(&self, idx: usize, ppp: f32) -> usize {
+        let heavy = self.pane_is_op_input(idx)
+            && ((self.contrast_of(idx) == ContrastMode::LutAlpha
+                && crate::imageproc::lut_alpha_available())
+                || (self.details_of(idx) && crate::imageproc::details_available()));
+        if heavy {
+            1
+        } else {
+            self.stage_step(idx, ppp)
+        }
+    }
+
     /// Render pane `idx`'s texture for frame `target` **without disturbing what's
     /// currently shown** (`tex`): the result lands in `pending`, to be committed
     /// by `refresh_textures`. Returns whether `target` is ready — already in `tex`,
@@ -296,7 +402,7 @@ impl CimApp {
     /// render on the [`RenderPool`] and land in `pending` via `pump_render`, so a
     /// slow operator never blocks the UI thread. An errored pane reports ready so
     /// it can't stall a lockstep commit.
-    fn stage(&mut self, ctx: &egui::Context, idx: usize, target: usize) -> bool {
+    fn stage(&mut self, ctx: &egui::Context, idx: usize, target: usize, ppp: f32) -> bool {
         if self.panes[idx].error.is_some() {
             return true; // can't produce a frame; keep the last texture
         }
@@ -304,15 +410,19 @@ impl CimApp {
         // output (bar the frame itself). With `shown` it tells a still-current
         // texture from a stale one without recomputing the (possibly O(N)) bounds.
         let sig = self.tone_sig(idx);
+        // Nearest-decimation factor for this pane's synchronous render (1 for a
+        // heavy proprietary-operator pane, which never decimates). Part of the
+        // texture identity so zooming below the full-resolution band re-renders.
+        let step = self.want_step(idx, ppp);
         // Already committed to the target — nothing to stage.
         if let Some(t) = &self.panes[idx].tex {
-            if t.shown == target && t.sig == sig {
+            if t.shown == target && t.sig == sig && t.step == step {
                 return true;
             }
         }
         // Already staged the target (rendered, awaiting the group commit).
         if let Some(t) = &self.panes[idx].pending {
-            if t.shown == target && t.sig == sig {
+            if t.shown == target && t.sig == sig && t.step == step {
                 return true;
             }
         }
@@ -355,12 +465,15 @@ impl CimApp {
         } else {
             // Synchronous LUT render (no proprietary operators). Always nearest,
             // at any zoom: the value under the cursor must be a true source
-            // sample, never a blend of neighbours.
+            // sample, never a blend of neighbours. When the pane is minified past
+            // the full-resolution band, decimate to ~display resolution so a grid
+            // of panes doesn't render/copy/upload far more pixels than the screen
+            // can show (each dropped sample is still a true source value).
             let (lo, hi) = self.tone_bounds(idx, &frame);
-            frame.render_into(lo, hi, &mut self.render_scratch);
-            let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
+            let size = frame.render_into_scaled(lo, hi, step, &mut self.render_scratch);
+            let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
-            set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, target, sig);
+            set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, target, sig, step);
             true
         }
     }
@@ -370,7 +483,8 @@ impl CimApp {
     fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
-        set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, f, sig);
+        // Heavy proprietary-operator renders run at full resolution (step 1).
+        set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, f, sig, 1);
     }
 
     /// Parameter-only hash of a pane's effective tone: everything that changes the
@@ -474,9 +588,9 @@ impl CimApp {
                 frame.render_intensity_rgba(rgb, alpha, &mut buf);
             }
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
-            // Overlay textures don't tone-map, so their signature stays 0.
+            // Overlay textures don't tone-map (sig 0) and aren't decimated (step 1).
             let name = format!("ov{}_{}", idx, src_id);
-            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, 0);
+            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, 0, 1);
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
     }
@@ -493,6 +607,7 @@ fn set_cached_tex(
     img: ColorImage,
     shown: usize,
     sig: u64,
+    step: usize,
 ) {
     let opts = TextureOptions::NEAREST;
     match slot {
@@ -500,10 +615,11 @@ fn set_cached_tex(
             t.handle.set(img, opts);
             t.shown = shown;
             t.sig = sig;
+            t.step = step;
         }
         None => {
             let handle = ctx.load_texture(name, img, opts);
-            *slot = Some(CachedTex { handle, shown, sig });
+            *slot = Some(CachedTex { handle, shown, sig, step });
         }
     }
 }

@@ -791,6 +791,26 @@ impl CimApp {
                          sequences; oldest unshown frames are evicted beyond it.",
                     );
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Decode threads");
+                    ui.add(
+                        egui::Slider::new(&mut self.config.decode_threads, 0..=16).custom_formatter(
+                            |n, _| {
+                                if n == 0.0 {
+                                    "auto".to_owned()
+                                } else {
+                                    format!("{n}")
+                                }
+                            },
+                        ),
+                    )
+                    .on_hover_text(
+                        "Background image-decoding worker threads shared by all sequences. \
+                         0 = auto (scales with CPU cores, capped). Lower it to leave CPU \
+                         for other users when several instances share one server / VNC host. \
+                         Applies immediately.",
+                    );
+                });
                 ui.checkbox(&mut self.config.cursor_dot, "Cursor dot on other panes")
                     .on_hover_text(
                         "Mark the hovered pixel on every other pane with a red dot, so \

@@ -50,6 +50,15 @@ const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
 
+/// How many frames ahead of the shown one playback pre-decodes for each on-screen
+/// pane (`prefetch_playback`), so it overlaps decode with display instead of
+/// stalling on decode latency when it reaches a not-yet-resident frame.
+const PLAY_PREFETCH: usize = 3;
+
+/// Opening more sequences than this at once triggers a resource-warning
+/// confirmation (heavy CPU / memory, worst over VNC on a shared machine).
+const SEQ_WARN_LIMIT: usize = 8;
+
 /// Outline / accent colour for the right-drag statistics region (cyan, so it
 /// reads distinct from the amber export-region rectangle).
 const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
@@ -73,6 +82,12 @@ struct CachedTex {
     /// `shown` it tells a still-current texture from a stale one. The overlay
     /// texture doesn't tone-map, so it leaves this at 0.
     sig: u64,
+    /// Nearest-decimation factor this texture was rendered at (`CimApp::want_step`
+    /// / `stage_step`): 1 = full resolution, ≥2 = every N-th source pixel for a
+    /// minified pane. Part of the texture's identity alongside `(shown, sig)` so a
+    /// zoom change that alters it re-renders and re-commits. Heavy (proprietary
+    /// operator) renders and overlays always use 1.
+    step: usize,
 }
 
 /// A single-channel media from another pane (a boolean mask or a grayscale
@@ -330,8 +345,21 @@ pub struct CimApp {
     pending_remove: Option<usize>,
     pending_reload: Option<usize>,
     pending_reload_all: bool,
+    /// Media loaded but not yet added as panes, held while the ">8 sequences"
+    /// resource warning is up. Confirmed → `commit_open`; declined → quit.
+    pending_open: Option<Vec<(Media, Source)>>,
+    /// View state deferred alongside `pending_open` (the startup CLI path), so
+    /// `--frame`/`--mode`/… still apply once the user confirms the open.
+    pending_view: Option<cli::ViewState>,
 
     decoder: BackgroundDecoder,
+    /// Auto decode-thread count (scaled to CPU cores, capped), used when
+    /// `config.decode_threads == 0`. Computed once at startup so the per-frame
+    /// resolve doesn't re-query the OS.
+    auto_decode_threads: usize,
+    /// Thread count the live `decoder` pool was built with. When the resolved
+    /// setting changes, the pool is rebuilt to match (`update`).
+    decode_threads_active: usize,
     inflight: HashSet<(u64, usize)>,
     /// Off-thread tone renderer for panes using the heavy operators (LUT_ALPHA /
     /// details); `render_inflight` holds the pane ids with a render in flight so
@@ -388,11 +416,17 @@ impl CimApp {
         }
         cc.egui_ctx.set_fonts(fonts);
 
-        let threads = std::thread::available_parallelism()
+        let auto_decode_threads = std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 6))
             .unwrap_or(4);
 
         let config = Config::load();
+        // 0 = auto (scale with cores); an explicit setting caps it for shared hosts.
+        let threads = if config.decode_threads == 0 {
+            auto_decode_threads
+        } else {
+            config.decode_threads.clamp(1, 16)
+        };
         // Load the optional proprietary operator libraries by their hard-coded
         // names (resolved via LD_LIBRARY_PATH). Each operator is independent; a
         // missing library just leaves its feature disabled and never blocks
@@ -465,7 +499,11 @@ impl CimApp {
             pending_remove: None,
             pending_reload: None,
             pending_reload_all: false,
+            pending_open: None,
+            pending_view: None,
             decoder: BackgroundDecoder::new(threads),
+            auto_decode_threads,
+            decode_threads_active: threads,
             inflight: HashSet::new(),
             // One render worker: serialises the proprietary operators (whose
             // thread-safety we can't assume) while still keeping all of that work
@@ -478,7 +516,13 @@ impl CimApp {
             render_scratch: Vec::new(),
         };
         app.open_inputs(inputs);
-        app.apply_view_state(view);
+        if app.pending_open.is_some() {
+            // The open is held behind the ">8 sequences" warning; apply the view
+            // once the user confirms and the panes actually exist.
+            app.pending_view = Some(view);
+        } else {
+            app.apply_view_state(view);
+        }
         app
     }
 
@@ -706,19 +750,57 @@ impl CimApp {
 
     /// Open a list of CLI inputs: a `Single` becomes one media, a `Sequence`
     /// becomes a single numbered-file sequence media (one pane, not one per file).
+    ///
+    /// Media are loaded first (cheap — metadata / page 0 only, decoding is lazy),
+    /// then gated: if the result would leave **more than `SEQ_WARN_LIMIT`
+    /// sequences** open at once, the loaded media are held in `pending_open` and a
+    /// resource-warning confirmation is shown instead of adding the panes now (see
+    /// the popup in `update`). Otherwise they're added immediately.
     pub(super) fn open_inputs(&mut self, inputs: Vec<cli::Input>) {
+        let mut loaded: Vec<(Media, Source)> = Vec::new();
         for input in inputs {
-            let (loaded, source) = match input {
+            let (res, source) = match input {
                 cli::Input::Single(p) => (media::load(&p), Source::File(p)),
                 cli::Input::Sequence { token, files } => (
                     media::load_sequence(&files, token.clone()),
                     Source::Sequence { token, files },
                 ),
             };
-            match loaded {
-                Ok(m) => self.add_pane(m, source),
+            match res {
+                Ok(m) => loaded.push((m, source)),
                 Err(e) => self.error_popup = Some(format!("Failed to open:\n{e}")),
             }
+        }
+
+        // Count sequences (multi-frame media) that would be open after this —
+        // panes already up, plus any batch already waiting behind the warning, plus
+        // the ones now loading. Including `pending_open` keeps a second drop gated
+        // instead of slipping panes in while the big batch still waits.
+        let open_seqs = self.panes.iter().filter(|p| p.media.is_sequence()).count();
+        let waiting_seqs = self
+            .pending_open
+            .as_ref()
+            .map(|b| b.iter().filter(|(m, _)| m.is_sequence()).count())
+            .unwrap_or(0);
+        let opening = loaded.iter().filter(|(m, _)| m.is_sequence()).count();
+        if open_seqs + waiting_seqs + opening > SEQ_WARN_LIMIT {
+            // Hold the load behind the warning; `commit_open` finishes it on
+            // confirm. Merge with any batch already waiting (rapid drops).
+            match &mut self.pending_open {
+                Some(pend) => pend.extend(loaded),
+                None => self.pending_open = Some(loaded),
+            }
+            return;
+        }
+        self.commit_open(loaded);
+    }
+
+    /// Add a batch of already-loaded media as panes and re-settle the view
+    /// selectors. Shared by the immediate path and the confirmed ">8 sequences"
+    /// path (`update`), so both run the same post-open fixups.
+    fn commit_open(&mut self, loaded: Vec<(Media, Source)>) {
+        for (m, source) in loaded {
+            self.add_pane(m, source);
         }
         let n = self.panes.len();
         self.current = self.current.min(n.saturating_sub(1));
@@ -728,6 +810,22 @@ impl CimApp {
             self.slot_b = self.slot_a + 1;
         }
         self.shared_view.needs_fit = true;
+        // A view state deferred at startup (behind the warning) applies now that
+        // the panes exist.
+        if let Some(v) = self.pending_view.take() {
+            self.apply_view_state(v);
+        }
+    }
+
+    /// Resolve the effective background decode-thread count: the configured value
+    /// (clamped) or, when it's `0`, the auto count scaled to CPU cores. Read each
+    /// update so a Settings change rebuilds the pool.
+    pub(super) fn resolve_decode_threads(&self) -> usize {
+        if self.config.decode_threads == 0 {
+            self.auto_decode_threads
+        } else {
+            self.config.decode_threads.clamp(1, 16)
+        }
     }
 
     /// Push a freshly loaded media as a new pane with default per-pane state.
@@ -1400,6 +1498,17 @@ impl eframe::App for CimApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
 
+        // Rebuild the decode pool if the thread setting changed (live-applied like
+        // the other config). Orphaned in-flight jobs won't land on the new pool,
+        // so clear `inflight` to let them be re-requested; the old pool's
+        // persistent readers are dropped and reopen on demand.
+        let want_threads = self.resolve_decode_threads();
+        if want_threads != self.decode_threads_active {
+            self.decoder = BackgroundDecoder::new(want_threads);
+            self.inflight.clear();
+            self.decode_threads_active = want_threads;
+        }
+
         self.pump_decoder();
         self.pump_render(ctx);
         self.handle_input(ctx);
@@ -1410,6 +1519,7 @@ impl eframe::App for CimApp {
         // end, otherwise just keep one page ahead of the cursor.
         self.drive_eager();
         self.ensure_lookahead();
+        self.prefetch_playback();
         self.poll_decoding_all();
         self.enforce_cache_budget();
 
@@ -1508,6 +1618,50 @@ impl eframe::App for CimApp {
                 });
             if dismiss {
                 self.error_popup = None;
+            }
+        }
+
+        // Resource warning before opening more than `SEQ_WARN_LIMIT` sequences.
+        // The media are already loaded (cheaply) and held in `pending_open`;
+        // confirming adds them, declining quits the app.
+        if self.pending_open.is_some() {
+            let existing = self.panes.iter().filter(|p| p.media.is_sequence()).count();
+            let opening = self
+                .pending_open
+                .as_ref()
+                .map(|b| b.iter().filter(|(m, _)| m.is_sequence()).count())
+                .unwrap_or(0);
+            let total = existing + opening;
+            let mut decision: Option<bool> = None; // Some(true)=open, Some(false)=quit
+            egui::Window::new("⚠ Many sequences")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "This will open {total} sequences at once.\n\nDecoding and \
+                         playing many sequences in parallel is heavy on CPU and memory \
+                         and can degrade performance — especially over a remote (VNC) \
+                         session on a machine shared with other users."
+                    ));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Open anyway").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Quit").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            match decision {
+                Some(true) => {
+                    if let Some(batch) = self.pending_open.take() {
+                        self.commit_open(batch);
+                    }
+                }
+                Some(false) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                None => {}
             }
         }
 

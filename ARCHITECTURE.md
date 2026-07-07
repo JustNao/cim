@@ -148,8 +148,14 @@ len)` grows length by one.
 
 ## 5. Background decode pool (`decoder.rs`)
 
-- `BackgroundDecoder::new(threads)` (`available_parallelism().clamp(2,6)`) shares
-  one `mpsc` job queue behind a `Mutex` (locked only for the hand-off).
+- `BackgroundDecoder::new(threads)` shares one `mpsc` job queue behind a `Mutex`
+  (locked only for the hand-off). The thread count is `CimApp::resolve_decode_threads`:
+  `config.decode_threads` clamped to `[1,16]`, or — when it's `0` (**auto**, the
+  default) — `available_parallelism().clamp(2,6)`. The **Decode threads** Settings
+  slider caps it for shared / VNC hosts where several instances share the CPU; a
+  change is **live-applied** in `update` by rebuilding the pool (and clearing
+  `inflight`, since jobs queued on the old pool won't land on the new one — they
+  re-request; persistent readers reopen on demand).
 - **Jobs addressed by stable pane `id`**, not Vec index, so results land after
   reorder/close.
 - **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Mutex<SeqReader>>>`.
@@ -161,6 +167,13 @@ len)` grows length by one.
   past-end probe, `Err` failure.
 - App side (`app/decode.rs`): `inflight: HashSet<(id, frame)>` dedupes; `pump_decoder`
   drains (insert + `touch`, or `frontier_ended`, or set pane `error`).
+- **Playback prefetch (`prefetch_playback`).** While playing, each on-screen pane (plus
+  the control pane) pre-decodes the next `PLAY_PREFETCH` (3) frames along the loop window
+  (same walk as `advance_playback`; wraps when looping), so playback overlaps decode with
+  display instead of stalling on decode latency at a not-yet-resident frame — the win grows
+  with pane count, since the lock-step commit waits for the slowest pane. Requests dedupe
+  via `inflight` and never go past the known length (frontier discovery stays with
+  `ensure_lookahead`), so re-running it every update is cheap.
 
 ---
 
@@ -194,8 +207,25 @@ texture back in `pending` for handle reuse — no per-frame allocation). `pane_t
 (read by drawing) returns the committed `tex`, falling back to `pending` only before the
 first commit so a pane isn't blank while its siblings load. **No spinner:** a pane holds
 its last committed frame until the group flips. The single-pane render pipeline: bounds →
-`render_into(lo, hi, &mut render_scratch)` (a reused buffer) →
+`render_into_scaled(lo, hi, step, &mut render_scratch)` (a reused buffer) →
 `ColorImage::from_rgba_unmultiplied` → texture `set`/`load`.
+
+**Display-resolution staging (minified panes).** The synchronous LUT render is done at a
+**nearest-decimation** `step` (`render_into_scaled`) so a minified pane doesn't render, copy
+and upload far more pixels than the screen can show — the dominant CPU cost when several
+sequences play in a grid over VNC / software GL, where the texture upload is a plain memcpy.
+`stage_step` picks `step` from the pane's **physical** scale `zoom × pixels_per_point`
+(so OS DPI and the UI-scale zoom count): `1` (full resolution) for any physical scale ≥ 1,
+rising to 2, 3, … as the pane shrinks further. Because the whole ≥1× range **and its
+neighbourhood** (down to 0.5× at `ppp = 1`) stay at `step 1`, **crossing 1× never changes
+what's on screen** — the same full-resolution texture is reused. Decimation only *drops*
+whole samples (never blends), so each texel is still a true source value and the
+pixel-accuracy invariant holds; the value-under-cursor readout reads native `FrameData`, not
+the texture, so it is unaffected. `step` is part of the texture identity
+(`CachedTex.step`, alongside `(shown, sig)`) so a zoom change that alters it re-renders and
+re-commits. `want_step` forces `step 1` for a **heavy** proprietary-operator pane —
+decimating an operator's input would change its output and thrash the size-keyed instances —
+so those (and overlays, and the export path) always render full-resolution.
 
 *Commit gotcha:* the commit swaps a pane **only when `pending` actually holds the target**
 (not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
@@ -499,9 +529,10 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, ui_scale, cache_budget_mb, cursor_dot,
+`Config { max_columns, ui_scale, cache_budget_mb, decode_threads, cursor_dot,
 keybindings }` (the proprietary operator libraries are loaded at startup by
-hard-coded name — §7 — not configured here),
+hard-coded name — §7 — not configured here; `decode_threads` = the background
+decode pool size, `0` = auto — §5),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written only on an explicit "Save settings"** (never on exit). `config` is
@@ -527,16 +558,19 @@ id each frame so Tab cleanly cycles the view and no button ever holds focus.
 
 Each frame: apply `ui_scale`; `clock += 1` (on the **first** frame re-assert
 `ViewportCommand::Maximized(true)` — Linux/Wayland often ignores `with_maximized` at
-window creation, Windows already honoured it); `pump_decoder` → `pump_render` (stage
+window creation, Windows already honoured it); **rebuild the decode pool if
+`resolve_decode_threads` changed** (§5); `pump_decoder` → `pump_render` (stage
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
-`drive_eager` → `ensure_lookahead` → `poll_decoding_all` → `enforce_cache_budget`; clamp
+`drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while
+playing, §5) → `poll_decoding_all` → `enforce_cache_budget`; clamp
 `shared_frame` (and any stale `play_prefetch`); `refresh_textures` (stage on-screen panes
 and, when all ready, flip them + commit a playback step — runs last so it sees settled
 frame/tone state, just before drawing reads the textures); `refresh_auto_compute`; expire
 the transient `status` note; draw toolbar,
 bottom frame bar (shown whenever **any** media is a sequence), central panel, the compute
-draft, windows (manager/export/settings/view-command), error popup; apply deferred
-actions; `export_tick`; then a **paced repaint**.
+draft, windows (manager/export/settings/view-command), error popup, the **">8 sequences"
+resource warning** (`pending_open` — Open anyway → `commit_open`, Quit → close); apply
+deferred actions; `export_tick`; then a **paced repaint**.
 
 **Transient notifications (`status`).** A single line shown **top-right in the toolbar**
 at normal size (e.g. "Settings saved", "View command copied"). `update` shadows the
@@ -578,8 +612,16 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 
 Done: lazy length, persistent readers, bounded LRU cache, LUT render + memoized bounds
 + reused buffer, per-pane histogram cache, **paced repaints** (§13, no busy-spin while
-decoding/playing). Remaining candidates: minor per-frame allocations (`Action::all()`,
-`grid_cells`) and display-downscale for large images in tiny cells.
+decoding/playing), **display-resolution staging** for minified panes (§7 — nearest-decimate
+the synchronous render so a grid of sequences doesn't render/copy/upload full-res textures
+the screen can't show; seamless across 1×), **playback decode prefetch** (§5 — overlap
+decode with display so first-pass / multi-pane playback doesn't stall on decode latency),
+and a **configurable decode-thread count** (§5 — cap the pool per instance on a shared
+host). For shared multi-user servers there's also a **">8 sequences" resource warning**
+(§13) before opening a heavy number of sequences at once. Remaining candidates: minor
+per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /
+lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads
+per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code.
 
 ---
 

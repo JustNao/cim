@@ -566,6 +566,60 @@ impl FrameData {
         }
     }
 
+    /// Render the display RGBA at a **nearest-decimated** resolution — every
+    /// `step`-th source pixel along each axis — into `out` (resized to fit),
+    /// returning the decimated pixel size `[w', h']`. `step <= 1` is the
+    /// full-size render, identical to (and delegating to) [`render_into`].
+    ///
+    /// A minified pane (physical scale < 1 screen pixel per source pixel) can't
+    /// show every source pixel anyway, so building, copying and uploading the
+    /// full-resolution texture is wasted work — worst over VNC / software GL,
+    /// where the upload is a CPU memcpy and every extra pane multiplies the cost.
+    /// Decimation only **drops** whole samples and never blends, so each texel is
+    /// still a true source value (the pixel-accuracy invariant holds); the texture
+    /// is drawn stretched to the same on-screen rect with NEAREST filtering, as
+    /// before. The caller chooses `step` from the pane's zoom (see
+    /// `CimApp::stage_step`).
+    pub fn render_into_scaled(&self, lo: f32, hi: f32, step: usize, out: &mut Vec<u8>) -> [usize; 2] {
+        if step <= 1 {
+            self.render_into(lo, hi, out);
+            return self.size;
+        }
+        let [w, h] = self.size;
+        let ow = w.div_ceil(step); // ceil: cover the whole image
+        let oh = h.div_ceil(step);
+        let ch = self.channels;
+        let cc = self.color_channels();
+        out.clear();
+        out.resize(ow * oh * 4, 255); // alpha stays 255; rgb overwritten below
+
+        // A boolean mask ignores the tone window: false → black, true → white.
+        if self.mask {
+            match &self.samples {
+                Samples::U8(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 }),
+                Samples::U16(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 }),
+                Samples::F32(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0.0 { 255 } else { 0 }),
+            }
+            return [ow, oh];
+        }
+
+        let denom = hi - lo;
+        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
+        let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
+        match &self.samples {
+            Samples::U8(v) => {
+                let lut: Vec<u8> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| lut[s as usize]);
+            }
+            Samples::U16(v) => {
+                let lut: Vec<u8> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| lut[s as usize]);
+            }
+            Samples::F32(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, map_f),
+        }
+        [ow, oh]
+    }
+
     /// Render a **single-channel 16-bit** buffer into `out` (resized to
     /// `width*height`), mapping native samples through `[lo, hi] → [0, 65535]`.
     /// This is the input the proprietary operators receive (`crate::imageproc`):
@@ -1103,6 +1157,13 @@ impl Media {
             Media::FileSeq(f) => f.frames.len(),
             Media::ConcatSeq(c) => c.frames.len(),
         }
+    }
+
+    /// Whether this is a multi-frame sequence (not a single still). A multi-page
+    /// TIFF counts even before its length is discovered (`frame_count` starts at
+    /// 1), since it decodes and plays like a sequence.
+    pub fn is_sequence(&self) -> bool {
+        !matches!(self, Media::Still(_))
     }
 
     pub fn size(&self) -> [usize; 2] {
@@ -1910,6 +1971,37 @@ mod tests {
             assert_eq!(got, reference(frame, lo, hi));
         }
     }
+
+    /// Decimated staging: `step == 1` matches the full render exactly, and
+    /// `step >= 2` yields a `ceil(dim/step)`-sized buffer whose every texel is a
+    /// true source sample (every `step`-th pixel), never a blend of neighbours.
+    #[test]
+    fn scaled_render_decimates_to_true_samples() {
+        // 4x2 mono ramp; display range [0, 255] so a sample maps to itself.
+        //   row 0: 0 10 20 30
+        //   row 1: 40 50 60 70
+        let f = FrameData::new([4, 2], 1, Samples::U8(vec![0, 10, 20, 30, 40, 50, 60, 70]));
+        let (lo, hi) = (0.0, 255.0);
+
+        // step 1 is identical to render_into (same size, same bytes).
+        let mut full = Vec::new();
+        f.render_into(lo, hi, &mut full);
+        let mut one = Vec::new();
+        assert_eq!(f.render_into_scaled(lo, hi, 1, &mut one), [4, 2]);
+        assert_eq!(one, full);
+
+        // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
+        let mut half = Vec::new();
+        assert_eq!(f.render_into_scaled(lo, hi, 2, &mut half), [2, 1]);
+        assert_eq!(half.len(), 2 * 1 * 4);
+        assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
+        assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
+
+        // step 3 -> ceil(4/3) x ceil(2/3) = 2x1, sampling (0,0) and (3,0): 0, 30.
+        let mut third = Vec::new();
+        assert_eq!(f.render_into_scaled(lo, hi, 3, &mut third), [2, 1]);
+        assert_eq!([third[0], third[4]], [0, 30]);
+    }
 }
 
 /// Write interleaved samples into an RGBA buffer through `map`. Mono sources
@@ -1935,6 +2027,41 @@ fn fill_rgba<T: Copy, U: Copy>(
             out[o] = map(v[base]);
             out[o + 1] = map(v[base + 1]);
             out[o + 2] = map(v[base + 2]);
+        }
+    }
+}
+
+/// Like [`fill_rgba`] but samples every `step`-th source pixel per axis from a
+/// `w`-wide source into an `ow × oh` output (both `ceil(dim / step)`). Used by
+/// [`FrameData::render_into_scaled`] to build a minified pane's texture at
+/// ~display resolution instead of full resolution.
+#[allow(clippy::too_many_arguments)]
+fn fill_rgba_decimated<T: Copy, U: Copy>(
+    out: &mut [U],
+    v: &[T],
+    w: usize,
+    ch: usize,
+    cc: usize,
+    ow: usize,
+    oh: usize,
+    step: usize,
+    map: impl Fn(T) -> U,
+) {
+    for oy in 0..oh {
+        let row = oy * step * w; // source row of this output row
+        for ox in 0..ow {
+            let base = (row + ox * step) * ch;
+            let o = (oy * ow + ox) * 4;
+            if cc == 1 {
+                let g = map(v[base]);
+                out[o] = g;
+                out[o + 1] = g;
+                out[o + 2] = g;
+            } else {
+                out[o] = map(v[base]);
+                out[o + 1] = map(v[base + 1]);
+                out[o + 2] = map(v[base + 2]);
+            }
         }
     }
 }
