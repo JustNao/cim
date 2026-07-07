@@ -41,7 +41,8 @@ src/
                  SeqReader (persistent TIFF decoder), rendering, histograms, stats.
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
                  (LUT_ALPHA, DETAILS_ENHANCED); C++ in cpp/ is built separately
-                 into a .so/.dll and loaded from a settings path (16-bit only).
+                 into two .so, loaded by hard-coded name. PaneOps owns a pane's
+                 per-operator instances (create/apply/destroy; 16-bit only).
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (LUT render
                  + LUT_ALPHA / details) for heavy panes so the UI never blocks.
@@ -215,14 +216,20 @@ LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off 
 UI thread** on the `renderer.rs` `RenderPool` (`renderer::Worker::render`). (Export uses the
 default clip percentile; `ToneOptions` are live-view only.)
 
-The operators are **loaded at runtime** (`libloading`) at startup
+The operators are **loaded at runtime** (`libloading`, Linux-only) at startup
 (`imageproc::init`) from **two separate libraries**, one per operator, by their
 hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`) resolved via
 the loader search path (set `LD_LIBRARY_PATH`) — not linked at build time; a
-**single-channel 16-bit** C ABI (`cim_lut_alpha` / `cim_details_enhanced`, `len
-== width*height`). Each operator is independent: a missing library disables only
-its own feature (`lut_alpha_available` / `details_available`). See
-`INTEGRATION_CPP.md` for the contract and how to build the `.so`/`.dll`.
+missing library is silently ignored. The operators are **heavy, size-dependent
+C++ objects**, so the C ABI is a **create/apply/destroy lifecycle** per operator
+(`cim_<op>_create(w,h)` → opaque handle, `cim_<op>_apply(handle, data, len)` on a
+**single-channel 16-bit** buffer `len == width*height`, `cim_<op>_destroy`).
+`imageproc::PaneOps` holds one pane's instances, created lazily and **rebuilt when
+the frame dimensions change**, so heavy construction is paid once per size; it is
+owned by the pane's render worker thread (and by each export pane), so an instance
+is only ever touched by one thread. Each operator is independent: a missing library
+disables only its own feature (`lut_alpha_available` / `details_available`). See
+`INTEGRATION_CPP.md` for the contract and how to build the `.so`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `prepare`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/blend/details/region), and

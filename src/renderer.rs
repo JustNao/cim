@@ -119,15 +119,15 @@ impl RenderPool {
 
 /// Per-pane render worker state, owned solely by that pane's thread.
 ///
-/// Today it is stateless — each [`render`](Worker::render) is a pure function of
-/// its job. When the proprietary C++ operators are wired in, their media-specific
-/// instances live here: built lazily on the first job that needs them and rebuilt
-/// when a job's image dimensions differ from the cached ones, so the heavy
-/// per-media construction is paid once and reused across that pane's frames.
+/// `ops` holds this pane's proprietary operator instances (LUT_ALPHA / details):
+/// each is built lazily on the first job that needs it and rebuilt when a job's
+/// image dimensions differ from the cached ones, so the heavy, size-dependent
+/// construction is paid once and reused across that pane's frames. Because the
+/// worker is the sole owner, the instances need no locking and are destroyed on
+/// this thread when the pane's worker is dropped (`RenderPool::forget`).
 #[derive(Default)]
 struct Worker {
-    // Future home of the dimension-keyed operator handles, e.g.
-    //   ops: Option<(usize /* w */, usize /* h */, OperatorInstances)>,
+    ops: crate::imageproc::PaneOps,
 }
 
 impl Worker {
@@ -149,7 +149,7 @@ impl Worker {
         if use_ops {
             let mut gray = Vec::new();
             job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
-            crate::imageproc::apply_operators(&mut gray, w, h, job.lut_blend, job.details);
+            self.ops.apply(&mut gray, w, h, job.lut_blend, job.details);
             // Expand the processed grey back to 8-bit RGBA for the texture.
             rgba.resize(gray.len() * 4, 255);
             for (i, &s) in gray.iter().enumerate() {

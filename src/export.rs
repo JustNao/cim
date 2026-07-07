@@ -54,6 +54,9 @@ pub struct ExportPane {
     cur_idx: Option<usize>,
     cur_display: Option<Vec<u8>>,
     cur_size: [usize; 2],
+    /// This pane's proprietary operator instances, reused across the exported
+    /// frames (rebuilt only on a size change) — same lifecycle as the live view.
+    ops: crate::imageproc::PaneOps,
     /// Optional boolean-mask overlay tinted over this pane (mirrors the live view).
     overlay: Option<ExportOverlay>,
 }
@@ -145,6 +148,7 @@ impl ExportPane {
             cur_idx: None,
             cur_display: None,
             cur_size: [0, 0],
+            ops: crate::imageproc::PaneOps::default(),
             overlay: None,
         }
     }
@@ -233,7 +237,7 @@ impl ExportPane {
         let rgba = if use_ops {
             let mut gray = frame.render_gray_u16(self.contrast.clips());
             let lut_blend = (self.contrast == ContrastMode::LutAlpha).then_some(1.0);
-            crate::imageproc::apply_operators(&mut gray, w, h, lut_blend, self.details);
+            self.ops.apply(&mut gray, w, h, lut_blend, self.details);
             // Expand the processed grey back to 8-bit RGBA.
             let mut out = vec![255u8; gray.len() * 4];
             for (i, &s) in gray.iter().enumerate() {

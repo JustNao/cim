@@ -1,14 +1,32 @@
-//! Runtime loader for the optional proprietary C++ image-processing operators.
+//! Runtime loader + per-pane instance manager for the optional proprietary C++
+//! image-processing operators.
 //!
 //! The two operators live in **separately built** shared libraries, one each:
-//! `cim_lut_alpha` (auto-contrast) and `cim_details_enhanced` (detail
-//! enhancement). cim does **not** link them at build time: each is loaded on
-//! demand at startup by its hard-coded file name (see `LUT_ALPHA_LIB` /
-//! `DETAILS_LIB`), resolved through the system loader's search path — set
-//! `LD_LIBRARY_PATH` (Linux) to point at the directory that holds them. Each
-//! operator is independent: if its library is missing or its symbol doesn't
-//! resolve, only that operator stays **unavailable** and its feature is disabled
-//! in the UI — the rest of the viewer (and the other operator) work unchanged.
+//! LUT_ALPHA (auto-contrast) and DETAILS_ENHANCED (detail enhancement). cim does
+//! **not** link them at build time: each is loaded on demand at startup by its
+//! hard-coded file name (see `LUT_ALPHA_LIB` / `DETAILS_LIB`), resolved through
+//! the system loader's search path — set `LD_LIBRARY_PATH` (Linux-only) to point
+//! at the directory that holds them. Each operator is independent: if its library
+//! is missing or its symbols don't resolve, only that operator stays unavailable
+//! and its feature is disabled in the UI.
+//!
+//! **The operators are heavy, size-dependent C++ objects, not stateless
+//! functions.** Each library exports a three-symbol lifecycle rather than one
+//! entry point:
+//!
+//! ```c
+//! void* cim_<op>_create (size_t width, size_t height);        // build the instance
+//! void  cim_<op>_apply  (void* handle, uint16_t* data, size_t len); // per frame, in place
+//! void  cim_<op>_destroy(void* handle);                       // free the instance
+//! ```
+//!
+//! Construction (`create`) is expensive and depends on the image **size** (not
+//! its contents), so cim builds an instance **once per (pane, size)** and reuses
+//! it across that pane's frames via `apply`, rebuilding only when the dimensions
+//! change and destroying it when the pane goes away. [`PaneOps`] holds one pane's
+//! instances; it is owned by that pane's render worker thread (see
+//! `renderer::Worker`) or its export pane, so a given instance is only ever
+//! touched by one thread — the proprietary class need not be reentrant.
 //!
 //! Both operators receive the frame as a **single-channel 16-bit** buffer
 //! (`width * height` u16 samples, one per pixel, row-major) and transform it
@@ -16,17 +34,18 @@
 //! frames whose native format is **single-channel 16-bit unsigned** (see the
 //! `is_op_input` gate in `app::decode::prepare` / `renderer` / `export`), so the
 //! operator sees genuine 16-bit precision rather than a value already crushed to
-//! 8 bits, and never an interleaved RGBA buffer. cim expands the operator's
-//! output back to grey RGBA for display.
+//! 8 bits. cim expands the operator's output back to grey RGBA for display.
 //!
 //! See `INTEGRATION_CPP.md` for how to build the libraries and the exact ABI.
 
+use std::os::raw::c_void;
 use std::sync::RwLock;
 
-/// The C ABI every operator export must match:
-/// `void cim_lut_alpha(uint16_t* data, size_t len, size_t width, size_t height)`
-/// where `len` is the number of u16 samples (`width * height`, single channel).
-type OpFn = unsafe extern "C" fn(*mut u16, usize, usize, usize);
+/// The three C symbols each operator library exports (see the module docs):
+/// `create(width, height) -> handle`, `apply(handle, data, len)`, `destroy(handle)`.
+type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
+type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
+type DestroyFn = unsafe extern "C" fn(*mut c_void);
 
 // Hard-coded shared-library file names, one operator each. Resolved via the
 // system loader's search path (`LD_LIBRARY_PATH`), not an absolute path.
@@ -34,49 +53,58 @@ type OpFn = unsafe extern "C" fn(*mut u16, usize, usize, usize);
 const LUT_ALPHA_LIB: &str = "libcim_lut_alpha.so"; // placeholder
 const DETAILS_LIB: &str = "libcim_details_enhanced.so"; // placeholder
 
-/// A successfully loaded library plus its single resolved entry point. The
-/// `Library` is kept alive here because the function pointer borrows from it; it
-/// unloads when this slot is cleared.
-struct Op {
+/// A successfully loaded operator library plus its three resolved entry points.
+/// The `Library` is kept alive here because the function pointers borrow from it;
+/// it unloads when this slot is cleared.
+struct Operator {
     _lib: libloading::Library,
-    func: OpFn,
+    create: CreateFn,
+    apply: ApplyFn,
+    destroy: DestroyFn,
 }
 
-// The handle is only ever called through `&Op` behind the `RwLock`, and both
-// `Library` and bare `fn` pointers are themselves `Send + Sync`.
-unsafe impl Send for Op {}
-unsafe impl Sync for Op {}
+// The handles are only ever called through `&Operator` behind the `RwLock`, and
+// both `Library` and bare `fn` pointers are themselves `Send + Sync`.
+unsafe impl Send for Operator {}
+unsafe impl Sync for Operator {}
 
 /// The process-wide loaded operators (`None` until loaded / when unavailable).
-/// Guarded by an `RwLock` so the render pool / export worker can read them
-/// concurrently.
-static LUT_ALPHA: RwLock<Option<Op>> = RwLock::new(None);
-static DETAILS: RwLock<Option<Op>> = RwLock::new(None);
+/// Guarded by an `RwLock` so each pane's worker can read them concurrently to
+/// build its own instance.
+static LUT_ALPHA: RwLock<Option<Operator>> = RwLock::new(None);
+static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
 
-/// Load one operator library by name and resolve its symbol.
-fn load_one(lib_name: &str, symbol: &[u8]) -> anyhow::Result<Op> {
+/// Load one operator library and resolve its `create`/`apply`/`destroy` symbols.
+/// `stem` is the operator's symbol prefix (e.g. `cim_lut_alpha`), to which
+/// `_create` / `_apply` / `_destroy` are appended.
+fn load_one(lib_name: &str, stem: &str) -> anyhow::Result<Operator> {
     // SAFETY: loading a shared library and calling its init routines is
     // inherently unsafe; these are trusted, distributed alongside the binary.
     unsafe {
         let lib = libloading::Library::new(lib_name)?;
-        let func: libloading::Symbol<OpFn> = lib.get(symbol)?;
-        Ok(Op {
-            func: *func,
+        let create: libloading::Symbol<CreateFn> = lib.get(format!("{stem}_create\0").as_bytes())?;
+        let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
+        let destroy: libloading::Symbol<DestroyFn> =
+            lib.get(format!("{stem}_destroy\0").as_bytes())?;
+        Ok(Operator {
+            create: *create,
+            apply: *apply,
+            destroy: *destroy,
             _lib: lib,
         })
     }
 }
 
 /// Attempt to load both operator libraries by their hard-coded names. Call once
-/// at startup. A library that's missing or lacking its symbol simply leaves that
+/// at startup. A library that's missing or lacking a symbol simply leaves that
 /// operator unavailable (its feature disabled in the UI); it never fails startup.
 pub fn init() {
     // A missing or unresolvable library simply leaves that operator unavailable
     // (its feature disabled in the UI) — silently, with no startup log noise.
-    if let Ok(op) = load_one(LUT_ALPHA_LIB, b"cim_lut_alpha\0") {
+    if let Ok(op) = load_one(LUT_ALPHA_LIB, "cim_lut_alpha") {
         *LUT_ALPHA.write().unwrap() = Some(op);
     }
-    if let Ok(op) = load_one(DETAILS_LIB, b"cim_details_enhanced\0") {
+    if let Ok(op) = load_one(DETAILS_LIB, "cim_details_enhanced") {
         *DETAILS.write().unwrap() = Some(op);
     }
 }
@@ -93,49 +121,109 @@ pub fn details_available() -> bool {
     DETAILS.read().unwrap().is_some()
 }
 
-/// Apply LUT_ALPHA auto-contrast to a single-channel 16-bit buffer in place
-/// (no-op if the library isn't loaded). `gray` must be `width * height` samples.
-fn lut_alpha(gray: &mut [u16], width: usize, height: usize) {
-    if let Some(op) = LUT_ALPHA.read().unwrap().as_ref() {
-        // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/
-        // writes within it and keeps the dimensions (per the documented ABI).
-        unsafe { (op.func)(gray.as_mut_ptr(), gray.len(), width, height) };
+/// One live proprietary operator instance: the opaque C++ handle from `create`,
+/// the `(width, height)` it was built for, and the fn pointers to drive/free it.
+/// Owned by a single pane's worker thread; `Drop` frees the handle on that thread.
+struct Instance {
+    dims: (usize, usize),
+    handle: *mut c_void,
+    apply: ApplyFn,
+    destroy: DestroyFn,
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        // SAFETY: `handle` came from the matching `create` and is freed exactly
+        // once, here, on the owning worker thread.
+        unsafe { (self.destroy)(self.handle) };
     }
 }
 
-/// Apply DETAILS_ENHANCED detail enhancement to a single-channel 16-bit buffer
-/// in place (no-op if the library isn't loaded). `gray` must be `width * height`.
-fn details_enhanced(gray: &mut [u16], width: usize, height: usize) {
-    if let Some(op) = DETAILS.read().unwrap().as_ref() {
-        // SAFETY: see `lut_alpha`.
-        unsafe { (op.func)(gray.as_mut_ptr(), gray.len(), width, height) };
-    }
+// An `Instance` is only ever touched through `&mut` on its owning thread; the
+// raw handle is opaque and never shared.
+unsafe impl Send for Instance {}
+
+/// The proprietary operator instances for **one pane**, owned by that pane's
+/// render worker thread (`renderer::Worker`) or its export pane. Each operator's
+/// instance is created lazily on first use and rebuilt when the frame dimensions
+/// change (construction is heavy and size-dependent), so the heavy work is paid
+/// once per size and reused across that pane's frames.
+#[derive(Default)]
+pub struct PaneOps {
+    lut_alpha: Option<Instance>,
+    details: Option<Instance>,
 }
 
-/// Apply the post-render tone operators to an already-rendered **single-channel
-/// 16-bit** buffer (`width * height` samples) in place: optional LUT_ALPHA (mixed
-/// back toward the linear image by `1 - blend` when `lut_blend = Some(blend)`;
-/// `None` skips it) followed by the optional details enhancement. This is the one
-/// shared tail of the render pipeline, run both off-thread for the live view
-/// (`renderer::Worker::render`) and by the export worker (`export::ExportPane::ensure_frame`),
-/// so the two match pixel-for-pixel. Each stage is a no-op when its library isn't
-/// loaded (the callers also gate on `lut_alpha_available` / `details_available`,
-/// so the buffer is simply the plain linear render in that case).
-pub fn apply_operators(gray: &mut Vec<u16>, width: usize, height: usize, lut_blend: Option<f32>, details: bool) {
-    if let Some(blend) = lut_blend {
-        let blend = blend.clamp(0.0, 1.0);
-        if blend >= 1.0 {
-            lut_alpha(gray, width, height);
-        } else {
-            // Mix the operator's output back toward the plain linear image.
-            let base = gray.clone();
-            lut_alpha(gray, width, height);
-            blend_u16(gray, &base, blend);
+impl PaneOps {
+    /// Apply the tone operators to an already-rendered **single-channel 16-bit**
+    /// buffer (`width * height` samples) in place: optional LUT_ALPHA (mixed back
+    /// toward the linear image by `1 - blend` when `lut_blend = Some(blend)`;
+    /// `None` skips it) followed by the optional details enhancement. Each stage
+    /// is a no-op when its library isn't loaded (callers also gate on
+    /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
+    /// instances, rebuilding one only if `width`/`height` changed since last call.
+    ///
+    /// This is the one shared tail of the render pipeline, run both off-thread for
+    /// the live view (`renderer::Worker::render`) and by the export worker
+    /// (`export::ExportPane::ensure_frame`), so the two match pixel-for-pixel.
+    pub fn apply(
+        &mut self,
+        gray: &mut Vec<u16>,
+        width: usize,
+        height: usize,
+        lut_blend: Option<f32>,
+        details: bool,
+    ) {
+        if let Some(blend) = lut_blend {
+            if Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
+                let inst = self.lut_alpha.as_ref().unwrap();
+                let blend = blend.clamp(0.0, 1.0);
+                if blend >= 1.0 {
+                    run(inst, gray);
+                } else {
+                    // Mix the operator's output back toward the plain linear image.
+                    let base = gray.clone();
+                    run(inst, gray);
+                    blend_u16(gray, &base, blend);
+                }
+            }
+        }
+        if details && Self::ensure(&mut self.details, &DETAILS, width, height) {
+            run(self.details.as_ref().unwrap(), gray);
         }
     }
-    if details {
-        details_enhanced(gray, width, height);
+
+    /// Ensure `slot` holds an instance of `op` built for `(w, h)`, creating it (or
+    /// rebuilding after a size change) as needed. Returns whether a usable instance
+    /// is present — `false` if the library is absent or `create` returned null.
+    fn ensure(slot: &mut Option<Instance>, op: &RwLock<Option<Operator>>, w: usize, h: usize) -> bool {
+        if slot.as_ref().map(|i| i.dims) != Some((w, h)) {
+            // Drop the old instance first (frees it on this thread) so a heavy
+            // rebuild never holds two instances at once.
+            *slot = None;
+            if let Some(operator) = op.read().unwrap().as_ref() {
+                // SAFETY: `create` per the documented ABI; the returned handle is
+                // freed exactly once in `Instance::drop`.
+                let handle = unsafe { (operator.create)(w, h) };
+                if !handle.is_null() {
+                    *slot = Some(Instance {
+                        dims: (w, h),
+                        handle,
+                        apply: operator.apply,
+                        destroy: operator.destroy,
+                    });
+                }
+            }
+        }
+        slot.is_some()
     }
+}
+
+/// Run one instance's operator over `gray` in place.
+fn run(inst: &Instance, gray: &mut [u16]) {
+    // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/writes
+    // within it and keeps the dimensions (per the ABI). `handle` matches `apply`.
+    unsafe { (inst.apply)(inst.handle, gray.as_mut_ptr(), gray.len()) };
 }
 
 /// Blend `out` toward `base` by `1 - t`: `out = t·out + (1 - t)·base` per sample.
