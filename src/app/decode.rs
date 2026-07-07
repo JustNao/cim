@@ -228,8 +228,10 @@ impl CimApp {
             return;
         }
         let mut all_ready = true;
+        let mut targets = Vec::with_capacity(panes.len());
         for &idx in &panes {
             let target = self.stage_target(idx);
+            targets.push(target);
             if !self.stage(ctx, idx, target) {
                 all_ready = false;
             }
@@ -237,12 +239,19 @@ impl CimApp {
         if !all_ready {
             return;
         }
-        // Commit: swap each staged frame to the front. The swap keeps the old
+        // Commit: flip each pane whose *pending* slot holds the target frame to the
+        // front. Only then — a bare `pending.is_some()` would also fire on idle
+        // repaints (cursor move / pan), where `pending` still holds the previous
+        // frame's texture kept for handle reuse, swapping the stale frame back in
+        // and making the image flicker between frames. The swap keeps the old
         // texture in `pending` so its handle is reused next frame (no per-frame
         // texture allocation during playback).
-        for &idx in &panes {
+        for (&idx, &target) in panes.iter().zip(&targets) {
+            let sig = self.tone_sig(idx);
             let p = &mut self.panes[idx];
-            if p.pending.is_some() {
+            let tex_shows = p.tex.as_ref().is_some_and(|t| t.shown == target && t.sig == sig);
+            let pending_shows = p.pending.as_ref().is_some_and(|t| t.shown == target && t.sig == sig);
+            if !tex_shows && pending_shows {
                 std::mem::swap(&mut p.tex, &mut p.pending);
             }
         }
