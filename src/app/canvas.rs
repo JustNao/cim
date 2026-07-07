@@ -204,7 +204,10 @@ impl CimApp {
             }
         }
 
-        let (tex, loading) = self.prepare(ctx, idx);
+        // Textures were staged/committed by `refresh_textures` before drawing; here
+        // we just blit the committed one (falling back to a not-yet-committed frame
+        // on the very first paint so a pane isn't blank while its siblings load).
+        let tex = self.pane_texture(idx);
         let overlay = self.prepare_overlay(ctx, idx);
         let painter = ui.painter_at(img_area);
         painter.rect_filled(img_area, 0.0, Color32::from_gray(24));
@@ -220,9 +223,6 @@ impl CimApp {
         // Replicate the shared cursor here (also on the hovered pane, marking the
         // exact pixel under the cursor).
         self.draw_cursor_dot(&painter, idx, img_area, img_area);
-        if loading {
-            draw_spinner(&painter, img_area, ctx.input(|i| i.time));
-        }
         self.draw_pane_error(ui, idx, img_area);
 
         // Interaction: left-drag pans and the wheel zooms — allowed even while
@@ -593,12 +593,12 @@ impl CimApp {
             }
         }
 
-        let (ta, la) = self.prepare(ctx, a);
-        let (tb, lb) = self.prepare(ctx, b);
+        // Textures were staged/committed by `refresh_textures` before drawing.
+        let ta = self.pane_texture(a);
+        let tb = self.pane_texture(b);
         // Mask overlays apply in A/B too (each side over its own image).
         let oa = self.prepare_overlay(ctx, a);
         let ob = self.prepare_overlay(ctx, b);
-        let now = ctx.input(|i| i.time);
         let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
         let left = Rect::from_min_max(img.min, Pos2::new(split_x, img.max.y));
         let right = Rect::from_min_max(Pos2::new(split_x, img.min.y), img.max);
@@ -611,8 +611,8 @@ impl CimApp {
             self.cursor_pane = self.cursor_img.map(|_| side);
         }
 
-        self.draw_ab_side(ui, a, ta, la, oa, img, left, true, now);
-        self.draw_ab_side(ui, b, tb, lb, ob, img, right, false, now);
+        self.draw_ab_side(ui, a, ta, oa, img, left, true);
+        self.draw_ab_side(ui, b, tb, ob, img, right, false);
         self.draw_pane_error(ui, a, left);
         self.draw_pane_error(ui, b, right);
 
@@ -685,12 +685,10 @@ impl CimApp {
         ui: &egui::Ui,
         idx: usize,
         tex: Option<TextureId>,
-        loading: bool,
         overlay: Option<TextureId>,
         area: Rect,
         clip: Rect,
         is_a: bool,
-        now: f64,
     ) {
         let painter = ui.painter_at(clip);
         painter.rect_filled(clip, 0.0, Color32::from_gray(18));
@@ -704,9 +702,6 @@ impl CimApp {
         }
         // Replicate the shared cursor on this side (clipped to it).
         self.draw_cursor_dot(&painter, idx, area, clip);
-        if loading {
-            draw_spinner(&painter, clip, now);
-        }
         // Corner label.
         let tag = format!(
             "{}  {}",

@@ -117,6 +117,7 @@ impl CimApp {
             }
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
+                self.play_prefetch = None;
                 if self.shared_frame > 0 {
                     self.shared_frame -= 1;
                 } else if at_end {
@@ -125,6 +126,7 @@ impl CimApp {
             }
             if ui.button("Next").on_hover_text("Next frame").clicked() {
                 self.pending_seek = None;
+                self.play_prefetch = None;
                 if self.shared_frame + 1 < len {
                     self.shared_frame += 1;
                 } else if at_end {
@@ -349,6 +351,7 @@ impl CimApp {
                     Some(false) => self.loop_range = Some((lo, f.max(lo).min(len - 1))),
                     None => {
                         self.pending_seek = None;
+                        self.play_prefetch = None;
                         self.shared_frame = f;
                     }
                 }
@@ -360,6 +363,7 @@ impl CimApp {
         if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.pending_seek = None;
+                self.play_prefetch = None;
                 self.shared_frame = frame_at(p);
             }
         }

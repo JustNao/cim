@@ -195,9 +195,10 @@ impl CimApp {
 
     // ---- textures --------------------------------------------------------
 
-    /// Take finished tone renders off the pool and upload them. Uploads whatever
-    /// landed (even if the pane has since advanced) so it shows progress like a
-    /// decoded frame; `prepare` re-requests when the result is stale.
+    /// Take finished tone renders off the pool and stage them. A landed render
+    /// goes into the pane's **`pending`** slot (not `tex`), so it isn't shown until
+    /// `refresh_textures` commits every on-screen pane together; `stage`
+    /// re-requests when the result is stale.
     pub(super) fn pump_render(&mut self, ctx: &egui::Context) {
         for d in self.renderer.drain() {
             self.render_inflight.remove(&d.id);
@@ -207,38 +208,110 @@ impl CimApp {
         }
     }
 
-    /// Ensure pane `idx` shows the best texture available for its current frame.
-    /// Returns `(texture, loading)`. The plain LUT render (Linear / Linear+Clip,
-    /// and masks) is cheap and stays **synchronous**. The heavy proprietary
-    /// operators (LUT_ALPHA / details) render on the [`RenderPool`] instead: the
-    /// pane keeps showing its last texture with a spinner until the result lands
-    /// (uploaded by `pump_render`), so a slow operator never blocks the UI thread.
-    pub(super) fn prepare(&mut self, ctx: &egui::Context, idx: usize) -> (Option<TextureId>, bool) {
-        // While a seek past the frontier is in flight, freeze the display: keep
-        // the last texture and show a spinner instead of rendering every frame
-        // the frontier probe rides through on the way to the target.
+    /// Bring every on-screen pane's texture up to date and, once they are **all**
+    /// ready, flip them to their new frame together. During playback the shared
+    /// timeline advances only when this commit lands (`play_prefetch`), so the
+    /// frame counter never leads the image and all panes update in step — a slow
+    /// proprietary operator paces playback instead of the counter racing ahead.
+    ///
+    /// No spinner: a pane keeps showing its last committed frame while the next
+    /// one decodes / renders, then swaps in atomically.
+    pub(super) fn refresh_textures(&mut self, ctx: &egui::Context) {
+        // While a length-discovery seek rides the frontier, freeze the display
+        // (keep the last committed textures) rather than rendering every frame the
+        // probe passes through; `drive_seek` snaps to the target when it's found.
         if self.pending_seek.is_some() {
-            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
-            return (last, true);
+            return;
         }
-        let f = self.frame_disp(idx);
-        let Some(frame) = self.panes[idx].media.resident(f) else {
-            // Not decoded yet: queue it and keep the last frame + spinner.
-            self.request(idx, f);
-            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
-            return (last, true);
-        };
-        self.panes[idx].media.touch(f, self.clock); // viewing keeps it hot
+        let panes = self.displayed_indices();
+        if panes.is_empty() {
+            return;
+        }
+        let mut all_ready = true;
+        for &idx in &panes {
+            let target = self.stage_target(idx);
+            if !self.stage(ctx, idx, target) {
+                all_ready = false;
+            }
+        }
+        if !all_ready {
+            return;
+        }
+        // Commit: swap each staged frame to the front. The swap keeps the old
+        // texture in `pending` so its handle is reused next frame (no per-frame
+        // texture allocation during playback).
+        for &idx in &panes {
+            let p = &mut self.panes[idx];
+            if p.pending.is_some() {
+                std::mem::swap(&mut p.tex, &mut p.pending);
+            }
+        }
+        // A committed playback step advances the shared timeline to the frame we
+        // just showed — so the counter and the image stay on the same frame.
+        if let Some(f) = self.play_prefetch.take() {
+            self.shared_frame = f;
+        }
+    }
 
+    /// The texture to draw for pane `idx`: the committed one, or — only until the
+    /// first commit lands — a freshly staged frame, so a pane isn't blank while its
+    /// siblings are still rendering. After that `tex` is always present and holds
+    /// until the group flips, so on-screen panes stay in step.
+    pub(super) fn pane_texture(&self, idx: usize) -> Option<TextureId> {
+        self.panes[idx]
+            .tex
+            .as_ref()
+            .or(self.panes[idx].pending.as_ref())
+            .map(|t| t.handle.id())
+    }
+
+    /// The frame `refresh_textures` should stage for pane `idx`. Synced panes chase
+    /// the playback prefetch (the candidate next shared frame) if one is in flight,
+    /// else the committed shared frame; unsynced panes use their own frame.
+    fn stage_target(&self, idx: usize) -> usize {
+        let c = self.panes[idx].media.frame_count().max(1);
+        if self.panes[idx].sync_temporal {
+            self.play_prefetch.unwrap_or(self.shared_frame).min(c - 1)
+        } else {
+            self.panes[idx].frame % c
+        }
+    }
+
+    /// Render pane `idx`'s texture for frame `target` **without disturbing what's
+    /// currently shown** (`tex`): the result lands in `pending`, to be committed
+    /// by `refresh_textures`. Returns whether `target` is ready — already in `tex`,
+    /// or staged in `pending`.
+    ///
+    /// The plain LUT render (Linear / Linear+Clip, and masks) is cheap and stays
+    /// **synchronous**. The heavy proprietary operators (LUT_ALPHA / details)
+    /// render on the [`RenderPool`] and land in `pending` via `pump_render`, so a
+    /// slow operator never blocks the UI thread. An errored pane reports ready so
+    /// it can't stall a lockstep commit.
+    fn stage(&mut self, ctx: &egui::Context, idx: usize, target: usize) -> bool {
+        if self.panes[idx].error.is_some() {
+            return true; // can't produce a frame; keep the last texture
+        }
         // Cheap, parameter-only signature of everything that changes the toned
         // output (bar the frame itself). With `shown` it tells a still-current
         // texture from a stale one without recomputing the (possibly O(N)) bounds.
         let sig = self.tone_sig(idx);
+        // Already committed to the target — nothing to stage.
         if let Some(t) = &self.panes[idx].tex {
-            if t.shown == f && t.sig == sig {
-                return (Some(t.handle.id()), false);
+            if t.shown == target && t.sig == sig {
+                return true;
             }
         }
+        // Already staged the target (rendered, awaiting the group commit).
+        if let Some(t) = &self.panes[idx].pending {
+            if t.shown == target && t.sig == sig {
+                return true;
+            }
+        }
+        let Some(frame) = self.panes[idx].media.resident(target) else {
+            self.request(idx, target); // not decoded yet: queue it, keep showing tex
+            return false;
+        };
+        self.panes[idx].media.touch(target, self.clock); // staging keeps it hot
 
         let contrast = self.contrast_of(idx);
         // The proprietary operators only run on single-channel 16-bit frames with
@@ -261,7 +334,7 @@ impl CimApp {
                 let details = self.details_of(idx);
                 self.renderer.request(crate::renderer::RenderJob {
                     id,
-                    frame: f,
+                    frame: target,
                     sig,
                     data: frame.clone(),
                     lo,
@@ -271,8 +344,7 @@ impl CimApp {
                 });
                 self.render_inflight.insert(id);
             }
-            let last = self.panes[idx].tex.as_ref().map(|t| t.handle.id());
-            (last, true)
+            false // lands in `pending` when the render finishes
         } else {
             // Synchronous LUT render (no proprietary operators). Always nearest,
             // at any zoom: the value under the cursor must be a true source
@@ -281,16 +353,17 @@ impl CimApp {
             frame.render_into(lo, hi, &mut self.render_scratch);
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
-            set_cached_tex(&mut self.panes[idx].tex, ctx, name, img, f, sig);
-            (Some(self.panes[idx].tex.as_ref().unwrap().handle.id()), false)
+            set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, target, sig);
+            true
         }
     }
 
-    /// Upload an RGBA buffer as pane `idx`'s texture, tagged with `(f, sig)`.
+    /// Stage an RGBA buffer as pane `idx`'s **pending** texture, tagged `(f, sig)`
+    /// (committed to the front by `refresh_textures`).
     fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
-        set_cached_tex(&mut self.panes[idx].tex, ctx, name, img, f, sig);
+        set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, f, sig);
     }
 
     /// Parameter-only hash of a pane's effective tone: everything that changes the

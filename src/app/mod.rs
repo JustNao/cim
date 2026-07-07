@@ -144,6 +144,12 @@ struct Pane {
     source: Source, // how to reload it / re-emit it in a replay command
     media: Media,
     tex: Option<CachedTex>,
+    /// Next frame's texture, rendered while the pane keeps displaying `tex`, so
+    /// every on-screen pane can flip to the new frame **together** (see
+    /// `refresh_textures`). Committed into `tex` by an atomic swap once all shown
+    /// panes are ready — the swap keeps the old texture handle here for reuse, so
+    /// playback doesn't allocate a texture per frame.
+    pending: Option<CachedTex>,
     transform: ViewTransform, // used only when !sync_spatial
     frame: usize,             // used only when !sync_temporal
     sync_spatial: bool,
@@ -198,6 +204,12 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
+    /// During playback, the candidate next shared frame being pre-rendered while
+    /// the panes still show `shared_frame`. The timeline only advances to it once
+    /// **every** on-screen pane has that frame ready (`refresh_textures` commits
+    /// the swap and applies it here), so the frame counter never runs ahead of the
+    /// image and all panes flip in step. `None` when idle / paused / seeking.
+    play_prefetch: Option<usize>,
     /// Shared "Transformations" (tone mode + options + details) that every pane
     /// with `sync_tone` follows, so editing one synced pane's Transformations
     /// popup updates them all.
@@ -393,6 +405,7 @@ impl CimApp {
             next_id: 0,
             shared_view: ViewTransform::default(),
             shared_frame: 0,
+            play_prefetch: None,
             shared_contrast: ContrastMode::LinearClip,
             shared_tone: ToneOptions::default(),
             shared_details: false,
@@ -741,6 +754,7 @@ impl CimApp {
             source,
             media,
             tex: None,
+            pending: None,
             transform: ViewTransform::default(),
             frame: 0,
             sync_spatial: true,
@@ -825,6 +839,7 @@ impl CimApp {
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;
                 self.panes[i].tex = None; // re-render the kept frame from fresh data
+                self.panes[i].pending = None; // drop any staged frame from old data
                 self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
@@ -977,6 +992,7 @@ impl CimApp {
                 let hi = fr.hi_depth();
                 self.panes[idx].media = media::Media::still(name, fr);
                 self.panes[idx].tex = None;
+                self.panes[idx].pending = None; // drop any frame staged from old inputs
                 self.panes[idx].hist = None; // recompute for the new result
                 self.panes[idx].contrast = if hi {
                     ContrastMode::LinearClip
@@ -1145,6 +1161,7 @@ impl CimApp {
         for p in &mut self.panes {
             if p.sync_tone {
                 p.tex = None;
+                p.pending = None;
                 p.overlay_tex = None;
             }
         }
@@ -1165,6 +1182,7 @@ impl CimApp {
         }
         self.panes[i].sync_tone = on;
         self.panes[i].tex = None;
+        self.panes[i].pending = None;
         self.panes[i].overlay_tex = None;
     }
 
@@ -1181,12 +1199,13 @@ impl CimApp {
     /// Jump the shared timeline to `target`. Within the discovered length this is
     /// instant. Past the frontier of a still-discovering sequence it arms a
     /// `pending_seek` so `drive_seek` rides the frontier as fast as it can — with
-    /// the panes frozen behind a spinner (see `prepare`) so none of the
-    /// intervening frames are ever rendered — then snaps to `target`.
+    /// the panes frozen (see `refresh_textures`) so none of the intervening frames
+    /// are ever rendered — then snaps to `target`.
     pub(super) fn seek_to(&mut self, target: usize) {
         if self.panes.is_empty() {
             return;
         }
+        self.play_prefetch = None; // a jump abandons any in-flight playback step
         let len = self.timeline_len();
         if target < len {
             self.pending_seek = None;
@@ -1400,6 +1419,15 @@ impl eframe::App for CimApp {
         if self.shared_frame >= tl {
             self.shared_frame = tl - 1;
         }
+        // A pre-render target can't outrun the (possibly just-clamped) length.
+        if self.play_prefetch.is_some_and(|f| f >= tl) {
+            self.play_prefetch = None;
+        }
+
+        // Stage the on-screen panes' textures and, when they're all ready, flip
+        // them (and commit a playback step) together. Runs last so it sees the
+        // settled frame/tone state, just before drawing reads the textures.
+        self.refresh_textures(ctx);
 
         // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
         self.refresh_auto_compute();
@@ -1578,22 +1606,6 @@ fn dim_outside(painter: &egui::Painter, area: Rect, r: Rect) {
         dim,
     );
     painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(240, 200, 80)));
-}
-
-/// A small animated dot-spinner badge in the bottom-right of `area`.
-fn draw_spinner(painter: &egui::Painter, area: Rect, now: f64) {
-    let center = area.right_bottom() - Vec2::splat(20.0);
-    painter.circle_filled(center, 13.0, Color32::from_black_alpha(150));
-    let n = 8i32;
-    let phase = (now * 8.0) as i32;
-    for k in 0..n {
-        let ang = k as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-        let pos = center + Vec2::new(ang.cos(), ang.sin()) * 7.0;
-        let behind = (phase - k).rem_euclid(n);
-        let bright = 1.0 - behind as f32 / n as f32;
-        let alpha = (40.0 + 215.0 * bright) as u8;
-        painter.circle_filled(pos, 2.0, Color32::from_white_alpha(alpha));
-    }
 }
 
 /// Clamp an image-space region to a frame's pixel grid, returning the integer
