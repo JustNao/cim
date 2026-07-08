@@ -482,11 +482,12 @@ impl CimApp {
         } else {
             config.decode_threads.clamp(1, 16)
         };
-        // Load the optional proprietary operator libraries by their hard-coded
-        // names (resolved via LD_LIBRARY_PATH). Each operator is independent; a
-        // missing library just leaves its feature disabled and never blocks
-        // startup.
-        crate::imageproc::init();
+        // Load the optional proprietary operator libraries from the configured
+        // folder (or, when unset, by their hard-coded names via LD_LIBRARY_PATH).
+        // Each operator is independent; a missing library just leaves its feature
+        // disabled and never blocks startup.
+        let cpp_dir = cpp_lib_dir(&config);
+        crate::imageproc::init(cpp_dir.as_deref());
         let mut app = Self {
             saved_config: config.clone(),
             config,
@@ -1880,6 +1881,13 @@ fn ab_image_rect(area: Rect) -> Rect {
 
 fn uv() -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+}
+
+/// The configured proprietary-operator library directory as a path, or `None`
+/// when the setting is blank (fall back to `LD_LIBRARY_PATH` resolution).
+pub(super) fn cpp_lib_dir(config: &Config) -> Option<PathBuf> {
+    let dir = config.cpp_lib_dir.trim();
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
 /// Dim everything in `area` outside `r`, then outline `r` (export-region look).

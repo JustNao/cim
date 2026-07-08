@@ -4,11 +4,13 @@
 //! The two operators live in **separately built** shared libraries, one each:
 //! LUT_ALPHA (auto-contrast) and DETAILS_ENHANCED (detail enhancement). cim does
 //! **not** link them at build time: each is loaded on demand at startup by its
-//! hard-coded file name (see `LUT_ALPHA_LIB` / `DETAILS_LIB`), resolved through
-//! the system loader's search path — set `LD_LIBRARY_PATH` (Linux-only) to point
-//! at the directory that holds them. Each operator is independent: if its library
-//! is missing or its symbols don't resolve, only that operator stays unavailable
-//! and its feature is disabled in the UI.
+//! hard-coded file name (see `LUT_ALPHA_LIB` / `DETAILS_LIB`). The **directory**
+//! that holds them is configured in Settings (`Config::cpp_lib_dir`) and passed
+//! to [`init`]; when it's left empty the bare name is used and the system loader
+//! resolves it via its search path (`LD_LIBRARY_PATH`, Linux-only), preserving
+//! the old behaviour. Each operator is independent: if its library is missing or
+//! its symbols don't resolve, only that operator stays unavailable and its feature
+//! is disabled in the UI.
 //!
 //! **The operators are heavy, size-dependent C++ objects, not stateless
 //! functions.** Each library exports a three-symbol lifecycle rather than one
@@ -39,6 +41,7 @@
 //! See `INTEGRATION_CPP.md` for how to build the libraries and the exact ABI.
 
 use std::os::raw::c_void;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 /// The three C symbols each operator library exports (see the module docs):
@@ -47,11 +50,22 @@ type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
 type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
 
-// Hard-coded shared-library file names, one operator each. Resolved via the
-// system loader's search path (`LD_LIBRARY_PATH`), not an absolute path.
+// Hard-coded shared-library file names, one operator each. Resolved inside the
+// configured library directory (`Config::cpp_lib_dir`), or — when that's empty —
+// via the system loader's search path (`LD_LIBRARY_PATH`) by bare name.
 // TODO: replace these placeholders with the real distributed file names.
 const LUT_ALPHA_LIB: &str = "libcim_lut_alpha.so"; // placeholder
 const DETAILS_LIB: &str = "libcim_details_enhanced.so"; // placeholder
+
+/// Resolve a library file name against the optional configured directory. With a
+/// directory, load exactly `<dir>/<name>`; without one, pass the bare name so the
+/// system loader resolves it via its search path (`LD_LIBRARY_PATH`).
+fn resolve(dir: Option<&Path>, name: &str) -> PathBuf {
+    match dir {
+        Some(d) => d.join(name),
+        None => PathBuf::from(name),
+    }
+}
 
 /// A successfully loaded operator library plus its three resolved entry points.
 /// The `Library` is kept alive here because the function pointers borrow from it;
@@ -77,11 +91,11 @@ static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
 /// Load one operator library and resolve its `create`/`apply`/`destroy` symbols.
 /// `stem` is the operator's symbol prefix (e.g. `cim_lut_alpha`), to which
 /// `_create` / `_apply` / `_destroy` are appended.
-fn load_one(lib_name: &str, stem: &str) -> anyhow::Result<Operator> {
+fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
     // SAFETY: loading a shared library and calling its init routines is
     // inherently unsafe; these are trusted, distributed alongside the binary.
     unsafe {
-        let lib = libloading::Library::new(lib_name)?;
+        let lib = libloading::Library::new(lib_path)?;
         let create: libloading::Symbol<CreateFn> = lib.get(format!("{stem}_create\0").as_bytes())?;
         let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
         let destroy: libloading::Symbol<DestroyFn> =
@@ -95,18 +109,31 @@ fn load_one(lib_name: &str, stem: &str) -> anyhow::Result<Operator> {
     }
 }
 
-/// Attempt to load both operator libraries by their hard-coded names. Call once
-/// at startup. A library that's missing or lacking a symbol simply leaves that
+/// Attempt to load both operator libraries from `dir` (the configured library
+/// folder, or `None` to resolve by bare name via `LD_LIBRARY_PATH`). Call once at
+/// startup. A library that's missing or lacking a symbol simply leaves that
 /// operator unavailable (its feature disabled in the UI); it never fails startup.
-pub fn init() {
+pub fn init(dir: Option<&Path>) {
     // A missing or unresolvable library simply leaves that operator unavailable
     // (its feature disabled in the UI) — silently, with no startup log noise.
-    if let Ok(op) = load_one(LUT_ALPHA_LIB, "cim_lut_alpha") {
+    if let Ok(op) = load_one(&resolve(dir, LUT_ALPHA_LIB), "cim_lut_alpha") {
         *LUT_ALPHA.write().unwrap() = Some(op);
     }
-    if let Ok(op) = load_one(DETAILS_LIB, "cim_details_enhanced") {
+    if let Ok(op) = load_one(&resolve(dir, DETAILS_LIB), "cim_details_enhanced") {
         *DETAILS.write().unwrap() = Some(op);
     }
+}
+
+/// Whether each operator library **file** is present in `dir` (or, with no
+/// directory, resolvable next to the working directory by bare name). Returns
+/// `(lut_alpha_present, details_present)`. Used by Settings to show a found /
+/// not-found indicator for the configured folder — a pure filesystem check that
+/// doesn't load anything, so it can run live as the user edits the path.
+pub fn libs_present(dir: Option<&Path>) -> (bool, bool) {
+    (
+        resolve(dir, LUT_ALPHA_LIB).is_file(),
+        resolve(dir, DETAILS_LIB).is_file(),
+    )
 }
 
 /// Whether the LUT_ALPHA operator is loaded and callable. The UI gates the

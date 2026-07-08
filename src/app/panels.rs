@@ -821,6 +821,58 @@ impl CimApp {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading("Image operators (C++)");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Library folder")
+                        .on_hover_text(
+                            "Folder holding the proprietary operator libraries \
+                             (LUT_ALPHA / Details). Leave empty to resolve them via \
+                             LD_LIBRARY_PATH. Applied on restart.",
+                        );
+                    if ui.button("📂 Browse…").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.config.cpp_lib_dir = dir.to_string_lossy().into_owned();
+                        }
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.config.cpp_lib_dir)
+                            .hint_text("(uses LD_LIBRARY_PATH)")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                // Live found/not-found indicator for the two libraries: green ✔
+                // both present, orange ✔ only one, red ✖ none. A pure filesystem
+                // check — the actual load happens on restart.
+                let dir = super::cpp_lib_dir(&self.config);
+                let (lut_ok, details_ok) = crate::imageproc::libs_present(dir.as_deref());
+                ui.horizontal(|ui| {
+                    let (icon, color, msg) = match (lut_ok, details_ok) {
+                        (true, true) => (
+                            "✔",
+                            Color32::from_rgb(120, 210, 120),
+                            "Both operator libraries found".to_owned(),
+                        ),
+                        (false, false) => (
+                            "✖",
+                            Color32::from_rgb(230, 120, 120),
+                            "No operator libraries found in this folder".to_owned(),
+                        ),
+                        _ => (
+                            "✔",
+                            Color32::from_rgb(240, 180, 90),
+                            format!(
+                                "Only the {} library found",
+                                if lut_ok { "LUT_ALPHA" } else { "Details" }
+                            ),
+                        ),
+                    };
+                    ui.colored_label(color, egui::RichText::new(icon).strong());
+                    ui.colored_label(color, msg);
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading("Keyboard shortcuts");
                 ui.add_space(4.0);
 

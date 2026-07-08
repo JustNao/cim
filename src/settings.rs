@@ -261,6 +261,11 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// Directory holding the proprietary C++ operator shared libraries (`.so`).
+    /// Empty = resolve them by bare name via the system loader search path
+    /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
+    #[serde(default)]
+    pub cpp_lib_dir: String,
     pub keybindings: Keybindings,
 }
 
@@ -288,6 +293,7 @@ impl Default for Config {
             cache_budget_mb: default_cache_budget_mb(),
             decode_threads: default_decode_threads(),
             cursor_dot: true,
+            cpp_lib_dir: String::new(),
             keybindings: Keybindings::default(),
         }
     }
