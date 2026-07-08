@@ -828,7 +828,7 @@ impl CimApp {
                         .on_hover_text(
                             "Folder holding the proprietary operator libraries \
                              (LUT_ALPHA / Details). Leave empty to resolve them via \
-                             LD_LIBRARY_PATH. Applied on restart.",
+                             LD_LIBRARY_PATH. Loaded at startup, or now via Load now.",
                         );
                     if ui.button("📂 Browse…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -843,7 +843,7 @@ impl CimApp {
                 });
                 // Live found/not-found indicator for the two libraries: green ✔
                 // both present, orange ✔ only one, red ✖ none. A pure filesystem
-                // check — the actual load happens on restart.
+                // check on the configured folder — it doesn't load anything.
                 let dir = super::cpp_lib_dir(&self.config);
                 let (lut_ok, details_ok) = crate::imageproc::libs_present(dir.as_deref());
                 ui.horizontal(|ui| {
@@ -869,6 +869,39 @@ impl CimApp {
                     };
                     ui.colored_label(color, egui::RichText::new(icon).strong());
                     ui.colored_label(color, msg);
+                });
+
+                // What's actually loaded right now, plus a runtime "Load now" that
+                // fills in libraries not loaded at startup (safe: it never unloads
+                // one — see CimApp::load_cpp_libs). Repointing an already-loaded
+                // operator at a different folder still needs a restart.
+                let lut_loaded = crate::imageproc::lut_alpha_available();
+                let details_loaded = crate::imageproc::details_available();
+                ui.horizontal(|ui| {
+                    let loaded = match (lut_loaded, details_loaded) {
+                        (true, true) => "loaded: LUT_ALPHA, Details".to_owned(),
+                        (true, false) => "loaded: LUT_ALPHA".to_owned(),
+                        (false, true) => "loaded: Details".to_owned(),
+                        (false, false) => "loaded: none".to_owned(),
+                    };
+                    ui.label(egui::RichText::new(loaded).weak());
+                    // Something to gain only if a present file isn't loaded yet.
+                    let can_load = (lut_ok && !lut_loaded) || (details_ok && !details_loaded);
+                    if ui
+                        .add_enabled(can_load, egui::Button::new("Load now"))
+                        .on_hover_text(
+                            "Load the libraries in this folder without restarting. \
+                             Only loads operators not already loaded; changing the \
+                             folder of an already-loaded operator needs a restart.",
+                        )
+                        .on_disabled_hover_text(
+                            "Nothing new to load — the present libraries are already \
+                             loaded, or none were found in this folder.",
+                        )
+                        .clicked()
+                    {
+                        self.status = self.load_cpp_libs();
+                    }
                 });
 
                 ui.add_space(8.0);

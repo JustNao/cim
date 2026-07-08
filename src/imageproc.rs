@@ -116,12 +116,39 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
 pub fn init(dir: Option<&Path>) {
     // A missing or unresolvable library simply leaves that operator unavailable
     // (its feature disabled in the UI) — silently, with no startup log noise.
-    if let Ok(op) = load_one(&resolve(dir, LUT_ALPHA_LIB), "cim_lut_alpha") {
-        *LUT_ALPHA.write().unwrap() = Some(op);
+    let _ = load_missing(dir);
+}
+
+/// Load any operator library that **isn't loaded yet** from `dir`, leaving
+/// already-loaded operators untouched, and return the resulting
+/// `(lut_alpha_loaded, details_loaded)`.
+///
+/// This is the safe way to apply a newly configured folder **without a restart**:
+/// it only ever *adds* a library, never unloads one, so it cannot invalidate the
+/// `apply`/`destroy` function pointers copied into live render/export instances
+/// (see the module docs — those bypass the `RwLock`). It therefore fills in only
+/// operators that failed to load at startup (empty/wrong folder then); repointing
+/// an *already-loaded* operator at a different folder still needs a restart.
+pub fn load_missing(dir: Option<&Path>) -> (bool, bool) {
+    // Hold each slot's write lock only while (re)loading it; scope the guards so
+    // the `*_available()` reads below take fresh read locks.
+    {
+        let mut slot = LUT_ALPHA.write().unwrap();
+        if slot.is_none() {
+            if let Ok(op) = load_one(&resolve(dir, LUT_ALPHA_LIB), "cim_lut_alpha") {
+                *slot = Some(op);
+            }
+        }
     }
-    if let Ok(op) = load_one(&resolve(dir, DETAILS_LIB), "cim_details_enhanced") {
-        *DETAILS.write().unwrap() = Some(op);
+    {
+        let mut slot = DETAILS.write().unwrap();
+        if slot.is_none() {
+            if let Ok(op) = load_one(&resolve(dir, DETAILS_LIB), "cim_details_enhanced") {
+                *slot = Some(op);
+            }
+        }
     }
+    (lut_alpha_available(), details_available())
 }
 
 /// Whether each operator library **file** is present in `dir` (or, with no

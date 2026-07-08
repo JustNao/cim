@@ -1387,6 +1387,30 @@ impl CimApp {
         }
     }
 
+    /// Load any not-yet-loaded proprietary operator library from the configured
+    /// folder, without a restart, and re-render every pane so newly available
+    /// operators take effect. Safe at runtime: `imageproc::load_missing` never
+    /// *unloads* a library, so it can't dangle the function pointers held by live
+    /// render/export instances — panes that had the operator disabled simply built
+    /// no instances, and re-rendering now creates fresh ones from the new library.
+    /// Returns a short status message for the toolbar. (Repointing an
+    /// already-loaded operator at a different folder still needs a restart.)
+    pub(super) fn load_cpp_libs(&mut self) -> String {
+        let dir = cpp_lib_dir(&self.config);
+        let (lut, details) = crate::imageproc::load_missing(dir.as_deref());
+        for p in &mut self.panes {
+            p.tex = None;
+            p.pending = None;
+            p.overlay_tex = None;
+        }
+        match (lut, details) {
+            (true, true) => "Operator libraries loaded".into(),
+            (false, false) => "No operator libraries could be loaded".into(),
+            (true, false) => "LUT_ALPHA loaded (Details unavailable)".into(),
+            (false, true) => "Details loaded (LUT_ALPHA unavailable)".into(),
+        }
+    }
+
     /// Invalidate the textures of every tone-synced pane (after the shared
     /// Transformations change), so they re-render with the new mapping — base
     /// image and tinted overlay both.
