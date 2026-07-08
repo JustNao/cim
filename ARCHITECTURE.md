@@ -152,6 +152,19 @@ len)` grows length by one.
   also **freezes every pane** (keeps the last committed texture) so the intervening
   frames are never rendered. A within-length target is instant (`seek_to` jumps
   directly). Any manual navigation clears it.
+- **A synced pane behind an already-advanced timeline** (loading a second sequence after
+  moving ahead in the first — `shared_frame` is past what the new pane has discovered)
+  uses the **same probe fast-path** without `pending_seek`, per-pane: `catching_up(i)` is
+  true (paused, still-discovering, target ≥ its frontier), so `ensure_lookahead` **probes**
+  that pane forward (metadata only, no full decode of the pages in between) and
+  `refresh_textures` **skips staging it** — it holds its last committed frame (blank if
+  new) instead of flipping through 0…N — until its own length passes the target, then it
+  stages just that frame. The `update` clamp pins `shared_frame` to the **control** pane's
+  length, so the control pane is never "catching up" (that's `pending_seek`'s job); this
+  covers the *other*, shorter/newer synced panes, and only while paused (playback still
+  discovers frame-by-frame at the frontier). Both this and `pending_seek` **repaint
+  immediately** while riding the frontier, so discovery runs as fast as probes land rather
+  than one per 30 fps decode-poll tick.
 - **Per-frame resolution:** `disp_size(i)` uses the resident frame's own size
   (page-0 fallback) so drawing/readout don't stretch or go out of bounds.
 - **`ConcatSeq`** reuses all of this: a frontier miss rolls to the next file's

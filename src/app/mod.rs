@@ -1291,6 +1291,33 @@ impl CimApp {
         }
     }
 
+    /// A pane whose target frame lies **beyond everything it has discovered** — a
+    /// sequence loaded (or synced) behind an already-advanced timeline, so its
+    /// target sits many pages past its frontier. Such a pane must discover
+    /// forward before it can show the target; until then it **holds its last
+    /// committed frame** and discovers with a metadata-only probe, rather than
+    /// full-decoding and flipping through every page in between.
+    ///
+    /// Deliberately narrow so it never touches normal use: only while **paused**
+    /// (playback discovers frame-by-frame at the frontier), only for a
+    /// still-discovering sequence, and only when the target is at or past the
+    /// frontier. During single-stepping the shared frame is clamped to the
+    /// control length (`update`), so the control pane is never "catching up" —
+    /// this is for the *other*, shorter/newer synced panes.
+    pub(super) fn catching_up(&self, i: usize) -> bool {
+        // A decode/probe error stops discovery (the pane shows its error) — don't
+        // keep re-probing (which would also busy-spin the immediate repaint).
+        if self.playing || self.panes[i].media.at_end() || self.panes[i].error.is_some() {
+            return false;
+        }
+        let want = if self.panes[i].sync_temporal {
+            self.shared_frame
+        } else {
+            self.panes[i].frame
+        };
+        want >= self.panes[i].media.frame_count()
+    }
+
     // ---- effective Transformations (own, or shared when `sync_tone`) ------
 
     pub(super) fn contrast_of(&self, i: usize) -> ContrastMode {
@@ -1805,6 +1832,12 @@ impl eframe::App for CimApp {
         if self.playing {
             let dt = (1.0 / self.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
+        } else if self.pending_seek.is_some() || (0..self.panes.len()).any(|i| self.catching_up(i)) {
+            // Actively riding the frontier (a length-discovery seek, or a pane
+            // catching up to an advanced timeline): each probe grows the length
+            // by one, so repaint immediately — discovery runs as fast as probes
+            // land instead of one per 30 fps decode-poll tick.
+            ctx.request_repaint();
         } else if self.export_run.is_some()
             || self.cancel_export
             || !self.inflight.is_empty()

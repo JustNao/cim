@@ -169,8 +169,13 @@ impl CimApp {
                 continue;
             }
             let known = self.panes[i].media.frame_count();
-            // Probe one page beyond the frame currently shown.
-            if self.frame_disp(i) + 2 > known {
+            if self.catching_up(i) {
+                // Target far past the frontier (a sequence behind an advanced
+                // timeline): discover with a metadata-only probe so the pages in
+                // between aren't decoded — only the target lands (see `stage`).
+                self.probe(i, known);
+            } else if self.frame_disp(i) + 2 > known {
+                // Browsing at the frontier: prefetch the next page (full decode).
                 self.request(i, known);
             }
         }
@@ -327,13 +332,20 @@ impl CimApp {
         // is judged against real screen resolution, not view-space points.
         let ppp = ctx.pixels_per_point();
         let mut all_ready = true;
-        let mut targets = Vec::with_capacity(panes.len());
+        let mut staged: Vec<(usize, usize)> = Vec::with_capacity(panes.len());
         for &idx in &panes {
+            // A pane discovering toward a far target holds its last committed
+            // frame (keeps `tex`) instead of flipping through the pages in
+            // between — `ensure_lookahead` probes it forward, and it stages
+            // normally once the target itself is discovered.
+            if self.catching_up(idx) {
+                continue;
+            }
             let target = self.stage_target(idx);
-            targets.push(target);
             if !self.stage(ctx, idx, target, ppp) {
                 all_ready = false;
             }
+            staged.push((idx, target));
         }
         if !all_ready {
             return;
@@ -345,7 +357,7 @@ impl CimApp {
         // and making the image flicker between frames. The swap keeps the old
         // texture in `pending` so its handle is reused next frame (no per-frame
         // texture allocation during playback).
-        for (&idx, &target) in panes.iter().zip(&targets) {
+        for (idx, target) in staged {
             let sig = self.tone_sig(idx);
             let step = self.want_step(idx, ppp);
             let p = &mut self.panes[idx];
