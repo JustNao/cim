@@ -361,6 +361,19 @@ impl FrameData {
         }
     }
 
+    /// Mean native intensity of one pixel across its colour channels (alpha
+    /// excluded) — the scalar value plotted along the line-profile graph. Mono
+    /// frames return the single sample; colour frames the average of R/G/B.
+    pub fn intensity_at(&self, x: usize, y: usize) -> f32 {
+        let base = (y * self.size[0] + x) * self.channels;
+        let cc = self.color_channels();
+        let mut sum = 0.0;
+        for c in 0..cc {
+            sum += self.sample_f(base + c);
+        }
+        sum / cc as f32
+    }
+
     /// Display range [lo, hi] mapped to [0, 255], memoized per mapping. With
     /// `clip`, a fixed 0.01% percentile stretch (robust auto-contrast);
     /// otherwise the full range.

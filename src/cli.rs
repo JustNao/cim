@@ -71,6 +71,8 @@ pub struct ViewState {
     pub visible: Option<Vec<bool>>,
     /// Per-pane Transformations-sync flags (`--tsync`), in pane order.
     pub tsync: Option<Vec<bool>>,
+    /// Per-pane display rotation in degrees (`--rotate`), in pane order.
+    pub rotations: Option<Vec<f32>>,
     /// Which pane drives the timeline / playback (`--control`).
     pub control: Option<usize>,
     /// Inclusive playback loop range `LO,HI` (`--loop`), 0-based.
@@ -158,6 +160,10 @@ pub fn parse(args: Vec<String>) -> Cli {
                 view.tsync = next(i).and_then(parse_details);
                 i += 1;
             }
+            "--rotate" => {
+                view.rotations = next(i).and_then(parse_floats);
+                i += 1;
+            }
             "--control" => {
                 view.control = next(i).and_then(|s| s.parse().ok());
                 i += 1;
@@ -217,6 +223,12 @@ fn parse_tones(s: &str) -> Option<Vec<Tone>> {
         .collect()
 }
 
+/// Parse a comma-separated per-pane float list for `--rotate` (degrees). Any
+/// unparseable token makes the whole flag ignored.
+fn parse_floats(s: &str) -> Option<Vec<f32>> {
+    s.split(',').map(|t| t.trim().parse().ok()).collect()
+}
+
 /// Parse a comma-separated per-pane on/off list (`1`/`0`), shared by `--detail`,
 /// `--show` and `--tsync`.
 fn parse_details(s: &str) -> Option<Vec<bool>> {
@@ -268,6 +280,7 @@ VIEW STATE:
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
         --show <B,B,...>         Per-pane visibility / show-hide (1/0)
         --tsync <B,B,...>        Per-pane Transformations-sync toggles (1/0)
+        --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
         --control <N>            Pane that drives the timeline / playback
         --loop <LO,HI>           Inclusive playback loop range (0-based)
 
@@ -588,6 +601,18 @@ mod tests {
         assert_eq!(view.visible, Some(vec![true, false]));
         assert_eq!(view.tsync, Some(vec![false, true]));
         assert_eq!(view.control, Some(1));
+    }
+
+    #[test]
+    fn parses_rotate() {
+        let args = "a.tif b.tif --rotate -90,45.5"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(view.rotations, Some(vec![-90.0, 45.5]));
     }
 
     #[test]

@@ -40,6 +40,9 @@ pub struct ExportPane {
     pub view: ViewTransform,
     pub contrast: ContrastMode,
     pub details: bool,
+    /// Display rotation in **radians**, about the image centre (0 = none). Applied
+    /// when sampling so an exported pane matches the rotated live view.
+    pub rotation: f32,
     pub count: usize,
     pub sync_temporal: bool,
     pub own_frame: usize,
@@ -139,6 +142,7 @@ impl ExportPane {
             view,
             contrast,
             details,
+            rotation: 0.0,
             count,
             sync_temporal,
             own_frame,
@@ -257,6 +261,21 @@ impl ExportPane {
         };
         self.cur_display = Some(rgba);
         self.cur_idx = Some(idx);
+    }
+
+    /// Undo the pane's display rotation on a sampled image point: map the point
+    /// `ip` (in the unrotated view's image space) to the source pixel it shows by
+    /// rotating it by `-rotation` about the image centre. Mirrors the live view's
+    /// `rot_screen_to_img`.
+    fn unrotate(&self, ip: Vec2) -> Vec2 {
+        if self.rotation == 0.0 {
+            return ip;
+        }
+        let [w, h] = self.cur_size;
+        let center = Vec2::new(w as f32 / 2.0, h as f32 / 2.0);
+        let d = ip - center;
+        let (s, c) = (-self.rotation).sin_cos();
+        center + Vec2::new(d.x * c - d.y * s, d.x * s + d.y * c)
     }
 
     /// Sample the composited pane colour (base image with the mask overlay, if
@@ -401,7 +420,7 @@ impl ExportPlan {
                 let mut col = [BG[0], BG[1], BG[2], 0];
                 if let Some(loc) = self.layout.locate(c) {
                     let pane = &self.panes[loc.pane];
-                    let ip = pane.view.screen_to_img(loc.sample, loc.area);
+                    let ip = pane.unrotate(pane.view.screen_to_img(loc.sample, loc.area));
                     if let Some(rgb) = pane.sample(ip) {
                         col = [rgb[0], rgb[1], rgb[2], 255];
                     }
@@ -654,6 +673,46 @@ mod tests {
                 } else {
                     assert_eq!(px, [100, 100, 100], "off-diagonal ({x},{y}) base");
                 }
+            }
+        }
+    }
+
+    /// A 180° pane rotation flips the exported image about its centre: output
+    /// pixel (x, y) shows source pixel (w-1-x, h-1-y).
+    #[test]
+    fn rotation_180_flips_export() {
+        let frame = FrameData::new([8, 8], 1, Samples::U8((0..64).collect()));
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(4.0, 4.0),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(frame)),
+        );
+        pane.rotation = std::f32::consts::PI; // 180°
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            region: cell,
+            out_w: 8,
+            out_h: 8,
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+        for oy in 0..8usize {
+            for ox in 0..8usize {
+                let expect = (7 - oy) * 8 + (7 - ox); // flipped source value
+                let got = buf[(oy * 8 + ox) * 4] as usize;
+                assert_eq!(got, expect, "pixel ({ox},{oy})");
             }
         }
     }

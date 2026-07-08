@@ -426,6 +426,7 @@ impl CimApp {
         let shared_contrast = self.shared_contrast;
         let shared_tone = self.shared_tone;
         let shared_details = self.shared_details;
+        let shared_rotation = self.shared_rotation;
 
         // Row drag-to-reorder: rows collects each media row's (vec index, screen
         // y-band) so a drop can be mapped to a target; do_move carries the
@@ -517,6 +518,7 @@ impl CimApp {
                                                 p.contrast = shared_contrast;
                                                 p.tone = shared_tone;
                                                 p.details = shared_details;
+                                                p.rotation = shared_rotation;
                                             }
                                             p.sync_tone = all_ts;
                                             p.tex = None;

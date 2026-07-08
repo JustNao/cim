@@ -392,13 +392,14 @@ focused pane.
 
 **Transformations sync (`Pane.sync_tone`, default on).** Like the Pos/Time syncs, a
 pane can follow the shared set (`shared_contrast`/`shared_tone`/`shared_details`/
-`shared_overlay`), toggled by the **Transf** checkbox in the manager's Sync column.
-`contrast_of`/`tone_of`/`details_of`/`overlay_of` return the effective value and are
-read by `stage`/`prepare_overlay`/`export_pane`/`view_command`; editing a synced
-pane's popup writes the shared set and `invalidate_synced_tone` refreshes every synced
-pane. `set_sync_tone(false)` snapshots the shared values in so nothing jumps. The
-first opened media seeds the shared set (`add_pane`); a replayed `--tone`/`--detail`
-is per-pane, so `apply_view_state` unsyncs the panes it sets.
+`shared_rotation`/`shared_overlay`), toggled by the **Transf** checkbox in the manager's
+Sync column. `contrast_of`/`tone_of`/`details_of`/`rotation_of`/`overlay_of` return the
+effective value and are read by `stage`/`prepare_overlay`/`pane_theta`/`export_pane`/
+`view_command`; editing a synced pane's popup writes the shared set and
+`invalidate_synced_tone` refreshes every synced pane. `set_sync_tone(false)` snapshots the
+shared values in so nothing jumps. The first opened media seeds the shared set
+(`add_pane`); a replayed `--tone`/`--detail`/`--rotate` is per-pane, so `apply_view_state`
+unsyncs the panes it sets.
 
 **Overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }` — **any
 single-channel media** (a boolean mask **or** a grayscale image/sequence) tinted over
@@ -425,6 +426,44 @@ per pane keyed on `(frame, stats_gen)`). A near-zero drag / plain right-click cl
 it. **"compute LUT from region"** pins every pane's tone to the region (§7); a **–**
 corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
 are **primary-button-only** so the right-drag isn't stolen.
+
+**Pane rotation (Alt + drag / Transformations slider).** Each pane carries a
+`rotation` (degrees, -180..180) that **rides the Transformations sync** like tone /
+details / overlay: `rotation_of(i)` returns the shared angle (`shared_rotation`) when the
+pane is tone-synced, else its own, and `set_rotation(i, °)` writes whichever applies — so
+editing one synced pane turns them all. **Alt + primary-drag** on a pane spins it to
+follow the cursor's angle about the image centre (Photoshop-style, `rotate_drag` holding
+the grab pivot + start angle), **snapped to the nearest degree**; the Transformations popup
+also has a **Rotate** control: a **1°-step** drag bar plus a **typeable angle** field
+(`rotation_edit`; a click selects the whole value so it can be typed over, committed on
+Enter / focus loss) and a ⟲ reset. Rotation is applied
+**at draw time** (the texture stays unrotated, so no re-render): `paint_rotated` draws the
+image (and its overlay) as a textured mesh with the image-rect's four corners rotated about
+its centre, clipped to the pane. Because the view is a **similarity** (uniform scale +
+translate, no rotation), rotating in image space about the image centre equals rotating the
+mapped screen point about the image-centre's screen position — so `rot_img_to_screen` /
+`rot_screen_to_img` (used by the cursor dot, value readout, stats region outline + selection,
+and the profile line) stay pixel-aligned with the drawn mesh. Export mirrors it: `ExportPane.rotation`
+(radians) un-rotates each sampled point (`unrotate`) so a rendered/encoded pane matches the
+rotated live view (`--rotate` round-trips it through the view command).
+
+**Intensity-profile line (shift + right-drag).** Holding **Shift** while right-dragging
+draws an editable **line** (`line_profile`, an image-space `{a, b}` like `stats_region`,
+so it **replicates on every pane** and can be edited from any of them). `line_input`
+(in `line_overlay_for_pane`, called from `draw_pane` and both A/B sides, right after the
+stats overlay) hit-tests the press: near an endpoint → drag it (`LineGrab::Start/End`),
+near the body → move the whole line (`Body`), else start a fresh line (`New`);
+`region_input` returns early while Shift is held so the stats region doesn't grab the
+same button. The line and its endpoint handles paint in **amber** (`LINE_COL`). The
+**Line profile** tab (`app/profile.rs::draw_profile`) is a window that shows **only while a
+line exists** — drawing one opens it, clearing it (or its **Clear line** button) closes it
+(`update` gates the draw on `line_profile.is_some()`); it plots each media's pixel
+**intensity** (`FrameData::intensity_at` — mono
+value or mean of R/G/B) sampled along the line (`line_samples`, one point per line pixel,
+`NaN`/break where a pane's frame doesn't cover it): **position on the x axis, value on the
+y axis**, default range the samples' **min/max**. One coloured polyline per media
+(`series_color`), value/position **ticks** (`nice_ticks`), and a **legend** of each media
+name + colour underneath.
 
 **Compute panes.** A *generated* pane whose image is derived from other panes. The
 **toolbar** "Compute" button sets `pending_compute_create`; the deferred
@@ -509,7 +548,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `--zoom`, `--center X,Y`, `--frame`, `--pane`, `--control`, `--ab A,B,SPLIT`,
   `--tone` (per-pane `linear|linearclip|lutalpha`), `--detail` (per-pane `1`/`0`),
   `--show` (per-pane visibility), `--tsync` (per-pane Transformations-sync),
-  `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
+  `--rotate` (per-pane display rotation in degrees, `-180..180`), `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
   button and a global **Ctrl+Shift+C** shortcut both route through `copy_view_command`
   (egui's `ctx.copy_text`, so it goes via eframe's clipboard backend on every platform).

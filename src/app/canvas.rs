@@ -145,10 +145,9 @@ impl CimApp {
     pub(super) fn screen_rect_to_image(&self, r: Rect, area: Rect) -> Option<Rect> {
         let idx = self.current.min(self.panes.len().checked_sub(1)?);
         let img_area = image_area(area);
-        let v = self.view_ref(idx);
         let [w, h] = self.disp_size(idx);
-        let a = v.screen_to_img(r.min, img_area);
-        let b = v.screen_to_img(r.max, img_area);
+        let a = self.rot_screen_to_img(idx, r.min, img_area);
+        let b = self.rot_screen_to_img(idx, r.max, img_area);
         let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
             .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
         (reg.width() >= 1.0 && reg.height() >= 1.0).then_some(reg)
@@ -214,10 +213,11 @@ impl CimApp {
         if let Some(id) = tex {
             let v = *self.view_ref(idx);
             let rect = v.image_rect(self.disp_size(idx), img_area);
-            painter.image(id, rect, uv(), Color32::WHITE);
+            let theta = self.pane_theta(idx);
+            paint_rotated(&painter, id, rect, theta);
             // The mask overlay shares the base image's rect (1:1 in image space).
             if let Some(ov) = overlay {
-                painter.image(ov, rect, uv(), Color32::WHITE);
+                paint_rotated(&painter, ov, rect, theta);
             }
         }
         // Replicate the shared cursor here (also on the hovered pane, marking the
@@ -232,6 +232,7 @@ impl CimApp {
         // suppressed during crop selection (the right button drives the crop).
         let resp = ui.interact(img_area, Id::new(("pane", idx)), Sense::click_and_drag());
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        let alt = ctx.input(|i| i.modifiers.alt);
         if resp.hovered() {
             let scroll = wheel_delta(ctx);
             if scroll != 0.0 {
@@ -242,10 +243,39 @@ impl CimApp {
                 self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
             }
         }
-        if !self.selecting_region && resp.drag_started_by(PointerButton::Primary) && ctrl {
-            self.drag_src = Some(idx);
+        // Alt + primary drag rotates the pane about its image centre (à la
+        // Photoshop): the pane follows the cursor's angle around the pivot.
+        if !self.selecting_region && resp.drag_started_by(PointerButton::Primary) {
+            if alt {
+                let rect = self.view_ref(idx).image_rect(self.disp_size(idx), img_area);
+                let pivot = rect.center();
+                if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                    let ang = (p - pivot).angle();
+                    self.rotate_drag = Some((idx, pivot, ang, self.rotation_of(idx)));
+                }
+            } else if ctrl {
+                self.drag_src = Some(idx);
+            }
         }
-        if resp.dragged_by(PointerButton::Primary) && self.drag_src.is_none() {
+        if let Some((ridx, pivot, start_ang, start_rot)) = self.rotate_drag {
+            if ridx == idx {
+                if resp.dragged_by(PointerButton::Primary) {
+                    if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                        let delta = ((p - pivot).angle() - start_ang).to_degrees();
+                        // Snap to whole degrees; sync across panes when tone-synced.
+                        let deg = wrap180((start_rot + delta).round());
+                        self.set_rotation(idx, deg);
+                    }
+                }
+                if resp.drag_stopped_by(PointerButton::Primary) {
+                    self.rotate_drag = None;
+                }
+            }
+        }
+        if resp.dragged_by(PointerButton::Primary)
+            && self.drag_src.is_none()
+            && self.rotate_drag.is_none()
+        {
             let d = resp.drag_delta();
             self.view_mut(idx).pan(d);
         }
@@ -257,6 +287,7 @@ impl CimApp {
         // while a crop selection owns the right button.
         if !self.selecting_region {
             self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
+            self.line_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
         }
 
         // Compute-pane controls (source / kind / recompute + inline save).
@@ -477,9 +508,43 @@ impl CimApp {
         if !clip.contains(pos) {
             return None;
         }
-        let p = self.view_ref(idx).screen_to_img(pos, coord_area);
+        let p = self.rot_screen_to_img(idx, pos, coord_area);
         let [w, h] = self.disp_size(idx);
         (p.x >= 0.0 && p.y >= 0.0 && (p.x as usize) < w && (p.y as usize) < h).then_some(p)
+    }
+
+    /// Pane `idx`'s effective display rotation in radians (0 when unrotated).
+    pub(super) fn pane_theta(&self, idx: usize) -> f32 {
+        self.rotation_of(idx).to_radians()
+    }
+
+    /// Screen position of image point `p` for pane `idx`, including the pane's
+    /// rotation about its image centre. Inverse of [`rot_screen_to_img`]. Because
+    /// the view is a similarity (uniform scale + translate, no rotation), rotating
+    /// in image space about the image centre is the same as rotating the mapped
+    /// screen point about the image-centre's screen position — so the drawn mesh
+    /// (which rotates the image rect's corners) and every overlay stay aligned.
+    pub(super) fn rot_img_to_screen(&self, idx: usize, p: Vec2, area: Rect) -> Pos2 {
+        let v = self.view_ref(idx);
+        let s = v.img_to_screen(p, area);
+        let theta = self.pane_theta(idx);
+        if theta == 0.0 {
+            return s;
+        }
+        let pivot = v.img_to_screen(center_vec(self.disp_size(idx)), area);
+        rotate_around(s, pivot, theta)
+    }
+
+    /// Which image pixel is under screen point `s` for pane `idx`, undoing the
+    /// pane's rotation. Inverse of [`rot_img_to_screen`].
+    pub(super) fn rot_screen_to_img(&self, idx: usize, s: Pos2, area: Rect) -> Vec2 {
+        let v = self.view_ref(idx);
+        let theta = self.pane_theta(idx);
+        if theta == 0.0 {
+            return v.screen_to_img(s, area);
+        }
+        let pivot = v.img_to_screen(center_vec(self.disp_size(idx)), area);
+        v.screen_to_img(rotate_around(s, pivot, -theta), area)
     }
 
     /// The native pixel value at the shared image cursor for pane `idx`: the
@@ -507,7 +572,7 @@ impl CimApp {
             return;
         }
         let Some(ci) = self.cursor_img else { return };
-        let sp = self.view_ref(idx).img_to_screen(ci, coord_area);
+        let sp = self.rot_img_to_screen(idx, ci, coord_area);
         if !clip.contains(sp) {
             return;
         }
@@ -677,6 +742,8 @@ impl CimApp {
         let ab_hover = resp.hovered();
         self.region_overlay_for_pane(ui, ctx, a, img, left, ab_hover);
         self.region_overlay_for_pane(ui, ctx, b, img, right, ab_hover);
+        self.line_overlay_for_pane(ui, ctx, a, img, left, ab_hover);
+        self.line_overlay_for_pane(ui, ctx, b, img, right, ab_hover);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -694,10 +761,11 @@ impl CimApp {
         painter.rect_filled(clip, 0.0, Color32::from_gray(18));
         if let Some(id) = tex {
             let rect = self.view_ref(idx).image_rect(self.disp_size(idx), area);
-            painter.image(id, rect, uv(), Color32::WHITE);
+            let theta = self.pane_theta(idx);
+            paint_rotated(&painter, id, rect, theta);
             // The mask overlay shares the base image's rect (1:1 in image space).
             if let Some(ov) = overlay {
-                painter.image(ov, rect, uv(), Color32::WHITE);
+                paint_rotated(&painter, ov, rect, theta);
             }
         }
         // Replicate the shared cursor on this side (clipped to it).
@@ -752,18 +820,28 @@ impl CimApp {
 
         let Some(reg) = self.stats_region else { return };
 
-        // Map the image-space region onto this pane and clip to its visible area.
-        let v = *self.view_ref(idx);
-        let r = Rect::from_two_pos(
-            v.img_to_screen(reg.min.to_vec2(), coord_area),
-            v.img_to_screen(reg.max.to_vec2(), coord_area),
-        )
-        .intersect(clip_rect);
+        // Map the image-space region's four corners onto this pane (rotation-aware),
+        // draw them as a closed outline, and take their screen bounding box `r` for
+        // clipping / stats-panel placement. On an unrotated pane this is the plain
+        // axis-aligned rectangle; on a rotated one it's the tilted region.
+        let corners = [
+            reg.left_top(),
+            reg.right_top(),
+            reg.right_bottom(),
+            reg.left_bottom(),
+        ]
+        .map(|c| self.rot_img_to_screen(idx, c.to_vec2(), coord_area));
+        let r = corners
+            .iter()
+            .fold(Rect::NOTHING, |acc, &p| acc.union(Rect::from_min_max(p, p)))
+            .intersect(clip_rect);
         if !r.is_positive() {
             return;
         }
+        let mut outline: Vec<Pos2> = corners.to_vec();
+        outline.push(corners[0]);
         ui.painter_at(clip_rect)
-            .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
+            .add(egui::Shape::line(outline, Stroke::new(1.5, REGION_COL)));
 
         // The stats panel is collapsible: when hidden, a small button under the
         // region brings it back. The region outline above stays visible.
@@ -772,6 +850,132 @@ impl CimApp {
             self.draw_stats_panel(ui, idx, r, clip_rect);
         } else {
             self.draw_stats_collapsed(ui, r, clip_rect);
+        }
+    }
+
+    // ---- shift+right-drag intensity-profile line -------------------------
+
+    /// Process the shift+right-drag profile line for pane `idx` and draw it (the
+    /// amber segment + endpoint handles), mapped onto this pane. `coord_area`
+    /// maps screen↔image; `clip_rect` bounds the visible side / where a drag may
+    /// start. The line itself lives in image space, so it replicates on every
+    /// pane and can be edited from any of them.
+    pub(super) fn line_overlay_for_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        idx: usize,
+        coord_area: Rect,
+        clip_rect: Rect,
+        hovered: bool,
+    ) {
+        self.line_input(ctx, idx, coord_area, clip_rect, hovered);
+        self.draw_line_overlay(ui, idx, coord_area, clip_rect);
+    }
+
+    /// Draw the profile line and its endpoint handles onto pane `idx`.
+    fn draw_line_overlay(&self, ui: &egui::Ui, idx: usize, coord_area: Rect, clip: Rect) {
+        let Some(lp) = self.line_profile else { return };
+        let sa = self.rot_img_to_screen(idx, lp.a.to_vec2(), coord_area);
+        let sb = self.rot_img_to_screen(idx, lp.b.to_vec2(), coord_area);
+        let painter = ui.painter_at(clip);
+        painter.line_segment([sa, sb], Stroke::new(2.0, LINE_COL));
+        for p in [sa, sb] {
+            painter.circle_filled(p, 4.0, LINE_COL);
+            painter.circle_stroke(p, 4.0, Stroke::new(1.0, Color32::from_black_alpha(180)));
+        }
+    }
+
+    /// Track the shift+right drag: on press, decide whether it grabs an endpoint,
+    /// the body, or draws a new line; follow while held; finalize on release
+    /// (a near-zero *new* line is discarded).
+    fn line_input(
+        &mut self,
+        ctx: &egui::Context,
+        idx: usize,
+        coord_area: Rect,
+        hit_rect: Rect,
+        hovered: bool,
+    ) {
+        if self.selecting_region {
+            return;
+        }
+        let down = ctx.input(|i| i.pointer.secondary_down());
+        let shift = ctx.input(|i| i.modifiers.shift);
+        let pos = ctx.input(|i| i.pointer.interact_pos());
+        match self.line_grab {
+            None => {
+                if !(shift && down && hovered) {
+                    return;
+                }
+                let Some(p) = pos.filter(|p| hit_rect.contains(*p)) else {
+                    return;
+                };
+                let img = self.rot_screen_to_img(idx, p, coord_area).to_pos2();
+                // Grab an existing endpoint / body when the press lands on it,
+                // otherwise start a fresh line anchored here.
+                let grab = match self.line_profile {
+                    Some(lp) => {
+                        let sa = self.rot_img_to_screen(idx, lp.a.to_vec2(), coord_area);
+                        let sb = self.rot_img_to_screen(idx, lp.b.to_vec2(), coord_area);
+                        if (p - sa).length() <= LINE_HANDLE {
+                            LineGrab::Start
+                        } else if (p - sb).length() <= LINE_HANDLE {
+                            LineGrab::End
+                        } else if dist_to_segment(p, sa, sb) <= LINE_HANDLE {
+                            LineGrab::Body
+                        } else {
+                            LineGrab::New(img)
+                        }
+                    }
+                    None => LineGrab::New(img),
+                };
+                if let LineGrab::New(anchor) = grab {
+                    self.line_profile = Some(LineProfile { a: anchor, b: img });
+                }
+                self.line_grab = Some(grab);
+                self.line_grab_pane = Some(idx);
+                self.line_grab_area = coord_area;
+                self.line_drag_last = Some(img);
+            }
+            Some(grab) if self.line_grab_pane == Some(idx) => {
+                if !down {
+                    self.finalize_line();
+                    return;
+                }
+                let Some(p) = pos else { return };
+                let img = self.rot_screen_to_img(idx, p, self.line_grab_area).to_pos2();
+                if let Some(lp) = self.line_profile.as_mut() {
+                    match grab {
+                        LineGrab::Start => lp.a = img,
+                        LineGrab::End | LineGrab::New(_) => lp.b = img,
+                        LineGrab::Body => {
+                            if let Some(last) = self.line_drag_last {
+                                let d = img - last;
+                                lp.a += d;
+                                lp.b += d;
+                            }
+                        }
+                    }
+                }
+                self.line_drag_last = Some(img);
+            }
+            _ => {}
+        }
+    }
+
+    /// End a profile-line drag; a *new* line dragged out to near-zero length is
+    /// discarded (so a stray shift+right-click doesn't leave a dot behind).
+    fn finalize_line(&mut self) {
+        let grab = self.line_grab.take();
+        self.line_grab_pane = None;
+        self.line_drag_last = None;
+        if matches!(grab, Some(LineGrab::New(_))) {
+            if let Some(lp) = self.line_profile {
+                if (lp.a - lp.b).length() < 2.0 {
+                    self.line_profile = None;
+                }
+            }
         }
     }
 
@@ -788,6 +992,11 @@ impl CimApp {
     ) {
         if self.selecting_region {
             return; // the export-region drag owns the pointer
+        }
+        // Shift + right-drag is the intensity-profile line, not a stats region;
+        // leave the pointer to `line_input` unless a stats drag is already going.
+        if self.stats_sel_pane.is_none() && ctx.input(|i| i.modifiers.shift) {
+            return;
         }
         let down = ctx.input(|i| i.pointer.secondary_down());
         let pos = ctx.input(|i| i.pointer.interact_pos());
@@ -831,9 +1040,8 @@ impl CimApp {
             self.set_stats_region(None); // treat a right-click as "clear"
             return;
         }
-        let v = *self.view_ref(idx);
-        let a = v.screen_to_img(s, area);
-        let b = v.screen_to_img(n, area);
+        let a = self.rot_screen_to_img(idx, s, area);
+        let b = self.rot_screen_to_img(idx, n, area);
         let [w, h] = self.disp_size(idx);
         let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
             .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
@@ -992,6 +1200,8 @@ impl CimApp {
         let mut contrast = self.contrast_of(idx);
         let mut tone = self.tone_of(idx);
         let mut details = self.details_of(idx);
+        // Effective rotation (shared when tone-synced, else the pane's own).
+        let mut rotation = self.rotation_of(idx);
         let mut close = false;
 
         // The proprietary operators (LUT_ALPHA / Details) each need their own
@@ -1100,6 +1310,62 @@ impl CimApp {
                             ui.add_enabled(details_ok, egui::Checkbox::without_text(&mut details))
                                 .on_hover_text("Rehaussement / sharpening")
                                 .on_disabled_hover_text(details_hint);
+                            ui.end_row();
+
+                            // Display rotation (about the image centre). Also
+                            // editable directly on the pane with Alt + drag.
+                            ui.label("Rotate");
+                            ui.horizontal(|ui| {
+                                // Drag bar (its numeric readout is the text box).
+                                ui.add(
+                                    egui::Slider::new(&mut rotation, -180.0..=180.0)
+                                        .step_by(1.0)
+                                        .show_value(false),
+                                )
+                                .on_hover_text("Rotate the image (Alt + drag on the pane)");
+
+                                // Manual angle entry: a click selects the whole
+                                // value so it can be typed straight over; committed
+                                // on Enter / focus loss. While this pane's field is
+                                // focused, keep the buffer as-typed; otherwise mirror
+                                // the live angle.
+                                if self.rotation_edit_pane != Some(pane_id) {
+                                    self.rotation_edit = fmt_angle(rotation);
+                                }
+                                let mut out = egui::TextEdit::singleline(&mut self.rotation_edit)
+                                    .id(Id::new(("rot_edit", pane_id)))
+                                    .desired_width(44.0)
+                                    .show(ui);
+                                if out.response.gained_focus() {
+                                    self.rotation_edit_pane = Some(pane_id);
+                                    // Select the whole current value on focus.
+                                    let end = self.rotation_edit.chars().count();
+                                    out.state.cursor.set_char_range(Some(
+                                        egui::text::CCursorRange::two(
+                                            egui::text::CCursor::new(0),
+                                            egui::text::CCursor::new(end),
+                                        ),
+                                    ));
+                                    out.state.store(ui.ctx(), out.response.id);
+                                }
+                                if out.response.lost_focus() {
+                                    if let Ok(v) = self
+                                        .rotation_edit
+                                        .trim()
+                                        .trim_end_matches('°')
+                                        .trim()
+                                        .parse::<f32>()
+                                    {
+                                        rotation = wrap180(v);
+                                    }
+                                    self.rotation_edit_pane = None;
+                                }
+                                ui.label("°");
+                                if ui.small_button("⟲").on_hover_text("Reset to 0°").clicked() {
+                                    rotation = 0.0;
+                                    self.rotation_edit_pane = None;
+                                }
+                            });
                             ui.end_row();
                         });
 
@@ -1218,6 +1484,12 @@ impl CimApp {
                 p.details = details;
                 p.tex = None; // re-render with the new mapping
             }
+        }
+        // Rotation is applied at draw time (no texture to invalidate); it rides
+        // the Transformations sync, so a synced edit turns every synced pane.
+        rotation = wrap180(rotation);
+        if self.rotation_of(idx) != rotation {
+            self.set_rotation(idx, rotation);
         }
         if close {
             self.panes[idx].show_opts = false;

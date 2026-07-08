@@ -17,6 +17,7 @@ mod decode;
 mod export_ui;
 mod input;
 mod panels;
+mod profile;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -63,6 +64,13 @@ const SEQ_WARN_LIMIT: usize = 8;
 /// reads distinct from the amber export-region rectangle).
 const REGION_COL: Color32 = Color32::from_rgb(90, 210, 230);
 
+/// Colour of the editable intensity-profile line (shift + right-drag) and its
+/// endpoint handles — amber, matching the request.
+const LINE_COL: Color32 = Color32::from_rgb(255, 191, 0);
+
+/// Screen-space grab radius (px) for the profile line's endpoints / body.
+const LINE_HANDLE: f32 = 8.0;
+
 // Soft ceiling on decoded frames kept resident across all sequences. Beyond it
 // the least-recently-viewed frames are evicted (they re-decode on demand), so a
 // long sequence can't grow memory without bound. Configurable in Settings
@@ -100,6 +108,25 @@ pub(super) struct OverlaySpec {
     src_id: u64, // stable id of the pane supplying the overlay
     color: Color32,
     opacity: f32, // 0..1
+}
+
+/// An editable line drawn over the images with **shift + right-drag**, stored in
+/// IMAGE space (like `stats_region`) so it replicates on every pane and can be
+/// moved from any of them. Each media's pixel intensities sampled along it are
+/// plotted in the **Line profile** tab.
+#[derive(Clone, Copy)]
+pub(super) struct LineProfile {
+    a: Pos2, // image-space endpoints
+    b: Pos2,
+}
+
+/// Which part of the profile line a shift+right drag is manipulating.
+#[derive(Clone, Copy, PartialEq)]
+enum LineGrab {
+    Start,     // dragging endpoint A
+    End,       // dragging endpoint B
+    Body,      // translating the whole line
+    New(Pos2), // drawing a fresh line (A pinned at the given image-space anchor)
 }
 
 /// Cached histogram for the media shown in the Visualise panel.
@@ -182,6 +209,10 @@ struct Pane {
     show_opts: bool,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
+    /// Display rotation in **degrees** (-180..180), about the image centre.
+    /// Applied at draw time (the texture stays unrotated) and to the export;
+    /// per-pane, independent of the Transformations sync.
+    rotation: f32,
     /// Optional boolean-mask overlay drawn on top of this pane (config only;
     /// shared across synced panes via `overlay_of`).
     overlay: Option<OverlaySpec>,
@@ -231,6 +262,8 @@ pub struct CimApp {
     shared_contrast: ContrastMode,
     shared_tone: ToneOptions,
     shared_details: bool,
+    /// Shared display rotation in degrees (rides the same `sync_tone`).
+    shared_rotation: f32,
     /// Shared mask overlay (rides the same `sync_tone` as the tone).
     shared_overlay: Option<OverlaySpec>,
     /// A requested timeline frame not yet reachable because the sequence's
@@ -297,6 +330,24 @@ pub struct CimApp {
     stats_sel_pane: Option<usize>,
     stats_sel_area: Rect,
 
+    // ---- intensity-profile line (shift + right-drag) --------------------
+    /// The editable profile line in IMAGE space, replicated across every pane;
+    /// `None` until one is drawn.
+    line_profile: Option<LineProfile>,
+    /// In-progress shift+right drag: which part is moving, the pane it started
+    /// on, that pane's coordinate area (for screen↔image mapping), and the last
+    /// image-space pointer (used to translate the body by its delta).
+    line_grab: Option<LineGrab>,
+    line_grab_pane: Option<usize>,
+    line_grab_area: Rect,
+    line_drag_last: Option<Pos2>,
+
+    /// Edit buffer for the Transformations popup's typeable rotation angle, and
+    /// the pane id currently being edited (so the buffer isn't overwritten with
+    /// the live value mid-typing). Mirrors the frame-bar `frame_edit` pattern.
+    rotation_edit: String,
+    rotation_edit_pane: Option<u64>,
+
     // Export
     show_export: bool,
     export_mode: Mode,
@@ -340,6 +391,10 @@ pub struct CimApp {
     /// **not** drawn on it — its own OS cursor already marks the spot.
     cursor_pane: Option<usize>,
     drag_src: Option<usize>,
+    /// Alt-drag rotation in progress: (pane idx, screen pivot = image centre,
+    /// pointer angle at grab, pane rotation° at grab). Photoshop-style — the pane
+    /// spins to follow the cursor around its centre.
+    rotate_drag: Option<(usize, Pos2, f32, f32)>,
     /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
     manager_drag: Option<usize>,
     pending_remove: Option<usize>,
@@ -443,6 +498,7 @@ impl CimApp {
             shared_contrast: ContrastMode::LinearClip,
             shared_tone: ToneOptions::default(),
             shared_details: false,
+            shared_rotation: 0.0,
             shared_overlay: None,
             pending_seek: None,
             frame_edit: String::new(),
@@ -472,6 +528,14 @@ impl CimApp {
             stats_sel_pane: None,
             stats_sel_area: Rect::NOTHING,
 
+            line_profile: None,
+            line_grab: None,
+            line_grab_pane: None,
+            line_grab_area: Rect::NOTHING,
+            line_drag_last: None,
+            rotation_edit: String::new(),
+            rotation_edit_pane: None,
+
             show_export: false,
             export_mode: Mode::Grid,
             export_region: None,
@@ -495,6 +559,7 @@ impl CimApp {
             cursor_img: None,
             cursor_pane: None,
             drag_src: None,
+            rotate_drag: None,
             manager_drag: None,
             pending_remove: None,
             pending_reload: None,
@@ -580,14 +645,24 @@ impl CimApp {
                 p.tex = None;
             }
         }
-        // Transformations sync flags, applied *after* per-pane tone/detail (which
-        // unsync the panes they set). Re-seed the shared set from the first synced
-        // pane so panes that follow it show the captured look.
+        // Per-pane rotation. Like --tone/--detail these are per-pane, so unsync
+        // the panes they set (otherwise a synced pane would ignore its own angle
+        // and follow the shared one); the following --tsync re-syncs and re-seeds.
+        if let Some(rots) = &vs.rotations {
+            for (p, &r) in self.panes.iter_mut().zip(rots) {
+                p.rotation = wrap180(r);
+                p.sync_tone = false;
+            }
+        }
+        // Transformations sync flags, applied *after* per-pane tone/detail/rotation
+        // (which unsync the panes they set). Re-seed the shared set from the first
+        // synced pane so panes that follow it show the captured look.
         if let Some(sync) = &vs.tsync {
             if let Some(k) = sync.iter().position(|&s| s) {
                 if let Some(p) = self.panes.get(k) {
                     self.shared_contrast = p.contrast;
                     self.shared_details = p.details;
+                    self.shared_rotation = p.rotation;
                 }
             }
             for (p, &s) in self.panes.iter_mut().zip(sync) {
@@ -708,6 +783,16 @@ impl CimApp {
                     .map(|p| if p.sync_tone { "1" } else { "0" })
                     .collect();
                 parts.push(format!("--tsync {}", ts.join(",")));
+            }
+            // Per-pane effective rotation — omit when every pane is unrotated.
+            if (0..n).any(|i| self.rotation_of(i) != 0.0) {
+                let rots: Vec<String> = (0..n)
+                    .map(|i| {
+                        let r = self.rotation_of(i);
+                        format!("{}", (r * 100.0).round() / 100.0)
+                    })
+                    .collect();
+                parts.push(format!("--rotate {}", rots.join(",")));
             }
         }
         if let Some((lo, hi)) = self.loop_range {
@@ -846,6 +931,7 @@ impl CimApp {
             self.shared_contrast = contrast;
             self.shared_tone = tone;
             self.shared_details = false;
+            self.shared_rotation = 0.0;
         }
         self.panes.push(Pane {
             id,
@@ -863,6 +949,7 @@ impl CimApp {
             tone,
             show_opts: false,
             details: false,
+            rotation: 0.0,
             overlay: None,
             overlay_tex: None,
             region_tone: false,
@@ -1230,6 +1317,26 @@ impl CimApp {
         }
     }
 
+    /// Effective display rotation (degrees) — the shared angle when tone-synced,
+    /// else the pane's own.
+    pub(super) fn rotation_of(&self, i: usize) -> f32 {
+        if self.panes[i].sync_tone {
+            self.shared_rotation
+        } else {
+            self.panes[i].rotation
+        }
+    }
+
+    /// Set pane `i`'s effective rotation (degrees): writes the shared angle when
+    /// tone-synced (so every synced pane turns together), else the pane's own.
+    pub(super) fn set_rotation(&mut self, i: usize, deg: f32) {
+        if self.panes[i].sync_tone {
+            self.shared_rotation = deg;
+        } else {
+            self.panes[i].rotation = deg;
+        }
+    }
+
     /// Whether pane `i`'s currently shown frame is single-channel 16-bit — the
     /// only input the proprietary operators accept. Used (with
     /// `imageproc::lut_alpha_available` / `details_available`) to gate the
@@ -1276,6 +1383,7 @@ impl CimApp {
             self.panes[i].contrast = self.shared_contrast;
             self.panes[i].tone = self.shared_tone;
             self.panes[i].details = self.shared_details;
+            self.panes[i].rotation = self.shared_rotation;
             self.panes[i].overlay = self.shared_overlay;
         }
         self.panes[i].sync_tone = on;
@@ -1589,6 +1697,11 @@ impl eframe::App for CimApp {
 
         if self.show_manager {
             self.draw_manager(ctx);
+        }
+        // The Line profile tab shows only while a line exists; drawing one opens
+        // it, clearing it (or "Clear line") closes it.
+        if self.line_profile.is_some() {
+            self.draw_profile(ctx);
         }
         if self.show_export {
             self.draw_export(ctx);
@@ -1911,6 +2024,89 @@ fn drop_target(rows: &[(usize, egui::Rangef)], y: f32) -> Option<usize> {
     rows.iter()
         .min_by(|a, b| (a.1.center() - y).abs().total_cmp(&(b.1.center() - y).abs()))
         .map(|&(idx, _)| idx)
+}
+
+/// Rotate screen point `p` about `pivot` by `theta` radians (screen y is down,
+/// so a positive angle turns clockwise on screen).
+fn rotate_around(p: Pos2, pivot: Pos2, theta: f32) -> Pos2 {
+    if theta == 0.0 {
+        return p;
+    }
+    let (s, c) = theta.sin_cos();
+    let d = p - pivot;
+    pivot + Vec2::new(d.x * c - d.y * s, d.x * s + d.y * c)
+}
+
+/// Wrap a degree value into the (-180, 180] range used by the rotation control.
+fn wrap180(mut d: f32) -> f32 {
+    d %= 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d <= -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
+/// Format a rotation angle for the Transformations text box: whole degrees
+/// plainly, otherwise one decimal.
+fn fmt_angle(v: f32) -> String {
+    if v.fract().abs() < 0.05 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// Image-space centre (in pixels) of a frame of the given size.
+fn center_vec(size: [usize; 2]) -> Vec2 {
+    Vec2::new(size[0] as f32 / 2.0, size[1] as f32 / 2.0)
+}
+
+/// Paint texture `id` into `rect`, rotated by `theta` radians about the rect's
+/// centre. `theta == 0` takes the plain axis-aligned path; otherwise a two-triangle
+/// textured mesh with the four corners rotated (clipped by the painter's clip rect,
+/// so the image still can't spill past its pane).
+fn paint_rotated(painter: &egui::Painter, id: TextureId, rect: Rect, theta: f32) {
+    if theta == 0.0 {
+        painter.image(id, rect, uv(), Color32::WHITE);
+        return;
+    }
+    let pivot = rect.center();
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    let uvs = [
+        Pos2::new(0.0, 0.0),
+        Pos2::new(1.0, 0.0),
+        Pos2::new(1.0, 1.0),
+        Pos2::new(0.0, 1.0),
+    ];
+    let mut mesh = egui::Mesh::with_texture(id);
+    for (corner, uv) in corners.into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: rotate_around(corner, pivot, theta),
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Shortest distance from point `p` to the segment `a`–`b` (screen space), used
+/// to hit-test the profile line's body.
+fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    if len2 <= f32::EPSILON {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    (p - (a + ab * t)).length()
 }
 
 /// Zoom sensitivity per scroll unit; Shift doubles it.
