@@ -298,13 +298,13 @@ their hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`). The
 directory is the **Library folder** Setting (`config.cpp_lib_dir`): when set,
 each lib is loaded as `<dir>/<name>`; when empty, the bare name is resolved via
 the loader search path (`LD_LIBRARY_PATH`). Not linked at build time; a missing
-library is silently ignored. Settings' **Load now** button calls
-`imageproc::load_missing` to load a library that wasn't loaded at startup
-**without a restart** — it only ever *adds* a library, never unloads one, so it
-can't dangle the `apply`/`destroy` pointers copied into live render/export
-instances (`CimApp::load_cpp_libs` then invalidates textures to re-render).
-Repointing an *already-loaded* operator at a different folder still needs a
-restart. The operators are **heavy, size-dependent
+library is silently ignored. Changing the folder in Settings **auto-loads**
+without a restart: `update` notices `cpp_lib_dir` changed and calls
+`CimApp::load_cpp_libs` → `imageproc::load_missing`, which only ever *adds* a
+not-yet-loaded library, never unloads one, so it can't dangle the
+`apply`/`destroy` pointers copied into live render/export instances (it then
+invalidates textures to re-render when something newly loads). Repointing an
+*already-loaded* operator at a different folder still needs a restart. The operators are **heavy, size-dependent
 C++ objects**, so the C ABI is a **create/apply/destroy lifecycle** per operator
 (`cim_<op>_create(w,h)` → opaque handle, `cim_<op>_apply(handle, data, len)` on a
 **single-channel 16-bit** buffer `len == width*height`, `cim_<op>_destroy`).
@@ -616,8 +616,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 `Config { max_columns, ui_scale, cache_budget_mb, decode_threads, cursor_dot,
 cpp_lib_dir, keybindings }` (`cpp_lib_dir` = the folder holding the proprietary
-operator libraries, loaded at startup — §7 — with a Browse/paste field, a
-found/not-found indicator, and a **Load now** button (runtime first-load) in
+operator libraries, loaded at startup and auto-loaded when the folder changes
+— §7 — with a Browse/paste field plus found/not-found and loaded indicators in
 Settings; empty = resolve by name via `LD_LIBRARY_PATH`. `decode_threads` = the background decode pool size, `0` =
 auto — §5),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows

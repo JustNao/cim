@@ -415,6 +415,10 @@ pub struct CimApp {
     /// Thread count the live `decoder` pool was built with. When the resolved
     /// setting changes, the pool is rebuilt to match (`update`).
     decode_threads_active: usize,
+    /// The `cpp_lib_dir` value the operator libraries were last (auto-)loaded
+    /// from. When the setting changes, `update` retries loading from the new
+    /// folder (`load_cpp_libs`) so a corrected path applies without a restart.
+    cpp_dir_active: String,
     inflight: HashSet<(u64, usize)>,
     /// Off-thread tone renderer for panes using the heavy operators (LUT_ALPHA /
     /// details); `render_inflight` holds the pane ids with a render in flight so
@@ -488,6 +492,7 @@ impl CimApp {
         // disabled and never blocks startup.
         let cpp_dir = cpp_lib_dir(&config);
         crate::imageproc::init(cpp_dir.as_deref());
+        let cpp_dir_active = config.cpp_lib_dir.clone();
         let mut app = Self {
             saved_config: config.clone(),
             config,
@@ -570,6 +575,7 @@ impl CimApp {
             decoder: BackgroundDecoder::new(threads),
             auto_decode_threads,
             decode_threads_active: threads,
+            cpp_dir_active,
             inflight: HashSet::new(),
             // One render worker: serialises the proprietary operators (whose
             // thread-safety we can't assume) while still keeping all of that work
@@ -1388,27 +1394,35 @@ impl CimApp {
     }
 
     /// Load any not-yet-loaded proprietary operator library from the configured
-    /// folder, without a restart, and re-render every pane so newly available
-    /// operators take effect. Safe at runtime: `imageproc::load_missing` never
-    /// *unloads* a library, so it can't dangle the function pointers held by live
-    /// render/export instances — panes that had the operator disabled simply built
-    /// no instances, and re-rendering now creates fresh ones from the new library.
-    /// Returns a short status message for the toolbar. (Repointing an
-    /// already-loaded operator at a different folder still needs a restart.)
-    pub(super) fn load_cpp_libs(&mut self) -> String {
+    /// folder, without a restart; when that makes one newly available, re-render
+    /// every pane so it takes effect and note it in the toolbar. Safe at runtime:
+    /// `imageproc::load_missing` never *unloads* a library, so it can't dangle the
+    /// function pointers held by live render/export instances — panes that had the
+    /// operator disabled simply built no instances, and re-rendering now creates
+    /// fresh ones from the new library. A no-op when nothing new loads, so it's
+    /// cheap to call on every folder change. (Repointing an already-loaded operator
+    /// at a different folder still needs a restart.)
+    pub(super) fn load_cpp_libs(&mut self) {
+        let before = (
+            crate::imageproc::lut_alpha_available(),
+            crate::imageproc::details_available(),
+        );
         let dir = cpp_lib_dir(&self.config);
-        let (lut, details) = crate::imageproc::load_missing(dir.as_deref());
+        let after = crate::imageproc::load_missing(dir.as_deref());
+        if after == before {
+            return; // nothing new loaded — don't thrash re-renders
+        }
         for p in &mut self.panes {
             p.tex = None;
             p.pending = None;
             p.overlay_tex = None;
         }
-        match (lut, details) {
+        self.status = match after {
             (true, true) => "Operator libraries loaded".into(),
-            (false, false) => "No operator libraries could be loaded".into(),
-            (true, false) => "LUT_ALPHA loaded (Details unavailable)".into(),
-            (false, true) => "Details loaded (LUT_ALPHA unavailable)".into(),
-        }
+            (true, false) => "LUT_ALPHA operator loaded".into(),
+            (false, true) => "Details operator loaded".into(),
+            (false, false) => return,
+        };
     }
 
     /// Invalidate the textures of every tone-synced pane (after the shared
@@ -1667,6 +1681,16 @@ impl eframe::App for CimApp {
             self.decoder = BackgroundDecoder::new(want_threads);
             self.inflight.clear();
             self.decode_threads_active = want_threads;
+        }
+
+        // Auto-load the proprietary operator libraries when the configured folder
+        // changes (edited/pasted/Browsed in Settings), so a corrected path applies
+        // without a restart. `load_cpp_libs` only *adds* a not-yet-loaded library
+        // (never unloads one — safe against live render/export instances) and no-ops
+        // when nothing new loads, so retrying per distinct path value is harmless.
+        if self.config.cpp_lib_dir != self.cpp_dir_active {
+            self.cpp_dir_active = self.config.cpp_lib_dir.clone();
+            self.load_cpp_libs();
         }
 
         self.pump_decoder();
