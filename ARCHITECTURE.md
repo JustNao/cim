@@ -381,6 +381,13 @@ frame in step, staged the same way.
 `slot_a`/`slot_b` at `ab_split` (draggable divider), pan/zoom acting on the side
 under the cursor.
 
+**Wheel:** over a pane the wheel **zooms** (about the cursor), but with **Ctrl held it
+scrubs the sequence** a frame at a time (up = next, down = previous) — routed through
+`apply_action(NextFrame/PrevFrame)`, so it steps the shared timeline exactly like the
+next/prev-frame keys (same frontier-hold / wrap-at-end). Reads `raw_scroll_delta` (always
+populated even under Ctrl); egui's own Ctrl-scroll UI-zoom is never applied (the app pins
+`zoom_factor` to `config.ui_scale` each frame). Works in Grid/Single and both A/B sides.
+
 Per pane: `image_area(cell)` (between header and `FOOTER_H`), `draw_header` (buttons,
 index, name, `frame/known(+)`, `in mem`, sync markers, close ×; the **filename is
 dropped** when the header is too narrow to fit the full title — measured against the

@@ -236,11 +236,19 @@ impl CimApp {
         if resp.hovered() {
             let scroll = wheel_delta(ctx);
             if scroll != 0.0 {
-                let anchor = ctx
-                    .input(|i| i.pointer.hover_pos())
-                    .unwrap_or(img_area.center());
-                let speed = zoom_speed(ctx);
-                self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
+                if ctrl {
+                    // Ctrl + wheel scrubs the sequence a frame at a time (up =
+                    // next, down = previous) instead of zooming — same stepping as
+                    // the next/prev-frame keys (advances the shared timeline).
+                    let step = if scroll > 0.0 { Action::NextFrame } else { Action::PrevFrame };
+                    self.apply_action(step, ctx);
+                } else {
+                    let anchor = ctx
+                        .input(|i| i.pointer.hover_pos())
+                        .unwrap_or(img_area.center());
+                    let speed = zoom_speed(ctx);
+                    self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
+                }
             }
         }
         // Alt + primary drag rotates the pane about its image centre (à la
@@ -724,7 +732,12 @@ impl CimApp {
             if resp.hovered() {
                 let scroll = wheel_delta(ctx);
                 if scroll != 0.0 {
-                    if let Some(pos) = ptr {
+                    if ctx.input(|i| i.modifiers.ctrl) {
+                        // Ctrl + wheel scrubs the sequence (up = next, down = prev)
+                        // instead of zooming — matches the grid/single pane path.
+                        let step = if scroll > 0.0 { Action::NextFrame } else { Action::PrevFrame };
+                        self.apply_action(step, ctx);
+                    } else if let Some(pos) = ptr {
                         let side = if pos.x < split_x { a } else { b };
                         let speed = zoom_speed(ctx);
                         self.view_mut(side).zoom_at((scroll * speed).exp(), pos, img);
