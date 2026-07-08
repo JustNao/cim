@@ -61,7 +61,12 @@ impl CimApp {
                 // image-space length in pixels).
                 let length = (lp.b - lp.a).length();
                 let npts = (length.round() as usize + 1).clamp(2, 4096);
-                let series: Vec<(String, Color32, Vec<f32>)> = (0..self.panes.len())
+                // Only the shown panes plot a curve; hidden ones (Hide) are
+                // skipped. Colour stays keyed on the pane index so a media keeps
+                // its colour regardless of which others are hidden.
+                let series: Vec<(String, Color32, Vec<f32>)> = self
+                    .visible_indices()
+                    .into_iter()
                     .map(|i| {
                         (
                             self.panes[i].media.name().to_string(),

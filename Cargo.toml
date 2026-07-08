@@ -17,6 +17,13 @@ anyhow = "1"
 # (a .so/.dll built separately from cpp/, loaded on demand — see src/imageproc.rs).
 libloading = "0.8"
 
+# Embed the Windows .exe icon at build time (see build.rs). `image` decodes the
+# PNG in assets/ into the .ico the resource compiler wants; `winresource` invokes
+# the Windows SDK resource compiler. Both are Windows-only build-time deps.
+[target.'cfg(windows)'.build-dependencies]
+image = "0.25"
+winresource = "0.1"
+
 # A fast, non-optimized-but-usable dev build; bump images decode speed a bit.
 [profile.dev]
 opt-level = 1

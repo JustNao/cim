@@ -28,6 +28,11 @@
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
   drag-handle grip — render instead of tofu).
+- **`.exe` icon (`build.rs`):** on Windows the same `assets/icon.png` is re-encoded
+  to a 256×256 `.ico` in `OUT_DIR` and embedded as a Windows resource via
+  `winresource` (needs the SDK resource compiler `rc.exe`), so the file/taskbar icon
+  matches the runtime window icon. No-op on other targets; Windows-only build-deps
+  (`image`, `winresource`).
 
 ---
 
@@ -457,8 +462,10 @@ near the body → move the whole line (`Body`), else start a fresh line (`New`);
 same button. The line and its endpoint handles paint in **amber** (`LINE_COL`). The
 **Line profile** tab (`app/profile.rs::draw_profile`) is a window that shows **only while a
 line exists** — drawing one opens it, clearing it (or its **Clear line** button) closes it
-(`update` gates the draw on `line_profile.is_some()`); it plots each media's pixel
-**intensity** (`FrameData::intensity_at` — mono
+(`update` gates the draw on `line_profile.is_some()`); it plots each **shown** media's
+pixel **intensity** (only `visible_indices` — a Hidden pane draws no curve and no
+legend entry; colour stays keyed on pane index so a media keeps its colour regardless
+of which others are hidden) (`FrameData::intensity_at` — mono
 value or mean of R/G/B) sampled along the line (`line_samples`, one point per line pixel,
 `NaN`/break where a pane's frame doesn't cover it): **position on the x axis, value on the
 y axis**, default range the samples' **min/max**. One coloured polyline per media
