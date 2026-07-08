@@ -28,7 +28,7 @@ use eframe::egui::{
 };
 
 use crate::cli;
-use crate::decoder::BackgroundDecoder;
+use crate::decoder::{BackgroundDecoder, Decoded};
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell};
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Config, ContrastMode, ToneOptions};

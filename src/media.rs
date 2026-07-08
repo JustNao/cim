@@ -998,10 +998,16 @@ pub enum DecodeReq {
     /// (pane id, `file`). A lone `TiffSeq` uses `file = 0` and `page = frame`;
     /// a `ConcatSeq` uses `file` to pick which TIFF in the run and `page` the
     /// page within it.
+    ///
+    /// `probe` = a **metadata-only** frontier probe: seek to the page and read
+    /// just whether it exists (its IFD), without decoding pixels. Used to
+    /// fast-forward lazy length discovery during a seek so the intervening pages
+    /// aren't decompressed — only the landed target frame is.
     Tiff {
         file: usize,
         page: usize,
         path: PathBuf,
+        probe: bool,
     },
     /// Decode this standalone file — one frame of a numbered still sequence.
     File(PathBuf),
@@ -1059,6 +1065,17 @@ impl SeqCache {
         } else if idx == self.cache.len() {
             self.resident_bytes += frame.byte_len();
             self.cache.push(Some(frame));
+            self.last_used.push(0);
+        }
+    }
+
+    /// Grow the known length by one **empty** (non-resident) slot — how a
+    /// metadata-only frontier probe records that a page exists without decoding
+    /// it. Only advances at the frontier (`idx == len`); anything else is
+    /// ignored (a real decode fills interior slots via `insert`).
+    fn note_len(&mut self, idx: usize) {
+        if idx == self.cache.len() {
+            self.cache.push(None);
             self.last_used.push(0);
         }
     }
@@ -1218,15 +1235,31 @@ impl Media {
     /// still sequence decodes that frame's own file; a concatenation maps the
     /// global frame to (file, page) — or, at the frontier, probes the next page.
     pub fn decode_job(&self, idx: usize) -> Option<DecodeReq> {
+        self.job(idx, false)
+    }
+
+    /// A **metadata-only** frontier probe for frame `idx` (TIFF-backed media
+    /// only): confirms the page exists without decoding its pixels, so a seek
+    /// can pass it cheaply. `None` for stills / numbered still runs (a still
+    /// run's length is known up front, so it never needs probing).
+    pub fn probe_job(&self, idx: usize) -> Option<DecodeReq> {
+        self.job(idx, true)
+    }
+
+    fn job(&self, idx: usize, probe: bool) -> Option<DecodeReq> {
         match self {
             Media::Still(_) => None,
             Media::TiffSeq(t) => Some(DecodeReq::Tiff {
                 file: 0,
                 page: idx,
                 path: t.path.clone(),
+                probe,
             }),
-            Media::FileSeq(f) => f.paths.get(idx).cloned().map(DecodeReq::File),
-            Media::ConcatSeq(c) => c.decode_job(idx),
+            // A numbered still run knows its length up front, so it is only ever
+            // decoded, never probed.
+            Media::FileSeq(f) if !probe => f.paths.get(idx).cloned().map(DecodeReq::File),
+            Media::FileSeq(_) => None,
+            Media::ConcatSeq(c) => c.job(idx, probe),
         }
     }
 
@@ -1303,6 +1336,18 @@ impl Media {
         }
     }
 
+    /// A **metadata-only** frontier probe confirmed a page exists at `idx`
+    /// without decoding it: grow the known length by one empty (non-resident)
+    /// slot so a seek can pass it. The frame decodes on demand when actually
+    /// shown. Only advances at the frontier (`idx == len`).
+    pub fn note_frontier(&mut self, idx: usize) {
+        match self {
+            Media::TiffSeq(t) => t.frames.note_len(idx),
+            Media::ConcatSeq(c) => c.note_frontier(idx),
+            _ => {}
+        }
+    }
+
     pub fn resident_count(&self) -> usize {
         match self {
             Media::Still(_) => 1,
@@ -1323,10 +1368,10 @@ impl Media {
 }
 
 impl ConcatSeq {
-    /// Map global frame `idx` to a decode request. Frames already in `map`
-    /// resolve directly; the frontier (`idx == map.len()`) probes the next
-    /// (file, page) to discover.
-    fn decode_job(&self, idx: usize) -> Option<DecodeReq> {
+    /// Map global frame `idx` to a decode (or, with `probe`, a metadata-only)
+    /// request. Frames already in `map` resolve directly; the frontier
+    /// (`idx == map.len()`) probes the next (file, page) to discover.
+    fn job(&self, idx: usize, probe: bool) -> Option<DecodeReq> {
         let (file, page) = if idx < self.map.len() {
             self.map[idx]
         } else if idx == self.map.len() {
@@ -1338,17 +1383,32 @@ impl ConcatSeq {
             file,
             page,
             path: path.clone(),
+            probe,
         })
     }
 
     fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
         if idx == self.frames.len() {
-            // Frontier confirmed: record where this global frame lives and step
-            // the probe to the next page of the same file.
-            self.map.push((self.disc_file, self.disc_page));
-            self.disc_page += 1;
+            self.advance_map();
         }
         self.frames.insert(idx, frame);
+    }
+
+    /// A metadata-only frontier probe confirmed the next global frame exists
+    /// (still within the current file): record where it lives and grow the
+    /// known length by one empty slot, without decoding its pixels.
+    fn note_frontier(&mut self, idx: usize) {
+        if idx == self.frames.len() {
+            self.advance_map();
+            self.frames.note_len(idx);
+        }
+    }
+
+    /// Frontier confirmed: record where this global frame lives and step the
+    /// probe to the next page of the same file.
+    fn advance_map(&mut self) {
+        self.map.push((self.disc_file, self.disc_page));
+        self.disc_page += 1;
     }
 
     /// The current file has no more pages: continue the timeline at the start of
@@ -1548,6 +1608,15 @@ impl SeqReader {
         }
         decode_current(&mut self.dec).map(Some)
     }
+
+    /// Metadata-only frontier probe: seek to page `idx` and confirm it exists by
+    /// reading its IFD, **without** decoding pixels. `Ok(true)` the page is
+    /// there, `Ok(false)` it is past the last page. `seek_to_image` walks the
+    /// IFD chain (cheap once offsets are cached) but never touches the strip
+    /// data, so fast-forwarding a seek this way skips the per-page decompress.
+    pub fn probe(&mut self, idx: usize) -> Result<bool> {
+        Ok(self.dec.seek_to_image(idx).is_ok())
+    }
 }
 
 fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
@@ -1681,6 +1750,49 @@ mod tests {
         assert!(pages >= 1, "at least one page must decode");
         // Probing exactly at the end reports None, not an error.
         assert!(reader.decode(pages).unwrap().is_none());
+    }
+
+    /// The metadata-only frontier probe (`SeqReader::probe` + `Media::note_frontier`)
+    /// discovers exactly the same length as a decode walk, but **without** making
+    /// any frame resident — this is the seek fast-path that skips decompressing
+    /// every page it rides past. `probe` reports the page's existence; the real
+    /// length lands identically to `tiff_length_is_discovered_lazily`.
+    #[test]
+    fn probe_discovers_length_without_decoding() {
+        let path = Path::new("examples/alpes_noisy_a.tif");
+        if !path.exists() {
+            return;
+        }
+        let mut m = load(path).expect("open tiff");
+        let mut reader = SeqReader::open(path).expect("open");
+
+        // Walk the frontier via metadata-only probes, exactly as `drive_seek`
+        // does, growing the known length one empty slot at a time.
+        let mut guard = 0;
+        while !m.at_end() {
+            guard += 1;
+            assert!(guard < 10_000, "probe discovery should terminate");
+            let known = m.frame_count();
+            if reader.probe(known).expect("probe") {
+                m.note_frontier(known);
+            } else {
+                m.frontier_ended();
+            }
+        }
+
+        // Compare against the true page count from a decode walk.
+        let mut dec = SeqReader::open(path).expect("open");
+        let mut pages = 0;
+        while dec.decode(pages).expect("decode").is_some() {
+            pages += 1;
+        }
+        assert_eq!(m.frame_count(), pages, "probe length == decode length");
+        assert_eq!(
+            m.resident_count(),
+            0,
+            "probing must not decode/keep any frame resident"
+        );
+        assert_eq!(m.resident_bytes(), 0);
     }
 
     /// A numbered still run opens as one `FileSeq` media whose length is the

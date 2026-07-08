@@ -28,9 +28,19 @@ struct Job {
 pub struct Done {
     pub id: u64,
     pub frame: usize,
-    /// `Ok(Some)` decoded frame, `Ok(None)` the page was past the sequence end
-    /// (a frontier probe that found nothing), `Err` a genuine decode failure.
-    pub result: Result<Option<Arc<FrameData>>>,
+    pub result: Result<Decoded>,
+}
+
+/// The outcome of a job.
+pub enum Decoded {
+    /// A fully decoded frame (a normal decode).
+    Frame(Arc<FrameData>),
+    /// A metadata-only frontier probe confirmed the page exists but did not
+    /// decode it — the caller grows the known length without a resident frame.
+    Exists,
+    /// The page was past the sequence end (a frontier probe/decode found
+    /// nothing): a TIFF's real end, or a concatenation rolls to the next file.
+    End,
 }
 
 /// Persistent readers, keyed by `(pane id, file index)`. A lone TIFF uses file
@@ -65,10 +75,15 @@ impl BackgroundDecoder {
                 };
 
                 let result = match &job.req {
-                    // Multi-page TIFF: decode `page` through the file's persistent
-                    // reader (keyed by pane id + file) so seeks reuse cached IFD
-                    // offsets.
-                    DecodeReq::Tiff { file, page, path } => {
+                    // Multi-page TIFF: decode (or, when `probe`, metadata-only
+                    // check) `page` through the file's persistent reader (keyed
+                    // by pane id + file) so seeks reuse cached IFD offsets.
+                    DecodeReq::Tiff {
+                        file,
+                        page,
+                        path,
+                        probe,
+                    } => {
                         let key = (job.id, *file);
                         let reader = {
                             let mut map = readers.lock().unwrap();
@@ -82,14 +97,24 @@ impl BackgroundDecoder {
                             }
                         };
                         match reader {
-                            Ok(r) => r.lock().unwrap().decode(*page).map(|f| f.map(Arc::new)),
+                            Ok(r) if *probe => r.lock().unwrap().probe(*page).map(|exists| {
+                                if exists {
+                                    Decoded::Exists
+                                } else {
+                                    Decoded::End
+                                }
+                            }),
+                            Ok(r) => r.lock().unwrap().decode(*page).map(|f| match f {
+                                Some(f) => Decoded::Frame(Arc::new(f)),
+                                None => Decoded::End,
+                            }),
                             Err(e) => Err(e),
                         }
                     }
                     // Numbered still sequence: each frame is its own file, so
                     // decode it standalone (no persistent reader to keep warm).
                     DecodeReq::File(path) => {
-                        media::decode_file(path).map(|f| Some(Arc::new(f)))
+                        media::decode_file(path).map(|f| Decoded::Frame(Arc::new(f)))
                     }
                 };
                 if done_tx

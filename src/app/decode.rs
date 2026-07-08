@@ -12,14 +12,21 @@ impl CimApp {
         for d in self.decoder.drain() {
             self.inflight.remove(&(d.id, d.frame));
             match d.result {
-                Ok(Some(frame)) => {
+                Ok(Decoded::Frame(frame)) => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
                         p.media.touch(d.frame, clock); // freshly decoded → most recent
                         p.error = None; // a good frame clears any stale error
                     }
                 }
-                Ok(None) => {
+                Ok(Decoded::Exists) => {
+                    // Metadata-only probe confirmed a page without decoding it:
+                    // grow the known length by one empty slot (the seek fast-path).
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
+                        p.media.note_frontier(d.frame);
+                    }
+                }
+                Ok(Decoded::End) => {
                     // Frontier probe found no page here: a TIFF has reached its
                     // end; a concatenation rolls over to the next file.
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
@@ -41,6 +48,23 @@ impl CimApp {
             return;
         }
         if let Some(req) = self.panes[idx].media.decode_job(frame) {
+            self.decoder.request(id, frame, req);
+            self.inflight.insert((id, frame));
+        }
+    }
+
+    /// Like `request`, but a **metadata-only** frontier probe: confirms the page
+    /// exists without decoding its pixels. Used by `drive_seek` to fast-forward
+    /// length discovery during a seek so the intervening pages aren't
+    /// decompressed — only the landed target frame is. Shares the `inflight`
+    /// dedupe set with `request`; the two never contend for the same (id, frame)
+    /// because a probe only targets the undiscovered frontier.
+    pub(super) fn probe(&mut self, idx: usize, frame: usize) {
+        let id = self.panes[idx].id;
+        if self.inflight.contains(&(id, frame)) {
+            return;
+        }
+        if let Some(req) = self.panes[idx].media.probe_job(frame) {
             self.decoder.request(id, frame, req);
             self.inflight.insert((id, frame));
         }
@@ -107,10 +131,15 @@ impl CimApp {
             self.shared_frame = known - 1;
             self.pending_seek = None;
         } else {
-            // Ride the frontier and probe the next page; `ensure_lookahead`
-            // (triggered by this frame position) issues the actual request.
+            // Ride the frontier with a metadata-only probe: confirm the next
+            // page exists (growing the known length) without decoding it, so a
+            // far seek walks IFD headers instead of decompressing every frame it
+            // passes. Only the target lands as a real decode, once discovery
+            // reaches it (`known > target`, above). `ensure_lookahead` is
+            // suppressed during a `pending_seek` so it can't fire a full decode
+            // of the same frontier page and defeat this.
             self.shared_frame = known - 1;
-            self.request(i, known);
+            self.probe(i, known);
         }
     }
 
@@ -121,7 +150,11 @@ impl CimApp {
     /// otherwise keep decoding its frontier and starve the shown pane, making the
     /// UI laggy even when a single media is displayed.
     pub(super) fn ensure_lookahead(&mut self) {
-        if self.panes.is_empty() {
+        // During a seek, frontier discovery is `drive_seek`'s job — via a
+        // metadata-only probe. Skip lookahead so it can't issue a *full* decode
+        // of the frontier page (the panes are frozen and nothing is browsing
+        // anyway); it resumes the update after the seek lands.
+        if self.panes.is_empty() || self.pending_seek.is_some() {
             return;
         }
         // The control pane drives the shared timeline/scrubber even when it isn't

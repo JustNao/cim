@@ -129,20 +129,29 @@ reader warm avoids that. `load(path)` dispatches by extension (TIFF page-0 vs th
 
 Opening a TIFF **never walks all IFDs** (long sequences would stall; pages may
 differ in resolution). A fresh `TiffSeq` starts at length 1, `at_end = false`;
-decoding past the end returns `Ok(None)` → `frontier_ended()`, and `insert(idx ==
+decoding past the end returns `Decoded::End` → `frontier_ended()`, and `insert(idx ==
 len)` grows length by one.
 
 - `ensure_lookahead` keeps **one page beyond the shown frame** discovered while
   browsing; playback **holds at the frontier** rather than wrapping until `at_end`.
 - Headers show `N+` while more frames may exist.
-- **Seeking past the frontier** (`--frame N` at launch, or **typing an index** in the
-  frame bar's readout — a `TextEdit` committing on Enter via `seek_to`): `pending_seek`
-  holds the target; `drive_seek` rides the frontier probing one page/update until the
-  length passes `N` (or the real end), then snaps. While a `pending_seek` is set,
-  `refresh_textures` **freezes every pane** (keeps the last committed texture) so the
-  intervening frames the probe rides through are never rendered — the discovery runs as
-  fast as it can and only the target frame is drawn. A within-length target is instant
-  (`seek_to` jumps directly). Any manual navigation clears it.
+- **Seeking past the frontier** (`--frame N` at launch — so exported view commands
+  restore instantly — or **typing an index** in the frame bar's readout — a `TextEdit`
+  committing on Enter via `seek_to`): `pending_seek` holds the target; `drive_seek`
+  rides the frontier one page/update until the length passes `N` (or the real end),
+  then snaps. **The intervening pages are discovered by a metadata-only probe, not
+  decoded:** `drive_seek` calls `probe` (not `request`), which issues a `DecodeReq::Tiff
+  { probe: true }`; the worker runs `SeqReader::probe` = `seek_to_image` (walk the IFD
+  chain, cheap once offsets are cached) + report existence, **without `read_image`** —
+  so a far seek walks headers instead of decompressing every frame it passes. A probe
+  hit (`Decoded::Exists`) grows the known length by one **empty** (non-resident) slot
+  via `note_frontier`/`SeqCache::note_len`; a miss (`Decoded::End`) ends the frontier.
+  Only the landed target frame is actually decoded (by `refresh_textures` once the seek
+  clears). `ensure_lookahead` is **suppressed while `pending_seek` is set** so it can't
+  fire a full decode of the same frontier page and defeat the probe. `refresh_textures`
+  also **freezes every pane** (keeps the last committed texture) so the intervening
+  frames are never rendered. A within-length target is instant (`seek_to` jumps
+  directly). Any manual navigation clears it.
 - **Per-frame resolution:** `disp_size(i)` uses the resident frame's own size
   (page-0 fallback) so drawing/readout don't stretch or go out of bounds.
 - **`ConcatSeq`** reuses all of this: a frontier miss rolls to the next file's
@@ -168,10 +177,12 @@ len)` grows length by one.
   to decode. Different files decode in parallel; pages of one file serialise.
   `forget(id)` drops all of a pane's readers. A `File` job has no persistent reader.
 - `request` enqueues; `drain()` collects finished `Done` non-blocking each update.
-  `Done.result: Result<Option<Arc<FrameData>>>` — `Ok(Some)` frame, `Ok(None)`
-  past-end probe, `Err` failure.
-- App side (`app/decode.rs`): `inflight: HashSet<(id, frame)>` dedupes; `pump_decoder`
-  drains (insert + `touch`, or `frontier_ended`, or set pane `error`).
+  `Done.result: Result<Decoded>` — `Decoded::Frame` a decoded frame, `Decoded::Exists`
+  a **metadata-only** frontier probe hit (`DecodeReq::Tiff { probe: true }`, page exists
+  but not decoded — §4), `Decoded::End` past-end, `Err` failure.
+- App side (`app/decode.rs`): `inflight: HashSet<(id, frame)>` dedupes both `request`
+  and `probe`; `pump_decoder` drains (insert + `touch`, or `note_frontier` for a probe
+  hit, or `frontier_ended`, or set pane `error`).
 - **Playback prefetch (`prefetch_playback`).** While playing, each on-screen pane (plus
   the control pane) pre-decodes the next `PLAY_PREFETCH` (3) frames along the loop window
   (same walk as `advance_playback`; wraps when looping), so playback overlaps decode with
