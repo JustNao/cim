@@ -501,7 +501,7 @@ impl CimApp {
             shared_view: ViewTransform::default(),
             shared_frame: 0,
             play_prefetch: None,
-            shared_contrast: ContrastMode::LinearClip,
+            shared_contrast: ContrastMode::Linear,
             shared_tone: ToneOptions::default(),
             shared_details: false,
             shared_rotation: 0.0,
@@ -638,12 +638,25 @@ impl CimApp {
             for (p, t) in self.panes.iter_mut().zip(tones) {
                 p.contrast = match t {
                     cli::Tone::Linear => ContrastMode::Linear,
-                    cli::Tone::LinearClip => ContrastMode::LinearClip,
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
                 };
                 p.sync_tone = false;
                 // Restored tone re-renders via `tone_sig`; no `tex` nulling (it
                 // would flash black for a heavy LUT_ALPHA/details pane).
+            }
+        }
+        // Per-pane Linear clip (`--clip`): a toggle + percentile. Like --tone this
+        // is per-pane, so unsync the panes it sets.
+        if let Some(clips) = &vs.clips {
+            for (p, c) in self.panes.iter_mut().zip(clips) {
+                match c {
+                    cli::ClipSpec::Off => p.tone.clip.enabled = false,
+                    cli::ClipSpec::On(pct) => {
+                        p.tone.clip.enabled = true;
+                        p.tone.clip.percent = *pct;
+                    }
+                }
+                p.sync_tone = false;
             }
         }
         if let Some(details) = &vs.details {
@@ -668,6 +681,7 @@ impl CimApp {
             if let Some(k) = sync.iter().position(|&s| s) {
                 if let Some(p) = self.panes.get(k) {
                     self.shared_contrast = p.contrast;
+                    self.shared_tone = p.tone;
                     self.shared_details = p.details;
                     self.shared_rotation = p.rotation;
                 }
@@ -747,25 +761,40 @@ impl CimApp {
         }
         let n = self.panes.len();
         if n > 0 {
-            // Per-pane tone (effective — shared when tone-synced). Omit when every
-            // pane sits at its depth-appropriate default (Linear+Clip for >8-bit,
-            // Linear otherwise).
+            // Per-pane tone mode (effective — shared when tone-synced). The mode
+            // is Linear for every pane unless LUT_ALPHA is chosen, so omit `--tone`
+            // when no pane uses LUT_ALPHA.
             let tones: Vec<&str> = (0..n)
                 .map(|i| match self.contrast_of(i) {
                     ContrastMode::Linear => "linear",
-                    ContrastMode::LinearClip => "linearclip",
                     ContrastMode::LutAlpha => "lutalpha",
                 })
                 .collect();
-            let tone_default = |i: usize| {
+            if (0..n).any(|i| tones[i] != "linear") {
+                parts.push(format!("--tone {}", tones.join(",")));
+            }
+            // Per-pane Linear clip (effective): `off` or the per-tail percentile.
+            // Omit when every pane is at its depth-appropriate default (on at
+            // 0.01% for >8-bit, off for 8-bit).
+            let clips: Vec<String> = (0..n)
+                .map(|i| {
+                    let clip = self.tone_of(i).clip;
+                    if clip.enabled {
+                        format!("{}", (clip.percent * 1000.0).round() / 1000.0)
+                    } else {
+                        "off".into()
+                    }
+                })
+                .collect();
+            let clip_default = |i: usize| -> &str {
                 if self.panes[i].media.hi_depth() {
-                    "linearclip"
+                    "0.01"
                 } else {
-                    "linear"
+                    "off"
                 }
             };
-            if (0..n).any(|i| tones[i] != tone_default(i)) {
-                parts.push(format!("--tone {}", tones.join(",")));
+            if (0..n).any(|i| clips[i].as_str() != clip_default(i)) {
+                parts.push(format!("--clip {}", clips.join(",")));
             }
             // Details / show / Transformations-sync — omit when all at default
             // (details off, all visible, all synced).
@@ -924,14 +953,12 @@ impl CimApp {
     fn add_pane(&mut self, media: Media, source: Source) {
         let id = self.next_id;
         self.next_id += 1;
-        // >8-bit sources need auto-contrast to be legible; 8-bit displays 1:1,
-        // so it defaults to a plain identity map.
-        let contrast = if media.hi_depth() {
-            ContrastMode::LinearClip
-        } else {
-            ContrastMode::Linear
-        };
-        let tone = ToneOptions::default();
+        // Always the built-in Linear map; the clip toggle carries the auto-
+        // contrast. >8-bit sources need it to be legible, so clip defaults on;
+        // 8-bit displays 1:1, so clip defaults off (a plain identity map).
+        let contrast = ContrastMode::Linear;
+        let mut tone = ToneOptions::default();
+        tone.clip.enabled = media.hi_depth();
         // Transformations sync is on by default; the first opened media seeds the
         // shared set (so its depth-appropriate tone becomes the group default).
         if self.panes.is_empty() {
@@ -1186,11 +1213,9 @@ impl CimApp {
                 self.panes[idx].tex = None;
                 self.panes[idx].pending = None; // drop any frame staged from old inputs
                 self.panes[idx].hist = None; // recompute for the new result
-                self.panes[idx].contrast = if hi {
-                    ContrastMode::LinearClip
-                } else {
-                    ContrastMode::Linear
-                };
+                self.panes[idx].contrast = ContrastMode::Linear;
+                self.panes[idx].tone.clip.enabled = hi; // clip >8-bit results
+
                 if let Some(c) = self.panes[idx].compute.as_mut() {
                     c.computed = true; // switch from the config form to the result
                 }
@@ -1978,20 +2003,28 @@ fn draw_tone_options(
     tone: &mut ToneOptions,
 ) {
     match mode {
-        ContrastMode::LinearClip => {
-            ui.label("Clip %");
-            ui.add(
-                egui::DragValue::new(&mut tone.clip.percent)
-                    .speed(0.005)
-                    .range(0.0..=49.0)
-                    .max_decimals(3),
-            )
-            .on_hover_text("Percentile clipped at each tail before the stretch");
+        ContrastMode::Linear => {
+            // Clip toggle + its per-tail percentile (greyed out when the toggle
+            // is off). On for >8-bit by default, off for 8-bit (set in add_pane).
+            ui.label("Clip");
+            ui.horizontal(|ui| {
+                ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
+                    .on_hover_text("Clip a percentile off each tail before the stretch");
+                ui.add_enabled(
+                    tone.clip.enabled,
+                    egui::DragValue::new(&mut tone.clip.percent)
+                        .speed(0.005)
+                        .range(0.0..=49.0)
+                        .max_decimals(3)
+                        .suffix(" %"),
+                )
+                .on_hover_text("Percentile clipped at each tail before the stretch");
+            });
             ui.end_row();
         }
-        // LUT_ALPHA and plain Linear have no options — emit no row (no wasted
-        // space). Add a LUT_ALPHA knob here: one row + a field on `ToneOptions`.
-        ContrastMode::LutAlpha | ContrastMode::Linear => {}
+        // LUT_ALPHA has no options. Add a knob here: one row + a field on
+        // `ToneOptions`.
+        ContrastMode::LutAlpha => {}
     }
 }
 

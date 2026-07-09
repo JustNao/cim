@@ -40,6 +40,10 @@ pub struct ExportPane {
     pub view: ViewTransform,
     pub contrast: ContrastMode,
     pub details: bool,
+    /// Linear-clip state: `Some(percent)` clips that percentile off each tail,
+    /// `None` maps the full range. Snapshotted from the pane's tone (LUT_ALPHA
+    /// always `None` — it takes the full range and does its own contrast).
+    pub clip: Option<f32>,
     /// Display rotation in **radians**, about the image centre (0 = none). Applied
     /// when sampling so an exported pane matches the rotated live view.
     pub rotation: f32,
@@ -129,10 +133,12 @@ fn decode_source(
 }
 
 impl ExportPane {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: ViewTransform,
         contrast: ContrastMode,
         details: bool,
+        clip: Option<f32>,
         count: usize,
         sync_temporal: bool,
         own_frame: usize,
@@ -142,6 +148,7 @@ impl ExportPane {
             view,
             contrast,
             details,
+            clip,
             rotation: 0.0,
             count,
             sync_temporal,
@@ -232,18 +239,24 @@ impl ExportPane {
             return;
         };
         self.cur_size = frame.size;
-        // Built-in render (full range or 0.01% clip), then the same proprietary
-        // operators the live view applies, so an export matches what's on screen.
-        // The operators run on a single-channel 16-bit render and only for
-        // single-channel 16-bit frames with the library loaded (mirroring the live
-        // view); everything else is the plain 8-bit render.
+        // Built-in render, then the same proprietary operators the live view
+        // applies, so an export matches what's on screen. The Linear clip toggle +
+        // its per-tail percentile (`self.clip`) mirror the pane's tone; LUT_ALPHA
+        // takes the full range (`clip == None`). The operators run on a single-
+        // channel 16-bit render, only for single-channel 16-bit frames with the
+        // library loaded; everything else is the plain 8-bit render.
         let [w, h] = frame.size;
+        let (lo, hi) = match self.clip {
+            Some(pct) => frame.clip_bounds(pct),
+            None => frame.display_bounds(false),
+        };
         let use_ops = frame.is_op_input()
             && ((self.contrast == ContrastMode::LutAlpha
                 && crate::imageproc::lut_alpha_available())
                 || (self.details && crate::imageproc::details_available()));
         let rgba = if use_ops {
-            let mut gray = frame.render_gray_u16(self.contrast.clips());
+            let mut gray = Vec::new();
+            frame.render_into_gray_u16(lo, hi, &mut gray);
             let lut_alpha = self.contrast == ContrastMode::LutAlpha;
             self.ops.apply(&mut gray, w, h, lut_alpha, self.details);
             // Expand the processed grey back to 8-bit RGBA.
@@ -257,7 +270,9 @@ impl ExportPane {
             }
             out
         } else {
-            frame.render_rgba(self.contrast.clips())
+            let mut out = Vec::new();
+            frame.render_into(lo, hi, &mut out);
+            out
         };
         self.cur_display = Some(rgba);
         self.cur_idx = Some(idx);
@@ -596,6 +611,7 @@ mod tests {
             view,
             ContrastMode::Linear,
             false,
+            None, // no clip
             1,
             true,
             0,
@@ -641,6 +657,7 @@ mod tests {
             view,
             ContrastMode::Linear,
             false,
+            None, // no clip
             1,
             true,
             0,
@@ -692,6 +709,7 @@ mod tests {
             view,
             ContrastMode::Linear,
             false,
+            None, // no clip
             1,
             true,
             0,
@@ -734,6 +752,7 @@ mod tests {
             view,
             ContrastMode::Linear,
             false,
+            None, // no clip
             1,
             true,
             0,
@@ -791,6 +810,7 @@ mod tests {
             view,
             ContrastMode::Linear,
             false,
+            None, // no clip
             4,
             true,
             0,

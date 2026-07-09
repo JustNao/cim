@@ -525,15 +525,6 @@ impl FrameData {
         out
     }
 
-    /// The single-channel 16-bit render (for the proprietary operators), using
-    /// the same display bounds as [`render_rgba`]. Used by the export worker.
-    /// Only valid for single-channel frames (see [`is_op_input`]).
-    pub fn render_gray_u16(&self, clip: bool) -> Vec<u16> {
-        let (lo, hi) = self.display_bounds(clip);
-        let mut out = Vec::new();
-        self.render_into_gray_u16(lo, hi, &mut out);
-        out
-    }
 
     /// Render the 8-bit RGBA display buffer into `out` (resized to fit), mapping
     /// native samples through `[lo, hi] → [0, 255]`.

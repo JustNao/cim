@@ -109,10 +109,21 @@ impl CimApp {
     /// what's on screen.
     pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
         let p = &self.panes[idx];
+        // Snapshot the Linear clip: on only in Linear mode with the toggle set;
+        // LUT_ALPHA takes the full range (None).
+        let clip = {
+            let t = self.tone_of(idx);
+            if matches!(self.contrast_of(idx), ContrastMode::Linear) && t.clip.enabled {
+                Some(t.clip.percent)
+            } else {
+                None
+            }
+        };
         let mut pane = ExportPane::new(
             *self.view_ref(idx),
             self.contrast_of(idx),
             self.details_of(idx),
+            clip,
             p.media.frame_count(),
             p.sync_temporal,
             p.frame,

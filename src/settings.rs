@@ -184,45 +184,41 @@ impl Keybindings {
 
 /// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
 /// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
-/// `crate::imageproc`); the other two are built-in mappings.
+/// `crate::imageproc`); `Linear` is the built-in full-range map, with an
+/// optional percentile clip toggled per pane (see [`ClipOptions`]).
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum ContrastMode {
-    /// Full-range mapping with a 0.01% percentile clip (robust auto-contrast).
-    /// The default.
+    /// Full-range mapping (native range → [0, 255]). A per-tail percentile clip
+    /// is applied when [`ClipOptions::enabled`] is set (on by default for
+    /// >8-bit sources). The default mode.
     #[default]
-    LinearClip,
+    Linear,
     /// Proprietary LUT_ALPHA auto-contrast, applied to the rendered image.
     LutAlpha,
-    /// Straight full-range mapping (native range → [0, 255], no clip).
-    Linear,
 }
 
 impl ContrastMode {
     /// The modes in dropdown order.
-    pub const ORDER: [ContrastMode; 3] = [
-        ContrastMode::LinearClip,
-        ContrastMode::LutAlpha,
-        ContrastMode::Linear,
-    ];
+    pub const ORDER: [ContrastMode; 2] = [ContrastMode::Linear, ContrastMode::LutAlpha];
 
     /// Short label for the media-manager dropdown.
     pub fn label(self) -> &'static str {
         match self {
-            ContrastMode::LinearClip => "Linear + Clip",
-            ContrastMode::LutAlpha => "LUT_ALPHA",
             ContrastMode::Linear => "Linear",
+            ContrastMode::LutAlpha => "LUT_ALPHA",
         }
-    }
-
-    /// Whether the built-in render should apply the percentile clip.
-    pub fn clips(self) -> bool {
-        matches!(self, ContrastMode::LinearClip)
     }
 }
 
-/// Options for the **Linear + Clip** tone.
+/// The optional percentile clip on the **Linear** tone: a toggle plus the
+/// per-tail percentile. When `enabled`, the render clips `percent`% off each
+/// tail before the full-range stretch (robust auto-contrast); when off, it maps
+/// the plain native range. `enabled` defaults on (seeded per source depth in
+/// `add_pane`: on for >8-bit, off for 8-bit which displays 1:1).
 #[derive(Clone, Copy, PartialEq)]
 pub struct ClipOptions {
+    /// Whether the percentile clip is applied at all.
+    pub enabled: bool,
     /// Percentile clipped at *each* tail before the full-range stretch, in
     /// percent (0.01 = the robust default; 0 = plain min/max).
     pub percent: f32,
@@ -230,13 +226,13 @@ pub struct ClipOptions {
 
 impl Default for ClipOptions {
     fn default() -> Self {
-        Self { percent: 0.01 }
+        Self { enabled: true, percent: 0.01 }
     }
 }
 
-/// Per-pane tone options: one sub-struct per mode, so switching modes keeps each
-/// mode's own settings. Extend a mode by growing its sub-struct (see above).
-/// (LUT_ALPHA currently has no options; it runs the operator at full strength.)
+/// Per-pane tone options. Currently just the Linear clip; extend by growing this
+/// struct and reading it in `stage`/`tone_sig`/`view_command`/`export_pane`.
+/// (LUT_ALPHA has no options; it runs the operator at full strength.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,

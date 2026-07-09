@@ -46,8 +46,17 @@ pub enum ViewMode {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tone {
     Linear,
-    LinearClip,
     LutAlpha,
+}
+
+/// Per-pane Linear-clip state carried by `--clip`: the toggle plus, when on, the
+/// per-tail percentile. Mirrors the app's `ClipOptions`.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ClipSpec {
+    /// Clip disabled — the plain full-range map.
+    Off,
+    /// Clip enabled at the given per-tail percentile (percent).
+    On(f32),
 }
 
 /// A viewpoint captured from a running session and replayed on the next launch.
@@ -65,6 +74,8 @@ pub struct ViewState {
     pub ab: Option<(usize, usize, f32)>,
     /// Per-pane tone modes (`--tone`), in pane order.
     pub tones: Option<Vec<Tone>>,
+    /// Per-pane Linear clip state (`--clip`), in pane order.
+    pub clips: Option<Vec<ClipSpec>>,
     /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
@@ -148,6 +159,10 @@ pub fn parse(args: Vec<String>) -> Cli {
                 view.tones = next(i).and_then(parse_tones);
                 i += 1;
             }
+            "--clip" => {
+                view.clips = next(i).and_then(parse_clips);
+                i += 1;
+            }
             "--detail" => {
                 view.details = next(i).and_then(parse_details);
                 i += 1;
@@ -215,10 +230,23 @@ fn parse_uint_pair(s: &str) -> Option<(usize, usize)> {
 fn parse_tones(s: &str) -> Option<Vec<Tone>> {
     s.split(',')
         .map(|t| match t.trim().to_ascii_lowercase().as_str() {
-            "linear" => Some(Tone::Linear),
-            "linearclip" | "clip" => Some(Tone::LinearClip),
+            // `linearclip`/`clip` are deprecated aliases (the clip is now the
+            // separate `--clip` flag); accept them as plain Linear.
+            "linear" | "linearclip" | "clip" => Some(Tone::Linear),
             "lutalpha" | "lut_alpha" => Some(Tone::LutAlpha),
             _ => None,
+        })
+        .collect()
+}
+
+/// Parse a comma-separated per-pane Linear-clip list for `--clip`. Each token is
+/// `off` (clip disabled) or a percentile number (clip enabled at that percent,
+/// per tail). Any unrecognised token makes the whole flag ignored.
+fn parse_clips(s: &str) -> Option<Vec<ClipSpec>> {
+    s.split(',')
+        .map(|t| match t.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(ClipSpec::Off),
+            num => num.parse::<f32>().ok().map(ClipSpec::On),
         })
         .collect()
 }
@@ -276,7 +304,8 @@ VIEW STATE:
         --frame <N>              Timeline frame to show
         --pane <N>               Focused pane
         --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
-        --tone <T,T,...>         Per-pane tone: linear | linearclip | lutalpha
+        --tone <T,T,...>         Per-pane tone: linear | lutalpha
+        --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
         --show <B,B,...>         Per-pane visibility / show-hide (1/0)
         --tsync <B,B,...>        Per-pane Transformations-sync toggles (1/0)
@@ -574,7 +603,7 @@ mod tests {
 
     #[test]
     fn parses_tone_detail_loop() {
-        let args = "a.tif b.tif --tone linearclip,lutalpha --detail 0,1 --loop 3,9"
+        let args = "a.tif b.tif --tone linear,lutalpha --clip 0.02,off --detail 0,1 --loop 3,9"
             .split(' ')
             .map(String::from)
             .collect();
@@ -583,10 +612,26 @@ mod tests {
         };
         assert!(matches!(
             view.tones.as_deref(),
-            Some([Tone::LinearClip, Tone::LutAlpha])
+            Some([Tone::Linear, Tone::LutAlpha])
+        ));
+        assert!(matches!(
+            view.clips.as_deref(),
+            Some([ClipSpec::On(p), ClipSpec::Off]) if (p - 0.02).abs() < 1e-6
         ));
         assert_eq!(view.details, Some(vec![false, true]));
         assert_eq!(view.loop_range, Some((3, 9)));
+    }
+
+    #[test]
+    fn deprecated_linearclip_maps_to_linear() {
+        let args = "a.tif --tone linearclip"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert!(matches!(view.tones.as_deref(), Some([Tone::Linear])));
     }
 
     #[test]
