@@ -11,7 +11,9 @@
 // cim drives the create/apply/destroy lifecycle documented in imageproc.h:
 //   * cim_details_enhanced_create(w, h)  — HEAVY, size-dependent construction,
 //                                          once per (pane, image size).
-//   * cim_details_enhanced_apply(h, ...) — per frame; transform in place.
+//   * cim_details_enhanced_apply(h, ...) — per frame; transform `data` (16-bit)
+//                                          in place, using `lut8` (the after-LUT
+//                                          8-bit companion) as read-only context.
 //   * cim_details_enhanced_destroy(h)    — free it.
 //
 // You may #include your vendor headers and use their types here; only plain C
@@ -34,8 +36,13 @@ struct DetailsEnhanced {
 
     DetailsEnhanced(std::size_t w, std::size_t h) : width(w), height(h) {}
 
-    void apply(std::uint16_t* data, std::size_t len) const {
+    // `data`  — raw 16-bit grayscale, transformed IN PLACE (kept same size).
+    // `lut8`  — the after-LUT 8-bit companion of the same frame (read-only): the
+    //           display-tone look (Linear+Clip by default). Use it to steer the
+    //           enhancement; do not write to it.
+    void apply(std::uint16_t* data, const std::uint8_t* lut8, std::size_t len) const {
         (void)data;
+        (void)lut8;
         (void)len;
         // Identity: leave the buffer unchanged.
     }
@@ -47,8 +54,9 @@ extern "C" void* cim_details_enhanced_create(std::size_t width, std::size_t heig
     return new DetailsEnhanced(width, height);
 }
 
-extern "C" void cim_details_enhanced_apply(void* handle, std::uint16_t* data, std::size_t len) {
-    static_cast<DetailsEnhanced*>(handle)->apply(data, len);
+extern "C" void cim_details_enhanced_apply(void* handle, std::uint16_t* data,
+                                           const std::uint8_t* lut8, std::size_t len) {
+    static_cast<DetailsEnhanced*>(handle)->apply(data, lut8, len);
 }
 
 extern "C" void cim_details_enhanced_destroy(void* handle) {

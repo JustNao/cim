@@ -44,9 +44,17 @@ extern "C" void  cim_lut_alpha_destroy(void* handle);
 
 // libcim_details_enhanced.so
 extern "C" void* cim_details_enhanced_create(size_t width, size_t height);
-extern "C" void  cim_details_enhanced_apply(void* handle, uint16_t* data, size_t len);
+extern "C" void  cim_details_enhanced_apply(void* handle, uint16_t* data,
+                                            const uint8_t* lut8, size_t len);
 extern "C" void  cim_details_enhanced_destroy(void* handle);
 ```
+
+**DETAILS_ENHANCED's `apply` takes a second buffer, `lut8`** — the **after-LUT
+8-bit** companion of the same frame (the display-tone look): `len` samples,
+one per pixel, row-major, **read-only**. cim builds it through a fixed LUT
+(**Linear + Clip** by default; change `DETAILS_COMPANION_LUT` in
+`src/imageproc.rs` to feed `LINEAR` or any other, code-only — not a UI setting).
+Transform the 16-bit `data` in place using `lut8` as context; never write `lut8`.
 
 - **`create(width, height)`** builds the instance. This is where the **heavy,
   size-dependent construction** goes; cim calls it **once per (pane, image size)**.
@@ -55,7 +63,9 @@ extern "C" void  cim_details_enhanced_destroy(void* handle);
 - **`apply(handle, data, len)`** runs per frame. `data` is a **single-channel
   16-bit** buffer, `len == width * height` samples (one per pixel), row-major.
   Transform it **in place**, keep the same dimensions. cim reuses the instance
-  across the pane's frames.
+  across the pane's frames. **DETAILS_ENHANCED's `apply` additionally takes
+  `lut8`** — a read-only `len`-sample 8-bit companion (the after-LUT look) —
+  before `len` (see the ABI block above).
 - **`destroy(handle)`** frees the instance (pane closed / reloaded / resized).
 
 cim keeps **one instance per pane** in `PaneOps`, rebuilding it only when the
@@ -74,8 +84,9 @@ called and the UI disables them.
 **Only plain C crosses the boundary.** Inside the `.cpp` you may use any vendor
 C++ types (image classes, pixel-format enums, …). If a vendor value must reach cim,
 do not leak the vendor type: add a plain C enum/struct to `imageproc.h` and mirror
-it in `src/imageproc.rs`. Today cim only passes a raw `uint16_t*`, so most format/
-type handling stays entirely inside the shim.
+it in `src/imageproc.rs`. cim passes a raw `uint16_t*` (plus, for
+DETAILS_ENHANCED, a read-only `const uint8_t*` companion), so most format/type
+handling stays entirely inside the shim.
 
 ## Building the library — cim and the shim build separately
 

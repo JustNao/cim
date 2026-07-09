@@ -308,6 +308,10 @@ invalidates textures to re-render when something newly loads). Repointing an
 C++ objects**, so the C ABI is a **create/apply/destroy lifecycle** per operator
 (`cim_<op>_create(w,h)` → opaque handle, `cim_<op>_apply(handle, data, len)` on a
 **single-channel 16-bit** buffer `len == width*height`, `cim_<op>_destroy`).
+**DETAILS_ENHANCED's `apply` takes a second buffer** — the **after-LUT 8-bit**
+companion of the same frame (`imageproc::details_companion_u8`, built through the
+fixed `DETAILS_COMPANION_LUT`, **Linear+Clip** by default and swappable in code) —
+so it sees the display-tone look, not just the raw 16-bit data.
 `imageproc::PaneOps` holds one pane's instances, created lazily and **rebuilt when
 the frame dimensions change**, so heavy construction is paid once per size; it is
 owned by the pane's render worker thread (and by each export pane), so an instance

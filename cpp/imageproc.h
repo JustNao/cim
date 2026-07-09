@@ -26,6 +26,10 @@
 //   * `data` is a single-channel 16-bit buffer, `len == width * height` u16
 //     samples, one per pixel, row-major (`len` is passed so you can bounds-check).
 //   * `apply` transforms it IN PLACE and keeps the same dimensions.
+//   * DETAILS_ENHANCED's `apply` takes a SECOND buffer, `lut8`: the after-LUT
+//     8-bit companion of the same frame (the display-tone look, Linear+Clip by
+//     default), `len` samples, one per pixel, row-major. It is READ-ONLY (const)
+//     context for the enhancement; write your result into `data`, not `lut8`.
 //   * The operators are only ever called for single-channel 16-bit images; cim
 //     expands the result back to grey RGBA afterwards.
 //   * `create` returns an opaque handle, or NULL on failure — cim then treats the
@@ -52,8 +56,11 @@ CIM_EXPORT void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size
 CIM_EXPORT void cim_lut_alpha_destroy(void* handle);
 
 // ---- DETAILS_ENHANCED: local detail / sharpness (libcim_details_enhanced.so) --
+// `apply` additionally receives `lut8`, the after-LUT 8-bit companion of the same
+// frame (read-only). Transform `data` (16-bit) in place; `lut8` is context only.
 CIM_EXPORT void* cim_details_enhanced_create(std::size_t width, std::size_t height);
-CIM_EXPORT void cim_details_enhanced_apply(void* handle, std::uint16_t* data, std::size_t len);
+CIM_EXPORT void cim_details_enhanced_apply(void* handle, std::uint16_t* data,
+                                           const std::uint8_t* lut8, std::size_t len);
 CIM_EXPORT void cim_details_enhanced_destroy(void* handle);
 
 } // extern "C"

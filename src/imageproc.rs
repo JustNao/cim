@@ -22,6 +22,19 @@
 //! void  cim_<op>_destroy(void* handle);                       // free the instance
 //! ```
 //!
+//! **DETAILS_ENHANCED takes a second buffer.** Its `apply` additionally receives
+//! the **after-LUT 8-bit** companion of the same frame — the display-tone look —
+//! so the operator can key its enhancement off it, not just the raw 16-bit data:
+//!
+//! ```c
+//! void  cim_details_enhanced_apply(void* handle, uint16_t* data,
+//!                                  const uint8_t* lut8, size_t len);
+//! ```
+//!
+//! `data` is the raw 16-bit buffer (transformed in place); `lut8` is a read-only
+//! `len`-sample 8-bit render built through [`DETAILS_COMPANION_LUT`] (Linear+Clip
+//! by default — change that constant to feed a different LUT, code-only).
+//!
 //! Construction (`create`) is expensive and depends on the image **size** (not
 //! its contents), so cim builds an instance **once per (pane, size)** and reuses
 //! it across that pane's frames via `apply`, rebuilding only when the dimensions
@@ -44,11 +57,51 @@ use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-/// The three C symbols each operator library exports (see the module docs):
-/// `create(width, height) -> handle`, `apply(handle, data, len)`, `destroy(handle)`.
+use crate::media::FrameData;
+
+/// The C symbols each operator library exports (see the module docs):
+/// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
 type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
+/// LUT_ALPHA's `apply`: raw 16-bit buffer, transformed in place.
 type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
+/// DETAILS_ENHANCED's `apply`: the raw 16-bit buffer (in place) **plus** the
+/// after-LUT 8-bit companion (read-only), both `len` samples.
+type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usize);
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
+
+/// Which tone curve builds the after-LUT 8-bit companion image that
+/// DETAILS_ENHANCED receives alongside the raw 16-bit buffer. DETAILS_ENHANCED
+/// gets both so it can key its enhancement off the display-tone look.
+///
+/// **Code-only knob.** Change this constant to feed the operator a different LUT
+/// (e.g. [`CompanionLut::Linear`]); it is deliberately not exposed in the UI.
+pub const DETAILS_COMPANION_LUT: CompanionLut = CompanionLut::LinearClip;
+
+/// A grayscale tone curve used to build DETAILS_ENHANCED's 8-bit companion.
+#[derive(Clone, Copy)]
+pub enum CompanionLut {
+    /// Plain full-range linear map (`display_bounds(false)`).
+    Linear,
+    /// Full-range linear map with the default per-tail percentile clip
+    /// (`display_bounds(true)`).
+    LinearClip,
+}
+
+/// Build the after-LUT **8-bit** grayscale companion for `frame`, tone-mapped
+/// through [`DETAILS_COMPANION_LUT`]. Handed to DETAILS_ENHANCED's `apply`
+/// alongside the raw 16-bit buffer. Shared by the live render worker
+/// (`renderer::Worker::render`) and the export worker
+/// (`export::ExportPane::ensure_frame`) so the two stay pixel-identical. Only
+/// meaningful for single-channel frames (the only ones the operator runs on).
+pub fn details_companion_u8(frame: &FrameData) -> Vec<u8> {
+    let (lo, hi) = match DETAILS_COMPANION_LUT {
+        CompanionLut::Linear => frame.display_bounds(false),
+        CompanionLut::LinearClip => frame.display_bounds(true),
+    };
+    let mut out = Vec::new();
+    frame.render_into_gray_u8(lo, hi, &mut out);
+    out
+}
 
 // Hard-coded shared-library file names, one operator each. Resolved inside the
 // configured library directory (`Config::cpp_lib_dir`), or — when that's empty —
@@ -73,6 +126,11 @@ fn resolve(dir: Option<&Path>, name: &str) -> PathBuf {
 struct Operator {
     _lib: libloading::Library,
     create: CreateFn,
+    /// The `<stem>_apply` symbol. LUT_ALPHA and DETAILS_ENHANCED export different
+    /// `apply` signatures ([`ApplyFn`] vs [`DetailsApplyFn`]); it is stored as the
+    /// canonical [`ApplyFn`] and the DETAILS call site transmutes it to
+    /// [`DetailsApplyFn`] (all fn pointers share a representation, so this is
+    /// sound — the resolved symbol address is the same either way).
     apply: ApplyFn,
     destroy: DestroyFn,
 }
@@ -97,6 +155,8 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
     unsafe {
         let lib = libloading::Library::new(lib_path)?;
         let create: libloading::Symbol<CreateFn> = lib.get(format!("{stem}_create\0").as_bytes())?;
+        // Resolved as the canonical `ApplyFn`; DETAILS_ENHANCED's call site
+        // transmutes it to its own `DetailsApplyFn` (same fn-pointer address).
         let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
         let destroy: libloading::Symbol<DestroyFn> =
             lib.get(format!("{stem}_destroy\0").as_bytes())?;
@@ -216,12 +276,18 @@ impl PaneOps {
     /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
     /// instances, rebuilding one only if `width`/`height` changed since last call.
     ///
+    /// `companion` is the **after-LUT 8-bit** render of the same frame
+    /// ([`details_companion_u8`]); DETAILS_ENHANCED receives it read-only next to
+    /// the 16-bit buffer. It must be `width * height` samples when `details` is set
+    /// (it is ignored otherwise, so `&[]` is fine when details is off).
+    ///
     /// This is the one shared tail of the render pipeline, run both off-thread for
     /// the live view (`renderer::Worker::render`) and by the export worker
     /// (`export::ExportPane::ensure_frame`), so the two match pixel-for-pixel.
     pub fn apply(
         &mut self,
         gray: &mut Vec<u16>,
+        companion: &[u8],
         width: usize,
         height: usize,
         lut_alpha: bool,
@@ -231,7 +297,8 @@ impl PaneOps {
             run(self.lut_alpha.as_ref().unwrap(), gray);
         }
         if details && Self::ensure(&mut self.details, &DETAILS, width, height) {
-            run(self.details.as_ref().unwrap(), gray);
+            debug_assert_eq!(companion.len(), gray.len(), "details companion size mismatch");
+            run_details(self.details.as_ref().unwrap(), gray, companion);
         }
     }
 
@@ -261,9 +328,24 @@ impl PaneOps {
     }
 }
 
-/// Run one instance's operator over `gray` in place.
+/// Run one instance's LUT_ALPHA-style operator over `gray` in place.
 fn run(inst: &Instance, gray: &mut [u16]) {
     // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/writes
     // within it and keeps the dimensions (per the ABI). `handle` matches `apply`.
     unsafe { (inst.apply)(inst.handle, gray.as_mut_ptr(), gray.len()) };
+}
+
+/// Run DETAILS_ENHANCED over `gray` in place, passing the read-only after-LUT
+/// 8-bit `companion` of the same frame (same length) as a second buffer.
+fn run_details(inst: &Instance, gray: &mut [u16], companion: &[u8]) {
+    // SAFETY: `gray` and `companion` are valid buffers of the same `len`; the
+    // callee writes only `gray` (in place, keeping dimensions) and reads only
+    // `companion`, per the DETAILS_ENHANCED ABI. `handle` matches `apply`. The
+    // stored `apply` is the same symbol address for either signature; DETAILS was
+    // loaded from a library exporting the `DetailsApplyFn` shape, so this
+    // transmute recovers the correct type.
+    unsafe {
+        let apply: DetailsApplyFn = std::mem::transmute(inst.apply);
+        apply(inst.handle, gray.as_mut_ptr(), companion.as_ptr(), gray.len());
+    }
 }

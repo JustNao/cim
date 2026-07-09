@@ -148,7 +148,15 @@ impl Worker {
         if use_ops {
             let mut gray = Vec::new();
             job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
-            self.ops.apply(&mut gray, w, h, job.lut_alpha, job.details);
+            // DETAILS_ENHANCED also receives the after-LUT 8-bit companion of the
+            // frame (built through the fixed `DETAILS_COMPANION_LUT`, independent
+            // of this pane's tone); skip it when details is off.
+            let companion = if job.details {
+                crate::imageproc::details_companion_u8(&job.data)
+            } else {
+                Vec::new()
+            };
+            self.ops.apply(&mut gray, &companion, w, h, job.lut_alpha, job.details);
             // Expand the processed grey back to 8-bit RGBA for the texture.
             rgba.resize(gray.len() * 4, 255);
             for (i, &s) in gray.iter().enumerate() {
