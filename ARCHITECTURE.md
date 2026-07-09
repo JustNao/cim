@@ -505,10 +505,22 @@ image (and its overlay) as a textured mesh with the image-rect's four corners ro
 its centre, clipped to the pane. Because the view is a **similarity** (uniform scale +
 translate, no rotation), rotating in image space about the image centre equals rotating the
 mapped screen point about the image-centre's screen position — so `rot_img_to_screen` /
-`rot_screen_to_img` (used by the cursor dot, value readout, stats region outline + selection,
-and the profile line) stay pixel-aligned with the drawn mesh. Export mirrors it: `ExportPane.rotation`
-(radians) un-rotates each sampled point (`unrotate`) so a rendered/encoded pane matches the
-rotated live view (`--rotate` round-trips it through the view command).
+`rot_screen_to_img` (used by the cursor dot, value readout, and the profile line — things
+that track a specific source *pixel*) stay pixel-aligned with the drawn mesh. Export mirrors it:
+`ExportPane.rotation` (radians) un-rotates each sampled point (`unrotate`) so a rendered/encoded
+pane matches the rotated live view (`--rotate` round-trips it through the view command).
+
+**Region selection is viewer-aligned, not image-aligned.** The **export crop** and the
+**stats region** are both stored in the pane's *unrotated* view frame and converted with the
+**plain view** (no rotation), via one shared helper `select_region_bounds` (used by
+`screen_rect_to_image` and `finalize_region`): the released rectangle stays axis-aligned with
+the **viewer** — exactly what the user dragged — rather than snapping to the (possibly rotated)
+image axis. Their overlays draw back with the same plain view. The pane's rotation is re-applied
+**downstream, once**: the export's `unrotate` maps each output pixel through the rotation (so a
+rotated crop shows the rotated content, with the area outside the image left as transparent
+**background**). Because the view is a pure similarity, on an **unrotated** pane this is the
+plain rectangle exactly as before — the crop is then clamped to the image bounds (dropping the
+background); a **rotated** crop is left un-clamped so it can include the background.
 
 **Intensity-profile line (shift + right-drag).** Holding **Shift** while right-dragging
 draws an editable **line** (`line_profile`, an image-space `{a, b}` like `stats_region`,
