@@ -50,11 +50,13 @@ extern "C" void  cim_details_enhanced_destroy(void* handle);
 ```
 
 **DETAILS_ENHANCED's `apply` takes a second buffer, `lut8`** — the **after-LUT
-8-bit** companion of the same frame (the display-tone look): `len` samples,
-one per pixel, row-major, **read-only**. cim builds it through a fixed LUT
-(**Linear + Clip** by default; change `DETAILS_COMPANION_LUT` in
-`src/imageproc.rs` to feed `LINEAR` or any other, code-only — not a UI setting).
-Transform the 16-bit `data` in place using `lut8` as context; never write `lut8`.
+8-bit** companion of the same frame: the **current view LUT output**, i.e. the
+exact grayscale the pane is showing. Whatever LUT the view is using is the 8-bit
+input — **LUT_ALPHA** when that's the active tone, otherwise the linear/clip map.
+`len` samples, one per pixel, row-major, **read-only**. cim builds it in
+`PaneOps::apply` (`src/imageproc.rs`) as the 16-bit `data` after any LUT_ALPHA,
+downscaled to 8 bits. Transform the 16-bit `data` in place using `lut8` as
+context; never write `lut8`.
 
 - **`create(width, height)`** builds the instance. This is where the **heavy,
   size-dependent construction** goes; cim calls it **once per (pane, image size)**.

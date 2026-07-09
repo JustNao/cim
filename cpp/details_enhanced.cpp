@@ -38,8 +38,9 @@ struct DetailsEnhanced {
 
     // `data`  — raw 16-bit grayscale, transformed IN PLACE (kept same size).
     // `lut8`  — the after-LUT 8-bit companion of the same frame (read-only): the
-    //           display-tone look (Linear+Clip by default). Use it to steer the
-    //           enhancement; do not write to it.
+    //           current view LUT output — exactly what the pane shows (LUT_ALPHA
+    //           if that's the active tone, else the linear/clip map). Use it to
+    //           steer the enhancement; do not write to it.
     void apply(std::uint16_t* data, const std::uint8_t* lut8, std::size_t len) const {
         (void)data;
         (void)lut8;

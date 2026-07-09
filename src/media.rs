@@ -672,45 +672,6 @@ impl FrameData {
         }
     }
 
-    /// Render a **single-channel 8-bit** buffer into `out` (resized to
-    /// `width*height`), mapping native samples through `[lo, hi] → [0, 255]`.
-    /// This is the **after-LUT** 8-bit companion the DETAILS_ENHANCED operator
-    /// receives alongside the raw 16-bit buffer (`crate::imageproc`): one 8-bit
-    /// sample per pixel. Only called for single-channel frames (see
-    /// [`is_op_input`]); the first channel is taken for any wider source. Mirrors
-    /// [`render_into_gray_u16`].
-    pub fn render_into_gray_u8(&self, lo: f32, hi: f32, out: &mut Vec<u8>) {
-        let px = self.size[0] * self.size[1];
-        let ch = self.channels;
-        out.clear();
-        out.resize(px, u8::MAX);
-
-        if self.mask {
-            match &self.samples {
-                Samples::U8(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u8::MAX } else { 0 }),
-                Samples::U16(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u8::MAX } else { 0 }),
-                Samples::F32(v) => fill_gray(out, v, ch, px, |s| if s != 0.0 { u8::MAX } else { 0 }),
-            }
-            return;
-        }
-
-        let denom = hi - lo;
-        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-        let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
-
-        match &self.samples {
-            Samples::U8(v) => {
-                let lut: Vec<u8> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
-                fill_gray(out, v, ch, px, |s| lut[s as usize]);
-            }
-            Samples::U16(v) => {
-                let lut: Vec<u8> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
-                fill_gray(out, v, ch, px, |s| lut[s as usize]);
-            }
-            Samples::F32(v) => fill_gray(out, v, ch, px, map_f),
-        }
-    }
-
     /// Build an RGBA overlay from this mask: true pixels take `rgb` at `alpha`,
     /// false pixels are fully transparent. Used to tint a boolean mask over
     /// another pane. `out` is resized to `w*h*4`.

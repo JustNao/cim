@@ -245,15 +245,7 @@ impl ExportPane {
         let rgba = if use_ops {
             let mut gray = frame.render_gray_u16(self.contrast.clips());
             let lut_alpha = self.contrast == ContrastMode::LutAlpha;
-            // DETAILS_ENHANCED also gets the after-LUT 8-bit companion (fixed
-            // `DETAILS_COMPANION_LUT`, independent of this pane's tone), mirroring
-            // the live render so an export matches what's on screen.
-            let companion = if self.details {
-                crate::imageproc::details_companion_u8(&frame)
-            } else {
-                Vec::new()
-            };
-            self.ops.apply(&mut gray, &companion, w, h, lut_alpha, self.details);
+            self.ops.apply(&mut gray, w, h, lut_alpha, self.details);
             // Expand the processed grey back to 8-bit RGBA.
             let mut out = vec![255u8; gray.len() * 4];
             for (i, &s) in gray.iter().enumerate() {

@@ -32,8 +32,10 @@
 //! ```
 //!
 //! `data` is the raw 16-bit buffer (transformed in place); `lut8` is a read-only
-//! `len`-sample 8-bit render built through [`DETAILS_COMPANION_LUT`] (Linear+Clip
-//! by default — change that constant to feed a different LUT, code-only).
+//! `len`-sample 8-bit render of the **current view LUT output** — the pane's own
+//! tone as it is shown, i.e. `data` after any LUT_ALPHA (or the linear/clip map)
+//! downscaled to 8 bits — built in [`PaneOps::apply`], so it always tracks
+//! whichever LUT the view is using.
 //!
 //! Construction (`create`) is expensive and depends on the image **size** (not
 //! its contents), so cim builds an instance **once per (pane, size)** and reuses
@@ -57,8 +59,6 @@ use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use crate::media::FrameData;
-
 /// The C symbols each operator library exports (see the module docs):
 /// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
 type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
@@ -68,40 +68,6 @@ type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
 /// after-LUT 8-bit companion (read-only), both `len` samples.
 type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usize);
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
-
-/// Which tone curve builds the after-LUT 8-bit companion image that
-/// DETAILS_ENHANCED receives alongside the raw 16-bit buffer. DETAILS_ENHANCED
-/// gets both so it can key its enhancement off the display-tone look.
-///
-/// **Code-only knob.** Change this constant to feed the operator a different LUT
-/// (e.g. [`CompanionLut::Linear`]); it is deliberately not exposed in the UI.
-pub const DETAILS_COMPANION_LUT: CompanionLut = CompanionLut::LinearClip;
-
-/// A grayscale tone curve used to build DETAILS_ENHANCED's 8-bit companion.
-#[derive(Clone, Copy)]
-pub enum CompanionLut {
-    /// Plain full-range linear map (`display_bounds(false)`).
-    Linear,
-    /// Full-range linear map with the default per-tail percentile clip
-    /// (`display_bounds(true)`).
-    LinearClip,
-}
-
-/// Build the after-LUT **8-bit** grayscale companion for `frame`, tone-mapped
-/// through [`DETAILS_COMPANION_LUT`]. Handed to DETAILS_ENHANCED's `apply`
-/// alongside the raw 16-bit buffer. Shared by the live render worker
-/// (`renderer::Worker::render`) and the export worker
-/// (`export::ExportPane::ensure_frame`) so the two stay pixel-identical. Only
-/// meaningful for single-channel frames (the only ones the operator runs on).
-pub fn details_companion_u8(frame: &FrameData) -> Vec<u8> {
-    let (lo, hi) = match DETAILS_COMPANION_LUT {
-        CompanionLut::Linear => frame.display_bounds(false),
-        CompanionLut::LinearClip => frame.display_bounds(true),
-    };
-    let mut out = Vec::new();
-    frame.render_into_gray_u8(lo, hi, &mut out);
-    out
-}
 
 // Hard-coded shared-library file names, one operator each. Resolved inside the
 // configured library directory (`Config::cpp_lib_dir`), or — when that's empty —
@@ -276,10 +242,12 @@ impl PaneOps {
     /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
     /// instances, rebuilding one only if `width`/`height` changed since last call.
     ///
-    /// `companion` is the **after-LUT 8-bit** render of the same frame
-    /// ([`details_companion_u8`]); DETAILS_ENHANCED receives it read-only next to
-    /// the 16-bit buffer. It must be `width * height` samples when `details` is set
-    /// (it is ignored otherwise, so `&[]` is fine when details is off).
+    /// DETAILS_ENHANCED additionally receives the **after-LUT 8-bit companion** of
+    /// the frame — the current view's tone output. That is exactly `gray` as it
+    /// stands here (LUT_ALPHA already applied if this is a LUT_ALPHA pane, and the
+    /// linear/clip window already baked into the render) downscaled to 8 bits, i.e.
+    /// the very pixels the pane would show without details. It is built here, so the
+    /// operator always sees whichever LUT the view is currently using.
     ///
     /// This is the one shared tail of the render pipeline, run both off-thread for
     /// the live view (`renderer::Worker::render`) and by the export worker
@@ -287,7 +255,6 @@ impl PaneOps {
     pub fn apply(
         &mut self,
         gray: &mut Vec<u16>,
-        companion: &[u8],
         width: usize,
         height: usize,
         lut_alpha: bool,
@@ -297,8 +264,10 @@ impl PaneOps {
             run(self.lut_alpha.as_ref().unwrap(), gray);
         }
         if details && Self::ensure(&mut self.details, &DETAILS, width, height) {
-            debug_assert_eq!(companion.len(), gray.len(), "details companion size mismatch");
-            run_details(self.details.as_ref().unwrap(), gray, companion);
+            // The 8-bit companion is the current view LUT output: `gray` (post
+            // LUT_ALPHA if used, else the linear/clip map) downscaled to 8 bits.
+            let companion: Vec<u8> = gray.iter().map(|&s| (s >> 8) as u8).collect();
+            run_details(self.details.as_ref().unwrap(), gray, &companion);
         }
     }
 

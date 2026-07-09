@@ -27,9 +27,10 @@
 //     samples, one per pixel, row-major (`len` is passed so you can bounds-check).
 //   * `apply` transforms it IN PLACE and keeps the same dimensions.
 //   * DETAILS_ENHANCED's `apply` takes a SECOND buffer, `lut8`: the after-LUT
-//     8-bit companion of the same frame (the display-tone look, Linear+Clip by
-//     default), `len` samples, one per pixel, row-major. It is READ-ONLY (const)
-//     context for the enhancement; write your result into `data`, not `lut8`.
+//     8-bit companion of the same frame — the CURRENT VIEW LUT output, i.e. the
+//     exact grayscale the pane is showing (LUT_ALPHA applied if that's the active
+//     tone, else the linear/clip map). `len` samples, one per pixel, row-major,
+//     READ-ONLY (const) context; write your result into `data`, not `lut8`.
 //   * The operators are only ever called for single-channel 16-bit images; cim
 //     expands the result back to grey RGBA afterwards.
 //   * `create` returns an opaque handle, or NULL on failure — cim then treats the
