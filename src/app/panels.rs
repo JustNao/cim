@@ -521,7 +521,7 @@ impl CimApp {
                                                 p.rotation = shared_rotation;
                                             }
                                             p.sync_tone = all_ts;
-                                            p.tex = None;
+                                            p.overlay_tex = None; // tone re-renders via tone_sig
                                         }
                                     }
                                 });

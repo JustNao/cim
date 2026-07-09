@@ -642,14 +642,14 @@ impl CimApp {
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
                 };
                 p.sync_tone = false;
-                p.tex = None; // re-render with the restored mapping
+                // Restored tone re-renders via `tone_sig`; no `tex` nulling (it
+                // would flash black for a heavy LUT_ALPHA/details pane).
             }
         }
         if let Some(details) = &vs.details {
             for (p, d) in self.panes.iter_mut().zip(details) {
                 p.details = *d;
                 p.sync_tone = false;
-                p.tex = None;
             }
         }
         // Per-pane rotation. Like --tone/--detail these are per-pane, so unsync
@@ -674,7 +674,7 @@ impl CimApp {
             }
             for (p, &s) in self.panes.iter_mut().zip(sync) {
                 p.sync_tone = s;
-                p.tex = None;
+                // Effective tone changed → re-renders via `tone_sig`; no nulling.
             }
         }
         if let Some(vis) = &vs.visible {
@@ -1425,19 +1425,6 @@ impl CimApp {
         };
     }
 
-    /// Invalidate the textures of every tone-synced pane (after the shared
-    /// Transformations change), so they re-render with the new mapping — base
-    /// image and tinted overlay both.
-    pub(super) fn invalidate_synced_tone(&mut self) {
-        for p in &mut self.panes {
-            if p.sync_tone {
-                p.tex = None;
-                p.pending = None;
-                p.overlay_tex = None;
-            }
-        }
-    }
-
     /// Set a pane's tone-sync flag. Turning it **off** snapshots the shared
     /// Transformations (tone + overlay) into the pane so nothing jumps; either
     /// way the pane re-renders.
@@ -1453,8 +1440,9 @@ impl CimApp {
             self.panes[i].overlay = self.shared_overlay;
         }
         self.panes[i].sync_tone = on;
-        self.panes[i].tex = None;
-        self.panes[i].pending = None;
+        // The pane re-renders via `tone_sig` (its effective tone changed) while
+        // holding its last committed `tex`; nulling it would flash black for a
+        // heavy LUT_ALPHA/details render. Only the tinted overlay is dropped.
         self.panes[i].overlay_tex = None;
     }
 
@@ -1603,7 +1591,8 @@ impl CimApp {
 
     /// Set (or clear) the shared image-space stats region. Bumps `stats_gen` so
     /// cached stats recompute; clearing also drops region-tone off every pane.
-    /// Region-tone textures are invalidated so their bounds re-derive.
+    /// A region-tone pane re-derives its bounds via `tone_sig` (which folds in
+    /// `stats_gen`), so no texture is nulled.
     pub(super) fn set_stats_region(&mut self, reg: Option<Rect>) {
         self.stats_region = reg;
         self.stats_gen = self.stats_gen.wrapping_add(1);
@@ -1611,20 +1600,21 @@ impl CimApp {
             p.stats = None;
             if reg.is_none() && p.region_tone {
                 p.region_tone = false;
-                p.tex = None;
-            } else if reg.is_some() && p.region_tone {
-                p.tex = None; // bounds change with the new region
             }
+            // A region-tone pane re-renders on its own: `stats_gen` (and the
+            // region_tone flag) feed `tone_sig`, so `stage` re-derives the bounds
+            // and commits while the pane holds its last committed frame — no black.
         }
     }
 
     /// Turn region-driven tone on/off for every pane at once (the button is a
-    /// single control replicated across panes), invalidating their textures.
+    /// single control replicated across panes); each re-renders via `tone_sig`.
     pub(super) fn apply_region_tone(&mut self, on: bool) {
         for p in &mut self.panes {
             if p.region_tone != on {
                 p.region_tone = on;
-                p.tex = None;
+                // Re-renders via `tone_sig` (region_tone changed) while holding
+                // the last committed frame — nulling `tex` would flash black.
             }
         }
     }

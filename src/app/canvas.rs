@@ -1478,7 +1478,10 @@ impl CimApp {
             }
         }
 
-        // Write the effective tone back (own or shared), invalidating textures.
+        // Write the effective tone back (own or shared). No texture nulling: every
+        // synced pane's `tone_sig` now reflects the new shared tone, so `stage`
+        // re-renders and commits each while it keeps showing its last frame —
+        // nulling `tex` would flash a heavy LUT_ALPHA/details render to black.
         if synced {
             if self.shared_contrast != contrast
                 || self.shared_tone != tone
@@ -1487,7 +1490,6 @@ impl CimApp {
                 self.shared_contrast = contrast;
                 self.shared_tone = tone;
                 self.shared_details = details;
-                self.invalidate_synced_tone();
             }
         } else {
             let p = &mut self.panes[idx];
@@ -1495,7 +1497,10 @@ impl CimApp {
                 p.contrast = contrast;
                 p.tone = tone;
                 p.details = details;
-                p.tex = None; // re-render with the new mapping
+                // No texture invalidation: the new tone changes `tone_sig`, so
+                // `stage` re-renders and commits the fresh frame while the pane
+                // keeps showing its last committed `tex` — nulling it here would
+                // blank a heavy (async) LUT_ALPHA/details render to black instead.
             }
         }
         // Rotation is applied at draw time (no texture to invalidate); it rides

@@ -436,16 +436,24 @@ under the header with: the tone `ContrastMode` + its mode-specific options
 `ToneOptions` sub-struct, add a row, read it in `stage`/`tone_sig`), the Details
 toggle, the mask **Overlay** picker, and this
 pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`, cached per pane).
-Edits invalidate the texture. `Action::ToggleVis` (default `V`) toggles it for the
-focused pane.
+A tone edit **does not null the texture**: it only changes the pane's `tone_sig`,
+so `stage` re-renders and the lock-step commit swaps in the fresh frame while the
+pane keeps showing its last committed `tex`. Nulling `tex` would blank a **heavy**
+(async, off-thread) LUT_ALPHA/details render to **black** until it lands — a cheap
+LUT refills synchronously the same update so its black is never seen, which is why
+only the operator tones flashed. (Only overlay edits drop `overlay_tex`, and
+data-changing events — reload, recompute, newly loaded operator library — still
+null `tex` since the frame data, not the signature, changed.) `Action::ToggleVis`
+(default `V`) toggles the popup for the focused pane.
 
 **Transformations sync (`Pane.sync_tone`, default on).** Like the Pos/Time syncs, a
 pane can follow the shared set (`shared_contrast`/`shared_tone`/`shared_details`/
 `shared_rotation`/`shared_overlay`), toggled by the **Transf** checkbox in the manager's
 Sync column. `contrast_of`/`tone_of`/`details_of`/`rotation_of`/`overlay_of` return the
 effective value and are read by `stage`/`prepare_overlay`/`pane_theta`/`export_pane`/
-`view_command`; editing a synced pane's popup writes the shared set and
-`invalidate_synced_tone` refreshes every synced pane. `set_sync_tone(false)` snapshots the
+`view_command`; editing a synced pane's popup writes the shared set, and every
+synced pane re-renders on its own because its effective `tone_sig` changed (no
+texture nulling — see above). `set_sync_tone(false)` snapshots the
 shared values in so nothing jumps. The first opened media seeds the shared set
 (`add_pane`); a replayed `--tone`/`--detail`/`--rotate` is per-pane, so `apply_view_state`
 unsyncs the panes it sets.
