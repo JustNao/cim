@@ -128,12 +128,12 @@ impl CimApp {
             Mode::Ab => vec![(self.slot_a.min(self.panes.len() - 1), ab_image_rect(area))],
         };
         for (idx, img_area) in panes_areas {
-            let v = self.view_ref(idx);
-            let r = Rect::from_two_pos(
-                v.img_to_screen(reg.min.to_vec2(), img_area),
-                v.img_to_screen(reg.max.to_vec2(), img_area),
-            )
-            .intersect(img_area);
+            // Map the region's four corners rotation-aware and take their screen
+            // bounding box, so the dim overlay stays aligned on a rotated pane
+            // (reduces to the plain rectangle when unrotated).
+            let r = self
+                .img_rect_to_screen_bounds(idx, reg, img_area)
+                .intersect(img_area);
             if r.is_positive() {
                 dim_outside(&ui.painter_at(img_area), img_area, r);
             }
@@ -141,16 +141,42 @@ impl CimApp {
     }
 
     /// Convert a screen-space rect (drawn in Single view over `area`) into the
-    /// image-space crop it covers, clamped to the current image's bounds.
+    /// image-space crop it covers. On an unrotated pane it is clamped to the
+    /// image bounds (background outside the image is dropped, as before); on a
+    /// rotated pane it is left un-clamped so the crop can include background.
     pub(super) fn screen_rect_to_image(&self, r: Rect, area: Rect) -> Option<Rect> {
         let idx = self.current.min(self.panes.len().checked_sub(1)?);
         let img_area = image_area(area);
-        let [w, h] = self.disp_size(idx);
-        let a = self.rot_screen_to_img(idx, r.min, img_area);
-        let b = self.rot_screen_to_img(idx, r.max, img_area);
-        let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
-            .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
+        let mut reg = self.screen_rect_to_image_bounds(idx, r, img_area);
+        if self.pane_theta(idx) == 0.0 {
+            let [w, h] = self.disp_size(idx);
+            reg = reg.intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
+        }
         (reg.width() >= 1.0 && reg.height() >= 1.0).then_some(reg)
+    }
+
+    /// Un-rotate the four corners of a screen-space selection rect into image
+    /// space for pane `idx` and return their axis-aligned bounding box. Using
+    /// all four corners keeps the selection correct on a rotated pane (an
+    /// axis-aligned screen rect maps to a tilted image quad); on an unrotated
+    /// pane it reduces to the plain rectangle. Shared by the export crop and the
+    /// right-drag stats region so both convert a release the same way.
+    pub(super) fn screen_rect_to_image_bounds(&self, idx: usize, r: Rect, area: Rect) -> Rect {
+        [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()]
+            .into_iter()
+            .map(|c| self.rot_screen_to_img(idx, c, area).to_pos2())
+            .fold(Rect::NOTHING, |acc, p| acc.union(Rect::from_min_max(p, p)))
+    }
+
+    /// Map an image-space rect's four corners onto pane `idx` (rotation-aware)
+    /// and return their screen bounding box. The inverse of
+    /// [`screen_rect_to_image_bounds`] for drawing; reduces to the plain
+    /// rectangle on an unrotated pane.
+    fn img_rect_to_screen_bounds(&self, idx: usize, reg: Rect, area: Rect) -> Rect {
+        [reg.left_top(), reg.right_top(), reg.right_bottom(), reg.left_bottom()]
+            .into_iter()
+            .map(|c| self.rot_img_to_screen(idx, c.to_vec2(), area))
+            .fold(Rect::NOTHING, |acc, p| acc.union(Rect::from_min_max(p, p)))
     }
 
     pub(super) fn grid_cells(&self, vis: &[usize], area: Rect) -> Vec<(usize, Rect)> {
@@ -1053,10 +1079,11 @@ impl CimApp {
             self.set_stats_region(None); // treat a right-click as "clear"
             return;
         }
-        let a = self.rot_screen_to_img(idx, s, area);
-        let b = self.rot_screen_to_img(idx, n, area);
         let [w, h] = self.disp_size(idx);
-        let reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2())
+        // Same release conversion as the export crop; the stats region always
+        // clamps to the image (stats only make sense over real pixels).
+        let reg = self
+            .screen_rect_to_image_bounds(idx, Rect::from_two_pos(s, n), area)
             .intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
         if reg.width() >= 1.0 && reg.height() >= 1.0 {
             self.set_stats_region(Some(reg));
