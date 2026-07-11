@@ -428,6 +428,10 @@ impl CimApp {
         let close_w = 44.0;
         let hide_w = 34.0;
         let reload_w = 26.0;
+        // The auto-reload (watch) toggle sits left of Reload, but only for panes
+        // backed by a file — a Compute pane has its own Auto-refresh instead.
+        let watchable = !matches!(self.panes[idx].source, Source::Computed);
+        let watch_w = if watchable { 26.0 } else { 0.0 };
 
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
@@ -468,7 +472,7 @@ impl CimApp {
         // full title (with the filename) doesn't fit that span, fall back to the
         // name-less form so the index/frame info stays readable in small cells.
         let title_x = header.min.x + MODIFY_W + 8.0;
-        let title_right = header.max.x - close_w - hide_w - reload_w - 6.0;
+        let title_right = header.max.x - close_w - hide_w - reload_w - watch_w - 6.0;
         let font = FontId::proportional(13.0);
         let fits = |ui: &egui::Ui, s: &str| {
             let w = ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).rect.width());
@@ -518,6 +522,52 @@ impl CimApp {
         );
         if reload_resp.clicked() {
             self.pending_reload = Some(idx);
+        }
+
+        // Auto-reload (watch) toggle, left of Reload. Amber ◉ while watching, a
+        // dim ○ otherwise; only shown for file-backed panes.
+        if watchable {
+            let watch = Rect::from_min_size(
+                Pos2::new(reload.min.x - watch_w, header.min.y),
+                Vec2::new(watch_w, HEADER_H),
+            );
+            let watching = self.panes[idx].watch;
+            let watch_resp = ui
+                .interact(watch, Id::new(("watch", idx)), Sense::click())
+                .on_hover_text(if watching {
+                    "Auto-reload on: reloads when the file changes on disk. Click to stop."
+                } else {
+                    "Auto-reload: watch the file and reload it when it changes on disk."
+                });
+            if watch_resp.hovered() {
+                hp.rect_filled(watch, 0.0, Color32::from_gray(70));
+            }
+            let amber = Color32::from_rgb(240, 200, 80);
+            hp.text(
+                watch.center(),
+                Align2::CENTER_CENTER,
+                if watching { "◉" } else { "○" },
+                FontId::proportional(14.0),
+                if watching {
+                    amber
+                } else if watch_resp.hovered() {
+                    Color32::from_gray(235)
+                } else {
+                    Color32::from_gray(170)
+                },
+            );
+            if watch_resp.clicked() {
+                let on = !watching;
+                self.panes[idx].watch = on;
+                self.panes[idx].watch_seen = None;
+                // Baseline to the current on-disk state when enabling, so turning
+                // the watch on never triggers an immediate reload.
+                self.panes[idx].watch_loaded = if on {
+                    Self::source_file_sig(&self.panes[idx].source)
+                } else {
+                    None
+                };
+            }
         }
 
         let hide_resp = ui.interact(hide, Id::new(("hide", idx)), Sense::click());

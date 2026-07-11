@@ -51,6 +51,21 @@ const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
 
+/// How often a **watched** pane's source file(s) are stat-ed for changes (also
+/// the idle wake-up interval while any pane is watching). A `stat` is
+/// microseconds, so this is negligible next to a single decode; it's kept slow
+/// on purpose to stay friendly to the paced-repaint model over VNC.
+const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A watched file must stay unchanged (same mtime + size) for this long after a
+/// change before it's reloaded — a debounce so a file still being written
+/// externally isn't read half-finished (each further write resets the timer).
+const WATCH_DEBOUNCE: f64 = 0.4;
+
+/// Identity of a source's on-disk contents for change detection: the latest
+/// modification time across its file(s) and their total byte length.
+type FileSig = (std::time::SystemTime, u64);
+
 /// How many frames ahead of the shown one playback pre-decodes for each on-screen
 /// pane (`prefetch_playback`), so it overlaps decode with display instead of
 /// stalling on decode latency when it reaches a not-yet-resident frame.
@@ -234,6 +249,18 @@ struct Pane {
     error: Option<String>,
     /// Background bulk-load mode for this pane (frame-bar / export buttons).
     eager: Eager,
+    /// Auto-reload: watch the source file(s) on disk and reload when they change
+    /// (the ◉ toggle in the header, left of ⟳ Reload). Never set for a Compute
+    /// pane (it has no file — use its own Auto-refresh).
+    watch: bool,
+    /// Signature of the currently-loaded on-disk contents, the baseline changes
+    /// are measured against. `None` until the first successful stat establishes
+    /// it (so enabling the watch never triggers an immediate reload).
+    watch_loaded: Option<FileSig>,
+    /// A changed-but-not-yet-settled signature and when it was first seen, for the
+    /// `WATCH_DEBOUNCE` quiescence check; reset each time the signature changes
+    /// again (i.e. while the file is still being written).
+    watch_seen: Option<(FileSig, f64)>,
 }
 
 /// A pane's background bulk-load mode.
@@ -1040,6 +1067,9 @@ impl CimApp {
             compute: None,
             error: None,
             eager: Eager::Off,
+            watch: false,
+            watch_loaded: None,
+            watch_seen: None,
         });
     }
 
@@ -1125,8 +1155,77 @@ impl CimApp {
                 }
                 // Frame position is left untouched; frame_disp clamps it if the
                 // reloaded file is shorter.
+                // Re-baseline any file watch to the freshly-loaded contents so it
+                // doesn't immediately fire again on the change we just picked up.
+                self.panes[i].watch_loaded = Self::source_file_sig(&self.panes[i].source);
+                self.panes[i].watch_seen = None;
             }
             Err(e) => self.panes[i].error = Some(format!("Reload failed: {e}")),
+        }
+    }
+
+    /// On-disk signature of a pane's source: the latest mtime across its file(s)
+    /// and their total length. `None` for a Compute pane (no file) or when any
+    /// file can't be stat-ed right now (e.g. mid-rename) — in which case the
+    /// watch simply waits for the next poll rather than reloading torn contents.
+    pub(super) fn source_file_sig(source: &Source) -> Option<FileSig> {
+        let paths: &[PathBuf] = match source {
+            Source::File(p) => std::slice::from_ref(p),
+            Source::Sequence { files, .. } => files.as_slice(),
+            Source::Computed => return None,
+        };
+        let mut latest: Option<std::time::SystemTime> = None;
+        let mut total = 0u64;
+        for p in paths {
+            let m = std::fs::metadata(p).ok()?;
+            total += m.len();
+            let mt = m.modified().ok()?;
+            latest = Some(match latest {
+                Some(l) if l >= mt => l,
+                _ => mt,
+            });
+        }
+        latest.map(|l| (l, total))
+    }
+
+    /// Poll every watched pane's source file(s) and reload those whose contents
+    /// have changed and then settled (unchanged for `WATCH_DEBOUNCE`). Runs before
+    /// `refresh_textures`, so the reloaded frame re-renders and commits in step
+    /// with the other panes instead of flashing. Cheap: one `stat` per file, and
+    /// only fires the (heavier) reload once a change has quiesced.
+    pub(super) fn poll_watches(&mut self, now: f64) {
+        let mut to_reload: Vec<usize> = Vec::new();
+        for i in 0..self.panes.len() {
+            if !self.panes[i].watch {
+                continue;
+            }
+            let Some(sig) = Self::source_file_sig(&self.panes[i].source) else {
+                continue; // unreadable this tick (mid-write/rename) — try again later
+            };
+            // Establish the baseline on the first successful stat.
+            let Some(loaded) = self.panes[i].watch_loaded else {
+                self.panes[i].watch_loaded = Some(sig);
+                self.panes[i].watch_seen = None;
+                continue;
+            };
+            if sig == loaded {
+                self.panes[i].watch_seen = None; // unchanged (or reverted)
+                continue;
+            }
+            // Changed from the loaded contents: wait for it to stop changing.
+            match self.panes[i].watch_seen {
+                Some((seen, t0)) if seen == sig => {
+                    if now - t0 >= WATCH_DEBOUNCE {
+                        self.panes[i].watch_seen = None;
+                        to_reload.push(i);
+                    }
+                }
+                // First sighting of this signature (or it changed again) — (re)arm.
+                _ => self.panes[i].watch_seen = Some((sig, now)),
+            }
+        }
+        for i in to_reload {
+            self.reload(i); // re-baselines watch_loaded to the fresh contents
         }
     }
 
@@ -1805,6 +1904,11 @@ impl eframe::App for CimApp {
             self.play_prefetch = None;
         }
 
+        // Auto-reload watched panes whose source files changed and settled. Runs
+        // before `refresh_textures` (like the compute recompute) so a reloaded
+        // frame re-renders and commits in step rather than flashing.
+        self.poll_watches(ctx.input(|i| i.time));
+
         // Recompute Compute panes *before* staging textures: a compute button
         // click (deferred to here) and any auto-refresh both null the pane's
         // texture (its frame data changed), so doing it now lets the fresh result
@@ -2022,6 +2126,11 @@ impl eframe::App for CimApp {
             || !self.render_inflight.is_empty()
         {
             ctx.request_repaint_after(DECODE_POLL);
+        } else if self.panes.iter().any(|p| p.watch) {
+            // Nothing else pending, but a pane is watching a file: wake up
+            // occasionally to stat it (see `poll_watches`). Slow enough to be
+            // negligible over VNC.
+            ctx.request_repaint_after(WATCH_POLL);
         }
     }
 }

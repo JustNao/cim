@@ -460,10 +460,24 @@ per-pane footer values are always shown. In A/B the single footer (`draw_ab_foot
 shows the shared position with **both** A and B values.
 
 The header is a **single row** (`header_h_for`, feeding `image_area`): the
-**Transformations** button on the left, the title, then **⟳ Reload** (re-reads this
-media from disk → `pending_reload`), **Hide** (sets `visible = false` — keeps the
-pane) and **Close** (removes it) buttons on the
+**Transformations** button on the left, the title, then the **◉ auto-reload**
+toggle, **⟳ Reload** (re-reads this media from disk → `pending_reload`), **Hide**
+(sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on the
 right, matching styles (Close tints red on hover to flag that it removes the pane).
+
+**Auto-reload (file watch).** The **◉** toggle (amber while on, left of ⟳ Reload;
+hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
+`poll_watches` (run each `update`, before `refresh_textures`) stats the pane's
+source file(s) — `source_file_sig` = latest mtime + total length across
+`Source::File` / `Source::Sequence` — and reloads the pane once a change has
+**settled** (`WATCH_DEBOUNCE`, so a file still being written externally isn't read
+half-finished; each further change re-arms the timer). A `stat` is microseconds, so
+watching is negligible; only the (heavier) `reload` fires, and only on quiescence.
+`watch_loaded` is the baseline signature (re-based after any reload and when the
+toggle is switched on, so enabling never triggers an immediate reload); an
+unreadable stat (mid-rename) simply waits for the next poll. While any pane watches,
+an otherwise-idle app wakes every `WATCH_POLL` to stat — the one intentional break
+from "idle requests no repaint", kept slow to stay VNC-friendly (§13/§15).
 Hiding the **focused** pane (via the header button or the manager checkbox) moves
 focus to the nearest still-shown media (`reselect_if_hidden`), so `current` never
 sits on a hidden pane while others are visible. `image_area` is **flush** to the header/footer bars (no margin), and
@@ -750,10 +764,12 @@ window creation, Windows already honoured it); **rebuild the decode pool if
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while
 playing, §5) → `poll_decoding_all` → `enforce_cache_budget`; clamp
-`shared_frame` (and any stale `play_prefetch`); recompute any Compute pane (a deferred
-`pending_recompute` button click, then `refresh_auto_compute`) — **before**
-`refresh_textures`, so its texture (nulled by the recompute) re-renders and commits in the
-same lock-step group as the other panes, never drawn black between the two; `refresh_textures`
+`shared_frame` (and any stale `play_prefetch`); `poll_watches` (reload any watched
+pane whose source file changed and settled) then recompute any Compute pane (a deferred
+`pending_recompute` button click, then `refresh_auto_compute`) — all **before**
+`refresh_textures`, so a reloaded/recomputed texture (nulled by the reload/recompute)
+re-renders and commits in the same lock-step group as the other panes, never drawn black
+between the two; `refresh_textures`
 (stage on-screen panes and, when all ready, flip them + commit a playback step — runs last so
 it sees settled frame/tone state, just before drawing reads the textures); expire
 the transient `status` note; draw toolbar,
