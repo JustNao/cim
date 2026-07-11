@@ -144,7 +144,8 @@ impl Worker {
         let size = job.data.size;
         let [w, h] = size;
         let mut rgba = Vec::new();
-        let mut lut_time = Duration::ZERO;
+        // Set on both branches below; `ops_time` keeps ZERO on the plain-LUT path.
+        let lut_time;
         let mut ops_time = Duration::ZERO;
         // The proprietary operators run on a single-channel 16-bit render (so they
         // see full native precision) and only for single-channel 16-bit frames with

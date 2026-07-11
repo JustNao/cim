@@ -688,7 +688,7 @@ impl CimApp {
             return;
         }
         painter.circle_filled(sp, 3.5, Color32::from_rgb(235, 40, 40));
-        painter.circle_stroke(sp, 3.5, Stroke::new(1.0, Color32::from_black_alpha(160)));
+        painter.circle_stroke(sp, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(160)));
     }
 
     /// Bottom status strip: resolution (h×w), the shared cursor pixel, and this
@@ -796,7 +796,7 @@ impl CimApp {
         let p = ui.painter_at(img);
         p.line_segment(
             [Pos2::new(split_x, img.min.y), Pos2::new(split_x, img.max.y)],
-            Stroke::new(2.0, Color32::from_gray(240)),
+            Stroke::new(2.0_f32, Color32::from_gray(240)),
         );
         let knob = Pos2::new(split_x, img.center().y);
         p.circle_filled(knob, 9.0, Color32::from_gray(240));
@@ -929,7 +929,7 @@ impl CimApp {
             if let (Some(s), Some(n)) = (self.stats_sel_start, self.stats_sel_now) {
                 let r = Rect::from_two_pos(s, n).intersect(clip_rect);
                 ui.painter_at(clip_rect)
-                    .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
+                    .rect_stroke(r, 0.0, Stroke::new(1.5_f32, REGION_COL));
             }
             return;
         }
@@ -950,7 +950,7 @@ impl CimApp {
             return;
         }
         ui.painter_at(clip_rect)
-            .rect_stroke(r, 0.0, Stroke::new(1.5, REGION_COL));
+            .rect_stroke(r, 0.0, Stroke::new(1.5_f32, REGION_COL));
 
         // The stats panel is collapsible: when hidden, a small button under the
         // region brings it back. The region outline above stays visible.
@@ -988,10 +988,10 @@ impl CimApp {
         let sa = self.rot_img_to_screen(idx, lp.a.to_vec2(), coord_area);
         let sb = self.rot_img_to_screen(idx, lp.b.to_vec2(), coord_area);
         let painter = ui.painter_at(clip);
-        painter.line_segment([sa, sb], Stroke::new(2.0, LINE_COL));
+        painter.line_segment([sa, sb], Stroke::new(2.0_f32, LINE_COL));
         for p in [sa, sb] {
             painter.circle_filled(p, 4.0, LINE_COL);
-            painter.circle_stroke(p, 4.0, Stroke::new(1.0, Color32::from_black_alpha(180)));
+            painter.circle_stroke(p, 4.0, Stroke::new(1.0_f32, Color32::from_black_alpha(180)));
         }
     }
 
@@ -1210,7 +1210,7 @@ impl CimApp {
 
         let painter = ui.painter_at(clip);
         painter.rect_filled(panel, 0.0, Color32::from_black_alpha(205));
-        painter.rect_stroke(panel, 0.0, Stroke::new(1.0, REGION_COL));
+        painter.rect_stroke(panel, 0.0, Stroke::new(1.0_f32, REGION_COL));
 
         let hist_rect = Rect::from_min_size(
             Pos2::new(panel.left() + pad, panel.top() + pad + head_h),

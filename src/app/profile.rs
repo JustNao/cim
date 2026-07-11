@@ -152,7 +152,7 @@ impl CimApp {
             let y = sy(v);
             painter.line_segment(
                 [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
-                Stroke::new(1.0, grid),
+                Stroke::new(1.0_f32, grid),
             );
             painter.text(
                 Pos2::new(plot.left() - 4.0, y),
@@ -171,7 +171,7 @@ impl CimApp {
             let x = sx(v);
             painter.line_segment(
                 [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
-                Stroke::new(1.0, grid),
+                Stroke::new(1.0_f32, grid),
             );
             painter.text(
                 Pos2::new(x, plot.bottom() + 3.0),
@@ -199,7 +199,7 @@ impl CimApp {
         );
 
         // Plot border.
-        painter.rect_stroke(plot, 0.0, Stroke::new(1.0, Color32::from_gray(70)));
+        painter.rect_stroke(plot, 0.0, Stroke::new(1.0_f32, Color32::from_gray(70)));
 
         // Each media's curve, breaking at NaN gaps so out-of-frame stretches
         // don't draw a false connecting segment.
@@ -207,7 +207,7 @@ impl CimApp {
             let mut run: Vec<Pos2> = Vec::new();
             let flush = |run: &mut Vec<Pos2>| {
                 if run.len() >= 2 {
-                    painter.add(egui::Shape::line(run.clone(), Stroke::new(1.3, *color)));
+                    painter.add(egui::Shape::line(run.clone(), Stroke::new(1.3_f32, *color)));
                 }
                 run.clear();
             };

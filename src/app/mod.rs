@@ -2210,7 +2210,7 @@ fn dim_outside(painter: &egui::Painter, area: Rect, r: Rect) {
         0.0,
         dim,
     );
-    painter.rect_stroke(r, 0.0, Stroke::new(2.0, Color32::from_rgb(240, 200, 80)));
+    painter.rect_stroke(r, 0.0, Stroke::new(2.0_f32, Color32::from_rgb(240, 200, 80)));
 }
 
 /// Clamp an image-space region to a frame's pixel grid, returning the integer
@@ -2304,7 +2304,7 @@ fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) -> Opt
             let y = rect.bottom() - hh * rect.height();
             pts.push(Pos2::new(x, y));
         }
-        painter.add(egui::Shape::line(pts, Stroke::new(1.0, colors[ci])));
+        painter.add(egui::Shape::line(pts, Stroke::new(1.0_f32, colors[ci])));
     }
 
     // For a single grey (mono) curve, mark the most-frequent value — the peak
@@ -2324,7 +2324,7 @@ fn draw_hist_curves(painter: &egui::Painter, rect: Rect, hist: &HistData) -> Opt
     let x = rect.left() + frac * rect.width();
     painter.line_segment(
         [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-        Stroke::new(1.5, Color32::from_rgb(240, 200, 80)),
+        Stroke::new(1.5_f32, Color32::from_rgb(240, 200, 80)),
     );
     Some(hist.min + frac * (hist.max - hist.min))
 }

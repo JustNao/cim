@@ -341,7 +341,7 @@ impl CimApp {
                 let x = x_of(k);
                 painter.line_segment(
                     [Pos2::new(x, rect.bottom() - 5.0), Pos2::new(x, rect.bottom())],
-                    Stroke::new(1.0, Color32::from_gray(90)),
+                    Stroke::new(1.0_f32, Color32::from_gray(90)),
                 );
             }
         }
@@ -357,7 +357,7 @@ impl CimApp {
 
         // Loop brackets: [ at the start, ] at the end.
         let amber = Color32::from_rgb(240, 200, 80);
-        let st = Stroke::new(2.0, amber);
+        let st = Stroke::new(2.0_f32, amber);
         let (top, bot, cap) = (rect.top(), rect.bottom(), 5.0);
         painter.line_segment([Pos2::new(xlo, top), Pos2::new(xlo, bot)], st);
         painter.line_segment([Pos2::new(xlo, top), Pos2::new(xlo + cap, top)], st);
@@ -370,7 +370,7 @@ impl CimApp {
         let px = x_of(self.shared_frame.min(len.saturating_sub(1)));
         painter.line_segment(
             [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
-            Stroke::new(2.0, Color32::from_gray(235)),
+            Stroke::new(2.0_f32, Color32::from_gray(235)),
         );
         painter.circle_filled(Pos2::new(px, rect.center().y), 6.0, Color32::from_gray(240));
 
@@ -805,7 +805,7 @@ impl CimApp {
                                 ui.painter().hline(
                                     ui.max_rect().x_range(),
                                     y,
-                                    Stroke::new(2.0, Color32::from_rgb(240, 200, 80)),
+                                    Stroke::new(2.0_f32, Color32::from_rgb(240, 200, 80)),
                                 );
                             }
                         }
