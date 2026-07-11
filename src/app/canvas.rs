@@ -1462,7 +1462,18 @@ impl CimApp {
                                     self.rotation_edit_pane = None;
                                 }
                                 ui.label("°");
-                                if ui.small_button("⟲").on_hover_text("Reset to 0°").clicked() {
+                                // A full interact-height button (not `small_button`,
+                                // which zeroes the vertical padding) so the tall ⟲
+                                // icon glyph is centred with room above/below rather
+                                // than clipped at the top by the taller slider row.
+                                if ui
+                                    .add(
+                                        egui::Button::new("⟲")
+                                            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y)),
+                                    )
+                                    .on_hover_text("Reset to 0°")
+                                    .clicked()
+                                {
                                     rotation = 0.0;
                                     self.rotation_edit_pane = None;
                                 }
