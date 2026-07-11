@@ -582,9 +582,10 @@ name + colour underneath.
 `add_compute_pane` adds an **unconfigured** Compute pane. `draw_compute_ui` (a
 top-left foreground `Area` over the pane) has two states keyed on `Compute.computed`:
 while `false` it shows the **config form** (mode + source combos + a **Compute**
-button); that button runs `recompute_pane`, which on success sets `computed = true`,
-so the **result image** then shows with the **Refresh** / **Save** / **Auto refresh**
-controls instead. `Pane.compute` holds the `kind`, source id(s), `computed`, and the
+button); that button sets `pending_recompute` (run at the top of the next `update`,
+before `refresh_textures`, so the result never flashes black — §13) → `recompute_pane`,
+which on success sets `computed = true`, so the **result image** then shows with the
+**Refresh** / **Save** / **Auto refresh** controls instead. `Pane.compute` holds the `kind`, source id(s), `computed`, and the
 auto-refresh flag. `media::Reduce` modes:
 - **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
@@ -749,9 +750,12 @@ window creation, Windows already honoured it); **rebuild the decode pool if
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while
 playing, §5) → `poll_decoding_all` → `enforce_cache_budget`; clamp
-`shared_frame` (and any stale `play_prefetch`); `refresh_textures` (stage on-screen panes
-and, when all ready, flip them + commit a playback step — runs last so it sees settled
-frame/tone state, just before drawing reads the textures); `refresh_auto_compute`; expire
+`shared_frame` (and any stale `play_prefetch`); recompute any Compute pane (a deferred
+`pending_recompute` button click, then `refresh_auto_compute`) — **before**
+`refresh_textures`, so its texture (nulled by the recompute) re-renders and commits in the
+same lock-step group as the other panes, never drawn black between the two; `refresh_textures`
+(stage on-screen panes and, when all ready, flip them + commit a playback step — runs last so
+it sees settled frame/tone state, just before drawing reads the textures); expire
 the transient `status` note; draw toolbar,
 bottom frame bar (shown whenever **any** media is a sequence), central panel, the compute
 draft, windows (manager/export/settings/view-command), error popup, the **">8 sequences"

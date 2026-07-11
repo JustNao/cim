@@ -333,6 +333,12 @@ pub struct CimApp {
     /// The toolbar "Compute" button was clicked: add a new Compute pane after the
     /// draw (deferred to avoid growing `panes` mid-draw).
     pending_compute_create: bool,
+    /// A Compute pane's in-pane **Compute** / **Refresh** button was clicked.
+    /// Deferred so the recompute (which nulls the pane's texture — its frame data
+    /// changed but its `(frame, sig)` identity didn't) runs at the *top* of the
+    /// next update, before `refresh_textures`, so the fresh result re-renders and
+    /// commits in the same lock-step group as the other panes — no black flash.
+    pending_recompute: Option<usize>,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
     /// Toggled by the button in the panel's top-left corner; when off, a small
@@ -562,6 +568,7 @@ impl CimApp {
             show_viewcmd: false,
             rebinding: None,
             pending_compute_create: false,
+            pending_recompute: None,
             show_stats: true,
             stats_region: None,
             stats_gen: 0,
@@ -1798,13 +1805,23 @@ impl eframe::App for CimApp {
             self.play_prefetch = None;
         }
 
+        // Recompute Compute panes *before* staging textures: a compute button
+        // click (deferred to here) and any auto-refresh both null the pane's
+        // texture (its frame data changed), so doing it now lets the fresh result
+        // re-render and commit in the same lock-step group as the other panes
+        // below — the pane is never drawn black between the two.
+        if let Some(i) = self.pending_recompute.take() {
+            if i < self.panes.len() {
+                self.recompute_pane(i);
+            }
+        }
+        // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
+        self.refresh_auto_compute();
+
         // Stage the on-screen panes' textures and, when they're all ready, flip
         // them (and commit a playback step) together. Runs last so it sees the
         // settled frame/tone state, just before drawing reads the textures.
         self.refresh_textures(ctx);
-
-        // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
-        self.refresh_auto_compute();
 
         // Expire a transient status notification after `STATUS_TTL`. Shadowing
         // the last value detects a fresh message, so every `self.status = …`

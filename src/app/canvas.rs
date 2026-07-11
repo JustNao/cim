@@ -1647,7 +1647,10 @@ impl CimApp {
             c.save_name = save_name.clone();
         }
         if recompute {
-            self.recompute_pane(idx);
+            // Defer to the top of the next update (before `refresh_textures`) so
+            // the recompute — which nulls this pane's texture — re-renders in the
+            // same lock-step commit as the others, never drawing the pane black.
+            self.pending_recompute = Some(idx);
         }
         if do_save {
             self.save_computed(idx, &save_name);
