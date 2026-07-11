@@ -669,11 +669,19 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   draws the crop (secondary-button edge detection in `region_overlay`, like the stats
   region) while **left-drag pans and the wheel zooms** so the user can move around first;
   `screen_rect_to_image` on release maps it to image space, applied to every pane as a
-  cell of exactly the crop's pixel size.
+  cell of exactly the crop's pixel size. Closing the panel mid-selection (the toolbar
+  toggle **or** the window's ✕) runs `cancel_region_select`, which clears
+  `selecting_region` and restores the forced-Single mode — otherwise the flag stays
+  stuck true and keeps suppressing pane interaction (rotate / reorder / focus).
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
-  playback window. A warning appears when a length isn't discovered yet, with
-  **Load all** / **Load offsets** (the latter — headers only — is enough here, since
-  export only needs the length, not resident frames) and a **Stop** while running.
+  playback window but with the **end exclusive** (the loop's `[lo, hi]` plays through
+  `hi`, but exporting it yields `lo..hi` — e.g. loop `[20, 40]` → 20 frames, not 21).
+  A warning appears only when the **selected range** isn't fully discovered yet
+  (`export_range_incomplete` — an explicit sub-range whose frames every participating
+  sequence has already found needs no loading, so no warning even if some tail is still
+  undiscovered), with **Load all** / **Load offsets** (the latter — headers only — is
+  enough here, since export only needs the length, not resident frames) and a **Stop**
+  while running.
   An export **Load all** arms `export_load_pending`: if it can't fully load because
   the frame cache is too small (`load_cache_exhausted`), a modal (`warn_popup`) on
   completion tells the user the whole sequence isn't resident — the length was still

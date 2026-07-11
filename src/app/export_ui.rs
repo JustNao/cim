@@ -66,14 +66,26 @@ impl CimApp {
         self.show_export = !self.show_export;
         if self.show_export {
             self.export_mode = self.mode; // default to what's on screen
-        } else if self.selecting_region {
+        } else {
             // Panel closed mid-selection: abandon it and restore the view.
-            self.selecting_region = false;
-            self.sel_start = None;
-            self.sel_rect = None;
-            if let Some(m) = self.pre_select_mode.take() {
-                self.mode = m;
-            }
+            self.cancel_region_select();
+        }
+    }
+
+    /// Abandon an in-progress export-region selection, restoring the view mode it
+    /// forced to Single. A no-op when not selecting. Must run on **every** way the
+    /// export panel closes — the toolbar toggle *and* the window's title-bar ✕ —
+    /// or `selecting_region` stays stuck true and keeps suppressing pane
+    /// interaction (rotate / reorder / focus) after the panel is gone.
+    pub(super) fn cancel_region_select(&mut self) {
+        if !self.selecting_region {
+            return;
+        }
+        self.selecting_region = false;
+        self.sel_start = None;
+        self.sel_rect = None;
+        if let Some(m) = self.pre_select_mode.take() {
+            self.mode = m;
         }
     }
 
@@ -268,6 +280,42 @@ impl CimApp {
             }
             None => self.content_region().unwrap_or(self.last_area),
         }
+    }
+
+    /// The panes an export actually composites, by current mode — so a warning /
+    /// check only considers media that end up in the output.
+    fn export_participants(&self) -> Vec<usize> {
+        if self.panes.is_empty() {
+            return Vec::new();
+        }
+        let n = self.panes.len();
+        match self.export_mode {
+            Mode::Grid => self.visible_indices(),
+            Mode::Single => vec![self.current.min(n - 1)],
+            Mode::Ab => vec![self.slot_a.min(n - 1), self.slot_b.min(n - 1)],
+        }
+    }
+
+    /// Whether the selected export range could still be cut short (or change) by
+    /// lazy length discovery — the only case the "not fully loaded" warning is
+    /// meaningful. `false` once the chosen range is fully discovered: an explicit
+    /// sub-range whose frames every participating sequence has already found needs
+    /// no more loading, even if some tail is still undiscovered.
+    fn export_range_incomplete(&self) -> bool {
+        // "All" over a still-discovering timeline is inherently open-ended: the
+        // end grows with discovery, so it's never complete until the true end.
+        if self.export_range.is_none() && !self.current_at_end() {
+            return true;
+        }
+        let (_, end) = self.export_frames();
+        // Frames are discovered contiguously, so a sequence covers the range once
+        // it's at its true end, or has already found a frame at index `end`. A
+        // still-discovering pane that hasn't reached `end` yet may still gain
+        // frames within the range (changing what it shows there), so warn.
+        self.export_participants().iter().any(|&i| {
+            let m = &self.panes[i].media;
+            m.frame_count() > 1 && !m.at_end() && m.frame_count() <= end
+        })
     }
 
     /// Inclusive (start, end) of the exported timeline range, clamped to what's
@@ -614,7 +662,9 @@ impl CimApp {
                                     );
                                     self.export_range = Some((s0, e0));
                                 }
-                                // Adopt the current playback loop window.
+                                // Adopt the current playback loop window, but with
+                                // the end **exclusive** — a loop [20, 40] exports
+                                // frames 20..40 (20 frames), not through 40.
                                 let (llo, lhi) = self.loop_bounds(tl);
                                 if ui
                                     .add_enabled(
@@ -622,11 +672,13 @@ impl CimApp {
                                         egui::Button::new("Use loop range"),
                                     )
                                     .on_hover_text(
-                                        "Set the frame range to the playback loop window",
+                                        "Set the frame range to the playback loop window \
+                                         (end exclusive: [20, 40] → frames 20–39)",
                                     )
                                     .clicked()
                                 {
-                                    self.export_range = Some((llo, lhi));
+                                    self.export_range =
+                                        Some((llo, lhi.saturating_sub(1).max(llo)));
                                 }
                             });
                             ui.end_row();
@@ -655,9 +707,10 @@ impl CimApp {
                         });
                 });
 
-                // Sequence lengths are discovered lazily, so warn when a media's
-                // true end isn't known yet — the range above may be short.
-                if self.panes.iter().any(|p| !p.media.at_end()) {
+                // Sequence lengths are discovered lazily, so warn when the chosen
+                // range isn't fully discovered yet — but not when it already is
+                // (e.g. a loop sub-range whose frames are all known).
+                if self.export_range_incomplete() {
                     ui.horizontal(|ui| {
                         ui.colored_label(
                             Color32::from_rgb(240, 200, 120),
@@ -748,6 +801,11 @@ impl CimApp {
                     ui.label(&self.export_status);
                 }
             });
+        // Closing via the window's ✕ (rather than the toolbar toggle) must still
+        // tear down an in-progress region selection, or it stays stuck on.
+        if self.show_export && !open {
+            self.cancel_region_select();
+        }
         self.show_export = open;
     }
 }
