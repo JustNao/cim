@@ -203,6 +203,40 @@ impl FrameData {
         f
     }
 
+    /// Extract the axis-aligned sub-rectangle `[x, y, w, h]` (clamped to the
+    /// frame) as a new **independent** frame — same sample type / channel count /
+    /// mask flag, but its own memoized bounds. The export uses this to run the
+    /// whole tone pipeline (LUT bounds + LUT render + the proprietary operators)
+    /// on **only** the cropped region instead of the full image.
+    pub fn crop(&self, x: usize, y: usize, w: usize, h: usize) -> FrameData {
+        let sw = self.size[0];
+        let x0 = x.min(sw);
+        let y0 = y.min(self.size[1]);
+        let x1 = (x0 + w).min(sw);
+        let y1 = (y0 + h).min(self.size[1]);
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let n = self.channels;
+        // Copy each output row as one contiguous slice of the source row.
+        macro_rules! rows {
+            ($v:expr) => {{
+                let mut out = Vec::with_capacity(cw * ch * n);
+                for row in y0..y1 {
+                    let s = (row * sw + x0) * n;
+                    out.extend_from_slice(&$v[s..s + cw * n]);
+                }
+                out
+            }};
+        }
+        let samples = match &self.samples {
+            Samples::U8(v) => Samples::U8(rows!(v)),
+            Samples::U16(v) => Samples::U16(rows!(v)),
+            Samples::F32(v) => Samples::F32(rows!(v)),
+        };
+        let mut f = FrameData::new([cw, ch], n, samples);
+        f.mask = self.mask;
+        f
+    }
+
     /// True when this frame is a boolean mask (decoded from a 1-bit TIFF).
     pub fn is_mask(&self) -> bool {
         self.mask
@@ -1114,7 +1148,7 @@ pub struct TiffSeq {
 
 /// A sequence whose frames are individual numbered image files (one file per
 /// frame) — e.g. `frame_000.png … frame_011.png`, given on the command line as
-/// a compact `PREFIX%0Nd,START,END.EXT` token. Unlike a TIFF its length is
+/// a compact `PREFIX%0Xu SUFFIX,START,END` token. Unlike a TIFF its length is
 /// known up front (the file list), so there is no lazy discovery and it is
 /// always "at end".
 pub struct FileSeq {
@@ -1127,7 +1161,7 @@ pub struct FileSeq {
 
 /// Several multi-page TIFFs presented as **one** continuous timeline: when
 /// `movie_000.tif` runs out of pages the timeline rolls straight into
-/// `movie_001.tif`, and so on. Opened from a compact `PREFIX%0Nd,…tif` token.
+/// `movie_001.tif`, and so on. Opened from a compact `PREFIX%0Xu.tif,…` token.
 ///
 /// Page counts per file aren't known up front (a TIFF's length is discovered
 /// lazily, §4), so the global length grows one page at a time: the frontier
@@ -1464,7 +1498,7 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
     }))
 }
 
-/// Open a numbered file run (a compact `PREFIX%0Nd,…` token) as a single media.
+/// Open a numbered file run (a compact `PREFIX%0Xu…,…` token) as a single media.
 /// Multi-page TIFFs are **concatenated** into one continuous timeline
 /// (`ConcatSeq`); any other extension is a still-per-file sequence (`FileSeq`).
 /// `name` is the display label (typically the token itself).
@@ -1945,6 +1979,29 @@ mod tests {
             ov,
             vec![0, 0, 0, 0, 10, 20, 30, 100, 10, 20, 30, 200]
         );
+    }
+
+    /// `crop` extracts the sub-rectangle's samples (clamped to the frame),
+    /// preserving channels and mask flag, with independent (fresh) bounds.
+    #[test]
+    fn crop_extracts_subrect() {
+        // 4×3 single-channel gradient, value = y*4 + x.
+        let f = FrameData::new([4, 3], 1, Samples::U8((0..12).collect()));
+        // Crop the 2×2 at (1, 1): values [5,6 / 9,10].
+        let c = f.crop(1, 1, 2, 2);
+        assert_eq!(c.size, [2, 2]);
+        assert_eq!(c.channels, 1);
+        match &c.samples {
+            Samples::U8(v) => assert_eq!(v, &vec![5, 6, 9, 10]),
+            _ => panic!("wrong sample type"),
+        }
+        // Out-of-bounds request clamps to the frame edge.
+        let e = f.crop(3, 2, 10, 10);
+        assert_eq!(e.size, [1, 1]);
+        match &e.samples {
+            Samples::U8(v) => assert_eq!(v, &vec![11]),
+            _ => panic!("wrong sample type"),
+        }
     }
 
     /// Inserting a frame accounts its bytes; evicting frees them and keeps the

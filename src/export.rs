@@ -58,8 +58,22 @@ pub struct ExportPane {
     /// Which concatenated file `reader` is currently open on (reopened when the
     /// timeline crosses into the next file).
     cur_file: Option<usize>,
+    /// The freshly decoded source frame, stashed between the decode phase and the
+    /// render phase (the render needs the crop box, computed from every pane's
+    /// size after all have decoded). `raw_idx` = which frame it holds.
+    raw_frame: Option<Arc<FrameData>>,
+    raw_idx: Option<usize>,
+    /// The frame index currently *rendered* into `cur_display`, plus the crop box
+    /// it was rendered at — so an unchanged (frame, box) skips re-rendering.
     cur_idx: Option<usize>,
+    cur_box: Option<[usize; 4]>,
+    /// The rendered display RGBA — **only the cropped region** (`cur_render_size`),
+    /// whose top-left is `cur_origin` in full-image pixels.
     cur_display: Option<Vec<u8>>,
+    cur_origin: [usize; 2],
+    cur_render_size: [usize; 2],
+    /// Full source-frame size (kept for the rotation centre and overlay mapping,
+    /// which work in full-image space regardless of the crop).
     cur_size: [usize; 2],
     /// This pane's proprietary operator instances, reused across the exported
     /// frames (rebuilt only on a size change) — same lifecycle as the live view.
@@ -156,8 +170,13 @@ impl ExportPane {
             source,
             reader: None,
             cur_file: None,
+            raw_frame: None,
+            raw_idx: None,
             cur_idx: None,
+            cur_box: None,
             cur_display: None,
+            cur_origin: [0, 0],
+            cur_render_size: [0, 0],
             cur_size: [0, 0],
             ops: crate::imageproc::PaneOps::default(),
             overlay: None,
@@ -226,37 +245,76 @@ impl ExportPane {
         }
     }
 
-    /// Ensure the display buffer for timeline `t` is decoded + rendered.
-    fn ensure_frame(&mut self, t: usize) {
+    /// Phase 1 — decode the source frame for timeline `t` (and its overlay) and
+    /// stash it for the render phase. The render can't run yet: the crop box is
+    /// computed once *all* panes' sizes are known (`ExportPlan::pane_boxes`). A
+    /// no-op when the same frame is already decoded; keeps the previous on a miss.
+    fn decode(&mut self, t: usize) {
         self.ensure_overlay(t);
         let idx = self.src_index(t);
-        if self.cur_idx == Some(idx) {
+        if self.raw_idx == Some(idx) {
             return;
         }
-        // Keep the previous frame on any open/decode miss.
         let Some(frame) = decode_source(&self.source, idx, &mut self.reader, &mut self.cur_file)
         else {
             return;
         };
         self.cur_size = frame.size;
-        // Built-in render, then the same proprietary operators the live view
-        // applies, so an export matches what's on screen. The Linear clip toggle +
-        // its per-tail percentile (`self.clip`) mirror the pane's tone; LUT_ALPHA
-        // takes the full range (`clip == None`). The operators run on a single-
-        // channel 16-bit render, only for single-channel 16-bit frames with the
-        // library loaded; everything else is the plain 8-bit render.
-        let [w, h] = frame.size;
-        let (lo, hi) = match self.clip {
-            Some(pct) => frame.clip_bounds(pct),
-            None => frame.display_bounds(false),
+        self.raw_frame = Some(frame);
+        self.raw_idx = Some(idx);
+    }
+
+    /// Phase 2 — render the pane's display buffer for the source-space crop box
+    /// `b = [x0, y0, w, h]`, running the **whole** tone pipeline (LUT bounds, LUT
+    /// render, and the proprietary LUT_ALPHA / details operators) on **only that
+    /// sub-rectangle**, so a small crop never processes the full image. `None` =
+    /// the pane isn't sampled by the output (nothing to render).
+    ///
+    /// The box is the axis-aligned bounding box, in the *unrotated* source image,
+    /// of the pixels the (possibly rotated) crop actually samples — so a rotated
+    /// pane renders the tight source rectangle that covers its rotated region.
+    fn render(&mut self, b: Option<[usize; 4]>) {
+        if self.cur_idx == self.raw_idx && self.cur_box == b {
+            return; // already rendered this frame at this box
+        }
+        let Some(frame) = self.raw_frame.clone() else {
+            return;
         };
-        let use_ops = frame.is_op_input()
+        let Some([x0, y0, cw, ch]) = b else {
+            self.cur_display = None;
+            self.cur_box = None;
+            self.cur_idx = self.raw_idx;
+            return;
+        };
+        // Crop first, so bounds / LUT / operators all see only the region. The
+        // Linear clip toggle + its per-tail percentile (`self.clip`) mirror the
+        // pane's tone; LUT_ALPHA takes the full range (`clip == None`). The
+        // operators run on a single-channel 16-bit render, only for single-channel
+        // 16-bit frames with the library loaded; everything else is the plain
+        // 8-bit render. Matches the live view (on the cropped region).
+        //
+        // Skip the copy when the box already covers the whole frame (e.g. a
+        // full-view export), so that common case is no slower than before.
+        let [fw, fh] = frame.size;
+        let cropped;
+        let sub: &FrameData = if x0 == 0 && y0 == 0 && cw == fw && ch == fh {
+            &*frame
+        } else {
+            cropped = frame.crop(x0, y0, cw, ch);
+            &cropped
+        };
+        let [w, h] = sub.size;
+        let (lo, hi) = match self.clip {
+            Some(pct) => sub.clip_bounds(pct),
+            None => sub.display_bounds(false),
+        };
+        let use_ops = sub.is_op_input()
             && ((self.contrast == ContrastMode::LutAlpha
                 && crate::imageproc::lut_alpha_available())
                 || (self.details && crate::imageproc::details_available()));
         let rgba = if use_ops {
             let mut gray = Vec::new();
-            frame.render_into_gray_u16(lo, hi, &mut gray);
+            sub.render_into_gray_u16(lo, hi, &mut gray);
             let lut_alpha = self.contrast == ContrastMode::LutAlpha;
             self.ops.apply(&mut gray, w, h, lut_alpha, self.details);
             // Expand the processed grey back to 8-bit RGBA.
@@ -271,11 +329,14 @@ impl ExportPane {
             out
         } else {
             let mut out = Vec::new();
-            frame.render_into(lo, hi, &mut out);
+            sub.render_into(lo, hi, &mut out);
             out
         };
         self.cur_display = Some(rgba);
-        self.cur_idx = Some(idx);
+        self.cur_origin = [x0, y0];
+        self.cur_render_size = [cw, ch];
+        self.cur_box = b;
+        self.cur_idx = self.raw_idx;
     }
 
     /// Undo the pane's display rotation on a sampled image point: map the point
@@ -335,13 +396,17 @@ impl ExportPane {
     /// nearest so every exported pixel is a true source value, never a blend —
     /// upscaling just replicates source pixels.
     fn sample_base(&self, ip: Vec2) -> Option<[u8; 3]> {
-        let [w, h] = self.cur_size;
         let buf = self.cur_display.as_ref()?;
-        if w == 0 || h == 0 || ip.x < 0.0 || ip.y < 0.0 || ip.x >= w as f32 || ip.y >= h as f32 {
+        // `cur_display` covers only the crop box (`cur_render_size`) whose top-left
+        // is `cur_origin` in full-image pixels — shift `ip` into that sub-buffer.
+        let [ox, oy] = self.cur_origin;
+        let [cw, ch] = self.cur_render_size;
+        let x = ip.x - ox as f32;
+        let y = ip.y - oy as f32;
+        if cw == 0 || ch == 0 || x < 0.0 || y < 0.0 || x >= cw as f32 || y >= ch as f32 {
             return None;
         }
-        let (x, y) = (ip.x as usize, ip.y as usize);
-        let i = (y * w + x) * 4;
+        let i = (y as usize * cw + x as usize) * 4;
         Some([buf[i], buf[i + 1], buf[i + 2]])
     }
 }
@@ -416,8 +481,16 @@ pub struct ExportPlan {
 impl ExportPlan {
     /// Composite output frame `t` (of `total`) into an RGBA buffer.
     pub fn compose(&mut self, t: usize) -> Vec<u8> {
+        // Decode every pane's source frame first (so their sizes are known), then
+        // compute the source-space crop box each one actually needs and render
+        // only that sub-rectangle — the tone pipeline (LUT + operators) never
+        // touches pixels outside the exported region.
         for p in &mut self.panes {
-            p.ensure_frame(self.start + t);
+            p.decode(self.start + t);
+        }
+        let boxes = self.pane_boxes();
+        for (p, b) in self.panes.iter_mut().zip(boxes) {
+            p.render(b);
         }
         let (w, h) = (self.out_w, self.out_h);
         let (rw, rh) = (self.region.width(), self.region.height());
@@ -444,6 +517,99 @@ impl ExportPlan {
             }
         }
         out
+    }
+
+    /// Per-pane source-image crop box `[x0, y0, w, h]` (or `None` when a pane is
+    /// not sampled): the axis-aligned bounding box, in the *unrotated* source
+    /// image, of the pixels the exported region actually reads from that pane.
+    ///
+    /// The composition→source map (region → cell content → view `screen_to_img` →
+    /// `unrotate`) is a pure affine (the view is a rotation-free similarity, and
+    /// `unrotate` is a rotation), so an axis-aligned composition rectangle maps to
+    /// a parallelogram whose bounding box is exactly the bound over its four
+    /// corners — mapping corners is exact for any rotation, and O(cells) rather
+    /// than a per-output-pixel pass. A 1px pad absorbs rounding at the edges.
+    fn pane_boxes(&self) -> Vec<Option<[usize; 4]>> {
+        // Accumulate a float bbox (min/max source x,y) per pane over mapped corners.
+        let mut acc: Vec<Option<(f32, f32, f32, f32)>> = vec![None; self.panes.len()];
+        let hit = |acc: &mut Vec<Option<(f32, f32, f32, f32)>>, pane: usize, sample: Pos2, area: Rect| {
+            let p = &self.panes[pane];
+            let ip = p.unrotate(p.view.screen_to_img(sample, area));
+            let e = &mut acc[pane];
+            *e = Some(match *e {
+                None => (ip.x, ip.y, ip.x, ip.y),
+                Some((x0, y0, x1, y1)) => (x0.min(ip.x), y0.min(ip.y), x1.max(ip.x), y1.max(ip.y)),
+            });
+        };
+        let corners = |r: Rect| {
+            [
+                r.min,
+                Pos2::new(r.max.x, r.min.y),
+                Pos2::new(r.min.x, r.max.y),
+                r.max,
+            ]
+        };
+        // A rectangle with real area (intersect can yield an empty/negative one).
+        let positive = |r: Rect| r.width() > 0.0 && r.height() > 0.0;
+        match &self.layout {
+            ExportLayout::Single(i, r) => {
+                let cr = self.region.intersect(*r);
+                if positive(cr) {
+                    for c in corners(cr) {
+                        hit(&mut acc, *i, c, *r);
+                    }
+                }
+            }
+            ExportLayout::Ab { a, b, img, split_x } => {
+                let base = self.region.intersect(*img);
+                if positive(base) {
+                    let mid = split_x.clamp(base.min.x, base.max.x);
+                    let left = Rect::from_min_max(base.min, Pos2::new(mid, base.max.y));
+                    let right = Rect::from_min_max(Pos2::new(mid, base.min.y), base.max);
+                    if positive(left) {
+                        for c in corners(left) {
+                            hit(&mut acc, *a, c, *img);
+                        }
+                    }
+                    if positive(right) {
+                        for c in corners(right) {
+                            hit(&mut acc, *b, c, *img);
+                        }
+                    }
+                }
+            }
+            ExportLayout::Grid(cells) => {
+                for g in cells {
+                    let pr = self.region.intersect(g.place);
+                    if !positive(pr) {
+                        continue;
+                    }
+                    // A composition point maps into `content` before the view samples.
+                    let off = g.content.min - g.place.min;
+                    for c in corners(pr) {
+                        hit(&mut acc, g.pane, c + off, g.area);
+                    }
+                }
+            }
+        }
+        // Float bbox → integer pixel box, padded then clamped to each frame's size.
+        acc.into_iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let (x0, y0, x1, y1) = e?;
+                let [w, h] = self.panes[i].cur_size;
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                let clampw = |v: f32| v.max(0.0).min(w as f32) as usize;
+                let clamph = |v: f32| v.max(0.0).min(h as f32) as usize;
+                let ix0 = clampw((x0 - 1.0).floor());
+                let iy0 = clamph((y0 - 1.0).floor());
+                let ix1 = clampw((x1 + 1.0).floor() + 1.0);
+                let iy1 = clamph((y1 + 1.0).floor() + 1.0);
+                (ix1 > ix0 && iy1 > iy0).then_some([ix0, iy0, ix1 - ix0, iy1 - iy0])
+            })
+            .collect()
     }
 }
 
@@ -630,6 +796,51 @@ mod tests {
         for oy in 0..2 {
             for ox in 0..4 {
                 let expect = (3 + oy) * 8 + (2 + ox); // source pixel value
+                let got = buf[(oy * 4 + ox) * 4] as usize;
+                assert_eq!(got, expect, "pixel ({ox},{oy})");
+            }
+        }
+    }
+
+    /// A **rotated** pane with a small region crop still exports pixel-exact: the
+    /// render box is the source bounding box of the rotated crop, and sampling
+    /// offsets into that sub-buffer. 180° flips the region about the image centre.
+    #[test]
+    fn rotated_region_crop_is_pixel_exact() {
+        let frame = FrameData::new([8, 8], 1, Samples::U8((0..64).collect()));
+        let reg = Rect::from_min_size(Pos2::new(2.0, 3.0), Vec2::new(4.0, 2.0));
+        let cell = Rect::from_min_size(Pos2::ZERO, reg.size());
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: reg.center().to_vec2(),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            None,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(frame)),
+        );
+        pane.rotation = std::f32::consts::PI; // 180°
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            region: cell,
+            out_w: 4,
+            out_h: 2,
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+        for oy in 0..2usize {
+            for ox in 0..4usize {
+                // 180° about the 8×8 centre maps the unrotated crop pixel
+                // (2+ox, 3+oy) to (5-ox, 4-oy).
+                let expect = (4 - oy) * 8 + (5 - ox);
                 let got = buf[(oy * 4 + ox) * 4] as usize;
                 assert_eq!(got, expect, "pixel ({ox},{oy})");
             }

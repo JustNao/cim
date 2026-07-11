@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod debug;
 mod decoder;
 mod export;
 mod imageproc;

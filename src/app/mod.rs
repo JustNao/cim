@@ -31,7 +31,7 @@ use crate::cli;
 use crate::decoder::{BackgroundDecoder, Decoded};
 use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell};
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
-use crate::settings::{Action, Config, ContrastMode, ToneOptions};
+use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
 
@@ -147,7 +147,7 @@ struct RegionStatsCache {
 enum Source {
     /// A single file (still or multi-page TIFF).
     File(PathBuf),
-    /// A numbered still sequence: the compact `PREFIX%0Nd,START,END.EXT` token
+    /// A numbered still sequence: the compact `PREFIX%0Xu SUFFIX,START,END` token
     /// it was opened from, plus the individual frame files.
     Sequence { token: String, files: Vec<PathBuf> },
     /// A computed image (Compute pane) — generated in memory from another pane's
@@ -232,9 +232,24 @@ struct Pane {
     compute: Option<Compute>,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
-    /// "Load all" requested: keep requesting missing + frontier frames until the
-    /// whole sequence is resident and its end is found.
-    eager: bool,
+    /// Background bulk-load mode for this pane (frame-bar / export buttons).
+    eager: Eager,
+}
+
+/// A pane's background bulk-load mode.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Eager {
+    /// Not bulk-loading.
+    #[default]
+    Off,
+    /// "Load all": decode every known frame and drive the frontier to the end.
+    /// Downgraded to `Offsets` if the frame cache fills, so length discovery
+    /// still finishes (headers alone) instead of stalling.
+    Full,
+    /// "Load offsets": drive the frontier to the end with **metadata-only**
+    /// probes (discover the true length via headers), decoding no pixels — so
+    /// the timeline reaches its end without filling the cache.
+    Offsets,
 }
 
 pub struct CimApp {
@@ -301,6 +316,13 @@ pub struct CimApp {
     loop_drag: Option<bool>,
     fps: f32,
     play_accum: f32,
+    /// Fast-forward stride (≥1, default 1): decode only 1 of every `fast_forward`
+    /// frames; the `fast_forward - 1` between are skimmed by a metadata-only header
+    /// probe (never decoded), to skim a huge sequence quickly. Affects **both**
+    /// "Load all" (`drive_eager`) and **playback** (`advance_playback` steps by
+    /// `fast_forward`; `prefetch_playback` / `ensure_lookahead` skim to match).
+    /// `1` = decode every frame (no skimming).
+    fast_forward: usize,
 
     show_settings: bool,
     show_manager: bool,
@@ -425,9 +447,22 @@ pub struct CimApp {
     /// at most one runs per pane at a time (rapid tone/frame changes coalesce).
     renderer: crate::renderer::RenderPool,
     render_inflight: HashSet<u64>,
-    /// True while a "Load all" batch is still decoding, so the status line can
-    /// be cleared once every queued frame has landed.
+    /// Pipeline timing profiler and its window toggle — only populated / shown
+    /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
+    metrics: crate::debug::Metrics,
+    show_debug: bool,
+    /// True while a "Load all" / "Load offsets" batch is still running, so the
+    /// status line can be cleared once every queued frame/probe has landed.
     decoding_all: bool,
+    /// Set when a running "Load all" hit the frame-cache budget and had to fall
+    /// back to offsets-only (headers) for the remaining frames — so not the whole
+    /// sequence is resident in memory.
+    load_cache_exhausted: bool,
+    /// A "Load all" was started from the **export** panel: on completion, if the
+    /// cache was too small (`load_cache_exhausted`), warn with a modal.
+    export_load_pending: bool,
+    /// A non-error modal notice (e.g. the export cache-too-small warning).
+    warn_popup: Option<String>,
     /// Monotonic per-frame counter driving cache LRU recency.
     clock: u64,
     /// Reused RGBA scratch buffer for texture rendering, so `prepare` doesn't
@@ -521,6 +556,7 @@ impl CimApp {
             loop_drag: None,
             fps: 25.0,
             play_accum: 0.0,
+            fast_forward: 1,
             show_settings: false,
             show_manager: false,
             show_viewcmd: false,
@@ -583,7 +619,12 @@ impl CimApp {
             // known to be reentrant, to render several panes in parallel.
             renderer: crate::renderer::RenderPool::new(),
             render_inflight: HashSet::new(),
+            metrics: crate::debug::Metrics::default(),
+            show_debug: false,
             decoding_all: false,
+            load_cache_exhausted: false,
+            export_load_pending: false,
+            warn_popup: None,
             clock: 0,
             render_scratch: Vec::new(),
         };
@@ -725,7 +766,7 @@ impl CimApp {
     ///
     /// Only the *shared* view is captured — panes with their own view (sync off)
     /// fall back to it. Sequences are listed as their individual files (the
-    /// compact `PREFIX%0Nd,…` token isn't reconstructed).
+    /// compact `PREFIX%0Xu…,…` token isn't reconstructed).
     pub(super) fn view_command(&self) -> String {
         let mut parts: Vec<String> = vec!["cim".into()];
         for p in &self.panes {
@@ -991,7 +1032,7 @@ impl CimApp {
             hist: None,
             compute: None,
             error: None,
-            eager: false,
+            eager: Eager::Off,
         });
     }
 
@@ -1582,6 +1623,27 @@ impl CimApp {
             .collect()
     }
 
+    /// The visible pane nearest `from` by index distance (lower index wins a
+    /// tie), or `None` when every pane is hidden.
+    fn nearest_visible(&self, from: usize) -> Option<usize> {
+        (0..self.panes.len())
+            .filter(|&i| self.panes[i].visible)
+            .min_by_key(|&i| (from.abs_diff(i), i))
+    }
+
+    /// If the focused pane (`current`) is hidden, move focus to the nearest
+    /// still-shown media. Called right after a pane is hidden so the selection
+    /// doesn't stay on a media that's no longer on screen; a no-op when the
+    /// current pane is still visible or nothing is visible.
+    pub(super) fn reselect_if_hidden(&mut self) {
+        if self.panes.get(self.current).is_some_and(|p| p.visible) {
+            return;
+        }
+        if let Some(i) = self.nearest_visible(self.current) {
+            self.current = i;
+        }
+    }
+
     /// Panes whose image is actually on screen right now, given the current mode:
     /// Single shows only `current`, Grid the visible cells, A/B the two slots.
     /// Used to gate background decode (lookahead) so loaded-but-hidden sequences
@@ -1670,6 +1732,9 @@ impl CimApp {
 
 impl eframe::App for CimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Whole-update CPU cost (CIM_DEBUG profiler); recorded at the end.
+        let frame_start = crate::debug::enabled().then(std::time::Instant::now);
+
         // Global UI scale (buttons/text).
         let scale = self.config.ui_scale.clamp(0.5, 3.0);
         if (ctx.zoom_factor() - scale).abs() > 1e-3 {
@@ -1803,6 +1868,9 @@ impl eframe::App for CimApp {
         if self.show_viewcmd {
             self.draw_viewcmd(ctx);
         }
+        if self.show_debug {
+            self.draw_debug(ctx);
+        }
 
         if self.error_popup.is_some() {
             let msg = self.error_popup.clone().unwrap();
@@ -1822,6 +1890,27 @@ impl eframe::App for CimApp {
                 });
             if dismiss {
                 self.error_popup = None;
+            }
+        }
+
+        if self.warn_popup.is_some() {
+            let msg = self.warn_popup.clone().unwrap();
+            let mut dismiss = false;
+            egui::Window::new("⚠ Warning")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    ui.add_space(8.0);
+                    ui.vertical_centered(|ui| {
+                        if ui.button("OK").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            if dismiss {
+                self.warn_popup = None;
             }
         }
 
@@ -1887,6 +1976,14 @@ impl eframe::App for CimApp {
             self.export_tick();
         }
 
+        if let Some(t) = frame_start {
+            self.metrics.frame.record(t.elapsed());
+            // A debug window with live timings should refresh even when idle.
+            if self.show_debug {
+                ctx.request_repaint_after(DECODE_POLL);
+            }
+        }
+
         // Keep animating, but pace repaints to what's actually happening rather
         // than busy-spinning at monitor rate (pure waste over VNC / no-GPU).
         // Playback needs its own frame interval; a pending background decode or a
@@ -1946,11 +2043,22 @@ fn uv() -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
 }
 
-/// The configured proprietary-operator library directory as a path, or `None`
-/// when the setting is blank (fall back to `LD_LIBRARY_PATH` resolution).
+/// The configured proprietary-operator library directory as a path. When the
+/// setting is blank the default is a `LIBS` folder next to the cim executable
+/// (`<cim location>/LIBS`); only if the executable path can't be resolved do we
+/// fall back to `None` (bare-name `LD_LIBRARY_PATH` resolution).
 pub(super) fn cpp_lib_dir(config: &Config) -> Option<PathBuf> {
     let dir = config.cpp_lib_dir.trim();
-    (!dir.is_empty()).then(|| PathBuf::from(dir))
+    if !dir.is_empty() {
+        return Some(PathBuf::from(dir));
+    }
+    default_cpp_lib_dir()
+}
+
+/// `<cim executable directory>/LIBS`, used when no library folder is configured.
+fn default_cpp_lib_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("LIBS"))
 }
 
 /// Dim everything in `area` outside `r`, then outline `r` (export-region look).

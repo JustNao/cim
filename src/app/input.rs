@@ -70,6 +70,12 @@ impl CimApp {
             }
             Action::ToggleExport => self.toggle_export(),
             Action::PlayPause => self.playing = !self.playing,
+            Action::ReloadMedia if n > 0 => self.pending_reload = Some(self.current.min(n - 1)),
+            Action::ReloadAll => self.pending_reload_all = true,
+            Action::HideMedia if n > 0 => {
+                self.panes[self.current.min(n - 1)].visible = false;
+                self.reselect_if_hidden();
+            }
             Action::SelectMedia(i) if i < n => {
                 self.current = i;
                 self.mode = Mode::Single;
@@ -113,11 +119,15 @@ impl CimApp {
         // when an operator is slow, so never carry a backlog into a burst.
         self.play_accum = 0.0;
 
+        // Fast-forward: advance by `ff` frames per step, skimming the ones in
+        // between (they're never staged, and the frontier is discovered by header
+        // only — see `ensure_lookahead`). `1` = play every frame.
+        let ff = self.fast_forward.max(1);
         let f = self.shared_frame;
         let next = if f < lo {
             Some(lo) // jump into the window
         } else if f < hi {
-            Some(f + 1)
+            Some((f + ff).min(hi)) // stride, but never overshoot the window end
         } else if full && !at_end {
             None // at the frontier of a still-discovering sequence: hold
         } else if self.loop_playback {
@@ -135,7 +145,7 @@ impl CimApp {
                 if !p.sync_temporal {
                     let c = p.media.frame_count();
                     if p.frame + 1 < c {
-                        p.frame += 1;
+                        p.frame = (p.frame + ff).min(c - 1);
                     } else if p.media.at_end() {
                         p.frame = 0;
                     }
@@ -159,18 +169,24 @@ impl CimApp {
 
     pub(super) fn handle_input(&mut self, ctx: &egui::Context) {
         if let Some(action) = self.rebinding {
-            let key = ctx.input(|i| {
+            // Capture the pressed key together with the modifiers held at that
+            // moment, so a chord like Ctrl+Shift+R can be bound (egui emits no
+            // Key event for a bare modifier, so the first Key event is the one).
+            let hit = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
                     egui::Event::Key {
-                        key, pressed: true, ..
-                    } => Some(*key),
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
                     _ => None,
                 })
             });
-            if let Some(k) = key {
+            if let Some((k, m)) = hit {
                 if k != Key::Escape {
                     // Live immediately; persisted only on an explicit Save.
-                    self.config.keybindings.set(action, k);
+                    self.config.keybindings.set(action, Chord::from_modifiers(k, m));
                 }
                 self.rebinding = None;
             }
@@ -184,8 +200,9 @@ impl CimApp {
         // text editors.
         if !ctx.wants_keyboard_input() {
             for action in Action::all() {
-                if let Some(key) = self.config.keybindings.key_for(action) {
-                    if ctx.input(|i| i.key_pressed(key)) {
+                if let Some(chord) = self.config.keybindings.chord_for(action) {
+                    // Exact modifier match, so `R` and `Ctrl+R` stay distinct.
+                    if ctx.input(|i| chord.pressed(i)) {
                         self.apply_action(action, ctx);
                     }
                 }

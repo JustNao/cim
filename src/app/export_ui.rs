@@ -663,8 +663,29 @@ impl CimApp {
                             Color32::from_rgb(240, 200, 120),
                             "⚠ Some media aren't fully loaded — frame counts may be incomplete.",
                         );
-                        if ui.button("Load all").clicked() {
-                            self.load_all();
+                        if self.decoding_all {
+                            if ui.button("Stop").clicked() {
+                                self.stop_load();
+                            }
+                        } else {
+                            if ui
+                                .button("Load all")
+                                .on_hover_text("Decode every frame; warns if the cache is too small")
+                                .clicked()
+                            {
+                                self.load_all();
+                                self.export_load_pending = true; // arm the cache-too-small modal
+                            }
+                            if ui
+                                .button("Load offsets")
+                                .on_hover_text(
+                                    "Discover the full length via headers only — enough for the \
+                                     export range, with no cache pressure",
+                                )
+                                .clicked()
+                            {
+                                self.load_offsets();
+                            }
                         }
                     });
                 }

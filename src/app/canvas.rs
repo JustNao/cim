@@ -422,10 +422,12 @@ impl CimApp {
             self.panes[idx].show_opts = !open;
         }
 
-        // "Hide" and "Close" text buttons at the top-right (matching styles).
-        // Hide sets visible = false (keeps the pane); Close removes it.
+        // "Reload", "Hide" and "Close" buttons at the top-right (matching styles).
+        // Reload re-reads from disk; Hide sets visible = false (keeps the pane);
+        // Close removes it.
         let close_w = 44.0;
         let hide_w = 34.0;
+        let reload_w = 26.0;
 
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
@@ -466,7 +468,7 @@ impl CimApp {
         // full title (with the filename) doesn't fit that span, fall back to the
         // name-less form so the index/frame info stays readable in small cells.
         let title_x = header.min.x + MODIFY_W + 8.0;
-        let title_right = header.max.x - close_w - hide_w - 6.0;
+        let title_right = header.max.x - close_w - hide_w - reload_w - 6.0;
         let font = FontId::proportional(13.0);
         let fits = |ui: &egui::Ui, s: &str| {
             let w = ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).rect.width());
@@ -493,6 +495,31 @@ impl CimApp {
             Pos2::new(close.min.x - hide_w, header.min.y),
             Vec2::new(hide_w, HEADER_H),
         );
+        let reload = Rect::from_min_size(
+            Pos2::new(hide.min.x - reload_w, header.min.y),
+            Vec2::new(reload_w, HEADER_H),
+        );
+        let reload_resp = ui
+            .interact(reload, Id::new(("reload", idx)), Sense::click())
+            .on_hover_text("Reload this media from disk");
+        if reload_resp.hovered() {
+            hp.rect_filled(reload, 0.0, Color32::from_gray(70));
+        }
+        hp.text(
+            reload.center(),
+            Align2::CENTER_CENTER,
+            "⟳",
+            FontId::proportional(14.0),
+            if reload_resp.hovered() {
+                Color32::from_gray(235)
+            } else {
+                Color32::from_gray(170)
+            },
+        );
+        if reload_resp.clicked() {
+            self.pending_reload = Some(idx);
+        }
+
         let hide_resp = ui.interact(hide, Id::new(("hide", idx)), Sense::click());
         if hide_resp.hovered() {
             hp.rect_filled(hide, 0.0, Color32::from_gray(70));
@@ -510,6 +537,7 @@ impl CimApp {
         );
         if hide_resp.clicked() {
             self.panes[idx].visible = false;
+            self.reselect_if_hidden();
         }
 
         let close_resp = ui.interact(close, Id::new(("close", idx)), Sense::click());

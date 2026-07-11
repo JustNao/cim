@@ -29,6 +29,8 @@ pub struct Done {
     pub id: u64,
     pub frame: usize,
     pub result: Result<Decoded>,
+    /// Wall-clock spent reading + decoding this job (for the `CIM_DEBUG` profiler).
+    pub elapsed: std::time::Duration,
 }
 
 /// The outcome of a job.
@@ -74,6 +76,7 @@ impl BackgroundDecoder {
                     Err(_) => break, // sender dropped: app is shutting down
                 };
 
+                let started = std::time::Instant::now();
                 let result = match &job.req {
                     // Multi-page TIFF: decode (or, when `probe`, metadata-only
                     // check) `page` through the file's persistent reader (keyed
@@ -122,6 +125,7 @@ impl BackgroundDecoder {
                         id: job.id,
                         frame: job.frame,
                         result,
+                        elapsed: started.elapsed(),
                     })
                     .is_err()
                 {

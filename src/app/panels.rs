@@ -51,6 +51,15 @@ impl CimApp {
             if ui.selectable_label(self.show_settings, "Settings").clicked() {
                 self.show_settings = !self.show_settings;
             }
+            // Pipeline profiler — only offered when launched with CIM_DEBUG=1.
+            if crate::debug::enabled()
+                && ui
+                    .selectable_label(self.show_debug, "Debug")
+                    .on_hover_text("Per-stage timing (read → display) to spot bottlenecks")
+                    .clicked()
+            {
+                self.show_debug = !self.show_debug;
+            }
 
             // Transient notifications (e.g. "Settings saved") sit on the far
             // right of this same row, at normal size; they auto-clear after
@@ -174,8 +183,52 @@ impl CimApp {
                     .suffix(" fps")
                     .fixed_decimals(0),
             );
-            if ui.button("Load all").clicked() {
-                self.load_all();
+            // While a bulk load runs, offer Stop; otherwise Load all / Load offsets.
+            if self.decoding_all {
+                if ui
+                    .button("Stop")
+                    .on_hover_text("Stop the running Load all / Load offsets")
+                    .clicked()
+                {
+                    self.stop_load();
+                }
+            } else {
+                if ui
+                    .button("Load all")
+                    .on_hover_text(
+                        "Decode every frame (up to the frame-cache budget; the rest \
+                         continue as offsets/headers only)",
+                    )
+                    .clicked()
+                {
+                    self.load_all();
+                }
+                if ui
+                    .button("Load offsets")
+                    .on_hover_text(
+                        "Discover the full sequence length via headers only (no pixel \
+                         decode, no cache pressure)",
+                    )
+                    .clicked()
+                {
+                    self.load_offsets();
+                }
+            }
+            // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
+            // between by header only. Affects Load all and playback. 1 = every frame.
+            ui.label("FF");
+            let mut ff = self.fast_forward.max(1);
+            if ui
+                .add(egui::DragValue::new(&mut ff).range(1..=1_000_000).speed(0.1))
+                .on_hover_text(
+                    "Fast-forward stride: decode only 1 of every N frames; the N-1 \
+                     between are skimmed by header lookahead (never decoded). Applies \
+                     to Load all AND playback (which then steps by N frames), to skim \
+                     a big sequence without reading every frame.",
+                )
+                .changed()
+            {
+                self.fast_forward = ff.max(1);
             }
             ui.separator();
             ui.strong(ellipsize(&name, 40));
@@ -402,6 +455,68 @@ impl CimApp {
         self.show_viewcmd = open;
     }
 
+    /// The `CIM_DEBUG` profiler window: one row per pipeline stage (read →
+    /// display) with last / average / min / max times over the recent window, so
+    /// the slowest stage stands out. Only reachable when `crate::debug::enabled()`.
+    pub(super) fn draw_debug(&mut self, ctx: &egui::Context) {
+        use crate::debug::Stage;
+        let mut open = self.show_debug;
+        egui::Window::new("⏱ Debug — pipeline timing")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Time each frame spends per stage on its way to the screen \
+                     (milliseconds, over the last ~120 samples).",
+                );
+                ui.add_space(6.0);
+
+                let ms = |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into());
+                let row = |ui: &mut egui::Ui, name: &str, s: &Stage| {
+                    ui.label(name);
+                    ui.monospace(ms(s.last()));
+                    ui.monospace(ms(s.avg()));
+                    ui.monospace(ms(s.min()));
+                    ui.monospace(ms(s.max()));
+                    ui.monospace(format!("{}", s.count()));
+                    ui.end_row();
+                };
+
+                egui::Grid::new("debug_timings")
+                    .num_columns(6)
+                    .striped(true)
+                    .spacing([14.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.strong("stage");
+                        ui.strong("last");
+                        ui.strong("avg");
+                        ui.strong("min");
+                        ui.strong("max");
+                        ui.strong("n");
+                        ui.end_row();
+
+                        let m = &self.metrics;
+                        row(ui, "Decode (read+decode)", &m.decode);
+                        row(ui, "LUT / tone render", &m.lut);
+                        row(ui, "Operators (LUT_ALPHA/details)", &m.operators);
+                        row(ui, "Texture upload", &m.upload);
+                        row(ui, "Update (CPU frame)", &m.frame);
+                    });
+
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Decode & operators run off the UI thread; upload / LUT (cheap panes) \
+                         and Update run on it. Update excludes the GPU paint eframe does after.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+        self.show_debug = open;
+    }
+
     pub(super) fn view_zoom_label(&self) -> f32 {
         if self.panes.is_empty() {
             1.0
@@ -436,7 +551,10 @@ impl CimApp {
 
         egui::Window::new("☰ Media")
             .open(&mut open)
-            .resizable(true)
+            // Width stays user-resizable, but let the height auto-size so the
+            // window grows to include every media row (the inner ScrollArea only
+            // kicks in once the list is taller than the screen).
+            .resizable([true, false])
             .default_width(560.0)
             .show(ctx, |ui| {
                 if self.panes.is_empty() {
@@ -444,7 +562,11 @@ impl CimApp {
                     return;
                 }
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                // Cap at ~the screen height so an auto-sizing window doesn't grow
+                // off-screen; below that the ScrollArea shrinks to content so every
+                // row shows without scrolling.
+                let max_h = ctx.screen_rect().height() * 0.85;
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
                     egui::Grid::new("media_table")
                         .num_columns(8)
                         .striped(true)
@@ -541,7 +663,11 @@ impl CimApp {
                                 let count = self.panes[i].media.frame_count();
                                 let resident = self.panes[i].media.resident_count();
 
-                                ui.checkbox(&mut self.panes[i].visible, "");
+                                if ui.checkbox(&mut self.panes[i].visible, "").changed()
+                                    && !self.panes[i].visible
+                                {
+                                    self.reselect_if_hidden();
+                                }
 
                                 // The index doubles as a drag handle: grab the
                                 // ⠿ grip to reorder the media list.
@@ -827,9 +953,9 @@ impl CimApp {
                     ui.label("Library folder")
                         .on_hover_text(
                             "Folder holding the proprietary operator libraries \
-                             (LUT_ALPHA / Details). Leave empty to resolve them via \
-                             LD_LIBRARY_PATH. Libraries load automatically when this \
-                             folder changes.",
+                             (LUT_ALPHA / Details). Leave empty to use the LIBS \
+                             folder next to the cim executable. Libraries load \
+                             automatically when this folder changes.",
                         );
                     if ui.button("📂 Browse…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -838,7 +964,7 @@ impl CimApp {
                     }
                     ui.add(
                         egui::TextEdit::singleline(&mut self.config.cpp_lib_dir)
-                            .hint_text("(uses LD_LIBRARY_PATH)")
+                            .hint_text("(uses <cim>/LIBS)")
                             .desired_width(f32::INFINITY),
                     );
                 });
@@ -888,6 +1014,14 @@ impl CimApp {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.heading("Keyboard shortcuts");
+                ui.label(
+                    egui::RichText::new(
+                        "Rebind, then press a key — hold Ctrl / Shift / Alt for a chord \
+                         (e.g. Ctrl+R). Esc cancels.",
+                    )
+                    .weak()
+                    .small(),
+                );
                 ui.add_space(4.0);
 
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -901,13 +1035,13 @@ impl CimApp {
                                 let key_txt = self
                                     .config
                                     .keybindings
-                                    .key_for(action)
-                                    .map(|k| k.name().to_string())
+                                    .chord_for(action)
+                                    .map(|c| c.name())
                                     .unwrap_or_else(|| "—".into());
                                 if self.rebinding == Some(action) {
                                     ui.colored_label(
                                         Color32::from_rgb(240, 200, 120),
-                                        "press a key…",
+                                        "press a key or chord…",
                                     );
                                 } else {
                                     ui.monospace(key_txt);

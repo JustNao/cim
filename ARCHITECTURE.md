@@ -51,6 +51,7 @@ src/
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (LUT render
                  + LUT_ALPHA / details) for heavy panes so the UI never blocks.
+  debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
@@ -215,8 +216,31 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
 - `clock` increments each update; frames are `touch`ed on decode and on display →
   LRU recency. When `resident_bytes()` exceeds budget, evict the oldest frames that
   are **not currently shown** (each pane's `frame_disp(i)` is protected) until under.
-- An over-budget **"Load all"** is **stopped** with a status note. Stills never
-  evict. Export decodes through its own `SeqReader`, so it's unaffected.
+- **Bulk loads (`Pane.eager: Eager` = `Off | Full | Offsets`), driven by
+  `drive_eager`:**
+  - **"Load all"** (`Eager::Full`) decodes every known frame and drives the frontier
+    to the end. When it exceeds the budget, `enforce_cache_budget` **downgrades it to
+    `Eager::Offsets`** (sets `load_cache_exhausted`) rather than stopping — so length
+    discovery **continues with metadata-only probes (headers alone)** while eviction
+    keeps memory bounded. Decoding just stops adding frames the cache can't hold.
+    - **Fast-forward stride** (`fast_forward`, ≥1, the `FF` field right of the Load all
+      button): decode only **1 of every `fast_forward` frames**; the `ff-1` between are
+      **skimmed by a header probe** (`probe`, never decoded) — to skim a huge sequence
+      fast and low-memory. Applies to **both**: "Load all" (`(0..known).step_by(ff)` +
+      a probed frontier) *and* **playback** (§8 — `advance_playback` steps by `ff`;
+      `prefetch_playback` strides to match; `ensure_lookahead` probes the frontier when
+      `ff > 1` so the jumped-over frames aren't decoded). Viewing/landing on a frame
+      still decodes it on demand (`stage`); `1` = every frame (unchanged). For an
+      instant skim of an *undiscovered* sequence, run **Load offsets** first so the
+      length is known and playback can jump freely.
+  - **"Load offsets"** (`Eager::Offsets`) drives the frontier to the true end with
+    **probes only** (no pixel decode, no cache pressure) — enough to complete the
+    timeline / export range.
+  - A **Stop** button (frame bar / export panel, shown while `decoding_all`) cancels
+    either via `stop_load`.
+- Stills never evict. Export decodes through its own `SeqReader`, so it's unaffected —
+  but an **export-initiated "Load all"** that hits the budget raises a modal warning
+  on completion (`warn_popup`) that not the whole sequence is resident (`§10`).
 
 ---
 
@@ -289,8 +313,9 @@ single-channel 16-bit (`uint16`) frames with the operator library loaded** —
 otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
 (`render_into`), and the UI disables those controls (`pane_is_op_input` +
 `imageproc::lut_alpha_available`/`details_available`). The same pipeline runs in
-three places, matching pixel-for-pixel: `export.rs::ensure_frame` (export worker),
-and — for live view — split by weight in `stage`: **Linear (clipped or not), masks,
+three places, matching pixel-for-pixel: `export.rs::ExportPane::render` (export worker
+— on the **cropped region only**, §10), and — for live view — split by weight in
+`stage`: **Linear (clipped or not), masks,
 and any non-single-channel-U16 or library-absent case render synchronously** (cheap
 LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off the
 UI thread** on the `renderer.rs` `RenderPool` (`renderer::Worker::render`). The export
@@ -302,8 +327,10 @@ The operators are **loaded at runtime** (`libloading`, Linux-only) at startup
 (`imageproc::init(dir)`) from **two separate libraries**, one per operator, by
 their hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`). The
 directory is the **Library folder** Setting (`config.cpp_lib_dir`): when set,
-each lib is loaded as `<dir>/<name>`; when empty, the bare name is resolved via
-the loader search path (`LD_LIBRARY_PATH`). Not linked at build time; a missing
+each lib is loaded as `<dir>/<name>`; when empty, it defaults to a **`LIBS`
+folder next to the cim executable** (`<cim location>/LIBS`), and only if the
+executable path can't be resolved is the bare name left to the loader search
+path (`LD_LIBRARY_PATH`) — see `cpp_lib_dir`. Not linked at build time; a missing
 library is silently ignored. Changing the folder in Settings **auto-loads**
 without a restart: `update` notices `cpp_lib_dir` changed and calls
 `CimApp::load_cpp_libs` → `imageproc::load_missing`, which only ever *adds* a
@@ -378,7 +405,11 @@ set by dragging the scrubber brackets; `None` = whole sequence). A full range wi
 undiscovered end holds at the frontier rather than wrapping; a sub-range wraps/stops
 immediately. `draw_scrubber` shades resident frames (contiguous runs merged), dims
 outside the window, and draws the brackets. `advance_playback` accumulates
-`stable_dt`, steps at `fps`, and advances unsynced panes independently.
+`stable_dt`, steps at `fps`, and advances unsynced panes independently. With a
+**fast-forward stride** (`fast_forward` > 1, §6) it steps by `fast_forward` frames
+(clamped to the window end), skimming those in between; `prefetch_playback` strides to
+match and `ensure_lookahead` probes (headers) rather than decoding the jumped-over
+frontier frames, so playback skims a big sequence without reading every frame.
 
 **Render-gated playback (`play_prefetch`).** Playback does **not** bump `shared_frame`
 directly. When the accumulator is due, `advance_playback` picks the next frame and parks
@@ -429,9 +460,13 @@ per-pane footer values are always shown. In A/B the single footer (`draw_ab_foot
 shows the shared position with **both** A and B values.
 
 The header is a **single row** (`header_h_for`, feeding `image_area`): the
-**Transformations** button on the left, the title, then **Hide** (sets
-`visible = false` — keeps the pane) and **Close** (removes it) text buttons on the
-right, matching styles (Close tints red on hover to flag that it removes the pane). `image_area` is **flush** to the header/footer bars (no margin), and
+**Transformations** button on the left, the title, then **⟳ Reload** (re-reads this
+media from disk → `pending_reload`), **Hide** (sets `visible = false` — keeps the
+pane) and **Close** (removes it) buttons on the
+right, matching styles (Close tints red on hover to flag that it removes the pane).
+Hiding the **focused** pane (via the header button or the manager checkbox) moves
+focus to the nearest still-shown media (`reselect_if_hidden`), so `current` never
+sits on a hidden pane while others are visible. `image_area` is **flush** to the header/footer bars (no margin), and
 egui window/popup **shadows are disabled** in `new` so nothing casts under panes or the
 Compute form.
 
@@ -597,6 +632,20 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
   (`set_overlay` + `blend_overlay`), so overlays appear in the video. `ExportSource =
   Still | Seq { path } | Files { paths } | Concat { files, map }`.
+- **Region-limited render pipeline.** `compose` runs in two phases: **(1) `decode`** every
+  pane's source frame (so all sizes are known), then **(2) `render`** each pane on **only
+  the cropped region**. `ExportPlan::pane_boxes` computes, per pane, the axis-aligned
+  bounding box *in the unrotated source image* of the pixels the output actually samples —
+  by mapping the four corners of that pane's composition rectangle through
+  `view.screen_to_img` + `unrotate` (the map is a pure affine, so the corner bound is exact
+  for **any rotation**; a rotated crop yields the tight source rectangle covering its rotated
+  region). `render` then `FrameData::crop`s to that box and runs the **whole** tone pipeline
+  — LUT bounds (`clip_bounds`/`display_bounds`), the LUT render, **and the LUT_ALPHA /
+  details operators** — on just that sub-frame, so a small crop never processes the full
+  image (and the operators' auto-contrast is computed on the region). A full-frame box skips
+  the copy (no regression for a full-view export); `cur_origin`/`cur_render_size` offset the
+  sample lookup into the cropped buffer, while `cur_size` (full frame) still anchors the
+  rotation centre and overlay mapping. A pane the output never samples isn't rendered at all.
 - `ExportLayout = Grid(Vec<GridCell>) | Single | Ab`. `ExportPlan.compose(t)` maps each
   output pixel back through the pane's view (Grid via `GridCell`'s place→content remap),
   sampling **nearest** — upscaling to a larger output just replicates source pixels, never
@@ -607,7 +656,13 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `screen_rect_to_image` on release maps it to image space, applied to every pane as a
   cell of exactly the crop's pixel size.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
-  playback window. A warning + "Load all" appears when a length isn't discovered yet.
+  playback window. A warning appears when a length isn't discovered yet, with
+  **Load all** / **Load offsets** (the latter — headers only — is enough here, since
+  export only needs the length, not resident frames) and a **Stop** while running.
+  An export **Load all** arms `export_load_pending`: if it can't fully load because
+  the frame cache is too small (`load_cache_exhausted`), a modal (`warn_popup`) on
+  completion tells the user the whole sequence isn't resident — the length was still
+  fully discovered, so the range is right and the encoder reads the rest from disk (§6).
 - Output filename typed in the panel, written to the **cwd**. For video `start_export`
   spawns `run_export` (compose + `Encoder` write per frame) on a **worker thread**,
   sharing an `AtomicUsize` progress + `AtomicBool` cancel; `export_tick` just polls it
@@ -636,7 +691,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   and `view_command` **omits any flag left at its default** to keep the line short; a
   restored `--zoom`/`--center` clears `needs_fit`. Only the *shared* view is captured.
 - Positional args accept a **compact numbered-sequence token**
-  `PREFIX%0Nd,START,END.EXT`, expanded at launch. A bare path → `Single`; a token
+  `PREFIX%0Xu SUFFIX,START,END` (e.g. `sequences_%05u.tif,4,15`), expanded at
+  launch. A bare path → `Single`; a token
   ≥2 files → `Sequence` opening as **one** pane (`.tif` run → `ConcatSeq`, else
   `FileSeq`). `token` is kept on the pane's `Source` so reload/round-trip work.
   Drag-and-drop / the file dialog only produce `Single`s.
@@ -652,7 +708,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 cpp_lib_dir, keybindings }` (`cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
 — §7 — with a Browse/paste field plus found/not-found and loaded indicators in
-Settings; empty = resolve by name via `LD_LIBRARY_PATH`. `decode_threads` = the background decode pool size, `0` =
+Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `decode_threads` = the background decode pool size, `0` =
 auto — §5),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
@@ -663,9 +719,18 @@ New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved conf
 loads.
 
 `Action` = all bindable actions (view toggles, next/prev media & frame, fit/actual/
-zoom, load all, open, toggle panels, play/pause, `SelectMedia(0..12)`).
-`Keybindings` is a `BTreeMap<action_id, key_name>` with unique bindings. New default
-bindings do **not** retroactively apply to a saved config (shows `—` until rebound).
+zoom, load all, open, toggle panels, play/pause, **reload focused / reload all / hide
+media**, `SelectMedia(0..12)`).
+`Keybindings` is a `BTreeMap<action_id, chord_string>` with unique bindings, where a
+**`Chord`** is a key **plus optional Ctrl/Shift/Alt modifiers** (`ctrl` = egui's
+cross-platform `command`). It serialises as a `Ctrl+Shift+Key` string, so an older
+config storing a bare key name still parses (a no-modifier chord). Matching is
+**exact** (`Chord::pressed` — key **and** modifier set), so `R` (reload focused) and
+`Ctrl+R` (reload all) stay distinct; rebinding captures the key press together with
+the modifiers held at that moment (`Chord::from_modifiers`, egui emits no Key event
+for a bare modifier). Default `Reload focused = R`, `Reload all = Ctrl+R`, `Hide = H`.
+The pane header also has a **⟳ Reload** button (left of Hide). New default bindings do
+**not** retroactively apply to a saved config (shows `—` until rebound).
 `handle_input` skips the shortcut scan while `ctx.wants_keyboard_input()` (a text
 field has focus), so typing doesn't trigger views. **Tab** (default `ToggleView`)
 would otherwise be stolen by egui's built-in focus navigation, which lands on the
@@ -725,7 +790,8 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 - Files are opened **read-only with shared access**; `forget(id)` on reload picks up
   new contents.
 - Export decodes independently of the display cache; export length = the **known**
-  timeline at build time (press "Load all" first for a full export).
+  timeline at build time (press "Load all" or "Load offsets" first for a full export —
+  offsets suffices, since export only needs the discovered length).
 
 ---
 
@@ -743,6 +809,17 @@ host). For shared multi-user servers there's also a **">8 sequences" resource wa
 per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /
 lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads
 per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code.
+
+**Profiling the pipeline (`debug.rs`).** Launch with **`CIM_DEBUG=1`** to enable a
+per-stage timing profiler and a **Debug** toolbar button (both hidden otherwise, so
+there's zero cost in a normal run — `debug::enabled()` reads the env var once and every
+record site is gated on it). Each stage on the read→display path records into a bounded
+ring buffer (last ~120 samples → last/avg/min/max): **Decode** (read+decode, timed on the
+decode worker and carried back on `Done.elapsed`), **LUT / tone render** and **Operators**
+(LUT_ALPHA/details, split and timed on the render worker via `RenderDone.lut_time/ops_time`,
+plus the synchronous cheap-pane LUT timed in `stage`), **Texture upload** (`ColorImage` build
++ GPU upload), and **Update** (the whole `update` CPU frame, excluding the GPU paint eframe
+does after). The `⏱ Debug` window (`draw_debug`) tabulates them so the bottleneck stands out.
 
 ---
 

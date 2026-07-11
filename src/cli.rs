@@ -2,8 +2,8 @@
 //! compact numbered-sequence token used both on the command line and by the
 //! completion suggestions.
 //!
-//! A numbered run is written `PREFIX%0Nd,START,END.EXT` — for example
-//! `frame_%05d,0,12.tif` stands for `frame_00000.tif` … `frame_00012.tif`.
+//! A numbered run is written `PREFIX%0Xu SUFFIX,START,END` — for example
+//! `frame_%05u.tif,0,12` stands for `frame_00000.tif` … `frame_00012.tif`.
 //! The GUI never has to enumerate a directory: the token carries the whole
 //! range, so the shell offers it on Tab and the app expands it on launch.
 
@@ -23,7 +23,7 @@ pub enum Cli {
 }
 
 /// One thing to open. A bare path becomes a single media; a compact
-/// `PREFIX%0Nd,START,END.EXT` token that names two or more files becomes **one**
+/// `PREFIX%0Xu SUFFIX,START,END` token that names two or more files becomes **one**
 /// image sequence (a single pane), not a pane per file.
 pub enum Input {
     Single(PathBuf),
@@ -280,8 +280,8 @@ USAGE:
 ARGS:
     <FILES|SEQUENCES>...
         Any number of images or sequences to open ({exts}).
-        A numbered run may be given compactly as PREFIX%0Nd,START,END.EXT,
-        e.g. frame_%05d,0,12.tif expands to frame_00000.tif .. frame_00012.tif.
+        A numbered run may be given compactly as PREFIX%0Xu SUFFIX,START,END,
+        e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
 
 OPTIONS:
     -h, --help                 Print this help and exit
@@ -289,7 +289,7 @@ OPTIONS:
         --complete <WORD>      List loadable completions for WORD, one per line
                                (used by the shell completers below; consecutive
                                numbered files collapse into the compact
-                               PREFIX%0Nd,START,END.EXT form)
+                               PREFIX%0Xu SUFFIX,START,END form)
         --completions <SHELL>  Print a completion script for SHELL to stdout
                                (bash | powershell)
 
@@ -338,14 +338,19 @@ fn expand_arg(arg: &str, out: &mut Vec<Input>) {
     }
 }
 
-/// Expand `PREFIX%0Nd,START,END.SUFFIX` into the files it stands for, or return
-/// `None` when `arg` isn't a well-formed sequence token.
+/// Expand a `PREFIX%0Xu SUFFIX,START,END` token into the files it stands for, or
+/// return `None` when `arg` isn't a well-formed sequence token. The printf-style
+/// file name (including any suffix and extension) comes first, then the inclusive
+/// range — e.g. `sequences_%05u.tif,4,15` → `sequences_00004.tif` …
+/// `sequences_00015.tif`.
 pub fn expand_sequence_token(arg: &str) -> Option<Vec<PathBuf>> {
     let (prefix, width, rest) = split_at_specifier(arg)?;
-    let rest = rest.strip_prefix(',')?;
-    let (start, rest) = take_uint(rest)?;
-    let rest = rest.strip_prefix(',')?;
-    let (end, suffix) = take_uint(rest)?;
+    // `rest` is `SUFFIX,START,END`: the last two comma fields are the range, and
+    // everything before them is the file-name suffix (which may be empty).
+    let (head, end) = rest.rsplit_once(',')?;
+    let (suffix, start) = head.rsplit_once(',')?;
+    let start: usize = start.parse().ok()?;
+    let end: usize = end.parse().ok()?;
     if end < start {
         return None;
     }
@@ -355,8 +360,8 @@ pub fn expand_sequence_token(arg: &str) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
-/// Split at a `%0Nd` (or `%Nd` / `%d`) conversion, returning
-/// `(prefix, pad_width, rest_after_the_d)`.
+/// Split at a `%0Xu` (or `%Xu` / `%u`) conversion, returning
+/// `(prefix, pad_width, rest_after_the_u)`.
 fn split_at_specifier(s: &str) -> Option<(&str, usize, &str)> {
     let pct = s.find('%')?;
     let prefix = &s[..pct];
@@ -375,17 +380,10 @@ fn split_at_specifier(s: &str) -> Option<(&str, usize, &str)> {
     } else {
         0
     };
-    if bytes.get(j) != Some(&b'd') {
+    if bytes.get(j) != Some(&b'u') {
         return None;
     }
     Some((prefix, width, &after[j + 1..]))
-}
-
-/// Take a run of leading ASCII digits, returning `(digits, rest)`.
-fn take_uint(s: &str) -> Option<(usize, &str)> {
-    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let value = s[..end].parse().ok()?;
-    Some((value, &s[end..]))
 }
 
 // ---- completion ----------------------------------------------------------
@@ -469,7 +467,7 @@ fn group_files(files: &[String], dir_disp: &str) -> Vec<String> {
             let end = idxs[j];
             if end > start {
                 out.push(format!(
-                    "{dir_disp}{prefix}%0{width}d,{start},{end}{suffix}"
+                    "{dir_disp}{prefix}%0{width}u{suffix},{start},{end}"
                 ));
             } else {
                 out.push(format!("{dir_disp}{prefix}{start:0width$}{suffix}"));
@@ -556,7 +554,7 @@ mod tests {
 
     #[test]
     fn expands_padded_range() {
-        let files = expand_sequence_token("frame_%05d,0,12.tif").unwrap();
+        let files = expand_sequence_token("frame_%05u.tif,0,12").unwrap();
         assert_eq!(files.len(), 13);
         assert_eq!(files[0], PathBuf::from("frame_00000.tif"));
         assert_eq!(files[12], PathBuf::from("frame_00012.tif"));
@@ -578,7 +576,7 @@ mod tests {
         ];
         let mut out = group_files(&files, "");
         out.sort();
-        assert_eq!(out, vec!["f_%03d,0,2.tif".to_string(), "solo.png".to_string()]);
+        assert_eq!(out, vec!["f_%03u.tif,0,2".to_string(), "solo.png".to_string()]);
     }
 
     #[test]
@@ -672,7 +670,7 @@ mod tests {
     #[test]
     fn token_becomes_one_sequence_input() {
         let Cli::Run { inputs, .. } = parse(vec![
-            "frame_%03d,0,11.png".into(),
+            "frame_%03u.png,0,11".into(),
             "solo.png".into(),
         ]) else {
             panic!("expected Run");
@@ -680,7 +678,7 @@ mod tests {
         assert_eq!(inputs.len(), 2);
         match &inputs[0] {
             Input::Sequence { token, files } => {
-                assert_eq!(token, "frame_%03d,0,11.png");
+                assert_eq!(token, "frame_%03u.png,0,11");
                 assert_eq!(files.len(), 12);
             }
             _ => panic!("first input should be a sequence"),
@@ -693,8 +691,8 @@ mod tests {
         // A big video split into parts: two independent numbered runs, each its
         // own token, must open as two separate sequences (two panes).
         let Cli::Run { inputs, .. } = parse(vec![
-            "partA_%03d,0,49.png".into(),
-            "partB_%03d,0,99.png".into(),
+            "partA_%03u.png,0,49".into(),
+            "partB_%03u.png,0,99".into(),
         ]) else {
             panic!("expected Run");
         };
@@ -704,9 +702,9 @@ mod tests {
                 Input::Sequence { token: t0, files: f0 },
                 Input::Sequence { token: t1, files: f1 },
             ) => {
-                assert_eq!(t0, "partA_%03d,0,49.png");
+                assert_eq!(t0, "partA_%03u.png,0,49");
                 assert_eq!(f0.len(), 50);
-                assert_eq!(t1, "partB_%03d,0,99.png");
+                assert_eq!(t1, "partB_%03u.png,0,99");
                 assert_eq!(f1.len(), 100);
             }
             _ => panic!("both inputs should be sequences"),

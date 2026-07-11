@@ -9,10 +9,15 @@ use super::*;
 impl CimApp {
     pub(super) fn pump_decoder(&mut self) {
         let clock = self.clock;
+        let debug = crate::debug::enabled();
         for d in self.decoder.drain() {
             self.inflight.remove(&(d.id, d.frame));
             match d.result {
                 Ok(Decoded::Frame(frame)) => {
+                    // Only a real decode (not a metadata-only probe) counts.
+                    if debug {
+                        self.metrics.decode.record(d.elapsed);
+                    }
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
                         p.media.touch(d.frame, clock); // freshly decoded → most recent
@@ -70,37 +75,88 @@ impl CimApp {
         }
     }
 
+    /// "Load all": decode every frame of every sequence and drive its frontier to
+    /// the end. If the frame cache fills mid-load, `enforce_cache_budget` downgrades
+    /// it to offsets-only (headers) so length discovery still finishes.
     pub(super) fn load_all(&mut self) {
         for p in &mut self.panes {
-            p.eager = true;
+            p.eager = Eager::Full;
         }
+        self.load_cache_exhausted = false;
+        self.export_load_pending = false; // only the export button sets this
         self.status = "Queued all frames for background decoding…".into();
         self.decoding_all = true;
     }
 
-    /// While "Load all" is active, keep every eager pane requesting its missing
-    /// known frames plus one frontier probe, so an unknown-length sequence loads
-    /// fully and reveals its end. A pane clears its flag once every frame is
-    /// resident and its end has been found.
+    /// "Load offsets": drive every sequence's frontier to its true end with
+    /// **metadata-only** probes (discover the length via headers alone, decoding
+    /// no pixels), so the timeline is complete without filling the frame cache. A
+    /// pane already doing a full "Load all" keeps it (a superset).
+    pub(super) fn load_offsets(&mut self) {
+        for p in &mut self.panes {
+            if p.eager != Eager::Full {
+                p.eager = Eager::Offsets;
+            }
+        }
+        self.status = "Discovering sequence length (headers only)…".into();
+        self.decoding_all = true;
+    }
+
+    /// Cancel any in-progress bulk load ("Load all" / "Load offsets").
+    pub(super) fn stop_load(&mut self) {
+        for p in &mut self.panes {
+            p.eager = Eager::Off;
+        }
+        self.decoding_all = false;
+        self.export_load_pending = false;
+        self.status = "Stopped loading".into();
+    }
+
+    /// Drive the active bulk loads each update. A **Full** pane requests every
+    /// missing known frame plus one frontier decode, clearing itself once fully
+    /// resident and ended. An **Offsets** pane only probes the frontier (headers,
+    /// no pixel decode), clearing itself once the end is found.
     pub(super) fn drive_eager(&mut self) {
         for i in 0..self.panes.len() {
-            if !self.panes[i].eager {
-                continue;
-            }
-            let known = self.panes[i].media.frame_count();
-            let mut pending = false;
-            for f in 0..known {
-                if self.panes[i].media.resident(f).is_none() {
-                    self.request(i, f);
-                    pending = true;
+            match self.panes[i].eager {
+                Eager::Off => continue,
+                Eager::Full => {
+                    let known = self.panes[i].media.frame_count();
+                    let ff = self.fast_forward.max(1);
+                    let mut pending = false;
+                    // Decode 1 of every `ff` frames (all of them when ff == 1). The
+                    // frames in between are never decoded — they're discovered as
+                    // headers only while the frontier advances below.
+                    for f in (0..known).step_by(ff) {
+                        if self.panes[i].media.resident(f).is_none() {
+                            self.request(i, f);
+                            pending = true;
+                        }
+                    }
+                    if !self.panes[i].media.at_end() {
+                        // Extend the known length. With a stride, skim the frontier
+                        // via a metadata-only header probe (the N-1 between decodes
+                        // are discovered, not decoded); without one, decode the next
+                        // page as before.
+                        if ff > 1 {
+                            self.probe(i, known);
+                        } else {
+                            self.request(i, known);
+                        }
+                        pending = true;
+                    }
+                    if !pending {
+                        self.panes[i].eager = Eager::Off;
+                    }
                 }
-            }
-            if !self.panes[i].media.at_end() {
-                self.request(i, known); // probe for a next page
-                pending = true;
-            }
-            if !pending {
-                self.panes[i].eager = false;
+                Eager::Offsets => {
+                    if self.panes[i].media.at_end() {
+                        self.panes[i].eager = Eager::Off;
+                    } else {
+                        let known = self.panes[i].media.frame_count();
+                        self.probe(i, known); // headers only, no pixel decode
+                    }
+                }
             }
         }
     }
@@ -165,8 +221,8 @@ impl CimApp {
             targets.push(ctrl);
         }
         for i in targets {
-            if self.panes[i].eager || self.panes[i].media.at_end() {
-                continue;
+            if self.panes[i].eager != Eager::Off || self.panes[i].media.at_end() {
+                continue; // a bulk load (drive_eager) already drives this pane's frontier
             }
             let known = self.panes[i].media.frame_count();
             if self.catching_up(i) {
@@ -175,8 +231,15 @@ impl CimApp {
                 // between aren't decoded — only the target lands (see `stage`).
                 self.probe(i, known);
             } else if self.frame_disp(i) + 2 > known {
-                // Browsing at the frontier: prefetch the next page (full decode).
-                self.request(i, known);
+                // Browsing at the frontier. With a fast-forward stride, skim it by
+                // header only (probe) so the frames jumped over aren't decoded — the
+                // one landed on decodes on demand in `stage`; otherwise prefetch the
+                // next page with a full decode.
+                if self.fast_forward > 1 {
+                    self.probe(i, known);
+                } else {
+                    self.request(i, known);
+                }
             }
         }
     }
@@ -205,6 +268,10 @@ impl CimApp {
         if !targets.contains(&ctrl) {
             targets.push(ctrl);
         }
+        // Prefetch the frames playback will actually land on: with a fast-forward
+        // stride it steps by `ff`, so prefetch the strided targets (not the frames
+        // skimmed over) to match `advance_playback`.
+        let ff = self.fast_forward.max(1);
         for i in targets {
             let known = self.panes[i].media.frame_count();
             if self.panes[i].sync_temporal {
@@ -213,7 +280,7 @@ impl CimApp {
                 let mut f = self.play_prefetch.unwrap_or(self.shared_frame);
                 for _ in 0..PLAY_PREFETCH {
                     f = if f < hi {
-                        f + 1
+                        (f + ff).min(hi)
                     } else if full && !at_end {
                         break; // holding at the frontier; discovery is ensure_lookahead's job
                     } else if self.loop_playback {
@@ -229,10 +296,10 @@ impl CimApp {
                     }
                 }
             } else {
-                // Unsynced pane: look ahead on its own timeline.
+                // Unsynced pane: look ahead on its own timeline (strided too).
                 let base = self.panes[i].frame;
                 for k in 1..=PLAY_PREFETCH {
-                    let f = base + k;
+                    let f = base + k * ff;
                     if f >= known {
                         break;
                     }
@@ -246,7 +313,9 @@ impl CimApp {
 
     /// Evict least-recently-viewed frames once resident memory exceeds the
     /// budget. Each pane's currently shown frame is protected so the view never
-    /// blanks, and an over-budget "Load all" is stopped rather than thrashing.
+    /// blanks. A running **full** "Load all" that can't fit is **downgraded to
+    /// offsets-only** (headers) rather than stopped, so the sequence length still
+    /// finishes discovering — decoding just stops adding frames the cache can't hold.
     pub(super) fn enforce_cache_budget(&mut self) {
         let budget = self.cache_budget_bytes();
         let mut total: usize = self.panes.iter().map(|p| p.media.resident_bytes()).sum();
@@ -254,14 +323,18 @@ impl CimApp {
             return;
         }
 
-        // The sequence(s) can't all fit — a running "Load all" would just fight
-        // eviction forever, so stop it and tell the user.
-        if self.panes.iter().any(|p| p.eager) {
+        // The sequence(s) can't all fit — a full "Load all" would just fight
+        // eviction forever. Downgrade it to offsets-only so it keeps discovering
+        // the length via headers (no more pixel decode) instead of thrashing.
+        if self.panes.iter().any(|p| p.eager == Eager::Full) {
             for p in &mut self.panes {
-                p.eager = false;
+                if p.eager == Eager::Full {
+                    p.eager = Eager::Offsets;
+                }
             }
-            self.decoding_all = false;
-            self.status = "Memory budget reached — keeping the most-recent frames only".into();
+            self.load_cache_exhausted = true;
+            self.status =
+                "Frame cache full — continuing with offsets only (headers) for the rest".into();
         }
 
         // Gather evictable frames (resident, not currently shown), oldest first.
@@ -284,12 +357,30 @@ impl CimApp {
         }
     }
 
-    /// Clear the "decoding…" status once the whole batch has landed.
+    /// Clear the "decoding…" status once the whole batch has landed, and — if an
+    /// **export**-initiated "Load all" couldn't fully load because the cache was
+    /// too small — warn the user with a modal.
     pub(super) fn poll_decoding_all(&mut self) {
-        if self.decoding_all && !self.panes.iter().any(|p| p.eager) && self.inflight.is_empty() {
+        let active = self.panes.iter().any(|p| p.eager != Eager::Off);
+        if self.decoding_all && !active && self.inflight.is_empty() {
             self.decoding_all = false;
-            if self.status == "Queued all frames for background decoding…" {
+            // Clear only our own transient load notes (don't clobber a newer one).
+            if self.status == "Queued all frames for background decoding…"
+                || self.status.starts_with("Discovering sequence length")
+                || self.status.starts_with("Frame cache full")
+            {
                 self.status.clear();
+            }
+            if std::mem::take(&mut self.export_load_pending) && self.load_cache_exhausted {
+                self.warn_popup = Some(
+                    "The whole sequence couldn't be loaded into memory — the frame \
+                     cache is too small to hold every frame at once.\n\nThe length \
+                     was fully discovered (headers only), so the export frame range \
+                     is correct and the encoder still reads the remaining frames \
+                     from disk as it runs. To keep more frames resident, raise the \
+                     Frame cache budget in Settings."
+                        .into(),
+                );
             }
         }
     }
@@ -301,8 +392,15 @@ impl CimApp {
     /// `refresh_textures` commits every on-screen pane together; `stage`
     /// re-requests when the result is stale.
     pub(super) fn pump_render(&mut self, ctx: &egui::Context) {
+        let debug = crate::debug::enabled();
         for d in self.renderer.drain() {
             self.render_inflight.remove(&d.id);
+            if debug {
+                self.metrics.lut.record(d.lut_time);
+                if !d.ops_time.is_zero() {
+                    self.metrics.operators.record(d.ops_time);
+                }
+            }
             if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
                 self.upload_tex(ctx, idx, d.size, &d.rgba, d.frame, d.sig);
             }
@@ -515,10 +613,19 @@ impl CimApp {
             // of panes doesn't render/copy/upload far more pixels than the screen
             // can show (each dropped sample is still a true source value).
             let (lo, hi) = self.tone_bounds(idx, &frame);
+            let debug = crate::debug::enabled();
+            let t = debug.then(std::time::Instant::now);
             let size = frame.render_into_scaled(lo, hi, step, &mut self.render_scratch);
+            if let Some(t) = t {
+                self.metrics.lut.record(t.elapsed());
+            }
+            let t = debug.then(std::time::Instant::now);
             let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
             set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, target, sig, step);
+            if let Some(t) = t {
+                self.metrics.upload.record(t.elapsed());
+            }
             true
         }
     }
@@ -526,10 +633,14 @@ impl CimApp {
     /// Stage an RGBA buffer as pane `idx`'s **pending** texture, tagged `(f, sig)`
     /// (committed to the front by `refresh_textures`).
     fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
+        let t = crate::debug::enabled().then(std::time::Instant::now);
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
         // Heavy proprietary-operator renders run at full resolution (step 1).
         set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, f, sig, 1);
+        if let Some(t) = t {
+            self.metrics.upload.record(t.elapsed());
+        }
     }
 
     /// Parameter-only hash of a pane's effective tone: everything that changes the

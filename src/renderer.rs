@@ -50,6 +50,10 @@ pub struct RenderDone {
     pub sig: u64,
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
+    /// LUT / tone map time (the gray or 8-bit render), for the `CIM_DEBUG` profiler.
+    pub lut_time: std::time::Duration,
+    /// Proprietary-operator `apply` time (zero when no operator ran).
+    pub ops_time: std::time::Duration,
 }
 
 pub struct RenderPool {
@@ -136,9 +140,12 @@ impl Worker {
     /// bits. Mirrors the live path in `app::decode::prepare` and the export path in
     /// `export::ensure_frame` so all three match pixel-for-pixel.
     fn render(&mut self, job: RenderJob) -> RenderDone {
+        use std::time::{Duration, Instant};
         let size = job.data.size;
         let [w, h] = size;
         let mut rgba = Vec::new();
+        let mut lut_time = Duration::ZERO;
+        let mut ops_time = Duration::ZERO;
         // The proprietary operators run on a single-channel 16-bit render (so they
         // see full native precision) and only for single-channel 16-bit frames with
         // the library loaded. Everything else takes the plain 8-bit LUT render.
@@ -147,8 +154,12 @@ impl Worker {
                 || (job.details && crate::imageproc::details_available()));
         if use_ops {
             let mut gray = Vec::new();
+            let t = Instant::now();
             job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
+            lut_time = t.elapsed();
+            let t = Instant::now();
             self.ops.apply(&mut gray, w, h, job.lut_alpha, job.details);
+            ops_time = t.elapsed();
             // Expand the processed grey back to 8-bit RGBA for the texture.
             rgba.resize(gray.len() * 4, 255);
             for (i, &s) in gray.iter().enumerate() {
@@ -159,7 +170,9 @@ impl Worker {
                 rgba[o + 2] = g;
             }
         } else {
+            let t = Instant::now();
             job.data.render_into(job.lo, job.hi, &mut rgba);
+            lut_time = t.elapsed();
         }
         RenderDone {
             id: job.id,
@@ -167,6 +180,8 @@ impl Worker {
             sig: job.sig,
             size,
             rgba,
+            lut_time,
+            ops_time,
         }
     }
 }

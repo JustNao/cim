@@ -70,8 +70,10 @@ type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usi
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
 
 // Hard-coded shared-library file names, one operator each. Resolved inside the
-// configured library directory (`Config::cpp_lib_dir`), or — when that's empty —
-// via the system loader's search path (`LD_LIBRARY_PATH`) by bare name.
+// configured library directory (`Config::cpp_lib_dir`) — which defaults to the
+// `LIBS` folder next to the cim executable when unset (see `cpp_lib_dir`) — or,
+// only when no directory resolves, via the system loader's search path
+// (`LD_LIBRARY_PATH`) by bare name.
 // TODO: replace these placeholders with the real distributed file names.
 const LUT_ALPHA_LIB: &str = "libcim_lut_alpha.so"; // placeholder
 const DETAILS_LIB: &str = "libcim_details_enhanced.so"; // placeholder

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use eframe::egui::Key;
+use eframe::egui::{self, Key};
 use serde::{Deserialize, Serialize};
 
 /// Everything a key can be bound to. `SelectMedia(i)` jumps straight to media i.
@@ -29,6 +29,9 @@ pub enum Action {
     ToggleVis,
     ToggleExport,
     PlayPause,
+    ReloadMedia,
+    ReloadAll,
+    HideMedia,
     SelectMedia(usize),
 }
 
@@ -55,6 +58,9 @@ impl Action {
             Action::ToggleVis => "toggle_vis".into(),
             Action::ToggleExport => "toggle_export".into(),
             Action::PlayPause => "play_pause".into(),
+            Action::ReloadMedia => "reload_media".into(),
+            Action::ReloadAll => "reload_all".into(),
+            Action::HideMedia => "hide_media".into(),
             Action::SelectMedia(i) => format!("select_media_{}", i + 1),
         }
     }
@@ -81,6 +87,9 @@ impl Action {
             Action::ToggleVis => "Toggle Transformations popup (focused pane)".into(),
             Action::ToggleExport => "Toggle export panel".into(),
             Action::PlayPause => "Play / pause sequences".into(),
+            Action::ReloadMedia => "Reload focused media from disk".into(),
+            Action::ReloadAll => "Reload all media from disk".into(),
+            Action::HideMedia => "Hide focused media".into(),
             Action::SelectMedia(i) => format!("Select media {}", i + 1),
         }
     }
@@ -107,13 +116,83 @@ impl Action {
             Action::ToggleVis,
             Action::ToggleExport,
             Action::PlayPause,
+            Action::ReloadMedia,
+            Action::ReloadAll,
+            Action::HideMedia,
         ];
         v.extend((0..12).map(Action::SelectMedia));
         v
     }
 }
 
-/// Maps action ids -> key names. Serialized as a plain string map.
+/// A bindable shortcut: a key plus optional modifiers (Ctrl / Shift / Alt).
+/// `ctrl` maps to egui's cross-platform `command` (Ctrl on Windows/Linux, ⌘ on
+/// macOS). Serialised as a `Ctrl+Shift+Key` string, so a pre-modifier config
+/// storing a bare key name (e.g. `"Tab"`) still parses as a no-modifier chord.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Chord {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub key: Key,
+}
+
+impl Chord {
+    /// A key with no modifiers.
+    pub fn plain(key: Key) -> Self {
+        Self { ctrl: false, shift: false, alt: false, key }
+    }
+
+    /// Build from a captured key-press event's modifier state.
+    pub fn from_modifiers(key: Key, m: egui::Modifiers) -> Self {
+        Self { ctrl: m.command, shift: m.shift, alt: m.alt, key }
+    }
+
+    /// Canonical `Ctrl+Shift+Alt+Key` string (used for both storage and display).
+    pub fn name(&self) -> String {
+        let mut s = String::new();
+        if self.ctrl {
+            s.push_str("Ctrl+");
+        }
+        if self.shift {
+            s.push_str("Shift+");
+        }
+        if self.alt {
+            s.push_str("Alt+");
+        }
+        s.push_str(self.key.name());
+        s
+    }
+
+    /// Parse the canonical string. A bare key name (no `+`) means no modifiers,
+    /// so an older single-key config still loads.
+    pub fn from_name(s: &str) -> Option<Self> {
+        let (mut ctrl, mut shift, mut alt) = (false, false, false);
+        let mut key = None;
+        for part in s.split('+') {
+            let p = part.trim();
+            match p.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" | "cmd" | "command" => ctrl = true,
+                "shift" => shift = true,
+                "alt" | "option" => alt = true,
+                _ => key = Key::from_name(p),
+            }
+        }
+        Some(Self { ctrl, shift, alt, key: key? })
+    }
+
+    /// True when this exact chord (its key **and** its modifier set) fired this
+    /// frame — an exact match, so `R` and `Ctrl+R` are distinct.
+    pub fn pressed(&self, i: &egui::InputState) -> bool {
+        i.key_pressed(self.key)
+            && i.modifiers.command == self.ctrl
+            && i.modifiers.shift == self.shift
+            && i.modifiers.alt == self.alt
+    }
+}
+
+/// Maps action ids -> chord strings (`Ctrl+Shift+Key`). Serialized as a plain
+/// string map, so pre-modifier configs (bare key names) still load.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Keybindings {
     #[serde(flatten)]
@@ -124,7 +203,7 @@ impl Default for Keybindings {
     fn default() -> Self {
         let mut map = BTreeMap::new();
         let mut set = |a: Action, k: Key| {
-            map.insert(a.id(), k.name().to_string());
+            map.insert(a.id(), Chord::plain(k).name());
         };
         set(Action::ToggleView, Key::Tab);
         set(Action::ViewGrid, Key::G);
@@ -145,6 +224,8 @@ impl Default for Keybindings {
         set(Action::ToggleVis, Key::V);
         set(Action::ToggleExport, Key::E);
         set(Action::PlayPause, Key::Space);
+        set(Action::ReloadMedia, Key::R);
+        set(Action::HideMedia, Key::H);
         // Media 1..=9 -> digit keys; 10..12 left unbound by default (rebindable).
         let digits = [
             Key::Num1,
@@ -160,18 +241,24 @@ impl Default for Keybindings {
         for (i, k) in digits.into_iter().enumerate() {
             set(Action::SelectMedia(i), k);
         }
+        // A modified default, to show chords work: Ctrl+R reloads every media.
+        // (Inserted after the `set` closure's last use so it doesn't clash on `map`.)
+        map.insert(
+            Action::ReloadAll.id(),
+            Chord { ctrl: true, shift: false, alt: false, key: Key::R }.name(),
+        );
         Self { map }
     }
 }
 
 impl Keybindings {
-    pub fn key_for(&self, action: Action) -> Option<Key> {
-        self.map.get(&action.id()).and_then(|s| Key::from_name(s))
+    pub fn chord_for(&self, action: Action) -> Option<Chord> {
+        self.map.get(&action.id()).and_then(|s| Chord::from_name(s))
     }
 
-    pub fn set(&mut self, action: Action, key: Key) {
-        // Keep bindings unique: clear any other action holding this key.
-        let name = key.name().to_string();
+    pub fn set(&mut self, action: Action, chord: Chord) {
+        // Keep bindings unique: clear any other action holding this exact chord.
+        let name = chord.name();
         let this = action.id();
         self.map.retain(|k, v| k == &this || v != &name);
         self.map.insert(this, name);
