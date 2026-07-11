@@ -1168,7 +1168,7 @@ impl CimApp {
     /// and their total length. `None` for a Compute pane (no file) or when any
     /// file can't be stat-ed right now (e.g. mid-rename) — in which case the
     /// watch simply waits for the next poll rather than reloading torn contents.
-    pub(super) fn source_file_sig(source: &Source) -> Option<FileSig> {
+    fn source_file_sig(source: &Source) -> Option<FileSig> {
         let paths: &[PathBuf] = match source {
             Source::File(p) => std::slice::from_ref(p),
             Source::Sequence { files, .. } => files.as_slice(),
