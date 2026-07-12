@@ -18,6 +18,13 @@ impl CimApp {
                     if debug {
                         self.metrics.decode.record(d.elapsed);
                     }
+                    // Always-on latency EMA (α = 1/8) driving adaptive prefetch depth.
+                    let s = d.elapsed.as_secs_f32();
+                    self.decode_ema_secs = if self.decode_ema_secs <= 0.0 {
+                        s
+                    } else {
+                        self.decode_ema_secs + (s - self.decode_ema_secs) / 8.0
+                    };
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.insert(d.frame, frame);
                         p.media.touch(d.frame, clock); // freshly decoded → most recent
@@ -272,7 +279,12 @@ impl CimApp {
         // stride it steps by `ff`, so prefetch the strided targets (not the frames
         // skimmed over) to match `advance_playback`.
         let ff = self.playback.fast_forward.max(1);
-        let depth = PLAY_PREFETCH;
+        let depth = prefetch_depth(
+            self.decode_ema_secs,
+            self.playback.fps,
+            self.decode_threads_active,
+            targets.len(),
+        );
 
         // Build each pane's ordered list of the next frames it will show, then
         // dispatch them round-robin *by distance* (every pane's +1, then every
@@ -797,6 +809,24 @@ fn set_cached_tex(
     }
 }
 
+/// How many frames per pane to prefetch, adapting to how slow decoding actually
+/// is. `PLAY_PREFETCH` is the floor; depth grows toward `PREFETCH_CAP` when the
+/// decode work in flight per committed frame — `latency × panes ÷ workers`,
+/// relative to the frame interval — exceeds what the floor buffers, so a slow /
+/// heavy sequence (or many panes) doesn't chronically under-prefetch, while a
+/// cheap one doesn't over-queue. `latency <= 0` (no measurement yet) → the floor.
+fn prefetch_depth(latency_secs: f32, fps: f32, workers: usize, panes: usize) -> usize {
+    const PREFETCH_CAP: usize = 8;
+    if latency_secs <= 0.0 || panes == 0 {
+        return PLAY_PREFETCH;
+    }
+    let interval = 1.0 / fps.max(0.1);
+    let workers = workers.max(1) as f32;
+    // Frames of decode in flight per committed frame, rounded up, + 1 slack.
+    let need = ((latency_secs * panes as f32) / (workers * interval)).ceil() as usize + 1;
+    need.clamp(PLAY_PREFETCH, PREFETCH_CAP)
+}
+
 /// Flatten per-pane prefetch frame lists into dispatch order, round-robin **by
 /// distance**: every pane's nearest frame first, then every pane's next, and so
 /// on. On the single shared decode queue this stops one pane's whole burst from
@@ -816,7 +846,23 @@ fn interleave_prefetch(plans: &[(usize, Vec<usize>)]) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::interleave_prefetch;
+    use super::{interleave_prefetch, prefetch_depth, PLAY_PREFETCH};
+
+    /// Depth is the floor until a latency is known, grows with slow decode / more
+    /// panes, shrinks with more workers, and never leaves the `[floor, 8]` band.
+    #[test]
+    fn prefetch_depth_adapts_and_clamps() {
+        // No measurement yet → floor, regardless of panes.
+        assert_eq!(prefetch_depth(0.0, 30.0, 4, 6), PLAY_PREFETCH);
+        // Fast decode (2 ms) at 30 fps stays at the floor.
+        assert_eq!(prefetch_depth(0.002, 30.0, 4, 2), PLAY_PREFETCH);
+        // Slow decode (40 ms) at 30 fps with 4 panes / 2 workers pushes above it.
+        assert!(prefetch_depth(0.040, 30.0, 2, 4) > PLAY_PREFETCH);
+        // Never exceeds the cap even when pathologically slow.
+        assert_eq!(prefetch_depth(5.0, 30.0, 1, 8), 8);
+        // More workers reduce (or hold) the depth for the same work.
+        assert!(prefetch_depth(0.040, 30.0, 6, 4) <= prefetch_depth(0.040, 30.0, 2, 4));
+    }
 
     /// Dispatch is round-robin by prefetch distance, and panes whose lists run
     /// short simply drop out of later rounds (no padding, no reordering).

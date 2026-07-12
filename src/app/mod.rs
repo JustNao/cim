@@ -675,6 +675,10 @@ pub struct CimApp {
     /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
     metrics: crate::debug::Metrics,
     show_debug: bool,
+    /// Exponential moving average of a real frame decode's wall time, in seconds.
+    /// Always maintained (unlike `metrics`, which is `CIM_DEBUG`-only) so playback
+    /// prefetch depth can adapt to how slow decoding actually is (`prefetch_depth`).
+    decode_ema_secs: f32,
     /// True while a "Load all" / "Load offsets" batch is still running, so the
     /// status line can be cleared once every queued frame/probe has landed.
     decoding_all: bool,
@@ -813,6 +817,7 @@ impl CimApp {
             renderer: crate::renderer::RenderPool::new(),
             render_inflight: HashSet::new(),
             metrics: crate::debug::Metrics::default(),
+            decode_ema_secs: 0.0,
             show_debug: false,
             decoding_all: false,
             load_cache_exhausted: false,
