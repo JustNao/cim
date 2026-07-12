@@ -109,7 +109,7 @@ impl CimApp {
             }
         }
         if let Some((lo, hi)) = vs.loop_range {
-            self.loop_range = Some((lo, hi));
+            self.playback.loop_range = Some((lo, hi));
         }
         // A restored zoom/centre is an explicit view, so suppress the auto-fit
         // that would otherwise run on first draw.
@@ -238,7 +238,7 @@ impl CimApp {
                 parts.push(format!("--rotate {}", rots.join(",")));
             }
         }
-        if let Some((lo, hi)) = self.loop_range {
+        if let Some((lo, hi)) = self.playback.loop_range {
             parts.push(format!("--loop {lo},{hi}"));
         }
         if n > 0 {

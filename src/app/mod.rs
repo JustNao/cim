@@ -215,6 +215,51 @@ impl Default for Export {
     }
 }
 
+/// Playback transport state for the control sequence.
+struct Playback {
+    playing: bool,
+    /// Loop the sequence when playback reaches the end (on by default). When
+    /// off, playback stops on the last frame instead of wrapping.
+    loop_playback: bool,
+    /// Inclusive frame sub-range to loop over on the control sequence; `None`
+    /// loops the whole (discovered) sequence. Set by dragging the timeline
+    /// brackets, reset to full by the loop-range button.
+    loop_range: Option<(usize, usize)>,
+    /// Which loop bracket the pointer is dragging: `Some(true)` = start (left),
+    /// `Some(false)` = end (right); `None` = not dragging a bracket.
+    loop_drag: Option<bool>,
+    fps: f32,
+    accum: f32,
+    /// Fast-forward stride (≥1, default 1): decode only 1 of every `fast_forward`
+    /// frames; the `fast_forward - 1` between are skimmed by a metadata-only header
+    /// probe (never decoded), to skim a huge sequence quickly. Affects **both**
+    /// "Load all" (`drive_eager`) and **playback** (`advance_playback` steps by
+    /// `fast_forward`; `prefetch_playback` / `ensure_lookahead` skim to match).
+    /// `1` = decode every frame (no skimming).
+    fast_forward: usize,
+    /// During playback, the candidate next shared frame being pre-rendered while
+    /// the panes still show `shared_frame`. The timeline only advances to it once
+    /// **every** on-screen pane has that frame ready (`refresh_textures` commits
+    /// the swap and applies it), so the frame counter never runs ahead of the
+    /// image and all panes flip in step. `None` when idle / paused / seeking.
+    prefetch: Option<usize>,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            loop_playback: true,
+            loop_range: None,
+            loop_drag: None,
+            fps: 25.0,
+            accum: 0.0,
+            fast_forward: 1,
+            prefetch: None,
+        }
+    }
+}
+
 /// The transient toolbar notification and its auto-expiry bookkeeping. `set`
 /// posts a message; `tick` (once per update) stamps a fresh message's time and
 /// clears it after the TTL, so every post gets the timeout for free.
@@ -396,12 +441,6 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
-    /// During playback, the candidate next shared frame being pre-rendered while
-    /// the panes still show `shared_frame`. The timeline only advances to it once
-    /// **every** on-screen pane has that frame ready (`refresh_textures` commits
-    /// the swap and applies it here), so the frame counter never runs ahead of the
-    /// image and all panes flip in step. `None` when idle / paused / seeking.
-    play_prefetch: Option<usize>,
     /// Shared "Transformations" (tone mode + options + details) that every pane
     /// with `sync_tone` follows, so editing one synced pane's Transformations
     /// popup updates them all.
@@ -434,26 +473,9 @@ pub struct CimApp {
     ab_split: f32, // 0..1 divider position
     ab_handle_grabbed: bool,
 
-    playing: bool,
-    /// Loop the sequence when playback reaches the end (on by default). When
-    /// off, playback stops on the last frame instead of wrapping.
-    loop_playback: bool,
-    /// Inclusive frame sub-range to loop over on the control sequence; `None`
-    /// loops the whole (discovered) sequence. Set by dragging the timeline
-    /// brackets, reset to full by the loop-range button.
-    loop_range: Option<(usize, usize)>,
-    /// Which loop bracket the pointer is dragging: `Some(true)` = start (left),
-    /// `Some(false)` = end (right); `None` = not dragging a bracket.
-    loop_drag: Option<bool>,
-    fps: f32,
-    play_accum: f32,
-    /// Fast-forward stride (≥1, default 1): decode only 1 of every `fast_forward`
-    /// frames; the `fast_forward - 1` between are skimmed by a metadata-only header
-    /// probe (never decoded), to skim a huge sequence quickly. Affects **both**
-    /// "Load all" (`drive_eager`) and **playback** (`advance_playback` steps by
-    /// `fast_forward`; `prefetch_playback` / `ensure_lookahead` skim to match).
-    /// `1` = decode every frame (no skimming).
-    fast_forward: usize,
+    /// Playback transport (play/pause, loop window, fps, fast-forward). See
+    /// [`Playback`].
+    playback: Playback,
 
     show_settings: bool,
     show_manager: bool,
@@ -647,7 +669,6 @@ impl CimApp {
             next_id: 0,
             shared_view: ViewTransform::default(),
             shared_frame: 0,
-            play_prefetch: None,
             shared_contrast: ContrastMode::Linear,
             shared_tone: ToneOptions::default(),
             shared_details: false,
@@ -662,13 +683,7 @@ impl CimApp {
             slot_b: 0,
             ab_split: 0.5,
             ab_handle_grabbed: false,
-            playing: false,
-            loop_playback: true,
-            loop_range: None,
-            loop_drag: None,
-            fps: 25.0,
-            play_accum: 0.0,
-            fast_forward: 1,
+            playback: Playback::default(),
             show_settings: false,
             show_manager: false,
             show_viewcmd: false,
@@ -792,7 +807,7 @@ impl CimApp {
     pub(super) fn catching_up(&self, i: usize) -> bool {
         // A decode/probe error stops discovery (the pane shows its error) — don't
         // keep re-probing (which would also busy-spin the immediate repaint).
-        if self.playing || self.panes[i].media.at_end() || self.panes[i].error.is_some() {
+        if self.playback.playing || self.panes[i].media.at_end() || self.panes[i].error.is_some() {
             return false;
         }
         let want = if self.panes[i].sync_temporal {
@@ -943,7 +958,7 @@ impl CimApp {
         if self.panes.is_empty() {
             return;
         }
-        self.play_prefetch = None; // a jump abandons any in-flight playback step
+        self.playback.prefetch = None; // a jump abandons any in-flight playback step
         let len = self.timeline_len();
         if target < len {
             self.pending_seek = None;
@@ -954,7 +969,7 @@ impl CimApp {
             self.shared_frame = len.saturating_sub(1);
         } else {
             // Beyond the frontier: discover forward without drawing each step.
-            self.playing = false;
+            self.playback.playing = false;
             self.pending_seek = Some(target);
         }
     }
@@ -977,7 +992,7 @@ impl CimApp {
     /// current known length `len`. `loop_range == None` → the whole sequence.
     pub(super) fn loop_bounds(&self, len: usize) -> (usize, usize) {
         let last = len.saturating_sub(1);
-        match self.loop_range {
+        match self.playback.loop_range {
             Some((lo, hi)) => {
                 let hi = hi.min(last);
                 (lo.min(hi), hi)
@@ -1005,7 +1020,7 @@ impl CimApp {
         // A loop sub-range belongs to a specific sequence; drop it if control
         // moved to a different one.
         if self.control != before {
-            self.loop_range = None;
+            self.playback.loop_range = None;
         }
     }
 
@@ -1200,8 +1215,8 @@ impl CimApp {
             self.shared_frame = tl - 1;
         }
         // A pre-render target can't outrun the (possibly just-clamped) length.
-        if self.play_prefetch.is_some_and(|f| f >= tl) {
-            self.play_prefetch = None;
+        if self.playback.prefetch.is_some_and(|f| f >= tl) {
+            self.playback.prefetch = None;
         }
 
         // Auto-reload watched panes whose source files changed and settled. Runs
@@ -1428,8 +1443,8 @@ impl eframe::App for CimApp {
         // running export (which encodes on a worker thread — we just poll its
         // progress) only needs an occasional wake-up. Idle with nothing pending:
         // no repaint is requested at all.
-        if self.playing {
-            let dt = (1.0 / self.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
+        if self.playback.playing {
+            let dt = (1.0 / self.playback.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
         } else if self.pending_seek.is_some() || (0..self.panes.len()).any(|i| self.catching_up(i)) {
             // Actively riding the frontier (a length-discovery seek, or a pane

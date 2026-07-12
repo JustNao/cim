@@ -20,7 +20,7 @@ impl CimApp {
             Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
             Action::NextFrame => {
                 self.pending_seek = None; // manual step cancels an automatic seek
-                self.play_prefetch = None; // …and any in-flight playback step
+                self.playback.prefetch = None; // …and any in-flight playback step
                 let tl = self.timeline_len();
                 if self.shared_frame + 1 < tl {
                     self.shared_frame += 1;
@@ -31,7 +31,7 @@ impl CimApp {
             }
             Action::PrevFrame => {
                 self.pending_seek = None; // manual step cancels an automatic seek
-                self.play_prefetch = None; // …and any in-flight playback step
+                self.playback.prefetch = None; // …and any in-flight playback step
                 let tl = self.timeline_len();
                 if self.shared_frame > 0 {
                     self.shared_frame -= 1;
@@ -69,7 +69,7 @@ impl CimApp {
                 }
             }
             Action::ToggleExport => self.toggle_export(),
-            Action::PlayPause => self.playing = !self.playing,
+            Action::PlayPause => self.playback.playing = !self.playback.playing,
             Action::ReloadMedia if n > 0 => self.pending_reload = Some(self.current.min(n - 1)),
             Action::ReloadAll => self.pending_reload_all = true,
             Action::HideMedia if n > 0 => {
@@ -86,8 +86,8 @@ impl CimApp {
     }
 
     pub(super) fn advance_playback(&mut self, ctx: &egui::Context) {
-        if !self.playing {
-            self.play_prefetch = None; // pausing abandons any in-flight step
+        if !self.playback.playing {
+            self.playback.prefetch = None; // pausing abandons any in-flight step
             return;
         }
         // Playback is render-gated: a step is pre-rendered into `play_prefetch`,
@@ -95,8 +95,8 @@ impl CimApp {
         // ready (`refresh_textures` clears it on commit). While one is in flight,
         // wait — so a slow operator paces playback instead of the counter racing
         // ahead of the image. Drop the backlog so we don't burst once it lands.
-        if self.play_prefetch.is_some() {
-            self.play_accum = 0.0;
+        if self.playback.prefetch.is_some() {
+            self.playback.accum = 0.0;
             return;
         }
         let tl = self.timeline_len();
@@ -105,24 +105,24 @@ impl CimApp {
         // full sequence and the end isn't discovered yet, `hi` is only the
         // frontier — hold there rather than wrapping early.
         let (lo, hi) = self.loop_bounds(tl);
-        let full = self.loop_range.is_none();
+        let full = self.playback.loop_range.is_none();
         if hi <= lo && at_end {
             return;
         }
         let dt = ctx.input(|i| i.stable_dt).min(0.25);
-        self.play_accum += dt;
-        let step = 1.0 / self.fps.max(0.1);
-        if self.play_accum < step {
+        self.playback.accum += dt;
+        let step = 1.0 / self.playback.fps.max(0.1);
+        if self.playback.accum < step {
             return;
         }
         // One frame per commit — the render gate, not the accumulator, paces us
         // when an operator is slow, so never carry a backlog into a burst.
-        self.play_accum = 0.0;
+        self.playback.accum = 0.0;
 
         // Fast-forward: advance by `ff` frames per step, skimming the ones in
         // between (they're never staged, and the frontier is discovered by header
         // only — see `ensure_lookahead`). `1` = play every frame.
-        let ff = self.fast_forward.max(1);
+        let ff = self.playback.fast_forward.max(1);
         let f = self.shared_frame;
         let next = if f < lo {
             Some(lo) // jump into the window
@@ -130,16 +130,16 @@ impl CimApp {
             Some((f + ff).min(hi)) // stride, but never overshoot the window end
         } else if full && !at_end {
             None // at the frontier of a still-discovering sequence: hold
-        } else if self.loop_playback {
+        } else if self.playback.loop_playback {
             Some(lo) // wrap to the window start
         } else {
-            self.playing = false; // stop on the last frame of the window
+            self.playback.playing = false; // stop on the last frame of the window
             None
         };
         if let Some(nf) = next {
             // Pre-render this frame; `refresh_textures` commits it (and applies it
             // to `shared_frame`) once all panes are ready.
-            self.play_prefetch = Some(nf);
+            self.playback.prefetch = Some(nf);
             // Advance unsynced panes' own timelines in step, staged the same way.
             for p in &mut self.panes {
                 if !p.sync_temporal {

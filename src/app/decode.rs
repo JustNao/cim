@@ -122,7 +122,7 @@ impl CimApp {
                 Eager::Off => continue,
                 Eager::Full => {
                     let known = self.panes[i].media.frame_count();
-                    let ff = self.fast_forward.max(1);
+                    let ff = self.playback.fast_forward.max(1);
                     let mut pending = false;
                     // Decode 1 of every `ff` frames (all of them when ff == 1). The
                     // frames in between are never decoded — they're discovered as
@@ -173,7 +173,7 @@ impl CimApp {
             return;
         };
         // Manual playback fights an automatic seek — let the user win.
-        if self.playing || self.panes.is_empty() {
+        if self.playback.playing || self.panes.is_empty() {
             self.pending_seek = None;
             return;
         }
@@ -235,7 +235,7 @@ impl CimApp {
                 // header only (probe) so the frames jumped over aren't decoded — the
                 // one landed on decodes on demand in `stage`; otherwise prefetch the
                 // next page with a full decode.
-                if self.fast_forward > 1 {
+                if self.playback.fast_forward > 1 {
                     self.probe(i, known);
                 } else {
                     self.request(i, known);
@@ -253,12 +253,12 @@ impl CimApp {
     /// length — lazy frontier discovery stays with `ensure_lookahead` — so
     /// re-running it every update is cheap.
     pub(super) fn prefetch_playback(&mut self) {
-        if !self.playing || self.panes.is_empty() {
+        if !self.playback.playing || self.panes.is_empty() {
             return;
         }
         let tl = self.timeline_len();
         let (lo, hi) = self.loop_bounds(tl);
-        let full = self.loop_range.is_none();
+        let full = self.playback.loop_range.is_none();
         let at_end = self.current_at_end();
 
         // Same targets as lookahead: on-screen panes plus the control pane (which
@@ -271,19 +271,19 @@ impl CimApp {
         // Prefetch the frames playback will actually land on: with a fast-forward
         // stride it steps by `ff`, so prefetch the strided targets (not the frames
         // skimmed over) to match `advance_playback`.
-        let ff = self.fast_forward.max(1);
+        let ff = self.playback.fast_forward.max(1);
         for i in targets {
             let known = self.panes[i].media.frame_count();
             if self.panes[i].sync_temporal {
                 // Walk the loop window forward from where playback is now, wrapping
                 // to the window start when looping — exactly the frames it shows next.
-                let mut f = self.play_prefetch.unwrap_or(self.shared_frame);
+                let mut f = self.playback.prefetch.unwrap_or(self.shared_frame);
                 for _ in 0..PLAY_PREFETCH {
                     f = if f < hi {
                         (f + ff).min(hi)
                     } else if full && !at_end {
                         break; // holding at the frontier; discovery is ensure_lookahead's job
-                    } else if self.loop_playback {
+                    } else if self.playback.loop_playback {
                         lo // wrap to the window start
                     } else {
                         break; // playback will stop at the window end
@@ -468,7 +468,7 @@ impl CimApp {
         }
         // A committed playback step advances the shared timeline to the frame we
         // just showed — so the counter and the image stay on the same frame.
-        if let Some(f) = self.play_prefetch.take() {
+        if let Some(f) = self.playback.prefetch.take() {
             self.shared_frame = f;
         }
     }
@@ -491,7 +491,7 @@ impl CimApp {
     fn stage_target(&self, idx: usize) -> usize {
         let c = self.panes[idx].media.frame_count().max(1);
         if self.panes[idx].sync_temporal {
-            self.play_prefetch.unwrap_or(self.shared_frame).min(c - 1)
+            self.playback.prefetch.unwrap_or(self.shared_frame).min(c - 1)
         } else {
             self.panes[idx].frame % c
         }

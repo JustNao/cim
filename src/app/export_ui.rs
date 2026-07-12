@@ -668,7 +668,7 @@ impl CimApp {
                                 let (llo, lhi) = self.loop_bounds(tl);
                                 if ui
                                     .add_enabled(
-                                        self.loop_range.is_some(),
+                                        self.playback.loop_range.is_some(),
                                         egui::Button::new("Use loop range"),
                                     )
                                     .on_hover_text(

@@ -120,13 +120,13 @@ impl CimApp {
 
         ui.horizontal(|ui| {
             // --- transport group ---
-            let play = if self.playing { "Pause" } else { "Play" };
+            let play = if self.playback.playing { "Pause" } else { "Play" };
             if ui.button(play).clicked() {
-                self.playing = !self.playing;
+                self.playback.playing = !self.playback.playing;
             }
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
                 self.pending_seek = None;
-                self.play_prefetch = None;
+                self.playback.prefetch = None;
                 if self.shared_frame > 0 {
                     self.shared_frame -= 1;
                 } else if at_end {
@@ -135,7 +135,7 @@ impl CimApp {
             }
             if ui.button("Next").on_hover_text("Next frame").clicked() {
                 self.pending_seek = None;
-                self.play_prefetch = None;
+                self.playback.prefetch = None;
                 if self.shared_frame + 1 < len {
                     self.shared_frame += 1;
                 } else if at_end {
@@ -146,18 +146,18 @@ impl CimApp {
 
             // --- loop group: enable, reset-to-full, and start/end fields ---
             if ui
-                .selectable_label(self.loop_playback, "Loop")
+                .selectable_label(self.playback.loop_playback, "Loop")
                 .on_hover_text("Loop playback when it reaches the window end")
                 .clicked()
             {
-                self.loop_playback = !self.loop_playback;
+                self.playback.loop_playback = !self.playback.loop_playback;
             }
             if ui
-                .add_enabled(self.loop_range.is_some(), egui::Button::new("Full"))
+                .add_enabled(self.playback.loop_range.is_some(), egui::Button::new("Full"))
                 .on_hover_text("Reset the loop range to the whole sequence")
                 .clicked()
             {
-                self.loop_range = None;
+                self.playback.loop_range = None;
             }
             // 1-based start/end fields (typeable or draggable). Editing either
             // sets a sub-range; they mirror the timeline brackets.
@@ -170,16 +170,16 @@ impl CimApp {
             let e_resp = ui.add(egui::DragValue::new(&mut e).range(lo..=last).speed(0.25));
             ui.label("]");
             if s_resp.changed() {
-                self.loop_range = Some((s.min(hi), hi));
+                self.playback.loop_range = Some((s.min(hi), hi));
             }
             if e_resp.changed() {
-                self.loop_range = Some((lo, e.clamp(lo, last)));
+                self.playback.loop_range = Some((lo, e.clamp(lo, last)));
             }
             ui.separator();
 
             // --- rate / load group ---
             ui.add(
-                egui::Slider::new(&mut self.fps, 1.0..=60.0)
+                egui::Slider::new(&mut self.playback.fps, 1.0..=60.0)
                     .suffix(" fps")
                     .fixed_decimals(0),
             );
@@ -217,7 +217,7 @@ impl CimApp {
             // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
             // between by header only. Affects Load all and playback. 1 = every frame.
             ui.label("FF");
-            let mut ff = self.fast_forward.max(1);
+            let mut ff = self.playback.fast_forward.max(1);
             if ui
                 .add(egui::DragValue::new(&mut ff).range(1..=1_000_000).speed(0.1))
                 .on_hover_text(
@@ -228,7 +228,7 @@ impl CimApp {
                 )
                 .changed()
             {
-                self.fast_forward = ff.max(1);
+                self.playback.fast_forward = ff.max(1);
             }
             ui.separator();
             ui.strong(ellipsize(&name, 40));
@@ -387,7 +387,7 @@ impl CimApp {
             (t * span).round() as usize
         };
         if resp.drag_started() {
-            self.loop_drag = resp.interact_pointer_pos().and_then(|p| {
+            self.playback.loop_drag = resp.interact_pointer_pos().and_then(|p| {
                 let (dlo, dhi) = ((p.x - xlo).abs(), (p.x - xhi).abs());
                 if dlo <= grab || dhi <= grab {
                     Some(dlo <= dhi) // true = start bracket (the nearer one)
@@ -399,24 +399,24 @@ impl CimApp {
         if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let f = frame_at(p);
-                match self.loop_drag {
-                    Some(true) => self.loop_range = Some((f.min(hi), hi)),
-                    Some(false) => self.loop_range = Some((lo, f.max(lo).min(len - 1))),
+                match self.playback.loop_drag {
+                    Some(true) => self.playback.loop_range = Some((f.min(hi), hi)),
+                    Some(false) => self.playback.loop_range = Some((lo, f.max(lo).min(len - 1))),
                     None => {
                         self.pending_seek = None;
-                        self.play_prefetch = None;
+                        self.playback.prefetch = None;
                         self.shared_frame = f;
                     }
                 }
             }
         }
         if resp.drag_stopped() {
-            self.loop_drag = None;
+            self.playback.loop_drag = None;
         }
         if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.pending_seek = None;
-                self.play_prefetch = None;
+                self.playback.prefetch = None;
                 self.shared_frame = frame_at(p);
             }
         }
@@ -755,7 +755,7 @@ impl CimApp {
                                         && self.control != i
                                     {
                                         self.control = i;
-                                        self.loop_range = None; // range is per-sequence
+                                        self.playback.loop_range = None; // range is per-sequence
                                     }
                                 });
 
