@@ -16,8 +16,10 @@
   release, so **debug is a console app** (CLI output visible). `[profile.dev]`
   uses `opt-level = 1` with deps at `opt-level = 3` so decode/render is usable.
 - **Run:** `cargo run -- [FILES|SEQUENCES]...`.
-- **Tests:** `cargo test` (inline in `media.rs`/`export.rs`/`cli.rs`; skip
-  gracefully when fixtures or `ffmpeg` are absent). Fixtures in `examples/`.
+- **Tests:** `cargo test` (inline in `media/*.rs`/`export.rs`/`cli.rs`/`renderer.rs`).
+  Fixtures are **generated synthetically** at test time by `src/testutil.rs`
+  (multi-page u16 TIFFs, PNG runs, a hand-written 1-bit bilevel-mask TIFF), so the
+  suite runs anywhere; only the MP4 encode test skips gracefully when `ffmpeg` is absent.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
@@ -42,39 +44,74 @@
 src/
   main.rs        Entry point: parse CLI, then launch the eframe window (maximized).
   cli.rs         CLI: --help, shell completion, sequence-token expansion.
-  media.rs       Data model: FrameData/Samples, Media (Still|TiffSeq|…),
-                 SeqReader (persistent TIFF decoder), rendering, histograms, stats.
+  media/         Data model, split by concern (re-exported from mod.rs):
+    mod.rs       FrameData/Samples core (accessors, crop), save_frame,
+                 placeholder_frame.
+    source.rs    Media (Still|TiffSeq|FileSeq|ConcatSeq) + SeqCache + DecodeReq:
+                 the source kinds behind one interface, length discovery, LRU.
+    loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
+                 decoder), bilevel-mask bit handling.
+    render.rs    Tone rendering: LUT render (render_into / _scaled / _gray_u16),
+                 mask/intensity overlay tints, display-bounds.
+    stats.rs     Histograms, region stats/bounds, Compute reductions (mean/std/diff).
+    percentile.rs  The one per-tail percentile histogram scan (rect + fallback),
+                 shared by whole-image auto-contrast and region tone.
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
                  (LUT_ALPHA, DETAILS_ENHANCED); C++ in cpp/ is built separately
                  into two .so, loaded by hard-coded name. PaneOps owns a pane's
-                 per-operator instances (create/apply/destroy; 16-bit only).
+                 per-operator instances (create/apply/destroy; 16-bit only) and
+                 the shared render tail render_display; ops_active gates them.
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
-  renderer.rs    Off-thread tone-render pool: builds the display RGBA (LUT render
-                 + LUT_ALPHA / details) for heavy panes so the UI never blocks.
+  renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
+                 PaneOps::render_display) for heavy panes so the UI never blocks.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
+  testutil.rs    #[cfg(test)] synthetic fixture generators (multi-page TIFF, PNG
+                 runs, bilevel-mask TIFF) so fixture-driven tests run anywhere.
   app/           The CimApp type (egui App), split by concern:
-    mod.rs       State struct, consts, new() (style, embedded fallback font,
-                 loading/reload), per-pane state resolution, update loop, helpers.
+    mod.rs       State struct + sub-structs (Export/Playback/StatusLine/
+                 RegionSel/LineSel/PaneTex/Watch/Deferred), consts, new(),
+                 per-pane state resolution, the update loop (tick / draw_modals /
+                 apply_deferred).
+    lifecycle.rs Open/add/remove/reload media; view-state replay + "View cmd".
+    compute.rs   Compute panes: reduce/diff/recompute/auto-refresh/save.
+    watch.rs     Auto-reload file watching (source_file_sig / poll_watches).
     decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
                  staging/commit (refresh_textures/stage/pane_texture).
     input.rs     apply_action (keybindings), advance_playback, handle_input.
-    canvas.rs    Central image area: grid/single/A-B, pan/zoom, reorder, header/
-                 footer, per-pane popups (Transformations, stats, Compute).
+    util.rs      Small stateless helpers (remap / drop_target / wheel input /
+                 ellipsize).
+    canvas/      Central image area, split by feature:
+      mod.rs         Layout core: draw_central, draw_pane, grid, reorder, export
+                     crop overlay.
+      chrome.rs      Per-pane header/footer/error text, shared-cursor dot.
+      transform.rs   Rotation-aware image<->screen math + region selection +
+                     angle/paint helpers.
+      ab.rs          A/B wipe view.
+      options_popup.rs  The Transformations popup (draw_tone_options — the place
+                     to add a tone knob).
+      region_stats.rs   Right-drag stats region + panel.
+      line_profile.rs   Shift+right-drag profile line overlay.
+      compute_ui.rs     In-pane Compute controls.
     panels.rs    Toolbar, media manager (drag the ⠿ handle to reorder rows via
                  `drop_target` + `remap_move`), settings, view-command, frame bar.
+    profile.rs   The Line-profile plot window.
     export_ui.rs Export panel UI + building ExportPlan from live app state.
 ```
 
 `CimApp`'s methods live in sibling `impl` blocks marked `pub(super)`; shared types
-(`Mode`, `Pane`, consts) and free helpers live in `app/mod.rs`, reached via
-`use super::*`.
+(`Mode`, `Pane`, the field sub-structs, consts) and free helpers live in
+`app/mod.rs`, reached via `use super::*` (canvas submodules use `crate::app::*`,
+being one level deeper). Many CimApp fields are grouped into sub-structs —
+`self.export.*`, `self.playback.*`, `self.status`, `self.region_sel` /
+`self.line_sel`, and per-pane `pane.tex` (a `PaneTex` owning the commit swap) /
+`pane.watch` (a `Watch`).
 
 ---
 
-## 3. Core data model (`media.rs`)
+## 3. Core data model (`media/`)
 
 ### `Samples` / `FrameData`
 - `Samples` = `U8 | U16 | F32` — **native** interleaved samples, kept at native bit
@@ -284,7 +321,7 @@ so those (and overlays, and the export path) always render full-resolution.
 (not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
 swapping the spent old texture back to the front and flicker between frames.
 
-`render_into` (`media.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
+`render_into` (`media/render.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
 per frame then table-look-up per pixel; **F32** maps arithmetically. Mono replicates
 grey across R/G/B; alpha = 255.
 
@@ -311,17 +348,22 @@ sample per pixel) so they see full native precision, then the result is expanded
 back to grey RGBA and downscaled to 8-bit for the texture. **They run only for
 single-channel 16-bit (`uint16`) frames with the operator library loaded** —
 otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
-(`render_into`), and the UI disables those controls (`pane_is_op_input` +
-`imageproc::lut_alpha_available`/`details_available`). The same pipeline runs in
-three places, matching pixel-for-pixel: `export.rs::ExportPane::render` (export worker
-— on the **cropped region only**, §10), and — for live view — split by weight in
-`stage`: **Linear (clipped or not), masks,
-and any non-single-channel-U16 or library-absent case render synchronously** (cheap
-LUT only), while **LUT_ALPHA / details on a single-channel U16 frame render off the
-UI thread** on the `renderer.rs` `RenderPool` (`renderer::Worker::render`). The export
-worker honours the pane's **clip toggle and percentile** too (`ExportPane.clip:
-Option<f32>` → `clip_bounds`/`display_bounds`), so an exported frame matches the live
-view's tone exactly.
+(`render_into`). **One predicate decides when the operators run —
+`imageproc::ops_active(frame, lut_alpha, details)`** (folding in `is_op_input` +
+`lut_alpha_available`/`details_available`, and excluding masks); the UI-gating
+`pane_is_op_input` and the pane-indexed `CimApp::pane_ops_active` sit alongside it.
+The heavy render **tail** (gray16 render → operators → expand to RGBA, else plain
+LUT) is itself a **single function, `imageproc::PaneOps::render_display`**, so the
+paths that use it match pixel-for-pixel by construction rather than by discipline.
+It runs in two places: the **export worker** (`export.rs::ExportPane::render` — on
+the **cropped region only**, §10) and, for live view, the off-UI-thread
+`renderer.rs` `RenderPool` (`renderer::Worker::render`). `stage` splits by weight:
+**Linear (clipped or not), masks, and any non-single-channel-U16 or library-absent
+case render synchronously** (cheap `render_into_scaled`, no operators), while
+**LUT_ALPHA / details on a single-channel U16 frame go off-thread** to
+`render_display`. The export worker honours the pane's **clip toggle and
+percentile** too (`ExportPane.clip: Option<f32>` → `clip_bounds`/`display_bounds`),
+so an exported frame matches the live view's tone exactly.
 
 The operators are **loaded at runtime** (`libloading`, Linux-only) at startup
 (`imageproc::init(dir)`) from **two separate libraries**, one per operator, by
@@ -423,7 +465,7 @@ frame in step, staged the same way.
 
 ---
 
-## 9. Modes & central drawing (`app/canvas.rs`)
+## 9. Modes & central drawing (`app/canvas/`)
 
 `Mode = Grid | Single | Ab`. `draw_central` dispatches: **Grid** lays out
 `grid_cells` and `draw_pane` per cell (ctrl-drag reorders via `drag_src` +
@@ -853,11 +895,18 @@ does after). The `⏱ Debug` window (`draw_debug`) tabulates them so the bottlen
 
 ## 16. Testing
 
-Inline `#[cfg(test)]` (skip when fixtures/ffmpeg absent): `cli` token
-expansion/grouping; `media` lazy length, eviction, **LUT render matches the float
-reference** bit-for-bit, region stats + save round-trip; `export` full compose→ffmpeg
-encode + **pixel-exact region crop** + content-only export (`content_region` excludes
-background) + still background crop (`crop_to_content` trims to the content bounding box).
+Inline `#[cfg(test)]`, run against **synthetic fixtures generated at test time**
+(`src/testutil.rs` — multi-page u16 TIFFs with varying page sizes, PNG runs, a
+hand-written 1-bit bilevel-mask TIFF); only the MP4 encode test skips when `ffmpeg`
+is absent. Coverage: `cli` token expansion/grouping; `media` lazy length / probe
+discovery / eviction, **LUT render matches the float reference** bit-for-bit,
+mask/intensity renders, region stats + save round-trip; **percentile equivalence**
+(whole-image == full-frame region, integer and float, with golden values);
+`renderer` **worker output == plain LUT render** when no operator library is loaded;
+`export` full compose→ffmpeg encode, **pixel-exact region crop** (incl. rotated),
+**full-frame export == live LUT render**, content-only export (`content_region`
+excludes background) + still background crop. The parity/equivalence tests are the
+net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
 
 ---
 

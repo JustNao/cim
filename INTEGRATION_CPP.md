@@ -23,12 +23,12 @@ Because the libraries are loaded dynamically:
 
 | File | Role |
 |------|------|
-| `src/imageproc.rs` | Runtime loader (`libloading`): hard-coded library names, `init` / `lut_alpha_available` / `details_available`, and **`PaneOps`** — one pane's operator instances (create/apply/destroy lifecycle) driven by the render pool and export. |
+| `src/imageproc.rs` | Runtime loader (`libloading`): hard-coded library names, `init` / `lut_alpha_available` / `details_available`, the **`ops_active`** gate (when do the operators run), and **`PaneOps`** — one pane's operator instances (create/apply/destroy lifecycle) plus **`render_display`**, the single shared render tail (gray16 → operators → RGBA, else plain LUT) driven by the render pool and export. |
 | `cpp/imageproc.h` | The **C ABI** cim resolves by name — the `create`/`apply`/`destroy` triple per operator, plus the full rationale. |
 | `cpp/lut_alpha.cpp` | **Integration point** for LUT_ALPHA → `libcim_lut_alpha.so`. Placeholder class to replace with your auto-contrast class; worked wiring example in the header comment. |
 | `cpp/details_enhanced.cpp` | **Integration point** for DETAILS_ENHANCED → `libcim_details_enhanced.so`. |
 | `cpp/CMakeLists.txt` | Example build producing the two operator `.so`. |
-| `src/renderer.rs` / `src/export.rs` | Each holds a `PaneOps` and applies the operators (live view off-thread per pane; export on its worker) so the two match pixel-for-pixel. |
+| `src/renderer.rs` / `src/export.rs` | Each holds a `PaneOps` and calls `render_display` (live view off-thread per pane; export on its worker), so the two match pixel-for-pixel **by construction** — one implementation, not two mirrored copies. |
 
 ## The data contract (do not change without updating both sides)
 

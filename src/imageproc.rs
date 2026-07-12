@@ -263,9 +263,10 @@ impl PaneOps {
     /// the very pixels the pane would show without details. It is built here, so the
     /// operator always sees whichever LUT the view is currently using.
     ///
-    /// This is the one shared tail of the render pipeline, run both off-thread for
-    /// the live view (`renderer::Worker::render`) and by the export worker
-    /// (`export::ExportPane::ensure_frame`), so the two match pixel-for-pixel.
+    /// This is the operator step of the render tail; [`PaneOps::render_display`]
+    /// wraps it (render the 16-bit input, `apply`, expand to RGBA) and is what the
+    /// live render worker and the export worker both call, so the two match
+    /// pixel-for-pixel.
     pub fn apply(
         &mut self,
         gray: &mut Vec<u16>,
