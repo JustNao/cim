@@ -272,13 +272,24 @@ impl CimApp {
         // stride it steps by `ff`, so prefetch the strided targets (not the frames
         // skimmed over) to match `advance_playback`.
         let ff = self.playback.fast_forward.max(1);
+        let depth = PLAY_PREFETCH;
+
+        // Build each pane's ordered list of the next frames it will show, then
+        // dispatch them round-robin *by distance* (every pane's +1, then every
+        // pane's +2, …). The lock-step commit waits on the slowest pane, and the
+        // decode pool is one shared queue — so requesting one pane's whole burst
+        // before the next's would front-load the queue and starve the very pane
+        // that gates the commit. Interleaving keeps each pane's nearest-needed
+        // frame near the front.
+        let mut plans: Vec<(usize, Vec<usize>)> = Vec::with_capacity(targets.len());
         for i in targets {
             let known = self.panes[i].media.frame_count();
+            let mut frames = Vec::with_capacity(depth);
             if self.panes[i].sync_temporal {
                 // Walk the loop window forward from where playback is now, wrapping
                 // to the window start when looping — exactly the frames it shows next.
                 let mut f = self.playback.prefetch.unwrap_or(self.shared_frame);
-                for _ in 0..PLAY_PREFETCH {
+                for _ in 0..depth {
                     f = if f < hi {
                         (f + ff).min(hi)
                     } else if full && !at_end {
@@ -291,22 +302,25 @@ impl CimApp {
                     if f >= known {
                         break;
                     }
-                    if self.panes[i].media.resident(f).is_none() {
-                        self.request(i, f);
-                    }
+                    frames.push(f);
                 }
             } else {
                 // Unsynced pane: look ahead on its own timeline (strided too).
                 let base = self.panes[i].frame;
-                for k in 1..=PLAY_PREFETCH {
+                for k in 1..=depth {
                     let f = base + k * ff;
                     if f >= known {
                         break;
                     }
-                    if self.panes[i].media.resident(f).is_none() {
-                        self.request(i, f);
-                    }
+                    frames.push(f);
                 }
+            }
+            plans.push((i, frames));
+        }
+
+        for (i, f) in interleave_prefetch(&plans) {
+            if self.panes[i].media.resident(f).is_none() {
+                self.request(i, f);
             }
         }
     }
@@ -780,5 +794,54 @@ fn set_cached_tex(
             let handle = ctx.load_texture(name, img, opts);
             *slot = Some(CachedTex { handle, shown, sig, step });
         }
+    }
+}
+
+/// Flatten per-pane prefetch frame lists into dispatch order, round-robin **by
+/// distance**: every pane's nearest frame first, then every pane's next, and so
+/// on. On the single shared decode queue this stops one pane's whole burst from
+/// starving the pane that gates the lock-step commit (`prefetch_playback`).
+fn interleave_prefetch(plans: &[(usize, Vec<usize>)]) -> Vec<(usize, usize)> {
+    let max_len = plans.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let mut out = Vec::with_capacity(plans.iter().map(|(_, v)| v.len()).sum());
+    for k in 0..max_len {
+        for (i, frames) in plans {
+            if let Some(&f) = frames.get(k) {
+                out.push((*i, f));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interleave_prefetch;
+
+    /// Dispatch is round-robin by prefetch distance, and panes whose lists run
+    /// short simply drop out of later rounds (no padding, no reordering).
+    #[test]
+    fn prefetch_interleaves_by_distance() {
+        // Pane 0 wants 3 frames, pane 1 wants 2, pane 2 wants 3.
+        let plans = vec![
+            (0, vec![10, 11, 12]),
+            (1, vec![20, 21]),
+            (2, vec![30, 31, 32]),
+        ];
+        assert_eq!(
+            interleave_prefetch(&plans),
+            vec![
+                (0, 10), (1, 20), (2, 30), // distance 1: all panes
+                (0, 11), (1, 21), (2, 31), // distance 2: all panes
+                (0, 12), (2, 32),          // distance 3: pane 1 has dropped out
+            ]
+        );
+    }
+
+    /// An empty plan set (or all-empty lists) yields nothing.
+    #[test]
+    fn prefetch_interleave_handles_empty() {
+        assert!(interleave_prefetch(&[]).is_empty());
+        assert!(interleave_prefetch(&[(0, vec![]), (1, vec![])]).is_empty());
     }
 }
