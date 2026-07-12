@@ -163,6 +163,48 @@ struct RegionStatsCache {
     data: RegionStats,
 }
 
+/// In-progress stats-region right-drag: anchor / current screen positions, the
+/// pane it started on, and that pane's coordinate area (for screen↔image
+/// mapping). Committed to the image-space `stats_region` on release.
+struct RegionSel {
+    start: Option<Pos2>,
+    now: Option<Pos2>,
+    pane: Option<usize>,
+    area: Rect,
+}
+
+impl Default for RegionSel {
+    fn default() -> Self {
+        Self {
+            start: None,
+            now: None,
+            pane: None,
+            area: Rect::NOTHING,
+        }
+    }
+}
+
+/// In-progress profile-line shift+right-drag: which part is moving, the pane it
+/// started on, that pane's coordinate area (for screen↔image mapping), and the
+/// last image-space pointer (used to translate the body by its delta).
+struct LineSel {
+    grab: Option<LineGrab>,
+    pane: Option<usize>,
+    area: Rect,
+    last: Option<Pos2>,
+}
+
+impl Default for LineSel {
+    fn default() -> Self {
+        Self {
+            grab: None,
+            pane: None,
+            area: Rect::NOTHING,
+            last: None,
+        }
+    }
+}
+
 /// The export panel's state: output settings, the in-image region selection
 /// (a right-drag while the panel forces Single), and the running encode job.
 /// Decoupled from the composited [`crate::export::ExportPlan`], which is a
@@ -504,24 +546,15 @@ pub struct CimApp {
     /// Bumped whenever `stats_region` changes, so cached per-pane stats and
     /// region-tone textures know to recompute.
     stats_gen: u64,
-    /// In-progress right-drag: anchor / current screen positions, the pane it
-    /// started on, and that pane's coordinate area (for screen↔image mapping).
-    stats_sel_start: Option<Pos2>,
-    stats_sel_now: Option<Pos2>,
-    stats_sel_pane: Option<usize>,
-    stats_sel_area: Rect,
+    /// In-progress stats-region right-drag. See [`RegionSel`].
+    region_sel: RegionSel,
 
     // ---- intensity-profile line (shift + right-drag) --------------------
     /// The editable profile line in IMAGE space, replicated across every pane;
     /// `None` until one is drawn.
     line_profile: Option<LineProfile>,
-    /// In-progress shift+right drag: which part is moving, the pane it started
-    /// on, that pane's coordinate area (for screen↔image mapping), and the last
-    /// image-space pointer (used to translate the body by its delta).
-    line_grab: Option<LineGrab>,
-    line_grab_pane: Option<usize>,
-    line_grab_area: Rect,
-    line_drag_last: Option<Pos2>,
+    /// In-progress profile-line shift+right-drag. See [`LineSel`].
+    line_sel: LineSel,
 
     /// Edit buffer for the Transformations popup's typeable rotation angle, and
     /// the pane id currently being edited (so the buffer isn't overwritten with
@@ -693,16 +726,10 @@ impl CimApp {
             show_stats: true,
             stats_region: None,
             stats_gen: 0,
-            stats_sel_start: None,
-            stats_sel_now: None,
-            stats_sel_pane: None,
-            stats_sel_area: Rect::NOTHING,
+            region_sel: RegionSel::default(),
 
             line_profile: None,
-            line_grab: None,
-            line_grab_pane: None,
-            line_grab_area: Rect::NOTHING,
-            line_drag_last: None,
+            line_sel: LineSel::default(),
             rotation_edit: String::new(),
             rotation_edit_pane: None,
 

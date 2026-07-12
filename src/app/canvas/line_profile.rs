@@ -58,7 +58,7 @@ impl CimApp {
         let down = ctx.input(|i| i.pointer.secondary_down());
         let shift = ctx.input(|i| i.modifiers.shift);
         let pos = ctx.input(|i| i.pointer.interact_pos());
-        match self.line_grab {
+        match self.line_sel.grab {
             None => {
                 if !(shift && down && hovered) {
                     return;
@@ -88,24 +88,24 @@ impl CimApp {
                 if let LineGrab::New(anchor) = grab {
                     self.line_profile = Some(LineProfile { a: anchor, b: img });
                 }
-                self.line_grab = Some(grab);
-                self.line_grab_pane = Some(idx);
-                self.line_grab_area = coord_area;
-                self.line_drag_last = Some(img);
+                self.line_sel.grab = Some(grab);
+                self.line_sel.pane = Some(idx);
+                self.line_sel.area = coord_area;
+                self.line_sel.last = Some(img);
             }
-            Some(grab) if self.line_grab_pane == Some(idx) => {
+            Some(grab) if self.line_sel.pane == Some(idx) => {
                 if !down {
                     self.finalize_line();
                     return;
                 }
                 let Some(p) = pos else { return };
-                let img = self.rot_screen_to_img(idx, p, self.line_grab_area).to_pos2();
+                let img = self.rot_screen_to_img(idx, p, self.line_sel.area).to_pos2();
                 if let Some(lp) = self.line_profile.as_mut() {
                     match grab {
                         LineGrab::Start => lp.a = img,
                         LineGrab::End | LineGrab::New(_) => lp.b = img,
                         LineGrab::Body => {
-                            if let Some(last) = self.line_drag_last {
+                            if let Some(last) = self.line_sel.last {
                                 let d = img - last;
                                 lp.a += d;
                                 lp.b += d;
@@ -113,7 +113,7 @@ impl CimApp {
                         }
                     }
                 }
-                self.line_drag_last = Some(img);
+                self.line_sel.last = Some(img);
             }
             _ => {}
         }
@@ -122,9 +122,9 @@ impl CimApp {
     /// End a profile-line drag; a *new* line dragged out to near-zero length is
     /// discarded (so a stray shift+right-click doesn't leave a dot behind).
     fn finalize_line(&mut self) {
-        let grab = self.line_grab.take();
-        self.line_grab_pane = None;
-        self.line_drag_last = None;
+        let grab = self.line_sel.grab.take();
+        self.line_sel.pane = None;
+        self.line_sel.last = None;
         if matches!(grab, Some(LineGrab::New(_))) {
             if let Some(lp) = self.line_profile {
                 if (lp.a - lp.b).length() < 2.0 {

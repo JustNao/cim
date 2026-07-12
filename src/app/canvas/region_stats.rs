@@ -23,8 +23,8 @@ impl CimApp {
         self.region_input(ctx, idx, coord_area, clip_rect, hovered);
 
         // While actively selecting on this pane, show only the rubber band.
-        if self.stats_sel_pane == Some(idx) {
-            if let (Some(s), Some(n)) = (self.stats_sel_start, self.stats_sel_now) {
+        if self.region_sel.pane == Some(idx) {
+            if let (Some(s), Some(n)) = (self.region_sel.start, self.region_sel.now) {
                 let r = Rect::from_two_pos(s, n).intersect(clip_rect);
                 ui.painter_at(clip_rect)
                     .rect_stroke(r, 0.0, Stroke::new(1.5_f32, REGION_COL));
@@ -76,20 +76,20 @@ impl CimApp {
         }
         // Shift + right-drag is the intensity-profile line, not a stats region;
         // leave the pointer to `line_input` unless a stats drag is already going.
-        if self.stats_sel_pane.is_none() && ctx.input(|i| i.modifiers.shift) {
+        if self.region_sel.pane.is_none() && ctx.input(|i| i.modifiers.shift) {
             return;
         }
         let down = ctx.input(|i| i.pointer.secondary_down());
         let pos = ctx.input(|i| i.pointer.interact_pos());
-        match self.stats_sel_pane {
+        match self.region_sel.pane {
             None => {
                 if down && hovered {
                     if let Some(p) = pos {
                         if hit_rect.contains(p) {
-                            self.stats_sel_pane = Some(idx);
-                            self.stats_sel_start = Some(p);
-                            self.stats_sel_now = Some(p);
-                            self.stats_sel_area = coord_area;
+                            self.region_sel.pane = Some(idx);
+                            self.region_sel.start = Some(p);
+                            self.region_sel.now = Some(p);
+                            self.region_sel.area = coord_area;
                         }
                     }
                 }
@@ -97,7 +97,7 @@ impl CimApp {
             Some(sel) if sel == idx => {
                 if down {
                     if let Some(p) = pos {
-                        self.stats_sel_now = Some(p);
+                        self.region_sel.now = Some(p);
                     }
                 } else {
                     self.finalize_region(idx);
@@ -110,10 +110,10 @@ impl CimApp {
     /// Convert the finished right-drag into an image-space region (or clear it
     /// on a near-zero drag), using the pane's view and stored coordinate area.
     fn finalize_region(&mut self, idx: usize) {
-        let start = self.stats_sel_start.take();
-        let now = self.stats_sel_now.take();
-        let area = self.stats_sel_area;
-        self.stats_sel_pane = None;
+        let start = self.region_sel.start.take();
+        let now = self.region_sel.now.take();
+        let area = self.region_sel.area;
+        self.region_sel.pane = None;
         let (Some(s), Some(n)) = (start, now) else {
             return;
         };
