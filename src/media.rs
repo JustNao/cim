@@ -2098,6 +2098,44 @@ mod tests {
         assert!(save_frame(&mean, &dir.join("mean.gif")).is_err());
     }
 
+    /// The region percentile over the FULL frame must equal the whole-image
+    /// percentile — the invariant the planned percentile unification relies
+    /// on — plus fixed golden values so a rewrite can't silently drift.
+    #[test]
+    fn full_frame_region_percentile_matches_whole_image() {
+        // Integer path: u8 ramp with outliers at both ends.
+        let mut v: Vec<u8> = (0..200).map(|i| 50 + (i % 100) as u8).collect();
+        v[0] = 0;
+        v[199] = 255;
+        let f = FrameData::new([20, 10], 1, Samples::U8(v));
+        for p in [0.01f32, 0.5, 2.0, 25.0] {
+            assert_eq!(
+                f.region_percentile_bounds(0, 0, 20, 10, p),
+                f.percentile_bounds(p),
+                "u8 p={p}"
+            );
+        }
+        // Golden: 25% per tail of [0, 10, 20, 30] cuts to (10, 20).
+        let g = FrameData::new([4, 1], 1, Samples::U8(vec![0, 10, 20, 30]));
+        assert_eq!(g.percentile_bounds(25.0), (10.0, 20.0));
+        assert_eq!(g.region_percentile_bounds(0, 0, 4, 1, 25.0), (10.0, 20.0));
+
+        // Float path (separate binned implementation).
+        let vf: Vec<f32> = (0..200).map(|i| -5.0 + (i % 100) as f32 * 0.25).collect();
+        let ff = FrameData::new([20, 10], 1, Samples::F32(vf));
+        for p in [0.01f32, 0.5, 2.0, 25.0] {
+            assert_eq!(
+                ff.region_percentile_float(0, 0, 20, 10, p),
+                ff.percentile_bounds_float(p),
+                "f32 p={p}"
+            );
+        }
+        // Golden: 25% per tail of [0, 10, 20, 30] cuts to ~(10, 20) (binned).
+        let gf = FrameData::new([4, 1], 1, Samples::F32(vec![0.0, 10.0, 20.0, 30.0]));
+        let (lo, hi) = gf.percentile_bounds_float(25.0);
+        assert!((lo - 10.0).abs() < 0.01 && (hi - 20.0).abs() < 0.01, "({lo}, {hi})");
+    }
+
     /// The LUT render path must produce exactly what the straightforward
     /// per-pixel float mapping would, for both integer widths and both
     /// mono/RGB layouts, at arbitrary bounds.

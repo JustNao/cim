@@ -186,3 +186,45 @@ impl Worker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::Samples;
+
+    /// The worker's output must equal the plain LUT render byte-for-byte when
+    /// no proprietary library is loaded (the test environment) — including
+    /// when the job *asks* for LUT_ALPHA / details, which is the documented
+    /// fallback. This locks the live-render half of the "all render paths
+    /// match pixel-for-pixel" invariant before the paths are unified.
+    #[test]
+    fn worker_render_matches_plain_lut_render() {
+        let frame = Arc::new(FrameData::new(
+            [8, 4],
+            1,
+            Samples::U16(crate::testutil::gray16_page(8, 4, 7)),
+        ));
+        let (lo, hi) = (500.0, 60000.0);
+        let mut reference = Vec::new();
+        frame.render_into(lo, hi, &mut reference);
+
+        let mut worker = Worker::default();
+        for (lut_alpha, details) in [(false, false), (true, false), (false, true)] {
+            let done = worker.render(RenderJob {
+                id: 1,
+                frame: 0,
+                sig: 9,
+                data: frame.clone(),
+                lo,
+                hi,
+                lut_alpha,
+                details,
+            });
+            assert_eq!(done.size, [8, 4]);
+            assert_eq!(
+                done.rgba, reference,
+                "lut_alpha={lut_alpha} details={details}"
+            );
+        }
+    }
+}

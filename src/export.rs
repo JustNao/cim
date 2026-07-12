@@ -999,6 +999,57 @@ mod tests {
         assert!(crop_to_content(&vec![0u8; w * h * 4], w, h).is_none());
     }
 
+    /// A full-frame 1:1 export must equal the live LUT render byte-for-byte,
+    /// including the pane's clip percentile (the export honours the same tone
+    /// as the view). This locks the export half of the "all render paths match
+    /// pixel-for-pixel" invariant before the paths are unified.
+    #[test]
+    fn full_frame_export_matches_lut_render() {
+        // u16 ramp with tail outliers so the 0.5% clip actually cuts values.
+        let mut v: Vec<u16> = (0..16 * 8).map(|i| 1000 + (i as u16) * 300).collect();
+        v[0] = 0;
+        v[127] = 65535;
+        let frame = Arc::new(FrameData::new([16, 8], 1, Samples::U16(v)));
+
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(16.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(8.0, 4.0),
+            needs_fit: false,
+        };
+        let pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            Some(0.5), // clip on, non-default percentile
+            1,
+            true,
+            0,
+            ExportSource::Still(frame.clone()),
+        );
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            region: cell,
+            out_w: 16,
+            out_h: 8,
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+
+        let (lo, hi) = frame.clip_bounds(0.5);
+        let mut reference = Vec::new();
+        frame.render_into(lo, hi, &mut reference);
+        for i in 0..16 * 8 {
+            assert_eq!(
+                buf[i * 4..i * 4 + 3],
+                reference[i * 4..i * 4 + 3],
+                "pixel {i}"
+            );
+        }
+    }
+
     /// Full compose → ffmpeg encode of a few frames. Skips gracefully only if
     /// ffmpeg is unavailable (e.g. CI without ffmpeg).
     #[test]
