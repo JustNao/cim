@@ -66,7 +66,7 @@ impl CimApp {
             // `STATUS_TTL` (see `update`).
             if !self.status.is_empty() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(&self.status);
+                    ui.label(self.status.text());
                 });
             }
         });
@@ -1068,7 +1068,7 @@ impl CimApp {
                     if ui.button("Save settings").clicked() {
                         self.config.save();
                         self.saved_config = self.config.clone();
-                        self.status = "Settings saved".into();
+                        self.status.set("Settings saved");
                     }
                     if dirty {
                         ui.label(

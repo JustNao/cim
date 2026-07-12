@@ -163,6 +163,52 @@ struct RegionStatsCache {
     data: RegionStats,
 }
 
+/// The transient toolbar notification and its auto-expiry bookkeeping. `set`
+/// posts a message; `tick` (once per update) stamps a fresh message's time and
+/// clears it after the TTL, so every post gets the timeout for free.
+#[derive(Default)]
+struct StatusLine {
+    text: String,
+    /// Last value `tick` saw, to detect a fresh message without a separate flag.
+    shadow: String,
+    at: f64,
+}
+
+impl StatusLine {
+    fn set(&mut self, msg: impl Into<String>) {
+        self.text = msg.into();
+    }
+    fn text(&self) -> &str {
+        &self.text
+    }
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+    fn clear(&mut self) {
+        self.text.clear();
+        self.shadow.clear();
+    }
+    /// Note a fresh message (stamp `at`) and expire after `ttl`. Returns the
+    /// seconds still to show (so the caller can schedule a wake-up), or `None`
+    /// when nothing is showing.
+    fn tick(&mut self, now: f64, ttl: f64) -> Option<f64> {
+        if self.text != self.shadow {
+            self.shadow = self.text.clone();
+            self.at = now;
+        }
+        if self.text.is_empty() {
+            return None;
+        }
+        let remaining = ttl - (now - self.at);
+        if remaining <= 0.0 {
+            self.clear();
+            None
+        } else {
+            Some(remaining)
+        }
+    }
+}
+
 /// How a pane's media was opened, so it can be reloaded from disk and emitted
 /// back into a replay command.
 enum Source {
@@ -434,13 +480,10 @@ pub struct CimApp {
     cancel_export: bool,
     export_status: String,
     /// Transient notification shown top-right in the toolbar (e.g. "Settings
-    /// saved"). Any assignment to it auto-expires after `STATUS_TTL`: `update`
-    /// shadows the last value in `status_shadow` to detect a fresh message and
-    /// stamps `status_at`, so every current/future `self.status = …` gets the
-    /// timeout for free.
-    status: String,
-    status_shadow: String,
-    status_at: f64,
+    /// saved"). Any `status.set(…)` auto-expires after `STATUS_TTL` — `tick`
+    /// detects a fresh message and stamps its time, so every current/future
+    /// call gets the timeout for free.
+    status: StatusLine,
     /// Global error not tied to a sequence — rendered as a modal popup.
     error_popup: Option<String>,
     last_area: Rect,
@@ -633,9 +676,7 @@ impl CimApp {
             export_run: None,
             cancel_export: false,
             export_status: String::new(),
-            status: String::new(),
-            status_shadow: String::new(),
-            status_at: 0.0,
+            status: StatusLine::default(),
             error_popup: None,
             last_area: Rect::NOTHING,
             cursor_img: None,
@@ -838,12 +879,12 @@ impl CimApp {
             p.pending = None;
             p.overlay_tex = None;
         }
-        self.status = match after {
-            (true, true) => "Operator libraries loaded".into(),
-            (true, false) => "LUT_ALPHA operator loaded".into(),
-            (false, true) => "Details operator loaded".into(),
+        self.status.set(match after {
+            (true, true) => "Operator libraries loaded",
+            (true, false) => "LUT_ALPHA operator loaded",
+            (false, true) => "Details operator loaded",
             (false, false) => return,
-        };
+        });
     }
 
     /// Set a pane's tone-sync flag. Turning it **off** snapshots the shared
@@ -1295,23 +1336,11 @@ impl eframe::App for CimApp {
 
         self.tick(ctx);
 
-        // Expire a transient status notification after `STATUS_TTL`. Shadowing
-        // the last value detects a fresh message, so every `self.status = …`
-        // site (current and future) inherits the timeout without extra work.
+        // Expire a transient status notification after `STATUS_TTL`; wake up to
+        // clear it even when the app is otherwise idle.
         let now = ctx.input(|i| i.time);
-        if self.status != self.status_shadow {
-            self.status_shadow = self.status.clone();
-            self.status_at = now;
-        }
-        if !self.status.is_empty() {
-            let remaining = STATUS_TTL - (now - self.status_at);
-            if remaining <= 0.0 {
-                self.status.clear();
-                self.status_shadow.clear();
-            } else {
-                // Wake up to clear it even when the app is otherwise idle.
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
-            }
+        if let Some(remaining) = self.status.tick(now, STATUS_TTL) {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
         }
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {

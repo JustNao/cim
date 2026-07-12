@@ -162,7 +162,7 @@ impl CimApp {
             return;
         }
         ctx.copy_text(self.view_command());
-        self.status = "View command copied to clipboard".into();
+        self.status.set("View command copied to clipboard");
     }
 
     // ---- input -----------------------------------------------------------

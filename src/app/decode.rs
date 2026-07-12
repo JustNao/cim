@@ -84,7 +84,7 @@ impl CimApp {
         }
         self.load_cache_exhausted = false;
         self.export_load_pending = false; // only the export button sets this
-        self.status = "Queued all frames for background decoding…".into();
+        self.status.set("Queued all frames for background decoding…");
         self.decoding_all = true;
     }
 
@@ -98,7 +98,7 @@ impl CimApp {
                 p.eager = Eager::Offsets;
             }
         }
-        self.status = "Discovering sequence length (headers only)…".into();
+        self.status.set("Discovering sequence length (headers only)…");
         self.decoding_all = true;
     }
 
@@ -109,7 +109,7 @@ impl CimApp {
         }
         self.decoding_all = false;
         self.export_load_pending = false;
-        self.status = "Stopped loading".into();
+        self.status.set("Stopped loading");
     }
 
     /// Drive the active bulk loads each update. A **Full** pane requests every
@@ -333,8 +333,8 @@ impl CimApp {
                 }
             }
             self.load_cache_exhausted = true;
-            self.status =
-                "Frame cache full — continuing with offsets only (headers) for the rest".into();
+            self.status
+                .set("Frame cache full — continuing with offsets only (headers) for the rest");
         }
 
         // Gather evictable frames (resident, not currently shown), oldest first.
@@ -365,9 +365,9 @@ impl CimApp {
         if self.decoding_all && !active && self.inflight.is_empty() {
             self.decoding_all = false;
             // Clear only our own transient load notes (don't clobber a newer one).
-            if self.status == "Queued all frames for background decoding…"
-                || self.status.starts_with("Discovering sequence length")
-                || self.status.starts_with("Frame cache full")
+            if self.status.text() == "Queued all frames for background decoding…"
+                || self.status.text().starts_with("Discovering sequence length")
+                || self.status.text().starts_with("Frame cache full")
             {
                 self.status.clear();
             }
