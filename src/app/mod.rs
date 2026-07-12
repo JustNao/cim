@@ -2226,42 +2226,6 @@ fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usi
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
 }
 
-/// Render the tone options for `mode` as label/value rows inside a 2-column
-/// `Grid` (each row ends with `end_row`). Extend by adding a `match` arm or a
-/// row: each mode reads/writes its own sub-struct of `ToneOptions`, so options
-/// never collide across modes.
-fn draw_tone_options(
-    ui: &mut egui::Ui,
-    _pane_id: u64,
-    mode: ContrastMode,
-    tone: &mut ToneOptions,
-) {
-    match mode {
-        ContrastMode::Linear => {
-            // Clip toggle + its per-tail percentile (greyed out when the toggle
-            // is off). On for >8-bit by default, off for 8-bit (set in add_pane).
-            ui.label("Clip");
-            ui.horizontal(|ui| {
-                ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
-                    .on_hover_text("Clip a percentile off each tail before the stretch");
-                ui.add_enabled(
-                    tone.clip.enabled,
-                    egui::DragValue::new(&mut tone.clip.percent)
-                        .speed(0.005)
-                        .range(0.0..=49.0)
-                        .max_decimals(3)
-                        .suffix(" %"),
-                )
-                .on_hover_text("Percentile clipped at each tail before the stretch");
-            });
-            ui.end_row();
-        }
-        // LUT_ALPHA has no options. Add a knob here: one row + a field on
-        // `ToneOptions`.
-        ContrastMode::LutAlpha => {}
-    }
-}
-
 /// Draw a histogram's per-channel curves into `rect` over a dark base: one grey
 /// curve when mono, else R/G/B, each sqrt-scaled so the tails stay legible.
 /// Shared by the pane Transformations histogram (`draw_histogram`) and the
