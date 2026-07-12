@@ -5,6 +5,8 @@
 
 use crate::app::*;
 
+use super::transform::*;
+
 impl CimApp {
     /// Process the shift+right-drag profile line for pane `idx` and draw it (the
     /// amber segment + endpoint handles), mapped onto this pane. `coord_area`

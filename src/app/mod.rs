@@ -2181,38 +2181,22 @@ pub(super) fn cpp_lib_dir(config: &Config) -> Option<PathBuf> {
     default_cpp_lib_dir()
 }
 
+/// Wrap a degree value into the (-180, 180] range used by the rotation control.
+fn wrap180(mut d: f32) -> f32 {
+    d %= 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    } else if d <= -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
 /// `<cim executable directory>/LIBS`, used when no library folder is configured.
 fn default_cpp_lib_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("LIBS"))
 }
-
-/// Dim everything in `area` outside `r`, then outline `r` (export-region look).
-fn dim_outside(painter: &egui::Painter, area: Rect, r: Rect) {
-    let dim = Color32::from_black_alpha(120);
-    painter.rect_filled(
-        Rect::from_min_max(area.min, Pos2::new(area.max.x, r.min.y)),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(Pos2::new(area.min.x, r.max.y), area.max),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(Pos2::new(area.min.x, r.min.y), Pos2::new(r.min.x, r.max.y)),
-        0.0,
-        dim,
-    );
-    painter.rect_filled(
-        Rect::from_min_max(Pos2::new(r.max.x, r.min.y), Pos2::new(area.max.x, r.max.y)),
-        0.0,
-        dim,
-    );
-    painter.rect_stroke(r, 0.0, Stroke::new(2.0_f32, Color32::from_rgb(240, 200, 80)));
-}
-
 /// Clamp an image-space region to a frame's pixel grid, returning the integer
 /// half-open bounds `[x0, x1) × [y0, y1)`, or `None` if it doesn't cover at
 /// least one pixel (e.g. the region lies entirely outside this frame — pages
@@ -2335,90 +2319,6 @@ fn drop_target(rows: &[(usize, egui::Rangef)], y: f32) -> Option<usize> {
         .min_by(|a, b| (a.1.center() - y).abs().total_cmp(&(b.1.center() - y).abs()))
         .map(|&(idx, _)| idx)
 }
-
-/// Rotate screen point `p` about `pivot` by `theta` radians (screen y is down,
-/// so a positive angle turns clockwise on screen).
-fn rotate_around(p: Pos2, pivot: Pos2, theta: f32) -> Pos2 {
-    if theta == 0.0 {
-        return p;
-    }
-    let (s, c) = theta.sin_cos();
-    let d = p - pivot;
-    pivot + Vec2::new(d.x * c - d.y * s, d.x * s + d.y * c)
-}
-
-/// Wrap a degree value into the (-180, 180] range used by the rotation control.
-fn wrap180(mut d: f32) -> f32 {
-    d %= 360.0;
-    if d > 180.0 {
-        d -= 360.0;
-    } else if d <= -180.0 {
-        d += 360.0;
-    }
-    d
-}
-
-/// Format a rotation angle for the Transformations text box: whole degrees
-/// plainly, otherwise one decimal.
-fn fmt_angle(v: f32) -> String {
-    if v.fract().abs() < 0.05 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{v:.1}")
-    }
-}
-
-/// Image-space centre (in pixels) of a frame of the given size.
-fn center_vec(size: [usize; 2]) -> Vec2 {
-    Vec2::new(size[0] as f32 / 2.0, size[1] as f32 / 2.0)
-}
-
-/// Paint texture `id` into `rect`, rotated by `theta` radians about the rect's
-/// centre. `theta == 0` takes the plain axis-aligned path; otherwise a two-triangle
-/// textured mesh with the four corners rotated (clipped by the painter's clip rect,
-/// so the image still can't spill past its pane).
-fn paint_rotated(painter: &egui::Painter, id: TextureId, rect: Rect, theta: f32) {
-    if theta == 0.0 {
-        painter.image(id, rect, uv(), Color32::WHITE);
-        return;
-    }
-    let pivot = rect.center();
-    let corners = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-    ];
-    let uvs = [
-        Pos2::new(0.0, 0.0),
-        Pos2::new(1.0, 0.0),
-        Pos2::new(1.0, 1.0),
-        Pos2::new(0.0, 1.0),
-    ];
-    let mut mesh = egui::Mesh::with_texture(id);
-    for (corner, uv) in corners.into_iter().zip(uvs) {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: rotate_around(corner, pivot, theta),
-            uv,
-            color: Color32::WHITE,
-        });
-    }
-    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-    painter.add(egui::Shape::mesh(mesh));
-}
-
-/// Shortest distance from point `p` to the segment `a`–`b` (screen space), used
-/// to hit-test the profile line's body.
-fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
-    let ab = b - a;
-    let len2 = ab.length_sq();
-    if len2 <= f32::EPSILON {
-        return (p - a).length();
-    }
-    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
-    (p - (a + ab * t)).length()
-}
-
 /// Zoom sensitivity per scroll unit; Shift doubles it.
 fn zoom_speed(ctx: &egui::Context) -> f32 {
     if ctx.input(|i| i.modifiers.shift) {

@@ -5,6 +5,8 @@
 
 use crate::app::*;
 
+use super::transform::*;
+
 impl CimApp {
     /// The pane options popup (toggled by the header "Transformations" button):
     /// the tone mode, its mode-specific options (`draw_tone_options`), and

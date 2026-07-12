@@ -4,6 +4,8 @@
 
 use crate::app::*;
 
+use super::transform::*;
+
 impl CimApp {
     pub(super) fn draw_ab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
         let n = self.panes.len();
