@@ -1083,19 +1083,13 @@ impl CimApp {
         let data = frame.region_stats(x0, y0, x1, y1, 256);
         self.panes[idx].stats = Some(RegionStatsCache { key, data });
     }
-}
 
-impl eframe::App for CimApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Whole-update CPU cost (CIM_DEBUG profiler); recorded at the end.
-        let frame_start = crate::debug::enabled().then(std::time::Instant::now);
-
-        // Global UI scale (buttons/text).
-        let scale = self.config.ui_scale.clamp(0.5, 3.0);
-        if (ctx.zoom_factor() - scale).abs() > 1e-3 {
-            ctx.set_zoom_factor(scale);
-        }
-
+    /// The fixed pre-draw pipeline: reconcile live config (UI scale is applied
+    /// by the caller), pump the decode / render pools, run input & playback,
+    /// discover length, enforce the cache budget, reload watched panes and
+    /// recompute Compute panes, then stage & lock-step-commit the on-screen
+    /// textures. Runs before any drawing so the textures reflect settled state.
+    fn tick(&mut self, ctx: &egui::Context) {
         self.clock = self.clock.wrapping_add(1);
 
         // Linux (esp. Wayland) frequently ignores `with_maximized(true)` from the
@@ -1175,73 +1169,13 @@ impl eframe::App for CimApp {
         // them (and commit a playback step) together. Runs last so it sees the
         // settled frame/tone state, just before drawing reads the textures.
         self.refresh_textures(ctx);
+    }
 
-        // Expire a transient status notification after `STATUS_TTL`. Shadowing
-        // the last value detects a fresh message, so every `self.status = …`
-        // site (current and future) inherits the timeout without extra work.
-        let now = ctx.input(|i| i.time);
-        if self.status != self.status_shadow {
-            self.status_shadow = self.status.clone();
-            self.status_at = now;
-        }
-        if !self.status.is_empty() {
-            let remaining = STATUS_TTL - (now - self.status_at);
-            if remaining <= 0.0 {
-                self.status.clear();
-                self.status_shadow.clear();
-            } else {
-                // Wake up to clear it even when the app is otherwise idle.
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
-            }
-        }
-
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            self.draw_toolbar(ui);
-            ui.add_space(2.0);
-        });
-
-        // Full-width transport bar, pinned to the bottom. Shown whenever any
-        // loaded media is a sequence (not just the focused one), so selecting a
-        // still doesn't drop the bar and shift the whole layout. It follows the
-        // `control` sequence.
-        if self.any_sequence() {
-            egui::TopBottomPanel::bottom("framebar").show(ctx, |ui| {
-                ui.add_space(4.0);
-                self.draw_frame_bar(ui);
-                ui.add_space(4.0);
-            });
-        }
-
-        // No frame margin: the image area runs flush to the window edges
-        // (top under the toolbar, left and right).
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                self.draw_central(ui, ctx);
-            });
-
-        if self.show_manager {
-            self.draw_manager(ctx);
-        }
-        // The Line profile tab shows only while a line exists; drawing one opens
-        // it, clearing it (or "Clear line") closes it.
-        if self.line_profile.is_some() {
-            self.draw_profile(ctx);
-        }
-        if self.show_export {
-            self.draw_export(ctx);
-        }
-        if self.show_settings {
-            self.draw_settings(ctx);
-        }
-        if self.show_viewcmd {
-            self.draw_viewcmd(ctx);
-        }
-        if self.show_debug {
-            self.draw_debug(ctx);
-        }
-
+    /// The centred modal popups drawn on top of everything: the per-app error
+    /// notice, the non-error warning, and the ">SEQ_WARN_LIMIT sequences"
+    /// resource confirmation (the media wait in `pending_open`; confirming
+    /// adds them, declining quits).
+    fn draw_modals(&mut self, ctx: &egui::Context) {
         if self.error_popup.is_some() {
             let msg = self.error_popup.clone().unwrap();
             let mut dismiss = false;
@@ -1327,7 +1261,12 @@ impl eframe::App for CimApp {
                 None => {}
             }
         }
+    }
 
+    /// Drain the deferred pane-lifecycle actions queued during the draw
+    /// (remove / reload / reload-all / create-Compute), which mustn't mutate
+    /// `panes` mid-draw.
+    fn apply_deferred(&mut self, _ctx: &egui::Context) {
         if let Some(i) = self.pending_remove.take() {
             self.remove_media(i);
         }
@@ -1340,6 +1279,90 @@ impl eframe::App for CimApp {
         if std::mem::take(&mut self.pending_compute_create) {
             self.add_compute_pane();
         }
+    }
+}
+
+impl eframe::App for CimApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Whole-update CPU cost (CIM_DEBUG profiler); recorded at the end.
+        let frame_start = crate::debug::enabled().then(std::time::Instant::now);
+
+        // Global UI scale (buttons/text).
+        let scale = self.config.ui_scale.clamp(0.5, 3.0);
+        if (ctx.zoom_factor() - scale).abs() > 1e-3 {
+            ctx.set_zoom_factor(scale);
+        }
+
+        self.tick(ctx);
+
+        // Expire a transient status notification after `STATUS_TTL`. Shadowing
+        // the last value detects a fresh message, so every `self.status = …`
+        // site (current and future) inherits the timeout without extra work.
+        let now = ctx.input(|i| i.time);
+        if self.status != self.status_shadow {
+            self.status_shadow = self.status.clone();
+            self.status_at = now;
+        }
+        if !self.status.is_empty() {
+            let remaining = STATUS_TTL - (now - self.status_at);
+            if remaining <= 0.0 {
+                self.status.clear();
+                self.status_shadow.clear();
+            } else {
+                // Wake up to clear it even when the app is otherwise idle.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+            }
+        }
+
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            self.draw_toolbar(ui);
+            ui.add_space(2.0);
+        });
+
+        // Full-width transport bar, pinned to the bottom. Shown whenever any
+        // loaded media is a sequence (not just the focused one), so selecting a
+        // still doesn't drop the bar and shift the whole layout. It follows the
+        // `control` sequence.
+        if self.any_sequence() {
+            egui::TopBottomPanel::bottom("framebar").show(ctx, |ui| {
+                ui.add_space(4.0);
+                self.draw_frame_bar(ui);
+                ui.add_space(4.0);
+            });
+        }
+
+        // No frame margin: the image area runs flush to the window edges
+        // (top under the toolbar, left and right).
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                self.draw_central(ui, ctx);
+            });
+
+        if self.show_manager {
+            self.draw_manager(ctx);
+        }
+        // The Line profile tab shows only while a line exists; drawing one opens
+        // it, clearing it (or "Clear line") closes it.
+        if self.line_profile.is_some() {
+            self.draw_profile(ctx);
+        }
+        if self.show_export {
+            self.draw_export(ctx);
+        }
+        if self.show_settings {
+            self.draw_settings(ctx);
+        }
+        if self.show_viewcmd {
+            self.draw_viewcmd(ctx);
+        }
+        if self.show_debug {
+            self.draw_debug(ctx);
+        }
+
+        self.draw_modals(ctx);
+        self.apply_deferred(ctx);
 
         // Encode one frame per frame while an export is running.
         if self.export_run.is_some() || self.cancel_export {
