@@ -1748,31 +1748,36 @@ fn unpack_bilevel(packed: &[u8], w: usize, h: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::*;
 
     /// Opening a TIFF must not walk the whole file: the length starts at one
     /// page and pages are discovered by decoding, with `Ok(None)` marking the
-    /// end. Skips gracefully when the fixture isn't present.
+    /// end. Pages differ in resolution on purpose (like real captures).
     #[test]
     fn tiff_length_is_discovered_lazily() {
-        let path = Path::new("examples/alpes_noisy_a.tif");
-        if !path.exists() {
-            return;
-        }
-        let m = load(path).expect("open tiff");
+        let dir = fixture_dir("lazy_len");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[32, 24], [16, 12], [32, 24]]);
+        let m = load(&path).expect("open tiff");
         // Fresh open knows only the first page and hasn't confirmed the end.
         assert_eq!(m.frame_count(), 1);
         assert!(!m.at_end());
 
         // Walk pages the way the app does until a probe finds nothing.
-        let mut reader = SeqReader::open(path).expect("open");
+        let mut reader = SeqReader::open(&path).expect("open");
         let mut pages = 0;
         loop {
             match reader.decode(pages).expect("decode") {
-                Some(_) => pages += 1,
+                Some(frame) => {
+                    // Per-page native size and values survive the round trip.
+                    let [w, h] = frame.size;
+                    assert_eq!(frame.sample(0), gray16_page(w, h, pages as u16 * 1000)[0] as u32);
+                    pages += 1;
+                }
                 None => break,
             }
         }
-        assert!(pages >= 1, "at least one page must decode");
+        assert_eq!(pages, 3, "all written pages decode");
         // Probing exactly at the end reports None, not an error.
         assert!(reader.decode(pages).unwrap().is_none());
     }
@@ -1784,12 +1789,11 @@ mod tests {
     /// length lands identically to `tiff_length_is_discovered_lazily`.
     #[test]
     fn probe_discovers_length_without_decoding() {
-        let path = Path::new("examples/alpes_noisy_a.tif");
-        if !path.exists() {
-            return;
-        }
-        let mut m = load(path).expect("open tiff");
-        let mut reader = SeqReader::open(path).expect("open");
+        let dir = fixture_dir("probe_len");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[24, 16], [24, 16], [12, 8], [24, 16]]);
+        let mut m = load(&path).expect("open tiff");
+        let mut reader = SeqReader::open(&path).expect("open");
 
         // Walk the frontier via metadata-only probes, exactly as `drive_seek`
         // does, growing the known length one empty slot at a time.
@@ -1806,11 +1810,12 @@ mod tests {
         }
 
         // Compare against the true page count from a decode walk.
-        let mut dec = SeqReader::open(path).expect("open");
+        let mut dec = SeqReader::open(&path).expect("open");
         let mut pages = 0;
         while dec.decode(pages).expect("decode").is_some() {
             pages += 1;
         }
+        assert_eq!(pages, 4, "decode walk sees every written page");
         assert_eq!(m.frame_count(), pages, "probe length == decode length");
         assert_eq!(
             m.resident_count(),
@@ -1825,12 +1830,8 @@ mod tests {
     /// first frame decoded eagerly and later frames decodable per file.
     #[test]
     fn file_sequence_opens_as_one_media() {
-        let files: Vec<PathBuf> = (0..=11)
-            .map(|i| PathBuf::from(format!("examples/frame_{i:03}.png")))
-            .collect();
-        if !files[0].exists() {
-            return;
-        }
+        let dir = fixture_dir("file_seq");
+        let files = write_png_run(&dir, 12, 20, 10);
         let m = load_sequence(&files, "frame".into()).expect("open sequence");
         assert_eq!(m.frame_count(), 12);
         assert!(m.at_end(), "a file sequence knows its length up front");
@@ -1846,13 +1847,10 @@ mod tests {
     /// frontier, `insert` a decoded page or `frontier_ended` on a miss.
     #[test]
     fn concat_sequence_concatenates_pages() {
-        let files = vec![
-            PathBuf::from("examples/clip_000.tif"), // 4 pages
-            PathBuf::from("examples/clip_001.tif"), // 3 pages
-        ];
-        if !files[0].exists() || !files[1].exists() {
-            return;
-        }
+        let dir = fixture_dir("concat");
+        let files = vec![dir.join("clip_000.tif"), dir.join("clip_001.tif")];
+        write_multipage_tiff_u16(&files[0], &[[16, 12]; 4]); // 4 pages
+        write_multipage_tiff_u16(&files[1], &[[16, 12]; 3]); // 3 pages
         let mut m = load_sequence(&files, "clip".into()).expect("open concat");
         assert!(matches!(m, Media::ConcatSeq(_)), "tiff run → ConcatSeq");
         assert_eq!(m.frame_count(), 1); // only the first page known at open
@@ -1900,48 +1898,47 @@ mod tests {
         );
     }
 
-    /// A real 1-bit bilevel TIFF opens as a mask media and decodes to a mask
-    /// frame. Skips gracefully when the fixture isn't present.
+    /// A 1-bit bilevel TIFF opens as a mask media whose decoded truth is the
+    /// **stored bit** the author set, for both PhotometricInterpretation senses
+    /// (the `tiff` decoder inverts WhiteIsZero to intensity; `mask_bits` flips
+    /// it back). Width 13 exercises the byte-padded row unpacking.
     #[test]
     fn bilevel_tiff_opens_as_mask() {
-        let path = Path::new("examples/alpes_mask.tif");
-        if !path.exists() {
-            return;
+        let dir = fixture_dir("bilevel");
+        let (w, h) = (13usize, 6usize);
+        // Stored truth: left half true — what a `numpy` bool block would set.
+        let bits: Vec<u8> = (0..w * h)
+            .map(|i| u8::from(i % w < w / 2))
+            .collect();
+
+        for white_is_zero in [true, false] {
+            let path = dir.join(format!("mask_wiz{}.tif", white_is_zero as u8));
+            write_bilevel_tiff(&path, w, h, &bits, white_is_zero);
+
+            let m = load(&path).expect("open mask tiff");
+            assert!(m.is_mask(), "1-bit bilevel TIFF should be a mask media");
+            let frame = SeqReader::open(&path)
+                .unwrap()
+                .decode(0)
+                .unwrap()
+                .expect("page 0");
+            assert!(frame.is_mask(), "decoded page should be flagged as a mask");
+            assert_eq!(frame.size, [w, h]);
+
+            // Decoded truth == stored truth, independent of the photometric.
+            for (i, &b) in bits.iter().enumerate() {
+                assert_eq!(
+                    frame.sample(i),
+                    b as u32,
+                    "px {i} (white_is_zero = {white_is_zero})"
+                );
+            }
+
+            // Renders black/white at native size.
+            let mut out = Vec::new();
+            frame.render_into(0.0, 255.0, &mut out);
+            assert_eq!(out.len(), w * h * 4);
         }
-        let m = load(path).expect("open mask tiff");
-        assert!(m.is_mask(), "1-bit bilevel TIFF should be a mask media");
-        let frame = SeqReader::open(path)
-            .unwrap()
-            .decode(0)
-            .unwrap()
-            .expect("page 0");
-        assert!(frame.is_mask(), "decoded page should be flagged as a mask");
-        let [w, h] = frame.size;
-        assert_eq!([w, h], [2560, 1706]);
-
-        // Cross-check the bit unpacking (MSB-first, byte-padded rows). The known
-        // ground truth below was captured in the decoder's *intensity* space
-        // (0 = black); mask truth is now the stored bit, so it flips for a
-        // WhiteIsZero source (see `mask_bits`). Read the tag and adjust.
-        let white_is_zero = Decoder::new(BufReader::new(File::open(path).unwrap()))
-            .unwrap()
-            .find_tag(tiff::tags::Tag::PhotometricInterpretation)
-            .ok()
-            .flatten()
-            .and_then(|v| v.into_u16().ok())
-            == Some(0);
-        let flip = |v: u32| if white_is_zero { v ^ 1 } else { v };
-        let ones = (0..w * h).filter(|&i| frame.sample(i) != 0).count();
-        let exp_ones = if white_is_zero { w * h - 395048 } else { 395048 };
-        assert_eq!(ones, exp_ones, "true-pixel count");
-        assert_eq!(frame.sample(0), flip(0), "px (0,0)");
-        assert_eq!(frame.sample((h / 2) * w + w / 2), flip(0), "px centre");
-        assert_eq!(frame.sample(10 * w + 100), flip(1), "px (100,10)");
-
-        // Renders black/white at native size.
-        let mut out = Vec::new();
-        frame.render_into(0.0, 255.0, &mut out);
-        assert_eq!(out.len(), w * h * 4);
     }
 
     /// A boolean mask renders as pure black/white regardless of the tone
@@ -2008,14 +2005,13 @@ mod tests {
     /// known length intact so the frame can be re-decoded later.
     #[test]
     fn eviction_frees_bytes_and_keeps_length() {
-        let path = Path::new("examples/alpes_noisy_a.tif");
-        if !path.exists() {
-            return;
-        }
-        let mut m = load(path).expect("open tiff");
+        let dir = fixture_dir("evict");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[32, 24], [32, 24]]);
+        let mut m = load(&path).expect("open tiff");
         assert_eq!(m.resident_bytes(), 0);
 
-        let frame = SeqReader::open(path)
+        let frame = SeqReader::open(&path)
             .unwrap()
             .decode(0)
             .unwrap()

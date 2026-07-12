@@ -9,6 +9,8 @@ mod imageproc;
 mod media;
 mod renderer;
 mod settings;
+#[cfg(test)]
+mod testutil;
 mod view;
 
 use eframe::egui;

@@ -757,7 +757,6 @@ pub fn out_dims(region: Rect, target_h: u32) -> (usize, usize) {
 mod tests {
     use super::*;
     use crate::media::Samples;
-    use std::path::PathBuf;
 
     /// An image-space crop exported 1:1 must reproduce exactly the region's
     /// pixels: cell of the crop's size + view (zoom 1, centred on the crop).
@@ -1000,14 +999,13 @@ mod tests {
         assert!(crop_to_content(&vec![0u8; w * h * 4], w, h).is_none());
     }
 
-    /// Full compose → ffmpeg encode of a few frames. Skips gracefully if the
-    /// fixture or ffmpeg is unavailable (e.g. CI without ffmpeg).
+    /// Full compose → ffmpeg encode of a few frames. Skips gracefully only if
+    /// ffmpeg is unavailable (e.g. CI without ffmpeg).
     #[test]
     fn export_single_pane_mp4() {
-        let src = PathBuf::from("examples/alpes_noisy_a.tif");
-        if !src.exists() {
-            return; // fixtures not present
-        }
+        let dir = crate::testutil::fixture_dir("export_mp4");
+        let src = dir.join("seq.tif");
+        crate::testutil::write_multipage_tiff_u16(&src, &[[64, 48]; 4]);
         let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(320.0, 240.0));
         let frame0 = SeqReader::open(&src)
             .expect("open")
