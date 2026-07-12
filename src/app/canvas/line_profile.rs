@@ -52,7 +52,7 @@ impl CimApp {
         hit_rect: Rect,
         hovered: bool,
     ) {
-        if self.selecting_region {
+        if self.export.selecting {
             return;
         }
         let down = ctx.input(|i| i.pointer.secondary_down());

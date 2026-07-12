@@ -42,7 +42,7 @@ impl CimApp {
             {
                 self.pending_compute_create = true;
             }
-            if ui.selectable_label(self.show_export, "Export").clicked() {
+            if ui.selectable_label(self.export.show, "Export").clicked() {
                 self.toggle_export();
             }
             if ui.selectable_label(self.show_viewcmd, "View cmd").clicked() {

@@ -64,14 +64,14 @@ impl CimApp {
         );
 
         // Interaction: divider drag, else pan/zoom the side under the cursor.
-        let sense = if self.selecting_region {
+        let sense = if self.export.selecting {
             Sense::hover()
         } else {
             Sense::click_and_drag()
         };
         let resp = ui.interact(img, Id::new("ab_area"), sense);
         let ptr = ctx.input(|i| i.pointer.interact_pos());
-        if !self.selecting_region {
+        if !self.export.selecting {
             if resp.drag_started_by(PointerButton::Primary) {
                 self.ab_handle_grabbed = ptr.is_some_and(|p| (p.x - split_x).abs() <= HANDLE_HIT);
             }

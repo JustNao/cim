@@ -163,6 +163,58 @@ struct RegionStatsCache {
     data: RegionStats,
 }
 
+/// The export panel's state: output settings, the in-image region selection
+/// (a right-drag while the panel forces Single), and the running encode job.
+/// Decoupled from the composited [`crate::export::ExportPlan`], which is a
+/// self-contained snapshot handed to the worker thread.
+struct Export {
+    show: bool,
+    mode: Mode,
+    /// Selected export crop in IMAGE space (pixels of the compared images).
+    /// Chosen in Single view; applied to every pane of the comparison. None =
+    /// whole image / whole view.
+    region: Option<Rect>,
+    /// Inclusive (start, end) timeline range to export; None = start to finish.
+    range: Option<(usize, usize)>,
+    selecting: bool,
+    sel_start: Option<Pos2>,
+    /// Live screen-space rubber band while dragging out a region.
+    sel_rect: Option<Rect>,
+    /// Mode to restore once region selection (forced Single) ends.
+    pre_select_mode: Option<Mode>,
+    out_height: u32,
+    crf: u32,
+    fps: f32,
+    /// Output file name, saved in the current working directory. The user
+    /// edits just the name — no save dialog / folder picker.
+    name: String,
+    run: Option<ExportRun>,
+    cancel: bool,
+    status: String,
+}
+
+impl Default for Export {
+    fn default() -> Self {
+        Self {
+            show: false,
+            mode: Mode::Grid,
+            region: None,
+            range: None,
+            selecting: false,
+            sel_start: None,
+            sel_rect: None,
+            pre_select_mode: None,
+            out_height: 720,
+            crf: 23,
+            fps: 12.0,
+            name: "comparison.mp4".into(),
+            run: None,
+            cancel: false,
+            status: String::new(),
+        }
+    }
+}
+
 /// The transient toolbar notification and its auto-expiry bookkeeping. `set`
 /// posts a message; `tick` (once per update) stamps a fresh message's time and
 /// clears it after the TTL, so every post gets the timeout for free.
@@ -455,30 +507,8 @@ pub struct CimApp {
     rotation_edit: String,
     rotation_edit_pane: Option<u64>,
 
-    // Export
-    show_export: bool,
-    export_mode: Mode,
-    /// Selected export crop in IMAGE space (pixels of the compared images).
-    /// Chosen in Single view; applied to every pane of the comparison. None =
-    /// whole image / whole view.
-    export_region: Option<Rect>,
-    /// Inclusive (start, end) timeline range to export; None = start to finish.
-    export_range: Option<(usize, usize)>,
-    selecting_region: bool,
-    sel_start: Option<Pos2>,
-    /// Live screen-space rubber band while dragging out a region.
-    sel_rect: Option<Rect>,
-    /// Mode to restore once region selection (forced Single) ends.
-    pre_select_mode: Option<Mode>,
-    out_height: u32,
-    crf: u32,
-    export_fps: f32,
-    /// Output file name, saved in the current working directory. The user
-    /// edits just the name — no save dialog / folder picker.
-    export_name: String,
-    export_run: Option<ExportRun>,
-    cancel_export: bool,
-    export_status: String,
+    /// Export-panel state (settings, region selection, running job). See [`Export`].
+    export: Export,
     /// Transient notification shown top-right in the toolbar (e.g. "Settings
     /// saved"). Any `status.set(…)` auto-expires after `STATUS_TTL` — `tick`
     /// detects a fresh message and stamps its time, so every current/future
@@ -661,21 +691,7 @@ impl CimApp {
             rotation_edit: String::new(),
             rotation_edit_pane: None,
 
-            show_export: false,
-            export_mode: Mode::Grid,
-            export_region: None,
-            export_range: None,
-            selecting_region: false,
-            sel_start: None,
-            sel_rect: None,
-            pre_select_mode: None,
-            out_height: 720,
-            crf: 23,
-            export_fps: 12.0,
-            export_name: "comparison.mp4".into(),
-            export_run: None,
-            cancel_export: false,
-            export_status: String::new(),
+            export: Export::default(),
             status: StatusLine::default(),
             error_popup: None,
             last_area: Rect::NOTHING,
@@ -1377,7 +1393,7 @@ impl eframe::App for CimApp {
         if self.line_profile.is_some() {
             self.draw_profile(ctx);
         }
-        if self.show_export {
+        if self.export.show {
             self.draw_export(ctx);
         }
         if self.show_settings {
@@ -1394,7 +1410,7 @@ impl eframe::App for CimApp {
         self.apply_deferred(ctx);
 
         // Encode one frame per frame while an export is running.
-        if self.export_run.is_some() || self.cancel_export {
+        if self.export.run.is_some() || self.export.cancel {
             self.export_tick();
         }
 
@@ -1421,8 +1437,8 @@ impl eframe::App for CimApp {
             // by one, so repaint immediately — discovery runs as fast as probes
             // land instead of one per 30 fps decode-poll tick.
             ctx.request_repaint();
-        } else if self.export_run.is_some()
-            || self.cancel_export
+        } else if self.export.run.is_some()
+            || self.export.cancel
             || !self.inflight.is_empty()
             || !self.render_inflight.is_empty()
         {

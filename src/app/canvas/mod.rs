@@ -84,11 +84,11 @@ impl CimApp {
     /// screen drag is converted to IMAGE space on release, so the same crop
     /// applies to every pane of the comparison afterwards.
     pub(super) fn region_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
-        if !self.show_export || self.panes.is_empty() {
+        if !self.export.show || self.panes.is_empty() {
             return;
         }
 
-        if self.selecting_region {
+        if self.export.selecting {
             // The crop is dragged with the **right** button, so the left button
             // stays free to pan/zoom around the image while choosing it (the pane
             // interaction handles that). Edge-detect the secondary button like the
@@ -96,34 +96,35 @@ impl CimApp {
             let down = ctx.input(|i| i.pointer.secondary_down());
             let pos = ctx.input(|i| i.pointer.interact_pos());
             if down {
-                if self.sel_start.is_none() {
+                if self.export.sel_start.is_none() {
                     // Begin only if the press starts inside the view.
-                    self.sel_start = pos.filter(|p| area.contains(*p));
+                    self.export.sel_start = pos.filter(|p| area.contains(*p));
                 }
-                if let (Some(s), Some(c)) = (self.sel_start, pos) {
-                    self.sel_rect = Some(Rect::from_two_pos(s, c).intersect(area));
+                if let (Some(s), Some(c)) = (self.export.sel_start, pos) {
+                    self.export.sel_rect = Some(Rect::from_two_pos(s, c).intersect(area));
                 }
-            } else if self.sel_start.is_some() {
+            } else if self.export.sel_start.is_some() {
                 // Right button released: finalize (a near-zero drag clears it).
-                self.selecting_region = false;
-                self.sel_start = None;
-                self.export_region = self
+                self.export.selecting = false;
+                self.export.sel_start = None;
+                self.export.region = self
+                    .export
                     .sel_rect
                     .take()
                     .filter(|r| r.width() >= 4.0 && r.height() >= 4.0)
                     .and_then(|r| self.screen_rect_to_image(r, area));
-                if let Some(m) = self.pre_select_mode.take() {
+                if let Some(m) = self.export.pre_select_mode.take() {
                     self.mode = m;
                 }
             }
-            if let Some(r) = self.sel_rect {
+            if let Some(r) = self.export.sel_rect {
                 dim_outside(&ui.painter_at(area), area, r);
             }
             return;
         }
 
         // Region chosen: show it on every pane it applies to.
-        let Some(reg) = self.export_region else { return };
+        let Some(reg) = self.export.region else { return };
         let panes_areas: Vec<(usize, Rect)> = match self.mode {
             Mode::Single => {
                 vec![(self.current.min(self.panes.len() - 1), image_area(area))]
@@ -254,7 +255,7 @@ impl CimApp {
         }
         // Alt + primary drag rotates the pane about its image centre (à la
         // Photoshop): the pane follows the cursor's angle around the pivot.
-        if !self.selecting_region && resp.drag_started_by(PointerButton::Primary) {
+        if !self.export.selecting && resp.drag_started_by(PointerButton::Primary) {
             if alt {
                 let rect = self.view_ref(idx).image_rect(self.disp_size(idx), img_area);
                 let pivot = rect.center();
@@ -288,13 +289,13 @@ impl CimApp {
             let d = resp.drag_delta();
             self.view_mut(idx).pan(d);
         }
-        if !self.selecting_region && resp.clicked() {
+        if !self.export.selecting && resp.clicked() {
             self.current = idx;
         }
 
         // Right-drag statistics region (selection + outline + stats panel) — not
         // while a crop selection owns the right button.
-        if !self.selecting_region {
+        if !self.export.selecting {
             self.region_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
             self.line_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
         }

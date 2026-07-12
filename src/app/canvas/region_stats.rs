@@ -71,7 +71,7 @@ impl CimApp {
         hit_rect: Rect,
         hovered: bool,
     ) {
-        if self.selecting_region {
+        if self.export.selecting {
             return; // the export-region drag owns the pointer
         }
         // Shift + right-drag is the intensity-profile line, not a stats region;
