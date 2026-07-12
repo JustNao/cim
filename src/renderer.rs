@@ -140,39 +140,13 @@ impl Worker {
     /// bits. Mirrors the live path in `app::decode::prepare` and the export path in
     /// `export::ensure_frame` so all three match pixel-for-pixel.
     fn render(&mut self, job: RenderJob) -> RenderDone {
-        use std::time::{Duration, Instant};
         let size = job.data.size;
-        let [w, h] = size;
         let mut rgba = Vec::new();
-        // Set on both branches below; `ops_time` keeps ZERO on the plain-LUT path.
-        let lut_time;
-        let mut ops_time = Duration::ZERO;
-        // The proprietary operators run on a single-channel 16-bit render (so they
-        // see full native precision) and only for single-channel 16-bit frames with
-        // the library loaded. Everything else takes the plain 8-bit LUT render.
-        let use_ops = crate::imageproc::ops_active(&job.data, job.lut_alpha, job.details);
-        if use_ops {
-            let mut gray = Vec::new();
-            let t = Instant::now();
-            job.data.render_into_gray_u16(job.lo, job.hi, &mut gray);
-            lut_time = t.elapsed();
-            let t = Instant::now();
-            self.ops.apply(&mut gray, w, h, job.lut_alpha, job.details);
-            ops_time = t.elapsed();
-            // Expand the processed grey back to 8-bit RGBA for the texture.
-            rgba.resize(gray.len() * 4, 255);
-            for (i, &s) in gray.iter().enumerate() {
-                let g = (s >> 8) as u8;
-                let o = i * 4;
-                rgba[o] = g;
-                rgba[o + 1] = g;
-                rgba[o + 2] = g;
-            }
-        } else {
-            let t = Instant::now();
-            job.data.render_into(job.lo, job.hi, &mut rgba);
-            lut_time = t.elapsed();
-        }
+        // The one shared render tail (plain LUT, or operators on a full-precision
+        // 16-bit render) — identical to the export path by construction.
+        let (lut_time, ops_time) =
+            self.ops
+                .render_display(&job.data, job.lo, job.hi, job.lut_alpha, job.details, &mut rgba);
         RenderDone {
             id: job.id,
             frame: job.frame,

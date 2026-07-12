@@ -303,36 +303,21 @@ impl ExportPane {
             cropped = frame.crop(x0, y0, cw, ch);
             &cropped
         };
-        let [w, h] = sub.size;
         let (lo, hi) = match self.clip {
             Some(pct) => sub.clip_bounds(pct),
             None => sub.display_bounds(false),
         };
-        let use_ops = crate::imageproc::ops_active(
+        // The one shared render tail (plain LUT, or operators on a full-precision
+        // 16-bit render) — identical to the live-view path by construction.
+        let mut rgba = Vec::new();
+        self.ops.render_display(
             &sub,
+            lo,
+            hi,
             self.contrast == ContrastMode::LutAlpha,
             self.details,
+            &mut rgba,
         );
-        let rgba = if use_ops {
-            let mut gray = Vec::new();
-            sub.render_into_gray_u16(lo, hi, &mut gray);
-            let lut_alpha = self.contrast == ContrastMode::LutAlpha;
-            self.ops.apply(&mut gray, w, h, lut_alpha, self.details);
-            // Expand the processed grey back to 8-bit RGBA.
-            let mut out = vec![255u8; gray.len() * 4];
-            for (i, &s) in gray.iter().enumerate() {
-                let g = (s >> 8) as u8;
-                let o = i * 4;
-                out[o] = g;
-                out[o + 1] = g;
-                out[o + 2] = g;
-            }
-            out
-        } else {
-            let mut out = Vec::new();
-            sub.render_into(lo, hi, &mut out);
-            out
-        };
         self.cur_display = Some(rgba);
         self.cur_origin = [x0, y0];
         self.cur_render_size = [cw, ch];

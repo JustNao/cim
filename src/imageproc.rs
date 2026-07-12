@@ -285,6 +285,53 @@ impl PaneOps {
         }
     }
 
+    /// Build a frame's 8-bit display RGBA into `out`, running the proprietary
+    /// operators when they're active for this frame/tone (`ops_active`): render a
+    /// single-channel 16-bit buffer at full precision, `apply` the operators in
+    /// place, then expand the grey back to RGBA. When they're not active, fall
+    /// back to the plain LUT render (`FrameData::render_into`).
+    ///
+    /// Returns `(lut_time, ops_time)` for the `CIM_DEBUG` profiler (`ops_time`
+    /// is zero on the plain path). This is the **one** implementation of the
+    /// heavy render tail, shared by the live render worker
+    /// (`renderer::Worker::render`) and export (`export::ExportPane::render`), so
+    /// the two produce identical pixels.
+    pub fn render_display(
+        &mut self,
+        frame: &crate::media::FrameData,
+        lo: f32,
+        hi: f32,
+        lut_alpha: bool,
+        details: bool,
+        out: &mut Vec<u8>,
+    ) -> (std::time::Duration, std::time::Duration) {
+        use std::time::{Duration, Instant};
+        if !ops_active(frame, lut_alpha, details) {
+            let t = Instant::now();
+            frame.render_into(lo, hi, out);
+            return (t.elapsed(), Duration::ZERO);
+        }
+        let [w, h] = frame.size;
+        let mut gray = Vec::new();
+        let t = Instant::now();
+        frame.render_into_gray_u16(lo, hi, &mut gray);
+        let lut_time = t.elapsed();
+        let t = Instant::now();
+        self.apply(&mut gray, w, h, lut_alpha, details);
+        let ops_time = t.elapsed();
+        // Expand the processed grey back to 8-bit RGBA for the texture.
+        out.clear();
+        out.resize(gray.len() * 4, 255);
+        for (i, &s) in gray.iter().enumerate() {
+            let g = (s >> 8) as u8;
+            let o = i * 4;
+            out[o] = g;
+            out[o + 1] = g;
+            out[o + 2] = g;
+        }
+        (lut_time, ops_time)
+    }
+
     /// Ensure `slot` holds an instance of `op` built for `(w, h)`, creating it (or
     /// rebuilding after a size change) as needed. Returns whether a usable instance
     /// is present — `false` if the library is absent or `create` returned null.
