@@ -304,18 +304,19 @@ impl PaneOps {
         hi: f32,
         lut_alpha: bool,
         details: bool,
+        lut: &mut crate::media::ToneLut,
         out: &mut Vec<u8>,
     ) -> (std::time::Duration, std::time::Duration) {
         use std::time::{Duration, Instant};
         if !ops_active(frame, lut_alpha, details) {
             let t = Instant::now();
-            frame.render_into(lo, hi, out);
+            frame.render_into_lut(lo, hi, lut, out);
             return (t.elapsed(), Duration::ZERO);
         }
         let [w, h] = frame.size;
         let mut gray = Vec::new();
         let t = Instant::now();
-        frame.render_into_gray_u16(lo, hi, &mut gray);
+        frame.render_into_gray_u16_lut(lo, hi, lut, &mut gray);
         let lut_time = t.elapsed();
         let t = Instant::now();
         self.apply(&mut gray, w, h, lut_alpha, details);

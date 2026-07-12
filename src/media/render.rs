@@ -72,44 +72,45 @@ impl FrameData {
     /// Render the 8-bit RGBA display buffer into `out` (resized to fit), mapping
     /// native samples through `[lo, hi] → [0, 255]`.
     ///
-    /// Integer sources map through a small lookup table keyed by sample value —
-    /// one table build (≤ 64 Ki entries) instead of a float multiply-and-clamp
-    /// at every pixel — which is the bulk of the per-frame CPU on a large image.
-    /// Passing a reusable `out` also avoids re-allocating the buffer each frame.
+    /// Convenience wrapper over [`render_into_lut`](Self::render_into_lut) with a
+    /// throwaway table — use that directly (passing a reused [`ToneLut`]) on any
+    /// per-frame path so a fixed-tone run doesn't rebuild the ≤ 64 Ki-entry LUT
+    /// every frame (the bulk of per-frame CPU on a large image).
     pub fn render_into(&self, lo: f32, hi: f32, out: &mut Vec<u8>) {
+        self.render_into_lut(lo, hi, &mut ToneLut::default(), out);
+    }
+
+    /// Render the 8-bit RGBA display buffer into `out`, reusing `lut` for the
+    /// value→display table. Integer sources map through the table (256 or 64 Ki
+    /// entries), rebuilt only when `(lo, hi, mask)` change — so a run of frames at
+    /// a fixed tone reuses one table instead of rebuilding it each frame. Float
+    /// sources have no bounded domain to tabulate and map arithmetically (the
+    /// `lut` is left untouched).
+    pub fn render_into_lut(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut Vec<u8>) {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
         let cc = self.color_channels();
         out.clear();
         out.resize(px * 4, 255); // alpha stays 255; rgb overwritten below
 
-        // A boolean mask ignores the tone window: false → black, true → white.
-        if self.mask {
-            match &self.samples {
-                Samples::U8(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { 255 } else { 0 }),
-                Samples::U16(v) => fill_rgba(out, v, ch, cc, px, |s| if s != 0 { 255 } else { 0 }),
-                Samples::F32(v) => {
-                    fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { 255 } else { 0 })
-                }
-            }
-            return;
-        }
-
-        let denom = hi - lo;
-        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-        let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
-
         match &self.samples {
+            // The table folds in the mask rule (0 → black, else white) and the
+            // linear map, so both integer paths are one table look-up per pixel.
             Samples::U8(v) => {
-                let lut: Vec<u8> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+                let tab = lut.map8(lo, hi, self.mask, 256);
+                fill_rgba(out, v, ch, cc, px, |s| tab[s as usize]);
             }
             Samples::U16(v) => {
-                let lut: Vec<u8> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba(out, v, ch, cc, px, |s| lut[s as usize]);
+                let tab = lut.map8(lo, hi, self.mask, 1 << 16);
+                fill_rgba(out, v, ch, cc, px, |s| tab[s as usize]);
             }
-            // Floats have no bounded domain to tabulate; map arithmetically.
-            Samples::F32(v) => fill_rgba(out, v, ch, cc, px, map_f),
+            Samples::F32(v) if self.mask => {
+                fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { 255 } else { 0 })
+            }
+            Samples::F32(v) => {
+                let map_f = map_u8(lo, hi);
+                fill_rgba(out, v, ch, cc, px, map_f)
+            }
         }
     }
 
@@ -126,10 +127,20 @@ impl FrameData {
     /// still a true source value (the pixel-accuracy invariant holds); the texture
     /// is drawn stretched to the same on-screen rect with NEAREST filtering, as
     /// before. The caller chooses `step` from the pane's zoom (see
-    /// `CimApp::stage_step`).
-    pub fn render_into_scaled(&self, lo: f32, hi: f32, step: usize, out: &mut Vec<u8>) -> [usize; 2] {
+    /// `CimApp::stage_step`) and passes a reused `lut` (see
+    /// [`render_into_lut`](Self::render_into_lut)); a small decimated output skips
+    /// the table entirely and maps arithmetically, which is cheaper than building
+    /// a 64 Ki-entry LUT for a few thousand pixels.
+    pub fn render_into_scaled_lut(
+        &self,
+        lo: f32,
+        hi: f32,
+        step: usize,
+        lut: &mut ToneLut,
+        out: &mut Vec<u8>,
+    ) -> [usize; 2] {
         if step <= 1 {
-            self.render_into(lo, hi, out);
+            self.render_into_lut(lo, hi, lut, out);
             return self.size;
         }
         let [w, h] = self.size;
@@ -139,30 +150,35 @@ impl FrameData {
         let cc = self.color_channels();
         out.clear();
         out.resize(ow * oh * 4, 255); // alpha stays 255; rgb overwritten below
+        let opx = ow * oh;
 
-        // A boolean mask ignores the tone window: false → black, true → white.
-        if self.mask {
-            match &self.samples {
-                Samples::U8(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 }),
-                Samples::U16(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 }),
-                Samples::F32(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0.0 { 255 } else { 0 }),
-            }
-            return [ow, oh];
-        }
-
-        let denom = hi - lo;
-        let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-        let map_f = |s: f32| -> u8 { (((s - lo) * scale).clamp(0.0, 255.0)) as u8 };
         match &self.samples {
+            // 256-entry table is always cheaper than a per-pixel map.
             Samples::U8(v) => {
-                let lut: Vec<u8> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| lut[s as usize]);
+                let tab = lut.map8(lo, hi, self.mask, 256);
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| tab[s as usize]);
+            }
+            // For a small decimated output, building a 64 Ki table costs more than
+            // mapping each output pixel arithmetically — so skip the table then.
+            Samples::U16(v) if opx < (1 << 16) => {
+                if self.mask {
+                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 });
+                } else {
+                    let map_f = map_u8(lo, hi);
+                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| map_f(s as f32));
+                }
             }
             Samples::U16(v) => {
-                let lut: Vec<u8> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| lut[s as usize]);
+                let tab = lut.map8(lo, hi, self.mask, 1 << 16);
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| tab[s as usize]);
             }
-            Samples::F32(v) => fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, map_f),
+            Samples::F32(v) if self.mask => {
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0.0 { 255 } else { 0 });
+            }
+            Samples::F32(v) => {
+                let map_f = map_u8(lo, hi);
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, map_f);
+            }
         }
         [ow, oh]
     }
@@ -174,35 +190,28 @@ impl FrameData {
     /// RGBA (and downscaled to 8 bits) for the texture only after the operators
     /// have run. Only called for single-channel frames (see [`is_op_input`]);
     /// the first channel is taken for any wider source. Mirrors [`render_into`].
-    pub fn render_into_gray_u16(&self, lo: f32, hi: f32, out: &mut Vec<u16>) {
+    pub fn render_into_gray_u16_lut(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut Vec<u16>) {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
         out.clear();
         out.resize(px, u16::MAX);
 
-        if self.mask {
-            match &self.samples {
-                Samples::U8(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u16::MAX } else { 0 }),
-                Samples::U16(v) => fill_gray(out, v, ch, px, |s| if s != 0 { u16::MAX } else { 0 }),
-                Samples::F32(v) => fill_gray(out, v, ch, px, |s| if s != 0.0 { u16::MAX } else { 0 }),
-            }
-            return;
-        }
-
-        let denom = hi - lo;
-        let scale = if denom > 0.0 { 65535.0 / denom } else { 0.0 };
-        let map_f = |s: f32| -> u16 { (((s - lo) * scale).clamp(0.0, 65535.0)) as u16 };
-
         match &self.samples {
             Samples::U8(v) => {
-                let lut: Vec<u16> = (0..=u8::MAX).map(|s| map_f(s as f32)).collect();
-                fill_gray(out, v, ch, px, |s| lut[s as usize]);
+                let tab = lut.map16(lo, hi, self.mask, 256);
+                fill_gray(out, v, ch, px, |s| tab[s as usize]);
             }
             Samples::U16(v) => {
-                let lut: Vec<u16> = (0..=u16::MAX).map(|s| map_f(s as f32)).collect();
-                fill_gray(out, v, ch, px, |s| lut[s as usize]);
+                let tab = lut.map16(lo, hi, self.mask, 1 << 16);
+                fill_gray(out, v, ch, px, |s| tab[s as usize]);
             }
-            Samples::F32(v) => fill_gray(out, v, ch, px, map_f),
+            Samples::F32(v) if self.mask => {
+                fill_gray(out, v, ch, px, |s| if s != 0.0 { u16::MAX } else { 0 })
+            }
+            Samples::F32(v) => {
+                let map_f = map_u16(lo, hi);
+                fill_gray(out, v, ch, px, map_f)
+            }
         }
     }
 
@@ -249,6 +258,78 @@ impl FrameData {
                 out[o + 3] = a;
             }
         }
+    }
+}
+
+/// The arithmetic `[lo, hi] → [0, 255]` map, shared by the float path and by
+/// [`ToneLut`]'s table build so a tabulated and a per-pixel render map identically.
+#[inline]
+fn map_u8(lo: f32, hi: f32) -> impl Fn(f32) -> u8 {
+    let denom = hi - lo;
+    let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
+    move |s: f32| (((s - lo) * scale).clamp(0.0, 255.0)) as u8
+}
+
+/// The arithmetic `[lo, hi] → [0, 65535]` map (16-bit operator input path).
+#[inline]
+fn map_u16(lo: f32, hi: f32) -> impl Fn(f32) -> u16 {
+    let denom = hi - lo;
+    let scale = if denom > 0.0 { 65535.0 / denom } else { 0.0 };
+    move |s: f32| (((s - lo) * scale).clamp(0.0, 65535.0)) as u16
+}
+
+/// A cached value→display lookup table, rebuilt only when its key
+/// `(lo, hi, mask, entries)` changes. A long run of frames at a fixed tone reuses
+/// one table instead of rebuilding a 64 Ki-entry LUT each frame — the dominant
+/// per-frame CPU cost on a large integer image. Owned per pane by the render path
+/// (`stage` for cheap panes, `renderer::Worker` for heavy ones); float sources
+/// don't tabulate and leave it untouched. Holds an 8-bit table (RGBA render) and a
+/// 16-bit table (operator input) independently, each self-keyed so switching paths
+/// only rebuilds the one in use.
+#[derive(Default)]
+pub struct ToneLut {
+    key8: Option<(u32, u32, bool, usize)>,
+    tab8: Vec<u8>,
+    key16: Option<(u32, u32, bool, usize)>,
+    tab16: Vec<u16>,
+}
+
+impl ToneLut {
+    /// The 8-bit table over `[0, entries)` sample values: `mask` folds in the
+    /// black/white rule (0 → 0, else 255), otherwise the linear `[lo,hi]` map.
+    fn map8(&mut self, lo: f32, hi: f32, mask: bool, entries: usize) -> &[u8] {
+        let key = (lo.to_bits(), hi.to_bits(), mask, entries);
+        if self.key8 != Some(key) {
+            self.tab8.clear();
+            self.tab8.reserve(entries);
+            if mask {
+                self.tab8
+                    .extend((0..entries).map(|s| if s != 0 { 255u8 } else { 0 }));
+            } else {
+                let map_f = map_u8(lo, hi);
+                self.tab8.extend((0..entries).map(|s| map_f(s as f32)));
+            }
+            self.key8 = Some(key);
+        }
+        &self.tab8
+    }
+
+    /// The 16-bit counterpart of [`map8`](Self::map8) (operator input range).
+    fn map16(&mut self, lo: f32, hi: f32, mask: bool, entries: usize) -> &[u16] {
+        let key = (lo.to_bits(), hi.to_bits(), mask, entries);
+        if self.key16 != Some(key) {
+            self.tab16.clear();
+            self.tab16.reserve(entries);
+            if mask {
+                self.tab16
+                    .extend((0..entries).map(|s| if s != 0 { u16::MAX } else { 0 }));
+            } else {
+                let map_f = map_u16(lo, hi);
+                self.tab16.extend((0..entries).map(|s| map_f(s as f32)));
+            }
+            self.key16 = Some(key);
+        }
+        &self.tab16
     }
 }
 
@@ -418,24 +499,84 @@ mod tests {
         //   row 1: 40 50 60 70
         let f = FrameData::new([4, 2], 1, Samples::U8(vec![0, 10, 20, 30, 40, 50, 60, 70]));
         let (lo, hi) = (0.0, 255.0);
+        let mut lut = super::ToneLut::default();
 
         // step 1 is identical to render_into (same size, same bytes).
         let mut full = Vec::new();
         f.render_into(lo, hi, &mut full);
         let mut one = Vec::new();
-        assert_eq!(f.render_into_scaled(lo, hi, 1, &mut one), [4, 2]);
+        assert_eq!(f.render_into_scaled_lut(lo, hi, 1, &mut lut, &mut one), [4, 2]);
         assert_eq!(one, full);
 
         // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
         let mut half = Vec::new();
-        assert_eq!(f.render_into_scaled(lo, hi, 2, &mut half), [2, 1]);
+        assert_eq!(f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half), [2, 1]);
         assert_eq!(half.len(), 2 * 1 * 4);
         assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
 
         // step 3 -> ceil(4/3) x ceil(2/3) = 2x1, sampling (0,0) and (3,0): 0, 30.
         let mut third = Vec::new();
-        assert_eq!(f.render_into_scaled(lo, hi, 3, &mut third), [2, 1]);
+        assert_eq!(f.render_into_scaled_lut(lo, hi, 3, &mut lut, &mut third), [2, 1]);
         assert_eq!([third[0], third[4]], [0, 30]);
+    }
+
+    /// A reused `ToneLut` renders bit-identically to a throwaway one, reuses the
+    /// table across frames at a fixed `(lo,hi)`, and rebuilds when it changes.
+    #[test]
+    fn tone_lut_caches_and_matches_plain_render() {
+        use crate::media::ToneLut;
+        // Two "frames" at a fixed tone: bytes must match the uncached render, and
+        // the shared table must be reused (same key) across both.
+        let a = FrameData::new([4, 1], 1, Samples::U16(vec![0, 1000, 30000, 65535]));
+        let b = FrameData::new([4, 1], 1, Samples::U16(vec![65535, 30000, 1000, 0]));
+        let (lo, hi) = (1000.0, 60000.0);
+
+        let mut lut = ToneLut::default();
+        for f in [&a, &b] {
+            let mut plain = Vec::new();
+            f.render_into(lo, hi, &mut plain);
+            let mut cached = Vec::new();
+            f.render_into_lut(lo, hi, &mut lut, &mut cached);
+            assert_eq!(cached, plain, "cached render must equal the plain render");
+        }
+        // The table was built once and reused (key unchanged across both frames).
+        assert_eq!(lut.tab8.len(), 1 << 16);
+        assert_eq!(lut.key8, Some((lo.to_bits(), hi.to_bits(), false, 1 << 16)));
+
+        // Changing the window rebuilds the table (new key).
+        let mut cached = Vec::new();
+        a.render_into_lut(500.0, 40000.0, &mut lut, &mut cached);
+        assert_eq!(lut.key8, Some((500f32.to_bits(), 40000f32.to_bits(), false, 1 << 16)));
+        let mut plain = Vec::new();
+        a.render_into(500.0, 40000.0, &mut plain);
+        assert_eq!(cached, plain);
+    }
+
+    /// The decimated small-output micro-win (arithmetic map instead of a 64 Ki
+    /// table) is bit-identical to the tabulated full render at `step 1`.
+    #[test]
+    fn scaled_lut_small_output_matches_table() {
+        use crate::media::ToneLut;
+        // 8x8 u16 ramp; a large step yields a tiny output (< 65536 px) that takes
+        // the arithmetic path, which must still equal the table-based mapping.
+        let data: Vec<u16> = (0..64).map(|i| (i * 1000) as u16).collect();
+        let f = FrameData::new([8, 8], 1, Samples::U16(data));
+        let (lo, hi) = (0.0, 63000.0);
+
+        let mut lut = ToneLut::default();
+        let mut scaled = Vec::new();
+        let size = f.render_into_scaled_lut(lo, hi, 4, &mut lut, &mut scaled);
+        assert_eq!(size, [2, 2]); // 4 px < 65536 → arithmetic path
+
+        // Reference: same decimation, but forced through the table via render_into.
+        let mut reference = ToneLut::default();
+        let full_tab = reference.map8(lo, hi, false, 1 << 16).to_vec();
+        // Output texels sample source pixels (0,0),(4,0),(0,4),(4,4).
+        for (ox, oy, x, y) in [(0, 0, 0, 0), (1, 0, 4, 0), (0, 1, 0, 4), (1, 1, 4, 4)] {
+            let value = ((y * 8 + x) * 1000) as usize;
+            let o = (oy * 2 + ox) * 4;
+            assert_eq!(scaled[o], full_tab[value]);
+        }
     }
 }

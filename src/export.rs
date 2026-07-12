@@ -78,6 +78,8 @@ pub struct ExportPane {
     /// This pane's proprietary operator instances, reused across the exported
     /// frames (rebuilt only on a size change) — same lifecycle as the live view.
     ops: crate::imageproc::PaneOps,
+    /// Cached value→display table, reused across this pane's exported frames.
+    lut: crate::media::ToneLut,
     /// Optional boolean-mask overlay tinted over this pane (mirrors the live view).
     overlay: Option<ExportOverlay>,
 }
@@ -187,6 +189,7 @@ impl ExportPane {
             cur_render_size: [0, 0],
             cur_size: [0, 0],
             ops: crate::imageproc::PaneOps::default(),
+            lut: crate::media::ToneLut::default(),
             overlay: None,
         }
     }
@@ -319,6 +322,7 @@ impl ExportPane {
             hi,
             self.contrast == ContrastMode::LutAlpha,
             self.details,
+            &mut self.lut,
             &mut rgba,
         );
         self.cur_display = Some(rgba);

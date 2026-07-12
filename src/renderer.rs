@@ -131,6 +131,9 @@ impl RenderPool {
 #[derive(Default)]
 struct Worker {
     ops: crate::imageproc::PaneOps,
+    /// Cached value→display table, reused across this pane's frames (see
+    /// [`crate::media::ToneLut`]) — the worker is the pane's single render thread.
+    lut: crate::media::ToneLut,
 }
 
 impl Worker {
@@ -144,9 +147,15 @@ impl Worker {
         let mut rgba = Vec::new();
         // The one shared render tail (plain LUT, or operators on a full-precision
         // 16-bit render) — identical to the export path by construction.
-        let (lut_time, ops_time) =
-            self.ops
-                .render_display(&job.data, job.lo, job.hi, job.lut_alpha, job.details, &mut rgba);
+        let (lut_time, ops_time) = self.ops.render_display(
+            &job.data,
+            job.lo,
+            job.hi,
+            job.lut_alpha,
+            job.details,
+            &mut self.lut,
+            &mut rgba,
+        );
         RenderDone {
             id: job.id,
             frame: job.frame,

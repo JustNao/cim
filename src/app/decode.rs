@@ -605,7 +605,13 @@ impl CimApp {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             let debug = crate::debug::enabled();
             let t = debug.then(std::time::Instant::now);
-            let size = frame.render_into_scaled(lo, hi, step, &mut self.render_scratch);
+            let size = frame.render_into_scaled_lut(
+                lo,
+                hi,
+                step,
+                &mut self.panes[idx].tex.lut,
+                &mut self.render_scratch,
+            );
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
             }

@@ -128,6 +128,10 @@ struct CachedTex {
 struct PaneTex {
     front: Option<CachedTex>,
     pending: Option<CachedTex>,
+    /// Cached value→display table for this pane's synchronous LUT render, reused
+    /// across frames so a fixed-tone playback run doesn't rebuild the 64 Ki-entry
+    /// table each frame (per-pane, since each pane's `(lo,hi)` is its own).
+    lut: crate::media::ToneLut,
 }
 
 impl PaneTex {

@@ -18,6 +18,7 @@ mod source;
 mod stats;
 
 pub use loader::{decode_file, load, load_sequence, SeqReader};
+pub use render::ToneLut;
 pub use source::{DecodeReq, Media};
 pub use stats::{diff_frames, reduce_frames, HistData, Reduce, RegionStats};
 
