@@ -12,6 +12,7 @@
 //! same interface.
 
 mod loader;
+mod percentile;
 mod render;
 mod source;
 mod stats;

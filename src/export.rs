@@ -99,14 +99,22 @@ struct ExportOverlay {
     cur_size: [usize; 2],
 }
 
+/// Which source frame a `count`-frame pane/overlay shows at timeline position
+/// `t`: synced sequences track `t` (holding on their last frame when shorter),
+/// unsynced ones stay pinned to their own frame. Shared by `ExportPane` and its
+/// mask overlay so the two stay in step.
+fn src_index(t: usize, count: usize, sync_temporal: bool, own_frame: usize) -> usize {
+    let c = count.max(1);
+    if sync_temporal {
+        t.min(c - 1)
+    } else {
+        own_frame % c
+    }
+}
+
 impl ExportOverlay {
     fn src_index(&self, t: usize) -> usize {
-        let c = self.count.max(1);
-        if self.sync_temporal {
-            t.min(c - 1)
-        } else {
-            self.own_frame % c
-        }
+        src_index(t, self.count, self.sync_temporal, self.own_frame)
     }
 }
 
@@ -212,12 +220,7 @@ impl ExportPane {
 
     /// Which source frame this pane shows at timeline position `t`.
     fn src_index(&self, t: usize) -> usize {
-        let c = self.count.max(1);
-        if self.sync_temporal {
-            t.min(c - 1) // shorter sequences hold on their last frame
-        } else {
-            self.own_frame % c
-        }
+        src_index(t, self.count, self.sync_temporal, self.own_frame)
     }
 
     /// Decode + render the mask overlay for timeline `t` (if any), caching the

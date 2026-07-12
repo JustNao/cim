@@ -244,128 +244,18 @@ impl FrameData {
 
     /// Region variant of [`FrameData::percentile_bounds`]: the `p`% and
     /// `(100 - p)`% percentile values within the pixel rectangle.
-    fn region_percentile_bounds(
-        &self,
-        x0: usize,
-        y0: usize,
-        x1: usize,
-        y1: usize,
-        p: f32,
-    ) -> (f32, f32) {
+    fn region_percentile_bounds(&self, x0: usize, y0: usize, x1: usize, y1: usize, p: f32) -> (f32, f32) {
         if self.is_float() {
             return self.region_percentile_float(x0, y0, x1, y1, p);
         }
-        let nb = self.max_possible() as usize + 1;
-        let mut hist = vec![0u32; nb];
-        let cc = self.color_channels();
-        let w = self.size[0];
-        let mut total = 0u32;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let base = (y * w + x) * self.channels;
-                for c in 0..cc {
-                    hist[self.sample(base + c) as usize] += 1;
-                    total += 1;
-                }
-            }
-        }
         let full = self.region_extent(x0, y0, x1, y1);
-        if total == 0 {
-            return full;
-        }
-        let lo_t = (total as f32 * p / 100.0) as u32;
-        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
-
-        let mut cum = 0u32;
-        let mut lo = 0usize;
-        while lo + 1 < nb {
-            cum += hist[lo];
-            if cum > lo_t {
-                break;
-            }
-            lo += 1;
-        }
-        let mut cum = 0u32;
-        let mut hi = 0usize;
-        while hi + 1 < nb {
-            cum += hist[hi];
-            if cum >= hi_t {
-                break;
-            }
-            hi += 1;
-        }
-        if hi <= lo {
-            full
-        } else {
-            (lo as f32, hi as f32)
-        }
+        self.percentile_rect_int(x0, y0, x1, y1, p, full)
     }
 
     /// Region percentile stretch for float frames (bins across the region's
     /// value extent, mirroring [`FrameData::percentile_bounds_float`]).
-    fn region_percentile_float(
-        &self,
-        x0: usize,
-        y0: usize,
-        x1: usize,
-        y1: usize,
-        p: f32,
-    ) -> (f32, f32) {
-        const NB: usize = 4096;
-        let (min, max) = self.region_extent(x0, y0, x1, y1);
-        if max <= min {
-            return (min, max);
-        }
-        let span = max - min;
-        let last = (NB - 1) as f32;
-        let mut hist = vec![0u32; NB];
-        let cc = self.color_channels();
-        let w = self.size[0];
-        let mut total = 0u32;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let base = (y * w + x) * self.channels;
-                for c in 0..cc {
-                    let s = self.sample_f(base + c);
-                    if s.is_nan() {
-                        continue;
-                    }
-                    let b = (((s - min) / span) * last) as usize;
-                    hist[b.min(NB - 1)] += 1;
-                    total += 1;
-                }
-            }
-        }
-        if total == 0 {
-            return (min, max);
-        }
-        let lo_t = (total as f32 * p / 100.0) as u32;
-        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
-
-        let bin_val = |b: usize| min + (b as f32 / last) * span;
-        let mut cum = 0u32;
-        let mut lo = 0usize;
-        while lo + 1 < NB {
-            cum += hist[lo];
-            if cum > lo_t {
-                break;
-            }
-            lo += 1;
-        }
-        let mut cum = 0u32;
-        let mut hi = 0usize;
-        while hi + 1 < NB {
-            cum += hist[hi];
-            if cum >= hi_t {
-                break;
-            }
-            hi += 1;
-        }
-        if hi <= lo {
-            (min, max)
-        } else {
-            (bin_val(lo), bin_val(hi))
-        }
+    fn region_percentile_float(&self, x0: usize, y0: usize, x1: usize, y1: usize, p: f32) -> (f32, f32) {
+        self.percentile_rect_float(x0, y0, x1, y1, p, self.region_extent(x0, y0, x1, y1))
     }
 }
 

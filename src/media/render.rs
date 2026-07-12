@@ -42,113 +42,22 @@ impl FrameData {
         }
     }
 
-    /// Values at the `p`% and `(100 - p)`% percentiles of the colour samples.
+    /// Values at the `p`% and `(100 - p)`% percentiles of the colour samples
+    /// over the whole image (auto-contrast) — the full-frame case of the shared
+    /// percentile scan. Integer sources fall back to the nominal range.
     pub(super) fn percentile_bounds(&self, p: f32) -> (f32, f32) {
         if self.is_float() {
             return self.percentile_bounds_float(p);
         }
-        let nb = self.max_possible() as usize + 1;
-        let mut hist = vec![0u32; nb];
-        let cc = self.color_channels();
-        let px = self.size[0] * self.size[1];
-        let mut total = 0u32;
-        for i in 0..px {
-            let base = i * self.channels;
-            for c in 0..cc {
-                hist[self.sample(base + c) as usize] += 1;
-                total += 1;
-            }
-        }
-        let full = (0.0, self.max_possible() as f32);
-        if total == 0 {
-            return full;
-        }
-        let lo_t = (total as f32 * p / 100.0) as u32;
-        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
-
-        let mut cum = 0u32;
-        let mut lo = 0usize;
-        while lo + 1 < nb {
-            cum += hist[lo];
-            if cum > lo_t {
-                break;
-            }
-            lo += 1;
-        }
-        let mut cum = 0u32;
-        let mut hi = 0usize;
-        while hi + 1 < nb {
-            cum += hist[hi];
-            if cum >= hi_t {
-                break;
-            }
-            hi += 1;
-        }
-        if hi <= lo {
-            full
-        } else {
-            (lo as f32, hi as f32)
-        }
+        let [w, h] = self.size;
+        self.percentile_rect_int(0, 0, w, h, p, (0.0, self.max_possible() as f32))
     }
 
-    /// Percentile stretch for float frames: bin across the true value extent
-    /// (floats can't index a per-value histogram like integers do).
+    /// The float-frame case of [`FrameData::percentile_bounds`]: bin across the
+    /// whole image's value extent.
     pub(super) fn percentile_bounds_float(&self, p: f32) -> (f32, f32) {
-        const NB: usize = 4096;
-        // value_extent yields finite, ordered bounds (min ≤ max), so a plain
-        // comparison is unambiguous here.
-        let (min, max) = self.value_extent();
-        if max <= min {
-            return (min, max);
-        }
-        let span = max - min;
-        let last = (NB - 1) as f32;
-        let mut hist = vec![0u32; NB];
-        let cc = self.color_channels();
-        let px = self.size[0] * self.size[1];
-        let mut total = 0u32;
-        for i in 0..px {
-            let base = i * self.channels;
-            for c in 0..cc {
-                let s = self.sample_f(base + c);
-                if s.is_nan() {
-                    continue;
-                }
-                let b = (((s - min) / span) * last) as usize;
-                hist[b.min(NB - 1)] += 1;
-                total += 1;
-            }
-        }
-        if total == 0 {
-            return (min, max);
-        }
-        let lo_t = (total as f32 * p / 100.0) as u32;
-        let hi_t = (total as f32 * (1.0 - p / 100.0)) as u32;
-
-        let bin_val = |b: usize| min + (b as f32 / last) * span;
-        let mut cum = 0u32;
-        let mut lo = 0usize;
-        while lo + 1 < NB {
-            cum += hist[lo];
-            if cum > lo_t {
-                break;
-            }
-            lo += 1;
-        }
-        let mut cum = 0u32;
-        let mut hi = 0usize;
-        while hi + 1 < NB {
-            cum += hist[hi];
-            if cum >= hi_t {
-                break;
-            }
-            hi += 1;
-        }
-        if hi <= lo {
-            (min, max)
-        } else {
-            (bin_val(lo), bin_val(hi))
-        }
+        let [w, h] = self.size;
+        self.percentile_rect_float(0, 0, w, h, p, self.value_extent())
     }
 
     /// Build the 8-bit RGBA buffer egui uploads as a texture (fresh allocation).
