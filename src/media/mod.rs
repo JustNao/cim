@@ -571,5 +571,39 @@ mod tests {
         assert_eq!(m.frame_count(), len, "eviction must not change known length");
     }
 
+    /// The incremental LRU peeks the oldest resident frame (by `last_used`),
+    /// never the protected/shown one, and stays correct as frames are touched
+    /// and evicted — the property `enforce_cache_budget` relies on.
+    #[test]
+    fn lru_evicts_oldest_and_protects_shown() {
+        let dir = fixture_dir("lru");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[16, 16], [16, 16], [16, 16], [16, 16]]);
+        let mut m = load(&path).expect("open tiff");
+
+        // Make frames 0..4 resident with strictly increasing recency (frame i
+        // used at tick i+1), so frame 0 is the least recently used.
+        for i in 0..4 {
+            let f = SeqReader::open(&path).unwrap().decode(i).unwrap().expect("page");
+            m.insert(i, Arc::new(f));
+            m.touch(i, i as u64 + 1);
+        }
+
+        // Protecting the shown frame 0, the oldest evictable is frame 1.
+        assert_eq!(m.lru_evictable(0).map(|(t, f, _)| (t, f)), Some((2, 1)));
+
+        // Re-touching frame 1 to newest moves it to the back of the order.
+        m.touch(1, 99);
+        assert_eq!(m.lru_evictable(0).map(|(_, f, _)| f), Some(2));
+
+        // Eviction walks the recency order: 2, then 3, then 1.
+        m.evict(2);
+        assert_eq!(m.lru_evictable(0).map(|(_, f, _)| f), Some(3));
+        m.evict(3);
+        assert_eq!(m.lru_evictable(0).map(|(_, f, _)| f), Some(1));
+        m.evict(1);
+        assert_eq!(m.lru_evictable(0), None); // only the shown frame is left
+    }
+
 }
 

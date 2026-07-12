@@ -337,21 +337,24 @@ impl CimApp {
                 .set("Frame cache full — continuing with offsets only (headers) for the rest");
         }
 
-        // Gather evictable frames (resident, not currently shown), oldest first.
-        let mut cands: Vec<(u64, usize, usize, usize)> = Vec::new(); // (used, pane, frame, bytes)
-        for i in 0..self.panes.len() {
-            let shown = self.frame_disp(i);
-            for (frame, used, bytes) in self.panes[i].media.resident_frames() {
-                if frame != shown {
-                    cands.push((used, i, frame, bytes));
+        // Evict the globally least-recently-used resident frame (never a pane's
+        // currently shown one) until back under budget. Each pane keeps its
+        // resident frames in a recency-ordered set, so picking the oldest is a
+        // per-pane O(log n) peek + a merge across the (few) panes — no full scan
+        // or sort of the thousands of known-but-non-resident slots.
+        while total > budget {
+            let mut victim: Option<(u64, usize, usize, usize)> = None; // (tick, pane, frame, bytes)
+            for i in 0..self.panes.len() {
+                let shown = self.frame_disp(i);
+                if let Some((tick, frame, bytes)) = self.panes[i].media.lru_evictable(shown) {
+                    if victim.is_none_or(|(t, ..)| tick < t) {
+                        victim = Some((tick, i, frame, bytes));
+                    }
                 }
             }
-        }
-        cands.sort_unstable_by_key(|c| c.0);
-        for (_, i, frame, bytes) in cands {
-            if total <= budget {
-                break;
-            }
+            let Some((_, i, frame, bytes)) = victim else {
+                break; // nothing evictable (everything left is a shown frame)
+            };
             self.panes[i].media.evict(frame);
             total -= bytes;
         }

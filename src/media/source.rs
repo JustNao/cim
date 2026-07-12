@@ -2,6 +2,7 @@
 //! run, concatenated TIFF run) behind one interface — length discovery,
 //! residency / LRU bookkeeping, and how each frame is decoded (`DecodeReq`).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,6 +58,11 @@ pub(super) struct SeqCache {
     last_used: Vec<u64>,
     /// Running total of resident sample bytes (sum of `byte_len` over `Some`s).
     resident_bytes: usize,
+    /// `(last_used, frame)` for every **resident** frame, ordered by recency, so
+    /// the budget can peek the least-recently-used one in O(log n) instead of
+    /// scanning + sorting the whole cache each over-budget tick. Kept in sync by
+    /// `insert` / `touch` / `evict`; non-resident slots are never in the set.
+    lru: BTreeSet<(u64, usize)>,
 }
 
 impl SeqCache {
@@ -66,6 +72,7 @@ impl SeqCache {
             cache: vec![None; len],
             last_used: vec![0; len],
             resident_bytes: 0,
+            lru: BTreeSet::new(),
         }
     }
 
@@ -84,7 +91,9 @@ impl SeqCache {
     pub(super) fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
         if idx < self.cache.len() {
             if let Some(old) = &self.cache[idx] {
-                self.resident_bytes -= old.byte_len();
+                self.resident_bytes -= old.byte_len(); // already in `lru` at its tick
+            } else {
+                self.lru.insert((self.last_used[idx], idx)); // newly resident
             }
             self.resident_bytes += frame.byte_len();
             self.cache[idx] = Some(frame);
@@ -92,6 +101,7 @@ impl SeqCache {
             self.resident_bytes += frame.byte_len();
             self.cache.push(Some(frame));
             self.last_used.push(0);
+            self.lru.insert((0, idx));
         }
     }
 
@@ -107,16 +117,24 @@ impl SeqCache {
     }
 
     fn touch(&mut self, idx: usize, clock: u64) {
-        if let Some(u) = self.last_used.get_mut(idx) {
-            *u = clock;
+        let Some(&old) = self.last_used.get(idx) else {
+            return;
+        };
+        if old == clock {
+            return;
         }
+        // A resident frame moves within the recency order; keep `lru` in sync.
+        if self.cache[idx].is_some() {
+            self.lru.remove(&(old, idx));
+            self.lru.insert((clock, idx));
+        }
+        self.last_used[idx] = clock;
     }
 
     fn evict(&mut self, idx: usize) {
-        if let Some(slot) = self.cache.get_mut(idx) {
-            if let Some(old) = slot.take() {
-                self.resident_bytes -= old.byte_len();
-            }
+        if let Some(Some(old)) = self.cache.get_mut(idx).map(|s| s.take()) {
+            self.resident_bytes -= old.byte_len();
+            self.lru.remove(&(self.last_used[idx], idx));
         }
     }
 
@@ -126,6 +144,18 @@ impl SeqCache {
             .enumerate()
             .filter_map(|(i, s)| s.as_ref().map(|f| (i, self.last_used[i], f.byte_len())))
             .collect()
+    }
+
+    /// The least-recently-used **resident** frame that isn't `protect` (the shown
+    /// frame, never evicted), as `(last_used tick, frame, byte size)` — peeked
+    /// from the recency order in O(log n). `None` when nothing else is resident.
+    fn lru_evictable(&self, protect: usize) -> Option<(u64, usize, usize)> {
+        self.lru.iter().find_map(|&(tick, frame)| {
+            (frame != protect).then(|| {
+                let bytes = self.cache[frame].as_ref().map_or(0, |f| f.byte_len());
+                (tick, frame, bytes)
+            })
+        })
     }
 
     fn resident_count(&self) -> usize {
@@ -337,6 +367,19 @@ impl Media {
             Media::TiffSeq(t) => t.frames.resident_frames(),
             Media::FileSeq(f) => f.frames.resident_frames(),
             Media::ConcatSeq(c) => c.frames.resident_frames(),
+        }
+    }
+
+    /// The least-recently-used evictable frame as `(tick, frame, bytes)`, never
+    /// `protect` (the shown frame). Peeked from the recency order in O(log n) so
+    /// the budget doesn't scan every slot. `None` for a still (never evicts) or
+    /// when nothing else is resident.
+    pub fn lru_evictable(&self, protect: usize) -> Option<(u64, usize, usize)> {
+        match self {
+            Media::Still(_) => None,
+            Media::TiffSeq(t) => t.frames.lru_evictable(protect),
+            Media::FileSeq(f) => f.frames.lru_evictable(protect),
+            Media::ConcatSeq(c) => c.frames.lru_evictable(protect),
         }
     }
 
