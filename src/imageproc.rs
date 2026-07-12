@@ -203,6 +203,18 @@ pub fn details_available() -> bool {
     DETAILS.read().unwrap().is_some()
 }
 
+/// Whether a proprietary operator actually runs on `frame` for the given tone.
+/// The operators only accept a single-channel 16-bit frame (`is_op_input`, and
+/// never a mask), and only when the wanted operator's library is loaded —
+/// otherwise the render falls back to the plain LUT. This is the one predicate
+/// the three render paths (live sync `stage`, the render worker, and export)
+/// share, so "when do operators run" is decided in a single place.
+pub fn ops_active(frame: &crate::media::FrameData, lut_alpha: bool, details: bool) -> bool {
+    frame.is_op_input()
+        && !frame.is_mask()
+        && ((lut_alpha && lut_alpha_available()) || (details && details_available()))
+}
+
 /// One live proprietary operator instance: the opaque C++ handle from `create`,
 /// the `(width, height)` it was built for, and the fn pointers to drive/free it.
 /// Owned by a single pane's worker thread; `Drop` frees the handle on that thread.

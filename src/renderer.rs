@@ -150,9 +150,7 @@ impl Worker {
         // The proprietary operators run on a single-channel 16-bit render (so they
         // see full native precision) and only for single-channel 16-bit frames with
         // the library loaded. Everything else takes the plain 8-bit LUT render.
-        let use_ops = job.data.is_op_input()
-            && ((job.lut_alpha && crate::imageproc::lut_alpha_available())
-                || (job.details && crate::imageproc::details_available()));
+        let use_ops = crate::imageproc::ops_active(&job.data, job.lut_alpha, job.details);
         if use_ops {
             let mut gray = Vec::new();
             let t = Instant::now();

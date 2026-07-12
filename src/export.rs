@@ -308,10 +308,11 @@ impl ExportPane {
             Some(pct) => sub.clip_bounds(pct),
             None => sub.display_bounds(false),
         };
-        let use_ops = sub.is_op_input()
-            && ((self.contrast == ContrastMode::LutAlpha
-                && crate::imageproc::lut_alpha_available())
-                || (self.details && crate::imageproc::details_available()));
+        let use_ops = crate::imageproc::ops_active(
+            &sub,
+            self.contrast == ContrastMode::LutAlpha,
+            self.details,
+        );
         let rgba = if use_ops {
             let mut gray = Vec::new();
             sub.render_into_gray_u16(lo, hi, &mut gray);

@@ -516,10 +516,7 @@ impl CimApp {
     /// `stage` and the lock-step commit so a texture's `step` is compared against
     /// the one the pane wants right now.
     fn want_step(&self, idx: usize, ppp: f32) -> usize {
-        let heavy = self.pane_is_op_input(idx)
-            && ((self.contrast_of(idx) == ContrastMode::LutAlpha
-                && crate::imageproc::lut_alpha_available())
-                || (self.details_of(idx) && crate::imageproc::details_available()));
+        let heavy = self.pane_ops_active(idx);
         if heavy {
             1
         } else {
@@ -571,10 +568,11 @@ impl CimApp {
         // The proprietary operators only run on single-channel 16-bit frames with
         // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
         // render, so there's nothing heavy to push off-thread.
-        let heavy = !frame.is_mask()
-            && frame.is_op_input()
-            && ((contrast == ContrastMode::LutAlpha && crate::imageproc::lut_alpha_available())
-                || (self.details_of(idx) && crate::imageproc::details_available()));
+        let heavy = crate::imageproc::ops_active(
+            &frame,
+            contrast == ContrastMode::LutAlpha,
+            self.details_of(idx),
+        );
 
         if heavy {
             // Render off-thread. One render per pane at a time, so rapid tone /

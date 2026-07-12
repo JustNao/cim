@@ -955,6 +955,21 @@ impl CimApp {
             .unwrap_or(false)
     }
 
+    /// Whether pane `i`'s current frame will actually run a proprietary operator
+    /// (its resident frame is op-input and the wanted operator's library is
+    /// loaded) — the pane-indexed form of [`crate::imageproc::ops_active`], used
+    /// to gate both the off-thread render and the no-decimation rule.
+    pub(super) fn pane_ops_active(&self, i: usize) -> bool {
+        let f = self.frame_disp(i);
+        self.panes[i].media.resident(f).is_some_and(|fr| {
+            crate::imageproc::ops_active(
+                &fr,
+                self.contrast_of(i) == ContrastMode::LutAlpha,
+                self.details_of(i),
+            )
+        })
+    }
+
     pub(super) fn overlay_of(&self, i: usize) -> Option<OverlaySpec> {
         if self.panes[i].sync_tone {
             self.shared_overlay
