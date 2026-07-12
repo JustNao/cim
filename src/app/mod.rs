@@ -389,6 +389,19 @@ impl StatusLine {
     }
 }
 
+/// A pane-lifecycle action queued during the draw and applied afterwards, since
+/// a button handler can't grow / shrink `panes` while it's being iterated.
+enum Deferred {
+    /// Remove the pane at this vec index (header ✕ / manager).
+    Remove(usize),
+    /// Reload the pane at this vec index from disk (header ⟳ / `R`).
+    Reload(usize),
+    /// Reload every pane (`Ctrl+R` / manager).
+    ReloadAll,
+    /// Add a fresh, unconfigured Compute pane (toolbar "Compute").
+    CreateCompute,
+}
+
 /// How a pane's media was opened, so it can be reloaded from disk and emitted
 /// back into a replay command.
 enum Source {
@@ -568,9 +581,6 @@ pub struct CimApp {
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
     rebinding: Option<Action>,
-    /// The toolbar "Compute" button was clicked: add a new Compute pane after the
-    /// draw (deferred to avoid growing `panes` mid-draw).
-    pending_compute_create: bool,
     /// A Compute pane's in-pane **Compute** / **Refresh** button was clicked.
     /// Deferred so the recompute (which nulls the pane's texture — its frame data
     /// changed but its `(frame, sig)` identity didn't) runs at the *top* of the
@@ -629,9 +639,9 @@ pub struct CimApp {
     rotate_drag: Option<(usize, Pos2, f32, f32)>,
     /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
     manager_drag: Option<usize>,
-    pending_remove: Option<usize>,
-    pending_reload: Option<usize>,
-    pending_reload_all: bool,
+    /// Pane-lifecycle actions queued during the draw (buttons can't mutate
+    /// `panes` mid-draw); drained in order by `apply_deferred` after drawing.
+    deferred: Vec<Deferred>,
     /// Media loaded but not yet added as panes, held while the ">8 sequences"
     /// resource warning is up. Confirmed → `commit_open`; declined → quit.
     pending_open: Option<Vec<(Media, Source)>>,
@@ -764,7 +774,6 @@ impl CimApp {
             show_manager: false,
             show_viewcmd: false,
             rebinding: None,
-            pending_compute_create: false,
             pending_recompute: None,
             show_stats: true,
             stats_region: None,
@@ -785,9 +794,7 @@ impl CimApp {
             drag_src: None,
             rotate_drag: None,
             manager_drag: None,
-            pending_remove: None,
-            pending_reload: None,
-            pending_reload_all: false,
+            deferred: Vec::new(),
             pending_open: None,
             pending_view: None,
             decoder: BackgroundDecoder::new(threads),
@@ -1408,17 +1415,13 @@ impl CimApp {
     /// (remove / reload / reload-all / create-Compute), which mustn't mutate
     /// `panes` mid-draw.
     fn apply_deferred(&mut self, _ctx: &egui::Context) {
-        if let Some(i) = self.pending_remove.take() {
-            self.remove_media(i);
-        }
-        if std::mem::take(&mut self.pending_reload_all) {
-            self.reload_all();
-        }
-        if let Some(i) = self.pending_reload.take() {
-            self.reload(i);
-        }
-        if std::mem::take(&mut self.pending_compute_create) {
-            self.add_compute_pane();
+        for action in std::mem::take(&mut self.deferred) {
+            match action {
+                Deferred::Remove(i) => self.remove_media(i),
+                Deferred::Reload(i) => self.reload(i),
+                Deferred::ReloadAll => self.reload_all(),
+                Deferred::CreateCompute => self.add_compute_pane(),
+            }
         }
     }
 }

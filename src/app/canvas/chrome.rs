@@ -145,7 +145,7 @@ impl CimApp {
             },
         );
         if reload_resp.clicked() {
-            self.pending_reload = Some(idx);
+            self.deferred.push(Deferred::Reload(idx));
         }
 
         // Auto-reload (watch) toggle, left of Reload. Amber ◉ while watching, a
@@ -231,7 +231,7 @@ impl CimApp {
             },
         );
         if close_resp.clicked() {
-            self.pending_remove = Some(idx);
+            self.deferred.push(Deferred::Remove(idx));
         }
     }
 

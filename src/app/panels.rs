@@ -40,7 +40,7 @@ impl CimApp {
                 .on_hover_text("Add a Compute pane (mean / std / diff of other media)")
                 .clicked()
             {
-                self.pending_compute_create = true;
+                self.deferred.push(Deferred::CreateCompute);
             }
             if ui.selectable_label(self.export.show, "Export").clicked() {
                 self.toggle_export();
@@ -652,7 +652,7 @@ impl CimApp {
                                     .on_hover_text("Reload all from disk")
                                     .clicked()
                                 {
-                                    self.pending_reload_all = true;
+                                    self.deferred.push(Deferred::ReloadAll);
                                 }
                                 ui.end_row();
                             }
@@ -775,10 +775,10 @@ impl CimApp {
                             }
 
                             if let Some(i) = to_remove {
-                                self.pending_remove = Some(i);
+                                self.deferred.push(Deferred::Remove(i));
                             }
                             if let Some(i) = to_reload {
-                                self.pending_reload = Some(i);
+                                self.deferred.push(Deferred::Reload(i));
                             }
                         });
                 });

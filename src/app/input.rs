@@ -70,8 +70,10 @@ impl CimApp {
             }
             Action::ToggleExport => self.toggle_export(),
             Action::PlayPause => self.playback.playing = !self.playback.playing,
-            Action::ReloadMedia if n > 0 => self.pending_reload = Some(self.current.min(n - 1)),
-            Action::ReloadAll => self.pending_reload_all = true,
+            Action::ReloadMedia if n > 0 => {
+                self.deferred.push(Deferred::Reload(self.current.min(n - 1)))
+            }
+            Action::ReloadAll => self.deferred.push(Deferred::ReloadAll),
             Action::HideMedia if n > 0 => {
                 self.panes[self.current.min(n - 1)].visible = false;
                 self.reselect_if_hidden();
