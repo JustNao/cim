@@ -366,8 +366,7 @@ impl CimApp {
             id,
             source,
             media,
-            tex: None,
-            pending: None,
+            tex: PaneTex::default(),
             transform: ViewTransform::default(),
             frame: 0,
             sync_spatial: true,
@@ -387,9 +386,7 @@ impl CimApp {
             compute: None,
             error: None,
             eager: Eager::Off,
-            watch: false,
-            watch_loaded: None,
-            watch_seen: None,
+            watch: Watch::default(),
         });
     }
 
@@ -455,8 +452,7 @@ impl CimApp {
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;
-                self.panes[i].tex = None; // re-render the kept frame from fresh data
-                self.panes[i].pending = None; // drop any staged frame from old data
+                self.panes[i].tex.clear();
                 self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
@@ -477,8 +473,8 @@ impl CimApp {
                 // reloaded file is shorter.
                 // Re-baseline any file watch to the freshly-loaded contents so it
                 // doesn't immediately fire again on the change we just picked up.
-                self.panes[i].watch_loaded = Self::source_file_sig(&self.panes[i].source);
-                self.panes[i].watch_seen = None;
+                self.panes[i].watch.loaded = Self::source_file_sig(&self.panes[i].source);
+                self.panes[i].watch.seen = None;
             }
             Err(e) => self.panes[i].error = Some(format!("Reload failed: {e}")),
         }

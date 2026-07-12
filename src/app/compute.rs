@@ -126,8 +126,7 @@ impl CimApp {
             Ok((fr, name, status)) => {
                 let hi = fr.hi_depth();
                 self.panes[idx].media = media::Media::still(name, fr);
-                self.panes[idx].tex = None;
-                self.panes[idx].pending = None; // drop any frame staged from old inputs
+                self.panes[idx].tex.clear();
                 self.panes[idx].hist = None; // recompute for the new result
                 self.panes[idx].contrast = ContrastMode::Linear;
                 self.panes[idx].tone.clip.enabled = hi; // clip >8-bit results

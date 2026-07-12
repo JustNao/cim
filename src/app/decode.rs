@@ -458,13 +458,9 @@ impl CimApp {
         for (idx, target) in staged {
             let sig = self.tone_sig(idx);
             let step = self.want_step(idx, ppp);
-            let p = &mut self.panes[idx];
-            let ready = |t: &CachedTex| t.shown == target && t.sig == sig && t.step == step;
-            let tex_shows = p.tex.as_ref().is_some_and(ready);
-            let pending_shows = p.pending.as_ref().is_some_and(ready);
-            if !tex_shows && pending_shows {
-                std::mem::swap(&mut p.tex, &mut p.pending);
-            }
+            self.panes[idx]
+                .tex
+                .commit(|t| t.shown == target && t.sig == sig && t.step == step);
         }
         // A committed playback step advances the shared timeline to the frame we
         // just showed — so the counter and the image stay on the same frame.
@@ -478,11 +474,7 @@ impl CimApp {
     /// siblings are still rendering. After that `tex` is always present and holds
     /// until the group flips, so on-screen panes stay in step.
     pub(super) fn pane_texture(&self, idx: usize) -> Option<TextureId> {
-        self.panes[idx]
-            .tex
-            .as_ref()
-            .or(self.panes[idx].pending.as_ref())
-            .map(|t| t.handle.id())
+        self.panes[idx].tex.id()
     }
 
     /// The frame `refresh_textures` should stage for pane `idx`. Synced panes chase
@@ -558,13 +550,13 @@ impl CimApp {
         // texture identity so zooming below the full-resolution band re-renders.
         let step = self.want_step(idx, ppp);
         // Already committed to the target — nothing to stage.
-        if let Some(t) = &self.panes[idx].tex {
+        if let Some(t) = &self.panes[idx].tex.front {
             if t.shown == target && t.sig == sig && t.step == step {
                 return true;
             }
         }
         // Already staged the target (rendered, awaiting the group commit).
-        if let Some(t) = &self.panes[idx].pending {
+        if let Some(t) = &self.panes[idx].tex.pending {
             if t.shown == target && t.sig == sig && t.step == step {
                 return true;
             }
@@ -622,7 +614,7 @@ impl CimApp {
             let t = debug.then(std::time::Instant::now);
             let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
-            set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, target, sig, step);
+            set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, target, sig, step);
             if let Some(t) = t {
                 self.metrics.upload.record(t.elapsed());
             }
@@ -637,7 +629,7 @@ impl CimApp {
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
         // Heavy proprietary-operator renders run at full resolution (step 1).
-        set_cached_tex(&mut self.panes[idx].pending, ctx, name, img, f, sig, 1);
+        set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, f, sig, 1);
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());
         }

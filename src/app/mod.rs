@@ -119,6 +119,47 @@ struct CachedTex {
     step: usize,
 }
 
+/// A pane's double-buffered display texture: the committed `front` that drawing
+/// reads, and the `pending` next frame staged while `front` keeps showing. The
+/// lock-step commit (`refresh_textures`) swaps `pending` to `front` only once
+/// every on-screen pane is ready, so they all flip together; the swap parks the
+/// old texture back in `pending` so its handle is reused (no per-frame alloc).
+#[derive(Default)]
+struct PaneTex {
+    front: Option<CachedTex>,
+    pending: Option<CachedTex>,
+}
+
+impl PaneTex {
+    /// Commit the staged frame if it's the wanted one and `front` isn't already
+    /// showing it: swap it to the front, parking the spent texture in `pending`
+    /// for handle reuse. `ready` tests a texture against the target identity.
+    fn commit(&mut self, ready: impl Fn(&CachedTex) -> bool) {
+        let front_shows = self.front.as_ref().is_some_and(&ready);
+        let pending_shows = self.pending.as_ref().is_some_and(&ready);
+        if !front_shows && pending_shows {
+            std::mem::swap(&mut self.front, &mut self.pending);
+        }
+    }
+
+    /// The texture handle to draw: the committed `front`, or — only until the
+    /// first commit lands — the freshly staged `pending`, so a pane isn't blank
+    /// while its siblings still render.
+    fn id(&self) -> Option<TextureId> {
+        self.front
+            .as_ref()
+            .or(self.pending.as_ref())
+            .map(|t| t.handle.id())
+    }
+
+    /// Drop both textures, so the frame re-renders from fresh data (reload,
+    /// recompute, newly loaded operator library).
+    fn clear(&mut self) {
+        self.front = None;
+        self.pending = None;
+    }
+}
+
 /// A single-channel media from another pane (a boolean mask or a grayscale
 /// image/sequence), tinted and drawn over a pane. Config only (no texture), so it
 /// can be shared across tone-synced panes; the tinted texture is cached
@@ -391,13 +432,8 @@ struct Pane {
     id: u64, // stable across reorder/close; matches background-decode results
     source: Source, // how to reload it / re-emit it in a replay command
     media: Media,
-    tex: Option<CachedTex>,
-    /// Next frame's texture, rendered while the pane keeps displaying `tex`, so
-    /// every on-screen pane can flip to the new frame **together** (see
-    /// `refresh_textures`). Committed into `tex` by an atomic swap once all shown
-    /// panes are ready — the swap keeps the old texture handle here for reuse, so
-    /// playback doesn't allocate a texture per frame.
-    pending: Option<CachedTex>,
+    /// The committed front texture plus the staged next one. See [`PaneTex`].
+    tex: PaneTex,
     transform: ViewTransform, // used only when !sync_spatial
     frame: usize,             // used only when !sync_temporal
     sync_spatial: bool,
@@ -440,18 +476,25 @@ struct Pane {
     error: Option<String>,
     /// Background bulk-load mode for this pane (frame-bar / export buttons).
     eager: Eager,
-    /// Auto-reload: watch the source file(s) on disk and reload when they change
-    /// (the ◉ toggle in the header, left of ⟳ Reload). Never set for a Compute
-    /// pane (it has no file — use its own Auto-refresh).
-    watch: bool,
+    /// Auto-reload file-watch state (the ◉ header toggle). See [`Watch`].
+    watch: Watch,
+}
+
+/// A pane's auto-reload file-watch state: watch the source file(s) on disk and
+/// reload when they change. Never enabled for a Compute pane (it has no file —
+/// it uses its own Auto-refresh).
+#[derive(Default)]
+struct Watch {
+    /// The ◉ toggle: whether this pane is watching its source at all.
+    on: bool,
     /// Signature of the currently-loaded on-disk contents, the baseline changes
     /// are measured against. `None` until the first successful stat establishes
     /// it (so enabling the watch never triggers an immediate reload).
-    watch_loaded: Option<FileSig>,
+    loaded: Option<FileSig>,
     /// A changed-but-not-yet-settled signature and when it was first seen, for the
     /// `WATCH_DEBOUNCE` quiescence check; reset each time the signature changes
     /// again (i.e. while the file is still being written).
-    watch_seen: Option<(FileSig, f64)>,
+    seen: Option<(FileSig, f64)>,
 }
 
 /// A pane's background bulk-load mode.
@@ -933,8 +976,7 @@ impl CimApp {
             return; // nothing new loaded — don't thrash re-renders
         }
         for p in &mut self.panes {
-            p.tex = None;
-            p.pending = None;
+            p.tex.clear();
             p.overlay_tex = None;
         }
         self.status.set(match after {
@@ -1485,7 +1527,7 @@ impl eframe::App for CimApp {
             || !self.render_inflight.is_empty()
         {
             ctx.request_repaint_after(DECODE_POLL);
-        } else if self.panes.iter().any(|p| p.watch) {
+        } else if self.panes.iter().any(|p| p.watch.on) {
             // Nothing else pending, but a pane is watching a file: wake up
             // occasionally to stat it (see `poll_watches`). Slow enough to be
             // negligible over VNC.

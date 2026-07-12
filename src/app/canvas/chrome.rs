@@ -155,7 +155,7 @@ impl CimApp {
                 Pos2::new(reload.min.x - watch_w, header.min.y),
                 Vec2::new(watch_w, HEADER_H),
             );
-            let watching = self.panes[idx].watch;
+            let watching = self.panes[idx].watch.on;
             let watch_resp = ui
                 .interact(watch, Id::new(("watch", idx)), Sense::click())
                 .on_hover_text(if watching {
@@ -182,11 +182,11 @@ impl CimApp {
             );
             if watch_resp.clicked() {
                 let on = !watching;
-                self.panes[idx].watch = on;
-                self.panes[idx].watch_seen = None;
+                self.panes[idx].watch.on = on;
+                self.panes[idx].watch.seen = None;
                 // Baseline to the current on-disk state when enabling, so turning
                 // the watch on never triggers an immediate reload.
-                self.panes[idx].watch_loaded = if on {
+                self.panes[idx].watch.loaded = if on {
                     Self::source_file_sig(&self.panes[idx].source)
                 } else {
                     None

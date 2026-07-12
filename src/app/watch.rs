@@ -37,32 +37,32 @@ impl CimApp {
     pub(super) fn poll_watches(&mut self, now: f64) {
         let mut to_reload: Vec<usize> = Vec::new();
         for i in 0..self.panes.len() {
-            if !self.panes[i].watch {
+            if !self.panes[i].watch.on {
                 continue;
             }
             let Some(sig) = Self::source_file_sig(&self.panes[i].source) else {
                 continue; // unreadable this tick (mid-write/rename) — try again later
             };
             // Establish the baseline on the first successful stat.
-            let Some(loaded) = self.panes[i].watch_loaded else {
-                self.panes[i].watch_loaded = Some(sig);
-                self.panes[i].watch_seen = None;
+            let Some(loaded) = self.panes[i].watch.loaded else {
+                self.panes[i].watch.loaded = Some(sig);
+                self.panes[i].watch.seen = None;
                 continue;
             };
             if sig == loaded {
-                self.panes[i].watch_seen = None; // unchanged (or reverted)
+                self.panes[i].watch.seen = None; // unchanged (or reverted)
                 continue;
             }
             // Changed from the loaded contents: wait for it to stop changing.
-            match self.panes[i].watch_seen {
+            match self.panes[i].watch.seen {
                 Some((seen, t0)) if seen == sig => {
                     if now - t0 >= WATCH_DEBOUNCE {
-                        self.panes[i].watch_seen = None;
+                        self.panes[i].watch.seen = None;
                         to_reload.push(i);
                     }
                 }
                 // First sighting of this signature (or it changed again) — (re)arm.
-                _ => self.panes[i].watch_seen = Some((sig, now)),
+                _ => self.panes[i].watch.seen = Some((sig, now)),
             }
         }
         for i in to_reload {
