@@ -347,13 +347,15 @@ fn draw_tone_options(
     match mode {
         ContrastMode::Linear => {
             // Clip toggle + its per-tail percentile (greyed out when the toggle
-            // is off). On for >8-bit by default, off for 8-bit (set in add_pane).
+            // is off, or when a manual window overrides it). On for >8-bit by
+            // default, off for 8-bit (set in add_pane).
+            let manual = tone.window.enabled;
             ui.label("Clip");
             ui.horizontal(|ui| {
-                ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
+                ui.add_enabled(!manual, egui::Checkbox::without_text(&mut tone.clip.enabled))
                     .on_hover_text("Clip a percentile off each tail before the stretch");
                 ui.add_enabled(
-                    tone.clip.enabled,
+                    !manual && tone.clip.enabled,
                     egui::DragValue::new(&mut tone.clip.percent)
                         .speed(0.005)
                         .range(0.0..=49.0)
@@ -361,6 +363,26 @@ fn draw_tone_options(
                         .suffix(" %"),
                 )
                 .on_hover_text("Percentile clipped at each tail before the stretch");
+            });
+            ui.end_row();
+
+            // Manual window: an explicit [lo, hi] display range (native units)
+            // that overrides the clip, so panes can lock to identical bounds.
+            ui.label("Window");
+            ui.horizontal(|ui| {
+                ui.add(egui::Checkbox::without_text(&mut tone.window.enabled)).on_hover_text(
+                    "Map an explicit [lo, hi] window (native units) — lock panes to identical bounds",
+                );
+                ui.add_enabled(
+                    tone.window.enabled,
+                    egui::DragValue::new(&mut tone.window.lo).speed(1.0),
+                )
+                .on_hover_text("Display-window low (native units)");
+                ui.add_enabled(
+                    tone.window.enabled,
+                    egui::DragValue::new(&mut tone.window.hi).speed(1.0),
+                )
+                .on_hover_text("Display-window high (native units)");
             });
             ui.end_row();
         }

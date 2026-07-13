@@ -684,6 +684,10 @@ impl CimApp {
         // The clip toggle and its percentile both change the Linear mapping.
         tone.clip.enabled.hash(&mut h);
         tone.clip.percent.to_bits().hash(&mut h);
+        // A manual display window overrides those bounds when enabled.
+        tone.window.enabled.hash(&mut h);
+        tone.window.lo.to_bits().hash(&mut h);
+        tone.window.hi.to_bits().hash(&mut h);
         self.details_of(idx).hash(&mut h);
         let region = self.panes[idx].region_tone;
         region.hash(&mut h);
@@ -700,6 +704,11 @@ impl CimApp {
     fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
         let contrast = self.contrast_of(idx);
         let tone = self.tone_of(idx);
+        // An explicit manual window overrides the auto / percentile / region
+        // bounds (but not LUT_ALPHA, which does its own contrast).
+        if contrast != ContrastMode::LutAlpha && tone.window.enabled {
+            return (tone.window.lo, tone.window.hi);
+        }
         let pct = tone.clip.percent;
         // Clip only the built-in Linear map, and only when its toggle is on;
         // LUT_ALPHA takes the full range and does its own contrast.

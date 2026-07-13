@@ -141,6 +141,13 @@ impl CimApp {
             p.frame,
             self.export_source(idx),
         );
+        // A manual display window overrides the clip for any non-LUT_ALPHA tone.
+        {
+            let t = self.tone_of(idx);
+            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.window.enabled {
+                pane.window = Some((t.window.lo, t.window.hi));
+            }
+        }
         pane.rotation = self.rotation_of(idx).to_radians();
         // Use the effective overlay (shared when the pane is tone-synced), and
         // skip mask panes (they don't take an overlay), matching prepare_overlay.

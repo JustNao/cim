@@ -59,6 +59,16 @@ pub enum ClipSpec {
     On(f32),
 }
 
+/// Per-pane manual display window carried by `--window`: `off`, or an explicit
+/// `LO:HI` (native units) that overrides the clip. Mirrors the app's `ManualWindow`.
+#[derive(Clone, Copy, PartialEq)]
+pub enum WindowSpec {
+    /// No manual window — the clip / auto bounds apply.
+    Off,
+    /// Map the explicit `[lo, hi]` display window.
+    On(f32, f32),
+}
+
 /// A viewpoint captured from a running session and replayed on the next launch.
 /// Every field is optional: only the flags actually present on the command line
 /// override the app's defaults. Produced by the "View command" panel and parsed
@@ -76,6 +86,8 @@ pub struct ViewState {
     pub tones: Option<Vec<Tone>>,
     /// Per-pane Linear clip state (`--clip`), in pane order.
     pub clips: Option<Vec<ClipSpec>>,
+    /// Per-pane manual display window (`--window`), in pane order.
+    pub windows: Option<Vec<WindowSpec>>,
     /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
@@ -161,6 +173,10 @@ pub fn parse(args: Vec<String>) -> Cli {
             }
             "--clip" => {
                 view.clips = next(i).and_then(parse_clips);
+                i += 1;
+            }
+            "--window" => {
+                view.windows = next(i).and_then(parse_windows);
                 i += 1;
             }
             "--detail" => {
@@ -251,6 +267,22 @@ fn parse_clips(s: &str) -> Option<Vec<ClipSpec>> {
         .collect()
 }
 
+/// Parse a comma-separated per-pane manual-window list for `--window`. Each token
+/// is `off` (no window) or `LO:HI` (native units). Any unrecognised token makes
+/// the whole flag ignored.
+fn parse_windows(s: &str) -> Option<Vec<WindowSpec>> {
+    s.split(',')
+        .map(|t| {
+            let t = t.trim();
+            if t.eq_ignore_ascii_case("off") || t.eq_ignore_ascii_case("none") {
+                return Some(WindowSpec::Off);
+            }
+            let (lo, hi) = t.split_once(':')?;
+            Some(WindowSpec::On(lo.trim().parse().ok()?, hi.trim().parse().ok()?))
+        })
+        .collect()
+}
+
 /// Parse a comma-separated per-pane float list for `--rotate` (degrees). Any
 /// unparseable token makes the whole flag ignored.
 fn parse_floats(s: &str) -> Option<Vec<f32>> {
@@ -306,6 +338,7 @@ VIEW STATE:
         --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
         --tone <T,T,...>         Per-pane tone: linear | lutalpha
         --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
+        --window <W,W,...>       Per-pane manual display window: off | LO:HI
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
         --show <B,B,...>         Per-pane visibility / show-hide (1/0)
         --tsync <B,B,...>        Per-pane Transformations-sync toggles (1/0)
@@ -618,6 +651,31 @@ mod tests {
         ));
         assert_eq!(view.details, Some(vec![false, true]));
         assert_eq!(view.loop_range, Some((3, 9)));
+    }
+
+    #[test]
+    fn parses_manual_window() {
+        let args = "a.tif b.tif --window 100:2000,off"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert!(matches!(
+            view.windows.as_deref(),
+            Some([WindowSpec::On(lo, hi), WindowSpec::Off])
+                if (lo - 100.0).abs() < 1e-6 && (hi - 2000.0).abs() < 1e-6
+        ));
+        // A malformed token drops the whole flag.
+        let bad = "a.tif --window 100"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(bad) else {
+            panic!("expected Run");
+        };
+        assert!(view.windows.is_none());
     }
 
     #[test]

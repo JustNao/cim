@@ -44,6 +44,9 @@ pub struct ExportPane {
     /// `None` maps the full range. Snapshotted from the pane's tone (LUT_ALPHA
     /// always `None` — it takes the full range and does its own contrast).
     pub clip: Option<f32>,
+    /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
+    /// `Some` (mirrors the pane's manual window; `None` for LUT_ALPHA / off).
+    pub window: Option<(f32, f32)>,
     /// Display rotation in **radians**, about the image centre (0 = none). Applied
     /// when sampling so an exported pane matches the rotated live view.
     pub rotation: f32,
@@ -173,6 +176,7 @@ impl ExportPane {
             contrast,
             details,
             clip,
+            window: None,
             rotation: 0.0,
             count,
             sync_temporal,
@@ -309,9 +313,11 @@ impl ExportPane {
             cropped = frame.crop(x0, y0, cw, ch);
             &cropped
         };
-        let (lo, hi) = match self.clip {
-            Some(pct) => sub.clip_bounds(pct),
-            None => sub.display_bounds(false),
+        // A manual window overrides the clip / auto bounds (mirrors tone_bounds).
+        let (lo, hi) = match (self.window, self.clip) {
+            (Some(win), _) => win,
+            (None, Some(pct)) => sub.clip_bounds(pct),
+            (None, None) => sub.display_bounds(false),
         };
         // The one shared render tail (plain LUT, or operators on a full-precision
         // 16-bit render) — identical to the live-view path by construction.

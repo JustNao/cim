@@ -317,12 +317,34 @@ impl Default for ClipOptions {
     }
 }
 
-/// Per-pane tone options. Currently just the Linear clip; extend by growing this
-/// struct and reading it in `stage`/`tone_sig`/`view_command`/`export_pane`.
-/// (LUT_ALPHA has no options; it runs the operator at full strength.)
+/// An explicit display window `[lo, hi]` in **native units**, overriding the
+/// auto / percentile / region bounds so panes can be locked to identical bounds
+/// — real intensity differences then show as brightness differences instead of
+/// being hidden by per-pane auto-normalisation. Off by default (the clip /
+/// full-range map applies); takes precedence over the clip when on. Ignored by
+/// LUT_ALPHA, which does its own contrast.
+#[derive(Clone, Copy, PartialEq)]
+pub struct ManualWindow {
+    /// Whether the explicit window overrides the automatic bounds.
+    pub enabled: bool,
+    pub lo: f32,
+    pub hi: f32,
+}
+
+impl Default for ManualWindow {
+    fn default() -> Self {
+        Self { enabled: false, lo: 0.0, hi: 255.0 }
+    }
+}
+
+/// Per-pane tone options. Extend by growing this struct and reading it in
+/// `stage`/`tone_bounds`/`tone_sig`/`view_command`/`export_pane`. (LUT_ALPHA has
+/// no options; it runs the operator at full strength.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
+    /// Explicit display window, overriding `clip` when enabled (see [`ManualWindow`]).
+    pub window: ManualWindow,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
