@@ -51,8 +51,8 @@ src/
                  the source kinds behind one interface, length discovery, LRU.
     loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
                  decoder), bilevel-mask bit handling.
-    render.rs    Tone rendering: LUT render (render_into / _scaled / _gray_u16),
-                 mask/intensity overlay tints, display-bounds.
+    render.rs    Tone rendering: cached-LUT render (ToneLut + render_into*_lut /
+                 _scaled / _gray_u16 / _cmap), mask/intensity overlay tints, display-bounds.
     stats.rs     Histograms, region stats/bounds, Compute reductions (mean/std/diff).
     percentile.rs  The one per-tail percentile histogram scan (rect + fallback),
                  shared by whole-image auto-contrast and region tone.
@@ -66,6 +66,7 @@ src/
                  PaneOps::render_display) for heavy panes so the UI never blocks.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
+  palette.rs     Colour palettes (viridis/turbo/diverging) for the Colormap tone.
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
   testutil.rs    #[cfg(test)] synthetic fixture generators (multi-page TIFF, PNG
@@ -241,6 +242,14 @@ len)` grows length by one.
   with pane count, since the lock-step commit waits for the slowest pane. Requests dedupe
   via `inflight` and never go past the known length (frontier discovery stays with
   `ensure_lookahead`), so re-running it every update is cheap.
+  - **Fair dispatch:** each pane's next-frame list is flattened **round-robin by
+    distance** (`interleave_prefetch` — every pane's `+1`, then every pane's `+2`, …), so
+    one pane's whole burst can't front-load the single decode queue and starve the pane
+    that gates the commit.
+  - **Adaptive depth:** `prefetch_depth` scales from a fixed floor (`PLAY_PREFETCH`) up to
+    a cap using an always-on decode-latency **EMA** (`decode_ema_secs`, maintained in
+    `pump_decoder` independent of `CIM_DEBUG`), the displayed-pane count, and the pool
+    size — deeper when decode is slow / many panes, shallower when cheap.
 
 ---
 
@@ -253,6 +262,11 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
 - `clock` increments each update; frames are `touch`ed on decode and on display →
   LRU recency. When `resident_bytes()` exceeds budget, evict the oldest frames that
   are **not currently shown** (each pane's `frame_disp(i)` is protected) until under.
+  Eviction is **incremental**: each `SeqCache` keeps its resident frames in a
+  recency-ordered `BTreeSet` (maintained in O(log n) by `insert`/`touch`/`evict`), and
+  the budget merges per-pane `lru_evictable` peeks to pop the globally oldest — so it
+  never scans/sorts the thousands of known-but-non-resident slots each over-budget tick
+  (the steady-state during multi-sequence playback at the cache ceiling).
 - **Bulk loads (`Pane.eager: Eager` = `Off | Full | Offsets`), driven by
   `drive_eager`:**
   - **"Load all"** (`Eager::Full`) decodes every known frame and drives the frontier
@@ -321,9 +335,16 @@ so those (and overlays, and the export path) always render full-resolution.
 (not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
 swapping the spent old texture back to the front and flicker between frames.
 
-`render_into` (`media/render.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki) once
-per frame then table-look-up per pixel; **F32** maps arithmetically. Mono replicates
-grey across R/G/B; alpha = 255.
+`render_into` (`media/render.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki)
+then table-look-up per pixel; **F32** maps arithmetically. Mono replicates grey
+across R/G/B; alpha = 255. The LUT is a reusable **`ToneLut`** (keyed on
+`(lo, hi, mask, entries)` — and a parallel RGB table for Colormap), so a fixed-tone
+playback run **reuses one table across frames** instead of rebuilding 64 Ki entries
+each frame (the dominant per-frame CPU on a large integer image). Each pane owns its
+`ToneLut`: the synchronous stage (`PaneTex.lut`), the render worker (`renderer::Worker`),
+and export (`ExportPane`) each reuse one via the `_lut` render variants; a heavily
+**decimated** small output skips the table and maps arithmetically. The plain
+`render_into`/`_scaled` are convenience wrappers building a throwaway `ToneLut`.
 
 **Display bounds:** full range for integers; data extent for floats; with `clip`, a
 per-tail percentile stretch (default **0.01%**). Bounds are content-invariant per
@@ -338,6 +359,19 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   percentile are seeded in `add_pane` and editable per pane. The default mode.
 - **LUT_ALPHA** — full-range map then the proprietary operator at full strength
   (no options; ignores the clip). Knobs slot in via `draw_tone_options`.
+- **Colormap** — false-colour a **mono** frame through a palette (`crate::palette`:
+  viridis / turbo / diverging), using the **same window/clip bounds as Linear**; a
+  display-only tone (no operators), rendered synchronously via `render_into_scaled_cmap`
+  (a per-value RGB table in the pane's `ToneLut`). Multi-channel frames fall back to the
+  plain render; each texel is still one true source sample (only its colour is the
+  palette). The diverging ramp suits a signed **Diff** Compute pane (zero → white).
+
+Plus a per-pane **manual window** (`ToneOptions.window` — an explicit `[lo,hi]` in
+native units) that **overrides** the clip / auto / region bounds for any non-LUT_ALPHA
+tone, so panes can be **locked to identical display bounds** and real intensity
+differences show as brightness rather than being hidden by per-pane auto-normalisation.
+Edited in the popup's **Window** row (greys out the clip when on); read by `tone_bounds`,
+hashed in `tone_sig`, snapshotted for export, and round-tripped via `--window`.
 
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
@@ -743,10 +777,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,
   `--zoom`, `--center X,Y`, `--frame`, `--pane`, `--control`, `--ab A,B,SPLIT`,
-  `--tone` (per-pane `linear|lutalpha`; `linearclip`/`clip` are accepted as
-  deprecated aliases for `linear`), `--clip` (per-pane Linear clip: `off` or the
-  per-tail percentile, e.g. `0.01,off,0.5`; omitted at each pane's depth default),
-  `--detail` (per-pane `1`/`0`),
+  `--tone` (per-pane `linear|lutalpha|colormap[:viridis|turbo|diverging]`;
+  `linearclip`/`clip` are accepted as deprecated aliases for `linear`), `--clip`
+  (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
+  at each pane's depth default), `--window` (per-pane manual display window: `off` or
+  `LO:HI` in native units, overriding the clip), `--detail` (per-pane `1`/`0`),
   `--show` (per-pane visibility), `--tsync` (per-pane Transformations-sync),
   `--rotate` (per-pane display rotation in degrees, `-180..180`), `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
@@ -868,11 +903,15 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 ## 15. Performance notes (VNC / no GPU)
 
 Done: lazy length, persistent readers, bounded LRU cache, LUT render + memoized bounds
-+ reused buffer, per-pane histogram cache, **paced repaints** (§13, no busy-spin while
++ reused buffer, **cross-frame LUT reuse** (§7 — `ToneLut` per pane, so fixed-tone
+playback doesn't rebuild the 64 Ki table each frame), **incremental LRU eviction** (§6 —
+a recency-ordered set per `SeqCache`, no whole-cache scan/sort per over-budget tick),
+per-pane histogram cache, **paced repaints** (§13, no busy-spin while
 decoding/playing), **display-resolution staging** for minified panes (§7 — nearest-decimate
 the synchronous render so a grid of sequences doesn't render/copy/upload full-res textures
 the screen can't show; seamless across 1×), **playback decode prefetch** (§5 — overlap
-decode with display so first-pass / multi-pane playback doesn't stall on decode latency),
+decode with display so first-pass / multi-pane playback doesn't stall on decode latency,
+now **fair-dispatched** across panes and **adaptive-depth** on measured decode latency),
 and a **configurable decode-thread count** (§5 — cap the pool per instance on a shared
 host). For shared multi-user servers there's also a **">8 sequences" resource warning**
 (§13) before opening a heavy number of sequences at once. Remaining candidates: minor
@@ -899,10 +938,14 @@ Inline `#[cfg(test)]`, run against **synthetic fixtures generated at test time**
 (`src/testutil.rs` — multi-page u16 TIFFs with varying page sizes, PNG runs, a
 hand-written 1-bit bilevel-mask TIFF); only the MP4 encode test skips when `ffmpeg`
 is absent. Coverage: `cli` token expansion/grouping; `media` lazy length / probe
-discovery / eviction, **LUT render matches the float reference** bit-for-bit,
+discovery / eviction (incl. **LRU peek order + shown-frame protection**), **LUT render
+matches the float reference** bit-for-bit, **`ToneLut` reuse == uncached render** (and
+the decimated small-output arithmetic path), **Colormap maps through the palette**,
 mask/intensity renders, region stats + save round-trip; **percentile equivalence**
 (whole-image == full-frame region, integer and float, with golden values);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
+`app::decode` **prefetch interleave order** + **adaptive depth**; `palette` endpoints /
+diverging-centre / token round-trip; `cli` **`--window` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **pixel-exact region crop** (incl. rotated),
 **full-frame export == live LUT render**, content-only export (`content_region`
 excludes background) + still background crop. The parity/equivalence tests are the
