@@ -47,6 +47,8 @@ pub struct ExportPane {
     /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
     /// `Some` (mirrors the pane's manual window; `None` for LUT_ALPHA / off).
     pub window: Option<(f32, f32)>,
+    /// Colormap palette when the pane's tone is `Colormap` (else `None`).
+    pub palette: Option<crate::palette::Palette>,
     /// Display rotation in **radians**, about the image centre (0 = none). Applied
     /// when sampling so an exported pane matches the rotated live view.
     pub rotation: f32,
@@ -177,6 +179,7 @@ impl ExportPane {
             details,
             clip,
             window: None,
+            palette: None,
             rotation: 0.0,
             count,
             sync_temporal,
@@ -319,18 +322,27 @@ impl ExportPane {
             (None, Some(pct)) => sub.clip_bounds(pct),
             (None, None) => sub.display_bounds(false),
         };
-        // The one shared render tail (plain LUT, or operators on a full-precision
-        // 16-bit render) — identical to the live-view path by construction.
         let mut rgba = Vec::new();
-        self.ops.render_display(
-            &sub,
-            lo,
-            hi,
-            self.contrast == ContrastMode::LutAlpha,
-            self.details,
-            &mut self.lut,
-            &mut rgba,
-        );
+        // Colormap is a plain mono-only palette render (mirrors the live sync
+        // path); everything else goes through the shared operator render tail.
+        match self.palette.filter(|_| sub.color_channels() == 1 && !sub.is_mask()) {
+            Some(pal) => {
+                sub.render_into_scaled_cmap(lo, hi, 1, pal.table(), pal.id(), &mut self.lut, &mut rgba);
+            }
+            None => {
+                // The one shared render tail (plain LUT, or operators on a full-
+                // precision 16-bit render) — identical to the live view by construction.
+                self.ops.render_display(
+                    sub,
+                    lo,
+                    hi,
+                    self.contrast == ContrastMode::LutAlpha,
+                    self.details,
+                    &mut self.lut,
+                    &mut rgba,
+                );
+            }
+        }
         self.cur_display = Some(rgba);
         self.cur_origin = [x0, y0];
         self.cur_render_size = [cw, ch];

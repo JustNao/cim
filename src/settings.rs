@@ -282,17 +282,23 @@ pub enum ContrastMode {
     Linear,
     /// Proprietary LUT_ALPHA auto-contrast, applied to the rendered image.
     LutAlpha,
+    /// False-colour a **mono** image through a palette (see [`ToneOptions::palette`]).
+    /// Uses the same window/clip bounds as Linear; multi-channel frames fall back
+    /// to the plain render. A display-only tone (no proprietary operators).
+    Colormap,
 }
 
 impl ContrastMode {
     /// The modes in dropdown order.
-    pub const ORDER: [ContrastMode; 2] = [ContrastMode::Linear, ContrastMode::LutAlpha];
+    pub const ORDER: [ContrastMode; 3] =
+        [ContrastMode::Linear, ContrastMode::LutAlpha, ContrastMode::Colormap];
 
     /// Short label for the media-manager dropdown.
     pub fn label(self) -> &'static str {
         match self {
             ContrastMode::Linear => "Linear",
             ContrastMode::LutAlpha => "LUT_ALPHA",
+            ContrastMode::Colormap => "Colormap",
         }
     }
 }
@@ -345,6 +351,8 @@ pub struct ToneOptions {
     pub clip: ClipOptions,
     /// Explicit display window, overriding `clip` when enabled (see [`ManualWindow`]).
     pub window: ManualWindow,
+    /// Palette for the Colormap tone (ignored by other modes).
+    pub palette: crate::palette::Palette,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

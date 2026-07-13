@@ -345,49 +345,68 @@ fn draw_tone_options(
     tone: &mut ToneOptions,
 ) {
     match mode {
-        ContrastMode::Linear => {
-            // Clip toggle + its per-tail percentile (greyed out when the toggle
-            // is off, or when a manual window overrides it). On for >8-bit by
-            // default, off for 8-bit (set in add_pane).
-            let manual = tone.window.enabled;
-            ui.label("Clip");
-            ui.horizontal(|ui| {
-                ui.add_enabled(!manual, egui::Checkbox::without_text(&mut tone.clip.enabled))
-                    .on_hover_text("Clip a percentile off each tail before the stretch");
-                ui.add_enabled(
-                    !manual && tone.clip.enabled,
-                    egui::DragValue::new(&mut tone.clip.percent)
-                        .speed(0.005)
-                        .range(0.0..=49.0)
-                        .max_decimals(3)
-                        .suffix(" %"),
-                )
-                .on_hover_text("Percentile clipped at each tail before the stretch");
-            });
+        // Linear and Colormap share the same bounds controls (clip + window);
+        // Colormap additionally picks a palette.
+        ContrastMode::Linear => draw_clip_and_window(ui, tone),
+        ContrastMode::Colormap => {
+            ui.label("Palette");
+            egui::ComboBox::from_id_salt(("opt_palette", _pane_id))
+                .selected_text(tone.palette.label())
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    for p in crate::palette::Palette::ORDER {
+                        ui.selectable_value(&mut tone.palette, p, p.label());
+                    }
+                });
             ui.end_row();
-
-            // Manual window: an explicit [lo, hi] display range (native units)
-            // that overrides the clip, so panes can lock to identical bounds.
-            ui.label("Window");
-            ui.horizontal(|ui| {
-                ui.add(egui::Checkbox::without_text(&mut tone.window.enabled)).on_hover_text(
-                    "Map an explicit [lo, hi] window (native units) — lock panes to identical bounds",
-                );
-                ui.add_enabled(
-                    tone.window.enabled,
-                    egui::DragValue::new(&mut tone.window.lo).speed(1.0),
-                )
-                .on_hover_text("Display-window low (native units)");
-                ui.add_enabled(
-                    tone.window.enabled,
-                    egui::DragValue::new(&mut tone.window.hi).speed(1.0),
-                )
-                .on_hover_text("Display-window high (native units)");
-            });
-            ui.end_row();
+            draw_clip_and_window(ui, tone);
         }
         // LUT_ALPHA has no options. Add a knob here: one row + a field on
         // `ToneOptions`.
         ContrastMode::LutAlpha => {}
     }
+}
+
+/// The clip toggle/percentile and manual-window rows, shared by the Linear and
+/// Colormap tones (both stretch the native range the same way before display).
+fn draw_clip_and_window(ui: &mut egui::Ui, tone: &mut ToneOptions) {
+    // Clip toggle + its per-tail percentile (greyed out when the toggle is off,
+    // or when a manual window overrides it). On for >8-bit by default, off for
+    // 8-bit (set in add_pane).
+    let manual = tone.window.enabled;
+    ui.label("Clip");
+    ui.horizontal(|ui| {
+        ui.add_enabled(!manual, egui::Checkbox::without_text(&mut tone.clip.enabled))
+            .on_hover_text("Clip a percentile off each tail before the stretch");
+        ui.add_enabled(
+            !manual && tone.clip.enabled,
+            egui::DragValue::new(&mut tone.clip.percent)
+                .speed(0.005)
+                .range(0.0..=49.0)
+                .max_decimals(3)
+                .suffix(" %"),
+        )
+        .on_hover_text("Percentile clipped at each tail before the stretch");
+    });
+    ui.end_row();
+
+    // Manual window: an explicit [lo, hi] display range (native units) that
+    // overrides the clip, so panes can lock to identical bounds.
+    ui.label("Window");
+    ui.horizontal(|ui| {
+        ui.add(egui::Checkbox::without_text(&mut tone.window.enabled)).on_hover_text(
+            "Map an explicit [lo, hi] window (native units) — lock panes to identical bounds",
+        );
+        ui.add_enabled(
+            tone.window.enabled,
+            egui::DragValue::new(&mut tone.window.lo).speed(1.0),
+        )
+        .on_hover_text("Display-window low (native units)");
+        ui.add_enabled(
+            tone.window.enabled,
+            egui::DragValue::new(&mut tone.window.hi).speed(1.0),
+        )
+        .on_hover_text("Display-window high (native units)");
+    });
+    ui.end_row();
 }

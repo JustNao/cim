@@ -43,10 +43,13 @@ pub enum ViewMode {
 
 /// Per-pane tone mode carried by `--tone`. Mirrors the app's `ContrastMode` but
 /// lives here so the CLI stays decoupled from the GUI module.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tone {
     Linear,
     LutAlpha,
+    /// Colormap with the given palette (`colormap:<name>`; bare `colormap` =
+    /// the default palette).
+    Colormap(crate::palette::Palette),
 }
 
 /// Per-pane Linear-clip state carried by `--clip`: the toggle plus, when on, the
@@ -250,6 +253,10 @@ fn parse_tones(s: &str) -> Option<Vec<Tone>> {
             // separate `--clip` flag); accept them as plain Linear.
             "linear" | "linearclip" | "clip" => Some(Tone::Linear),
             "lutalpha" | "lut_alpha" => Some(Tone::LutAlpha),
+            "colormap" => Some(Tone::Colormap(crate::palette::Palette::default())),
+            other if other.starts_with("colormap:") => {
+                crate::palette::Palette::from_token(&other["colormap:".len()..]).map(Tone::Colormap)
+            }
             _ => None,
         })
         .collect()
@@ -336,7 +343,8 @@ VIEW STATE:
         --frame <N>              Timeline frame to show
         --pane <N>               Focused pane
         --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
-        --tone <T,T,...>         Per-pane tone: linear | lutalpha
+        --tone <T,T,...>         Per-pane tone: linear | lutalpha |
+                               colormap[:viridis|turbo|diverging]
         --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
         --window <W,W,...>       Per-pane manual display window: off | LO:HI
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
@@ -676,6 +684,38 @@ mod tests {
             panic!("expected Run");
         };
         assert!(view.windows.is_none());
+    }
+
+    #[test]
+    fn parses_colormap_tone() {
+        use crate::palette::Palette;
+        let args = "a.tif b.tif c.tif --tone colormap,colormap:turbo,lutalpha"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(
+            view.tones.as_deref(),
+            Some(
+                [
+                    Tone::Colormap(Palette::Viridis), // bare = default palette
+                    Tone::Colormap(Palette::Turbo),
+                    Tone::LutAlpha,
+                ]
+                .as_slice()
+            )
+        );
+        // An unknown palette drops the whole flag.
+        let bad = "a.tif --tone colormap:bogus"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(bad) else {
+            panic!("expected Run");
+        };
+        assert!(view.tones.is_none());
     }
 
     #[test]

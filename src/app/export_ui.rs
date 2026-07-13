@@ -121,11 +121,11 @@ impl CimApp {
     /// what's on screen.
     pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
         let p = &self.panes[idx];
-        // Snapshot the Linear clip: on only in Linear mode with the toggle set;
+        // Snapshot the clip: on for Linear / Colormap with the toggle set;
         // LUT_ALPHA takes the full range (None).
         let clip = {
             let t = self.tone_of(idx);
-            if matches!(self.contrast_of(idx), ContrastMode::Linear) && t.clip.enabled {
+            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.clip.enabled {
                 Some(t.clip.percent)
             } else {
                 None
@@ -146,6 +146,9 @@ impl CimApp {
             let t = self.tone_of(idx);
             if self.contrast_of(idx) != ContrastMode::LutAlpha && t.window.enabled {
                 pane.window = Some((t.window.lo, t.window.hi));
+            }
+            if self.contrast_of(idx) == ContrastMode::Colormap {
+                pane.palette = Some(t.palette);
             }
         }
         pane.rotation = self.rotation_of(idx).to_radians();

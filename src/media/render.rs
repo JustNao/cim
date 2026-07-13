@@ -183,6 +183,75 @@ impl FrameData {
         [ow, oh]
     }
 
+    /// Render the display RGBA of a **mono** frame through a colour `palette`
+    /// (the Colormap tone): each source sample is toned to an 8-bit index via
+    /// `[lo, hi]` then looked up in the 256-entry palette. Nearest-decimated at
+    /// `step` like [`render_into_scaled_lut`](Self::render_into_scaled_lut) — each
+    /// output texel is still a single true source sample, only its *colour* comes
+    /// from the palette, so pixel-accuracy holds (the readout still reads native
+    /// values). The caller ensures the frame is single-channel and non-mask.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_into_scaled_cmap(
+        &self,
+        lo: f32,
+        hi: f32,
+        step: usize,
+        palette: &[[u8; 3]; 256],
+        palette_id: u8,
+        lut: &mut ToneLut,
+        out: &mut Vec<u8>,
+    ) -> [usize; 2] {
+        let [w, h] = self.size;
+        let ch = self.channels;
+        let (ow, oh) = if step <= 1 {
+            (w, h)
+        } else {
+            (w.div_ceil(step), h.div_ceil(step))
+        };
+        out.clear();
+        out.resize(ow * oh * 4, 255);
+        let decim = step > 1;
+        let opx = ow * oh;
+
+        // `rgb` yields the colour for one source sample; `write` fans it out over
+        // the full or decimated grid (the fill helpers below).
+        match &self.samples {
+            Samples::U8(v) => {
+                let tab = lut.map_rgb(lo, hi, palette, palette_id, 256);
+                let rgb = |s: u8| tab[s as usize];
+                if decim {
+                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
+                } else {
+                    fill_rgb(out, v, ch, w * h, rgb);
+                }
+            }
+            // Small decimated output maps arithmetically (skip the 64 Ki table).
+            Samples::U16(v) if decim && opx < (1 << 16) => {
+                let map_f = map_u8(lo, hi);
+                fill_rgb_decimated(out, v, w, ch, ow, oh, step, |s| palette[map_f(s as f32) as usize]);
+            }
+            Samples::U16(v) => {
+                let tab = lut.map_rgb(lo, hi, palette, palette_id, 1 << 16);
+                let rgb = |s: u16| tab[s as usize];
+                if decim {
+                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
+                } else {
+                    fill_rgb(out, v, ch, w * h, rgb);
+                }
+            }
+            Samples::F32(v) => {
+                let map_f = map_u8(lo, hi);
+                let rgb = |s: f32| palette[map_f(s) as usize];
+                if decim {
+                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
+                } else {
+                    fill_rgb(out, v, ch, w * h, rgb);
+                }
+            }
+        }
+        [ow, oh]
+    }
+
     /// Render a **single-channel 16-bit** buffer into `out` (resized to
     /// `width*height`), mapping native samples through `[lo, hi] → [0, 65535]`.
     /// This is the input the proprietary operators receive (`crate::imageproc`):
@@ -292,6 +361,8 @@ pub struct ToneLut {
     tab8: Vec<u8>,
     key16: Option<(u32, u32, bool, usize)>,
     tab16: Vec<u16>,
+    key_rgb: Option<(u32, u32, u8, usize)>,
+    tab_rgb: Vec<[u8; 3]>,
 }
 
 impl ToneLut {
@@ -312,6 +383,29 @@ impl ToneLut {
             self.key8 = Some(key);
         }
         &self.tab8
+    }
+
+    /// The per-value RGB table for the Colormap tone: each sample value is toned
+    /// to an 8-bit index (`map_u8`) and looked up in `palette`. Keyed on
+    /// `(lo, hi, palette_id, entries)` so a fixed palette/window reuses it.
+    fn map_rgb(
+        &mut self,
+        lo: f32,
+        hi: f32,
+        palette: &[[u8; 3]; 256],
+        palette_id: u8,
+        entries: usize,
+    ) -> &[[u8; 3]] {
+        let key = (lo.to_bits(), hi.to_bits(), palette_id, entries);
+        if self.key_rgb != Some(key) {
+            let map_f = map_u8(lo, hi);
+            self.tab_rgb.clear();
+            self.tab_rgb.reserve(entries);
+            self.tab_rgb
+                .extend((0..entries).map(|s| palette[map_f(s as f32) as usize]));
+            self.key_rgb = Some(key);
+        }
+        &self.tab_rgb
     }
 
     /// The 16-bit counterpart of [`map8`](Self::map8) (operator input range).
@@ -391,6 +485,44 @@ fn fill_rgba_decimated<T: Copy, U: Copy>(
                 out[o + 1] = map(v[base + 1]);
                 out[o + 2] = map(v[base + 2]);
             }
+        }
+    }
+}
+
+/// Write a per-pixel RGB triple (from the first channel of each interleaved
+/// pixel) into an RGBA buffer; alpha is left at whatever `out` holds (255). Used
+/// by the Colormap tone. `out` must already be `px * 4` long.
+fn fill_rgb<T: Copy>(out: &mut [u8], v: &[T], ch: usize, px: usize, rgb: impl Fn(T) -> [u8; 3]) {
+    for i in 0..px {
+        let c = rgb(v[i * ch]);
+        let o = i * 4;
+        out[o] = c[0];
+        out[o + 1] = c[1];
+        out[o + 2] = c[2];
+    }
+}
+
+/// Decimated [`fill_rgb`]: samples every `step`-th source pixel per axis from a
+/// `w`-wide source into an `ow × oh` output.
+#[allow(clippy::too_many_arguments)]
+fn fill_rgb_decimated<T: Copy>(
+    out: &mut [u8],
+    v: &[T],
+    w: usize,
+    ch: usize,
+    ow: usize,
+    oh: usize,
+    step: usize,
+    rgb: impl Fn(T) -> [u8; 3],
+) {
+    for oy in 0..oh {
+        let row = oy * step * w;
+        for ox in 0..ow {
+            let c = rgb(v[(row + ox * step) * ch]);
+            let o = (oy * ow + ox) * 4;
+            out[o] = c[0];
+            out[o + 1] = c[1];
+            out[o + 2] = c[2];
         }
     }
 }
@@ -578,5 +710,37 @@ mod tests {
             let o = (oy * 2 + ox) * 4;
             assert_eq!(scaled[o], full_tab[value]);
         }
+    }
+
+    /// The Colormap render maps each sample through its toned index into the
+    /// palette (RGB, not grey), and a flat window yields a constant colour.
+    #[test]
+    fn colormap_render_maps_through_palette() {
+        use crate::media::ToneLut;
+        use crate::palette::Palette;
+        let pal = Palette::Viridis;
+        let tab = pal.table();
+
+        // A 3-pixel mono ramp min/mid/max over the window [0, 255].
+        let f = FrameData::new([3, 1], 1, Samples::U8(vec![0, 128, 255]));
+        let mut lut = ToneLut::default();
+        let mut out = Vec::new();
+        let size = f.render_into_scaled_cmap(0.0, 255.0, 1, tab, pal.id(), &mut lut, &mut out);
+        assert_eq!(size, [3, 1]);
+        // Each pixel's RGB is palette[value], with alpha preserved (255).
+        for (i, &v) in [0u8, 128, 255].iter().enumerate() {
+            let o = i * 4;
+            assert_eq!([out[o], out[o + 1], out[o + 2]], tab[v as usize]);
+            assert_eq!(out[o + 3], 255);
+        }
+        // Endpoints are the palette ends and differ (it's a real colour ramp).
+        assert_eq!([out[0], out[1], out[2]], tab[0]);
+        assert_ne!([out[0], out[1], out[2]], [out[8], out[9], out[10]]);
+
+        // A flat window (lo == hi) collapses every sample to one palette colour.
+        let mut flat = Vec::new();
+        f.render_into_scaled_cmap(5.0, 5.0, 1, tab, pal.id(), &mut lut, &mut flat);
+        assert_eq!([flat[0], flat[1], flat[2]], [flat[4], flat[5], flat[6]]);
+        assert_eq!([flat[4], flat[5], flat[6]], [flat[8], flat[9], flat[10]]);
     }
 }

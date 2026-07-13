@@ -7,6 +7,7 @@ mod decoder;
 mod export;
 mod imageproc;
 mod media;
+mod palette;
 mod renderer;
 mod settings;
 #[cfg(test)]

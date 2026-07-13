@@ -594,14 +594,20 @@ impl CimApp {
         self.panes[idx].media.touch(target, self.clock); // staging keeps it hot
 
         let contrast = self.contrast_of(idx);
+        // Colormap is a plain (mono-only) palette render, done synchronously; it
+        // takes precedence over the proprietary operators (details is ignored).
+        let cmap = contrast == ContrastMode::Colormap
+            && frame.color_channels() == 1
+            && !frame.is_mask();
         // The proprietary operators only run on single-channel 16-bit frames with
         // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
         // render, so there's nothing heavy to push off-thread.
-        let heavy = crate::imageproc::ops_active(
-            &frame,
-            contrast == ContrastMode::LutAlpha,
-            self.details_of(idx),
-        );
+        let heavy = !cmap
+            && crate::imageproc::ops_active(
+                &frame,
+                contrast == ContrastMode::LutAlpha,
+                self.details_of(idx),
+            );
 
         if heavy {
             // Render off-thread. One render per pane at a time, so rapid tone /
@@ -634,13 +640,27 @@ impl CimApp {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             let debug = crate::debug::enabled();
             let t = debug.then(std::time::Instant::now);
-            let size = frame.render_into_scaled_lut(
-                lo,
-                hi,
-                step,
-                &mut self.panes[idx].tex.lut,
-                &mut self.render_scratch,
-            );
+            let size = if cmap {
+                // Colormap: false-colour the mono frame through the palette.
+                let pal = self.tone_of(idx).palette;
+                frame.render_into_scaled_cmap(
+                    lo,
+                    hi,
+                    step,
+                    pal.table(),
+                    pal.id(),
+                    &mut self.panes[idx].tex.lut,
+                    &mut self.render_scratch,
+                )
+            } else {
+                frame.render_into_scaled_lut(
+                    lo,
+                    hi,
+                    step,
+                    &mut self.panes[idx].tex.lut,
+                    &mut self.render_scratch,
+                )
+            };
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
             }
@@ -678,6 +698,7 @@ impl CimApp {
         let c = match self.contrast_of(idx) {
             ContrastMode::Linear => 0u8,
             ContrastMode::LutAlpha => 1,
+            ContrastMode::Colormap => 2,
         };
         let tone = self.tone_of(idx);
         c.hash(&mut h);
@@ -688,6 +709,8 @@ impl CimApp {
         tone.window.enabled.hash(&mut h);
         tone.window.lo.to_bits().hash(&mut h);
         tone.window.hi.to_bits().hash(&mut h);
+        // The Colormap palette changes the rendered colour.
+        tone.palette.id().hash(&mut h);
         self.details_of(idx).hash(&mut h);
         let region = self.panes[idx].region_tone;
         region.hash(&mut h);
@@ -710,9 +733,9 @@ impl CimApp {
             return (tone.window.lo, tone.window.hi);
         }
         let pct = tone.clip.percent;
-        // Clip only the built-in Linear map, and only when its toggle is on;
-        // LUT_ALPHA takes the full range and does its own contrast.
-        let clip = matches!(contrast, ContrastMode::Linear) && tone.clip.enabled;
+        // Clip the built-in maps (Linear and Colormap share the same bounds),
+        // only when the toggle is on; LUT_ALPHA takes the full range (own contrast).
+        let clip = contrast != ContrastMode::LutAlpha && tone.clip.enabled;
         let base = |clip: bool| {
             if clip {
                 frame.clip_bounds(pct)

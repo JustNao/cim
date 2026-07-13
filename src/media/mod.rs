@@ -272,8 +272,9 @@ impl FrameData {
         (cc, out)
     }
 
-    /// Channels that carry colour (alpha excluded) — used for stats.
-    fn color_channels(&self) -> usize {
+    /// Channels that carry colour (alpha excluded) — used for stats and to gate
+    /// the mono-only Colormap tone.
+    pub(crate) fn color_channels(&self) -> usize {
         if self.channels >= 3 {
             3
         } else {
