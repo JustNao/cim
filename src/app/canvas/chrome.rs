@@ -52,10 +52,20 @@ impl CimApp {
         let close_w = 44.0;
         let hide_w = 34.0;
         let reload_w = 26.0;
-        // The auto-reload (watch) toggle sits left of Reload, but only for panes
-        // backed by a file — a Compute pane has its own Auto-refresh instead.
+        // The Auto-reload (watch) toggle sits left of Reload, but only for panes
+        // backed by a file — a Compute pane has its own Auto-refresh instead. It's
+        // a labelled "Auto-reload" button; size it to its text so it never clips.
         let watchable = !matches!(self.panes[idx].source, Source::Computed);
-        let watch_w = if watchable { 26.0 } else { 0.0 };
+        let watch_w = if watchable {
+            let w = ui.fonts(|f| {
+                f.layout_no_wrap("Auto-reload".to_owned(), FontId::proportional(12.0), Color32::WHITE)
+                    .rect
+                    .width()
+            });
+            w + 14.0
+        } else {
+            0.0
+        };
 
         let count = self.panes[idx].media.frame_count();
         let name = self.panes[idx].media.name();
@@ -148,8 +158,9 @@ impl CimApp {
             self.deferred.push(Deferred::Reload(idx));
         }
 
-        // Auto-reload (watch) toggle, left of Reload. Amber ◉ while watching, a
-        // dim ○ otherwise; only shown for file-backed panes.
+        // Auto-reload (watch) toggle, left of Reload. A labelled button that fills
+        // blue while watching (matching the Transformations toggle), a plain hover
+        // fill otherwise; only shown for file-backed panes.
         if watchable {
             let watch = Rect::from_min_size(
                 Pos2::new(reload.min.x - watch_w, header.min.y),
@@ -163,17 +174,18 @@ impl CimApp {
                 } else {
                     "Auto-reload: watch the file and reload it when it changes on disk."
                 });
-            if watch_resp.hovered() {
+            if watching {
+                hp.rect_filled(watch, 0.0, Color32::from_rgb(70, 110, 160));
+            } else if watch_resp.hovered() {
                 hp.rect_filled(watch, 0.0, Color32::from_gray(70));
             }
-            let amber = Color32::from_rgb(240, 200, 80);
             hp.text(
                 watch.center(),
                 Align2::CENTER_CENTER,
-                if watching { "◉" } else { "○" },
-                FontId::proportional(14.0),
+                "Auto-reload",
+                FontId::proportional(12.0),
                 if watching {
-                    amber
+                    Color32::from_gray(230)
                 } else if watch_resp.hovered() {
                     Color32::from_gray(235)
                 } else {

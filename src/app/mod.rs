@@ -508,7 +508,7 @@ struct Pane {
     error: Option<String>,
     /// Background bulk-load mode for this pane (frame-bar / export buttons).
     eager: Eager,
-    /// Auto-reload file-watch state (the ◉ header toggle). See [`Watch`].
+    /// Auto-reload file-watch state (the "Auto-reload" header toggle). See [`Watch`].
     watch: Watch,
 }
 
@@ -517,7 +517,7 @@ struct Pane {
 /// it uses its own Auto-refresh).
 #[derive(Default)]
 struct Watch {
-    /// The ◉ toggle: whether this pane is watching its source at all.
+    /// The "Auto-reload" toggle: whether this pane is watching its source at all.
     on: bool,
     /// Signature of the currently-loaded on-disk contents, the baseline changes
     /// are measured against. `None` until the first successful stat establishes

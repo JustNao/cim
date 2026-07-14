@@ -558,13 +558,13 @@ per-pane footer values are always shown. In A/B the single footer (`draw_ab_foot
 shows the shared position with **both** A and B values.
 
 The header is a **single row** (`header_h_for`, feeding `image_area`): the
-**Transformations** button on the left, the title, then the **◉ auto-reload**
+**Transformations** button on the left, the title, then the **Auto-reload**
 toggle, **⟳ Reload** (re-reads this media from disk → `pending_reload`), **Hide**
 (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on the
 right, matching styles (Close tints red on hover to flag that it removes the pane).
 
-**Auto-reload (file watch).** The **◉** toggle (amber while on, left of ⟳ Reload;
-hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
+**Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
+⟳ Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
 `poll_watches` (run each `update`, before `refresh_textures`) stats the pane's
 source file(s) — `source_file_sig` = latest mtime + total length across
 `Source::File` / `Source::Sequence` — and reloads the pane once a change has

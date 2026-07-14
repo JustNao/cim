@@ -1,4 +1,4 @@
-//! Auto-reload file watching (the header's ◉ toggle): stat the pane's source
+//! Auto-reload file watching (the header's "Auto-reload" toggle): stat the pane's source
 //! file(s) each update and reload once a change has settled, so a file still
 //! being written externally isn't read half-finished.
 
