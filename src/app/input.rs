@@ -21,11 +21,18 @@ impl CimApp {
             Action::NextFrame => {
                 self.pending_seek = None; // manual step cancels an automatic seek
                 self.playback.prefetch = None; // …and any in-flight playback step
+                // Step within the active loop window (the same one playback
+                // obeys), not the whole timeline.
                 let tl = self.timeline_len();
-                if self.shared_frame + 1 < tl {
+                let (lo, hi) = self.loop_bounds(tl);
+                let full = self.playback.loop_range.is_none();
+                let f = self.shared_frame;
+                if lo <= f && f < hi {
                     self.shared_frame += 1;
+                } else if !full {
+                    self.shared_frame = lo; // sub-range: wrap at its edges
                 } else if self.current_at_end() {
-                    self.shared_frame = 0; // wrap only once the real length is known
+                    self.shared_frame = lo; // full range: wrap once length is known
                 }
                 // else hold at the frontier; lookahead extends it shortly
             }
@@ -33,10 +40,15 @@ impl CimApp {
                 self.pending_seek = None; // manual step cancels an automatic seek
                 self.playback.prefetch = None; // …and any in-flight playback step
                 let tl = self.timeline_len();
-                if self.shared_frame > 0 {
+                let (lo, hi) = self.loop_bounds(tl);
+                let full = self.playback.loop_range.is_none();
+                let f = self.shared_frame;
+                if lo < f && f <= hi {
                     self.shared_frame -= 1;
+                } else if !full {
+                    self.shared_frame = hi; // sub-range: wrap at its edges
                 } else if self.current_at_end() {
-                    self.shared_frame = tl - 1;
+                    self.shared_frame = hi; // full range: wrap once length is known
                 }
             }
             Action::ResetView => {
@@ -96,9 +108,14 @@ impl CimApp {
         // and the timeline only advances once every on-screen pane has that frame
         // ready (`refresh_textures` clears it on commit). While one is in flight,
         // wait — so a slow operator paces playback instead of the counter racing
-        // ahead of the image. Drop the backlog so we don't burst once it lands.
+        // ahead of the image. Keep accumulating real time so the gate's own
+        // latency doesn't stretch the frame interval (the next frame is due `step`
+        // after this one *fired*, not after it committed), but cap the backlog at
+        // one step so a slow operator can't burst several frames when it lands.
         if self.playback.prefetch.is_some() {
-            self.playback.accum = 0.0;
+            let dt = ctx.input(|i| i.stable_dt).min(0.25);
+            let step = 1.0 / self.playback.fps.max(0.1);
+            self.playback.accum = (self.playback.accum + dt).min(step);
             return;
         }
         let tl = self.timeline_len();

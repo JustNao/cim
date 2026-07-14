@@ -124,23 +124,13 @@ impl CimApp {
             if ui.button(play).clicked() {
                 self.playback.playing = !self.playback.playing;
             }
+            // Step through `apply_action` so these obey the active loop window
+            // exactly like the keyboard / Ctrl+wheel controls.
             if ui.button("Prev").on_hover_text("Previous frame").clicked() {
-                self.pending_seek = None;
-                self.playback.prefetch = None;
-                if self.shared_frame > 0 {
-                    self.shared_frame -= 1;
-                } else if at_end {
-                    self.shared_frame = len - 1;
-                }
+                self.apply_action(Action::PrevFrame, ui.ctx());
             }
             if ui.button("Next").on_hover_text("Next frame").clicked() {
-                self.pending_seek = None;
-                self.playback.prefetch = None;
-                if self.shared_frame + 1 < len {
-                    self.shared_frame += 1;
-                } else if at_end {
-                    self.shared_frame = 0;
-                }
+                self.apply_action(Action::NextFrame, ui.ctx());
             }
             ui.separator();
 

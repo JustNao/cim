@@ -64,21 +64,20 @@ pub struct RenderPool {
     /// Cloned into each worker; results from every pane funnel back here.
     done_tx: mpsc::Sender<RenderDone>,
     done_rx: mpsc::Receiver<RenderDone>,
-}
-
-impl Default for RenderPool {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Woken (`request_repaint`) when a render lands, so the lock-step commit
+    /// runs the moment a heavy pane is ready rather than on the next paced
+    /// repaint (which, during playback, is a whole frame interval away).
+    ctx: eframe::egui::Context,
 }
 
 impl RenderPool {
-    pub fn new() -> Self {
+    pub fn new(ctx: eframe::egui::Context) -> Self {
         let (done_tx, done_rx) = mpsc::channel::<RenderDone>();
         Self {
             workers: HashMap::new(),
             done_tx,
             done_rx,
+            ctx,
         }
     }
 
@@ -90,6 +89,7 @@ impl RenderPool {
         if !self.workers.contains_key(&id) {
             let (job_tx, job_rx) = mpsc::channel::<RenderJob>();
             let done_tx = self.done_tx.clone();
+            let ctx = self.ctx.clone();
             thread::spawn(move || {
                 // The worker owns this pane's render state (and, later, its
                 // proprietary operator instances) for the life of the thread.
@@ -98,6 +98,8 @@ impl RenderPool {
                     if done_tx.send(worker.render(job)).is_err() {
                         break; // UI gone: shutting down
                     }
+                    // Wake the UI to commit this render promptly (see `ctx`).
+                    ctx.request_repaint();
                 }
                 // Channel closed (`forget` / shutdown): `worker` drops here, on
                 // this thread, destroying its operator instances.

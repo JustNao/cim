@@ -58,7 +58,12 @@ pub struct BackgroundDecoder {
 }
 
 impl BackgroundDecoder {
-    pub fn new(threads: usize) -> Self {
+    /// `ctx` is woken (`request_repaint`) whenever a job finishes, so a landed
+    /// frame is picked up (and, during render-gated playback, committed) the
+    /// instant it's ready instead of on the next paced repaint — otherwise the
+    /// gate waits up to a whole frame interval and playback runs at a fraction of
+    /// the requested fps.
+    pub fn new(threads: usize, ctx: eframe::egui::Context) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         let job_rx = Arc::new(Mutex::new(job_rx));
@@ -68,6 +73,7 @@ impl BackgroundDecoder {
             let job_rx = Arc::clone(&job_rx);
             let done_tx = done_tx.clone();
             let readers = Arc::clone(&readers);
+            let ctx = ctx.clone();
             thread::spawn(move || loop {
                 // Hold the job lock only for the hand-off, then decode unlocked
                 // so other workers can pick up queued jobs in parallel.
@@ -131,6 +137,8 @@ impl BackgroundDecoder {
                 {
                     break;
                 }
+                // Wake the UI to drain this result promptly (see `new`).
+                ctx.request_repaint();
             });
         }
 

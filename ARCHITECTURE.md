@@ -479,7 +479,11 @@ the manager's **Control** selector chooses which.
 Playback loops over a **window** `loop_bounds(len)` — a user sub-range (`loop_range`,
 set by dragging the scrubber brackets; `None` = whole sequence). A full range with an
 undiscovered end holds at the frontier rather than wrapping; a sub-range wraps/stops
-immediately. `draw_scrubber` shades resident frames (contiguous runs merged), dims
+immediately. **The manual next/previous-frame controls obey the same window**
+(`apply_action(NextFrame/PrevFrame)`, shared by the keys, the Ctrl+wheel scrub, and the
+frame-bar Prev/Next buttons via `ui.ctx()`): stepping inside `[lo, hi]` moves one frame;
+at an edge a sub-range wraps to the other edge, a full range wraps only once the real end
+is known (else holds at the frontier). `draw_scrubber` shades resident frames (contiguous runs merged), dims
 outside the window, and draws the brackets. `advance_playback` accumulates
 `stable_dt`, steps at `fps`, and advances unsynced panes independently. With a
 **fast-forward stride** (`fast_forward` > 1, §6) it steps by `fast_forward` frames
@@ -491,9 +495,12 @@ frontier frames, so playback skims a big sequence without reading every frame.
 directly. When the accumulator is due, `advance_playback` picks the next frame and parks
 it in `play_prefetch` (the candidate next shared frame), then stages the panes toward it;
 `refresh_textures` advances `shared_frame` to it only on the commit — i.e. once **every**
-on-screen pane has that frame ready. While a prefetch is in flight the accumulator is
-zeroed (no burst), so a slow proprietary operator **paces** playback instead of the frame
-counter racing ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
+on-screen pane has that frame ready. While a prefetch is in flight the accumulator **keeps
+counting real time but is capped at one `step`**: the gate's own latency doesn't stretch
+the frame interval (the next frame is due `step` after this one *fired*, not after it
+committed), yet a slow proprietary operator still **paces** playback — at most one frame
+fires the moment a long gate lands, never a burst — instead of the frame counter racing
+ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
 pause, any manual next/prev/seek, and length clamping; unsynced panes advance their own
 frame in step, staged the same way.
 
@@ -873,10 +880,22 @@ as does the modal `error_popup`. (There is no per-pane decode spinner — a pane
 last committed frame while the next one decodes / renders; see §7.)
 
 **Paced repaint** (not `request_repaint()` at monitor rate — pure waste over VNC):
-playback requests `request_repaint_after(1/fps)`; a pending background decode, an
+playback wakes when the **next frame is due** — `request_repaint_after(step −
+playback.accum)`, not a fixed `1/fps` interval, so a render-gated commit that already
+consumed part of the interval doesn't push the next frame late (while a playback step is
+**in flight** awaiting its gate it instead sets a slow `DECODE_POLL` fallback, since the
+worker wakes it the instant the frame lands — below); a pending background decode, an
 **in-flight tone render** (`render_inflight`), **or a running export** (which encodes on
 its own thread — we just poll progress) wakes every `DECODE_POLL` (~30 fps, enough to
 pick up landed frames and commit them); a fully idle app requests no repaint at all.
+
+**Worker wake-ups.** Both the decode pool (`decoder.rs`) and the tone-render pool
+(`renderer.rs`) hold a cloned `egui::Context` and call `request_repaint()` the instant a
+job finishes, so a landed frame / render is drained (and, during **render-gated
+playback**, committed) immediately rather than on the next paced repaint. Without this the
+gate waited up to a whole frame interval for the paced tick, so playback ran at a fraction
+of the requested fps whenever a frame needed a decode or an off-thread render (moving the
+mouse — which forces input-driven repaints — masked it by waking the loop constantly).
 
 Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_create`,
 `error_popup`) avoid mutating panes mid-draw.
@@ -912,8 +931,11 @@ the synchronous render so a grid of sequences doesn't render/copy/upload full-re
 the screen can't show; seamless across 1×), **playback decode prefetch** (§5 — overlap
 decode with display so first-pass / multi-pane playback doesn't stall on decode latency,
 now **fair-dispatched** across panes and **adaptive-depth** on measured decode latency),
-and a **configurable decode-thread count** (§5 — cap the pool per instance on a shared
-host). For shared multi-user servers there's also a **">8 sequences" resource warning**
+**worker wake-ups + accum-aware playback pacing** (§13/§8 — the decode/render pools
+`request_repaint` on completion and playback wakes when the next frame is actually due, so
+render-gated playback holds the requested fps instead of collapsing to a fraction of it
+when frames need a decode / off-thread render), and a **configurable decode-thread count**
+(§5 — cap the pool per instance on a shared host). For shared multi-user servers there's also a **">8 sequences" resource warning**
 (§13) before opening a heavy number of sequences at once. Remaining candidates: minor
 per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /
 lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads

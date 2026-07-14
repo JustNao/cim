@@ -805,7 +805,7 @@ impl CimApp {
             deferred: Vec::new(),
             pending_open: None,
             pending_view: None,
-            decoder: BackgroundDecoder::new(threads),
+            decoder: BackgroundDecoder::new(threads, cc.egui_ctx.clone()),
             auto_decode_threads,
             decode_threads_active: threads,
             cpp_dir_active,
@@ -814,7 +814,7 @@ impl CimApp {
             // thread-safety we can't assume) while still keeping all of that work
             // off the UI thread. Raise this once LUT_ALPHA / DETAILS_ENHANCED are
             // known to be reentrant, to render several panes in parallel.
-            renderer: crate::renderer::RenderPool::new(),
+            renderer: crate::renderer::RenderPool::new(cc.egui_ctx.clone()),
             render_inflight: HashSet::new(),
             metrics: crate::debug::Metrics::default(),
             decode_ema_secs: 0.0,
@@ -1279,7 +1279,7 @@ impl CimApp {
         // persistent readers are dropped and reopen on demand.
         let want_threads = self.resolve_decode_threads();
         if want_threads != self.decode_threads_active {
-            self.decoder = BackgroundDecoder::new(want_threads);
+            self.decoder = BackgroundDecoder::new(want_threads, ctx.clone());
             self.inflight.clear();
             self.decode_threads_active = want_threads;
         }
@@ -1540,8 +1540,22 @@ impl eframe::App for CimApp {
         // progress) only needs an occasional wake-up. Idle with nothing pending:
         // no repaint is requested at all.
         if self.playback.playing {
-            let dt = (1.0 / self.playback.fps.max(1.0)).clamp(1.0 / 120.0, 0.1);
-            ctx.request_repaint_after(std::time::Duration::from_secs_f32(dt));
+            let step = 1.0 / self.playback.fps.max(1.0);
+            let wait = if self.playback.prefetch.is_some() {
+                // A step is staged, waiting for the render-gated commit. The
+                // decode / render worker wakes us the instant it lands (see the
+                // pools' `request_repaint`), so we don't wait a whole frame
+                // interval here — just set a slow fallback rather than busy-spin
+                // if the commit is slow.
+                DECODE_POLL
+            } else {
+                // Wake when the *next* frame is due: the time left for the
+                // accumulator to reach one step. A fixed `step` interval would
+                // drift late whenever a gate already consumed part of it.
+                let remaining = (step - self.playback.accum).clamp(1.0 / 120.0, 0.1);
+                std::time::Duration::from_secs_f32(remaining)
+            };
+            ctx.request_repaint_after(wait);
         } else if self.pending_seek.is_some() || (0..self.panes.len()).any(|i| self.catching_up(i)) {
             // Actively riding the frontier (a length-discovery seek, or a pane
             // catching up to an advanced timeline): each probe grows the length
