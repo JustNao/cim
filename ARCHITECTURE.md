@@ -968,8 +968,12 @@ per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code.
 per-stage timing profiler and a **Debug** toolbar button (both hidden otherwise, so
 there's zero cost in a normal run — `debug::enabled()` reads the env var once and every
 record site is gated on it). Each stage on the read→display path records into a bounded
-ring buffer (last ~120 samples → last/avg/min/max): **Decode** (read+decode, timed on the
-decode worker and carried back on `Done.elapsed`), **LUT / tone render** and **Operators**
+ring buffer (last ~120 samples → last/avg/min/max): **Read (file I/O)** and **Decode
+(CPU)** — split at a `TimedFile` shim under the persistent TIFF reader that accumulates
+time spent inside `read`/`seek` calls (the `tiff` crate interleaves reads with
+decompression, so the I/O layer is the only place the two can be told apart; carried back
+per job on `Done.elapsed`/`Done.io`; an OS-page-cache hit reads as near-zero I/O, and a
+standalone still can't split so it records wholly as Decode) —, **LUT / tone render** and **Operators**
 (LUT_ALPHA/details, split and timed on the render worker via `RenderDone.lut_time/ops_time`,
 plus the synchronous cheap-pane LUT timed in `stage`), **Texture upload** (`ColorImage` build
 + GPU upload), and **Update** (the whole `update` CPU frame, excluding the GPU paint eframe

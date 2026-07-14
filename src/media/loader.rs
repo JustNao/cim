@@ -3,8 +3,9 @@
 //! [`SeqReader`] (plus the TIFF bilevel-mask bit handling).
 
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -172,6 +173,38 @@ fn decode_still_frame(path: &Path) -> Result<FrameData> {
     Ok(FrameData::new([w, h], channels, samples))
 }
 
+/// A `File` wrapped so the wall-clock time spent inside its `read` / `seek`
+/// calls accumulates into a shared counter. The `tiff` crate interleaves file
+/// reads with decompression inside `read_image`, so the I/O layer is the only
+/// place true file time can be told apart from CPU decode — [`SeqReader`]
+/// reports it per decode via `take_io`, splitting the profiler's Decode stage
+/// into **Read (file I/O)** and **Decode (CPU)**. Two `Instant::now` per
+/// syscall is noise next to the syscall itself, so it's not debug-gated.
+struct TimedFile {
+    file: File,
+    io_nanos: Arc<AtomicU64>,
+}
+
+impl Read for TimedFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let t = std::time::Instant::now();
+        let r = self.file.read(buf);
+        self.io_nanos
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+}
+
+impl Seek for TimedFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let t = std::time::Instant::now();
+        let r = self.file.seek(pos);
+        self.io_nanos
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        r
+    }
+}
+
 /// A persistent TIFF reader for one sequence.
 ///
 /// The `tiff` crate caches the byte offset of each IFD it has walked, but only
@@ -179,15 +212,28 @@ fn decode_still_frame(path: &Path) -> Result<FrameData> {
 /// that cache warm, so seeking to page `k` no longer re-walks the whole IFD
 /// chain from the start on every decode (which made a sweep O(N²)).
 pub struct SeqReader {
-    dec: Decoder<BufReader<File>>,
+    dec: Decoder<BufReader<TimedFile>>,
+    io_nanos: Arc<AtomicU64>,
 }
 
 impl SeqReader {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+        let io_nanos = Arc::new(AtomicU64::new(0));
         Ok(Self {
-            dec: Decoder::new(BufReader::new(file))?,
+            dec: Decoder::new(BufReader::new(TimedFile {
+                file,
+                io_nanos: Arc::clone(&io_nanos),
+            }))?,
+            io_nanos,
         })
+    }
+
+    /// Drain the accumulated file-I/O time (reads + seeks) since the last call.
+    /// The decode worker takes it once per job, so each `Done` carries the I/O
+    /// share of that decode for the profiler.
+    pub fn take_io(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.io_nanos.swap(0, Ordering::Relaxed))
     }
 
     /// Decode page `idx` at native bit depth, or `Ok(None)` when `idx` is past
@@ -211,7 +257,7 @@ impl SeqReader {
     }
 }
 
-fn decode_current(dec: &mut Decoder<BufReader<File>>) -> Result<FrameData> {
+fn decode_current<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<FrameData> {
     let (w, h) = dec.dimensions()?;
     let (w, h) = (w as usize, h as usize);
     let color = dec.colortype()?;

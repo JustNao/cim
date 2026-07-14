@@ -1,9 +1,10 @@
 //! Optional pipeline profiling, gated on the `CIM_DEBUG=1` environment variable.
 //!
 //! When enabled, each stage a frame passes through on its way to the screen —
-//! background **read + decode**, the **LUT / tone render**, the proprietary
-//! **operators** (LUT_ALPHA / details), the **texture upload**, and the whole
-//! **update** (CPU frame) — records its duration into a small ring buffer. The
+//! background **file read** and **CPU decode** (split at the I/O shim under the
+//! TIFF reader), the **LUT / tone render**, the proprietary **operators**
+//! (LUT_ALPHA / details), the **texture upload**, and the whole **update**
+//! (CPU frame) — records its duration into a small ring buffer. The
 //! debug window (`app::panels::draw_debug`, reachable from the toolbar's
 //! **Debug** button) reports last / average / min / max per stage so bottlenecks
 //! are easy to spot. When the variable is unset the recording sites are no-ops
@@ -69,7 +70,15 @@ impl Stage {
 /// Timings for every measured stage of the read → display pipeline.
 #[derive(Default)]
 pub struct Metrics {
-    /// Background read + decode of one frame (off the UI thread).
+    /// File I/O (`read`/`seek` calls) inside one frame's decode, timed at the
+    /// `TimedFile` shim under the persistent TIFF reader. The decode stage below
+    /// excludes this, so the two rows split disk time from CPU decompress. Note
+    /// an OS-cached read is near-zero here — a small value means the pages are
+    /// coming from the page cache, not that the disk is fast.
+    pub read: Stage,
+    /// CPU decompress of one frame (off the UI thread): the decode job's total
+    /// minus its file I/O. (A standalone still — non-sequence — job can't split
+    /// the two and records its whole read+decode here.)
     pub decode: Stage,
     /// LUT / tone map to display RGBA (the synchronous path and the async gray
     /// render both feed this).

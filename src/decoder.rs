@@ -31,6 +31,11 @@ pub struct Done {
     pub result: Result<Decoded>,
     /// Wall-clock spent reading + decoding this job (for the `CIM_DEBUG` profiler).
     pub elapsed: std::time::Duration,
+    /// The share of `elapsed` spent inside file `read`/`seek` calls (true I/O;
+    /// the rest is CPU decompress). Only the persistent-reader TIFF path splits
+    /// this out — a standalone `File` job reports zero (its decode stage then
+    /// still means read + decode, as before).
+    pub io: std::time::Duration,
 }
 
 /// The outcome of a job.
@@ -83,6 +88,7 @@ impl BackgroundDecoder {
                 };
 
                 let started = std::time::Instant::now();
+                let mut io = std::time::Duration::ZERO;
                 let result = match &job.req {
                     // Multi-page TIFF: decode (or, when `probe`, metadata-only
                     // check) `page` through the file's persistent reader (keyed
@@ -113,10 +119,16 @@ impl BackgroundDecoder {
                                     Decoded::End
                                 }
                             }),
-                            Ok(r) => r.lock().unwrap().decode(*page).map(|f| match f {
-                                Some(f) => Decoded::Frame(Arc::new(f)),
-                                None => Decoded::End,
-                            }),
+                            Ok(r) => {
+                                let mut reader = r.lock().unwrap();
+                                reader.take_io(); // clear residue from prior probes
+                                let res = reader.decode(*page).map(|f| match f {
+                                    Some(f) => Decoded::Frame(Arc::new(f)),
+                                    None => Decoded::End,
+                                });
+                                io = reader.take_io(); // this decode's file-I/O share
+                                res
+                            }
                             Err(e) => Err(e),
                         }
                     }
@@ -132,6 +144,7 @@ impl BackgroundDecoder {
                         frame: job.frame,
                         result,
                         elapsed: started.elapsed(),
+                        io,
                     })
                     .is_err()
                 {

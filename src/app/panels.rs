@@ -211,10 +211,7 @@ impl CimApp {
             if ui
                 .add(egui::DragValue::new(&mut ff).range(1..=1_000_000).speed(0.1))
                 .on_hover_text(
-                    "Fast-forward stride: decode only 1 of every N frames; the N-1 \
-                     between are skimmed by header lookahead (never decoded). Applies \
-                     to Load all AND playback (which then steps by N frames), to skim \
-                     a big sequence without reading every frame.",
+                    "Fast-forward stride",
                 )
                 .changed()
             {
@@ -451,14 +448,13 @@ impl CimApp {
     pub(super) fn draw_debug(&mut self, ctx: &egui::Context) {
         use crate::debug::Stage;
         let mut open = self.show_debug;
-        egui::Window::new("⏱ Debug — pipeline timing")
+        egui::Window::new("Debug — pipeline timing")
             .open(&mut open)
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
                 ui.label(
-                    "Time each frame spends per stage on its way to the screen \
-                     (milliseconds, over the last ~120 samples).",
+                    "Time each frame spends per stage on its way to the screen.",
                 );
                 ui.add_space(6.0);
 
@@ -487,22 +483,13 @@ impl CimApp {
                         ui.end_row();
 
                         let m = &self.metrics;
-                        row(ui, "Decode (read+decode)", &m.decode);
+                        row(ui, "Read (file I/O)", &m.read);
+                        row(ui, "Decode (CPU)", &m.decode);
                         row(ui, "LUT / tone render", &m.lut);
                         row(ui, "Operators (LUT_ALPHA/details)", &m.operators);
                         row(ui, "Texture upload", &m.upload);
                         row(ui, "Update (CPU frame)", &m.frame);
                     });
-
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Decode & operators run off the UI thread; upload / LUT (cheap panes) \
-                         and Update run on it. Update excludes the GPU paint eframe does after.",
-                    )
-                    .weak()
-                    .small(),
-                );
             });
         self.show_debug = open;
     }

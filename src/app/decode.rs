@@ -15,8 +15,13 @@ impl CimApp {
             match d.result {
                 Ok(Decoded::Frame(frame)) => {
                     // Only a real decode (not a metadata-only probe) counts.
+                    // The TIFF path splits file I/O from CPU decompress (`d.io`);
+                    // a standalone-file job can't and reports it all as decode.
                     if debug {
-                        self.metrics.decode.record(d.elapsed);
+                        self.metrics.decode.record(d.elapsed.saturating_sub(d.io));
+                        if !d.io.is_zero() {
+                            self.metrics.read.record(d.io);
+                        }
                     }
                     // Always-on latency EMA (α = 1/8) driving adaptive prefetch depth.
                     let s = d.elapsed.as_secs_f32();
