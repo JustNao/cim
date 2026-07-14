@@ -155,7 +155,7 @@ impl CimApp {
                                 }
                                 let mut out = egui::TextEdit::singleline(&mut self.rotation_edit)
                                     .id(Id::new(("rot_edit", pane_id)))
-                                    .desired_width(44.0)
+                                    .desired_width(30.0)
                                     .show(ui);
                                 if out.response.gained_focus() {
                                     self.rotation_edit_pane = Some(pane_id);
@@ -188,8 +188,7 @@ impl CimApp {
                                 // than clipped at the top by the taller slider row.
                                 if ui
                                     .add(
-                                        egui::Button::new("⟲")
-                                            .min_size(egui::vec2(0.0, ui.spacing().interact_size.y)),
+                                        egui::Button::new("Reset"),
                                     )
                                     .on_hover_text("Reset to 0°")
                                     .clicked()
@@ -382,9 +381,9 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
         ui.add_enabled(
             tone.clip.enabled,
             egui::DragValue::new(&mut tone.clip.percent)
-                .speed(0.005)
+                .speed(0.01)
                 .range(0.0..=49.0)
-                .max_decimals(3)
+                .max_decimals(2)
                 .suffix(" %"),
         )
         .on_hover_text("Percentile clipped at each tail before the stretch");
@@ -393,7 +392,7 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
         if ui
             .add_enabled(
                 tone.clip.enabled && tone.clip.percent != default_pct,
-                egui::Button::new("⟲").small(),
+                egui::Button::new("Reset"),
             )
             .on_hover_text(format!("Reset to the default ({default_pct} %)"))
             .clicked()
