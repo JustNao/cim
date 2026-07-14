@@ -370,16 +370,17 @@ fn draw_tone_options(
 /// The clip toggle/percentile and the "Share clip" row, shared by the Linear and
 /// Colormap tones (both stretch the native range the same way before display).
 fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
-    // Clip toggle + its per-tail percentile (greyed out when the toggle is off,
-    // or when "Share clip" overrides this pane's own bounds). On for >8-bit by
-    // default, off for 8-bit (set in add_pane).
-    let shared = tone.share_clip;
+    // Clip toggle + its per-tail percentile (percentile greyed only when the
+    // toggle is off). On for >8-bit by default, off for 8-bit (set in add_pane).
+    // These are NOT greyed out under "Share clip": since Share clip rides the
+    // Transformations sync, the clip toggle/percentile edited on any synced pane
+    // is the very statistic the Control media derives its shared [lo, hi] from.
     ui.label("Clip");
     ui.horizontal(|ui| {
-        ui.add_enabled(!shared, egui::Checkbox::without_text(&mut tone.clip.enabled))
+        ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
             .on_hover_text("Clip a percentile off each tail before the stretch");
         ui.add_enabled(
-            !shared && tone.clip.enabled,
+            tone.clip.enabled,
             egui::DragValue::new(&mut tone.clip.percent)
                 .speed(0.005)
                 .range(0.0..=49.0)
@@ -390,11 +391,12 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     });
     ui.end_row();
 
-    // Share clip: lock this pane's display bounds to the Control media's
-    // [lo, hi], so panes share identical bounds (overrides this pane's own clip).
+    // Share clip: apply the Control media's exact [lo, hi] LUT to every pane, so
+    // all panes share identical clamp/scaling (even if it over/under-saturates
+    // some) rather than each auto-normalising. Rides the Transformations sync.
     ui.label("Share clip");
     ui.add(egui::Checkbox::without_text(&mut tone.share_clip)).on_hover_text(
-        "Use the Control media's display bounds (lo/hi) — lock panes to identical bounds",
+        "Apply the Control media's exact LUT (lo/hi) to every pane — identical clamp/scaling",
     );
     ui.end_row();
 }
