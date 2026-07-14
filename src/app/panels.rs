@@ -483,12 +483,12 @@ impl CimApp {
                         ui.end_row();
 
                         let m = &self.metrics;
-                        row(ui, "Read (file I/O)", &m.read);
-                        row(ui, "Decode (CPU)", &m.decode);
-                        row(ui, "LUT / tone render", &m.lut);
-                        row(ui, "Operators (LUT_ALPHA/details)", &m.operators);
+                        row(ui, "Read", &m.read);
+                        row(ui, "Decode", &m.decode);
+                        row(ui, "Render", &m.lut);
+                        row(ui, "Custom operators", &m.operators);
                         row(ui, "Texture upload", &m.upload);
-                        row(ui, "Update (CPU frame)", &m.frame);
+                        row(ui, "Global update", &m.frame);
                     });
             });
         self.show_debug = open;
@@ -738,7 +738,7 @@ impl CimApp {
 
                                 ui.horizontal(|ui| {
                                     if ui
-                                        .small_button("⟳")
+                                        .small_button("Reload")
                                         .on_hover_text("Reload this media from disk")
                                         .clicked()
                                     {
