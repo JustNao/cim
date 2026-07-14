@@ -388,6 +388,18 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
                 .suffix(" %"),
         )
         .on_hover_text("Percentile clipped at each tail before the stretch");
+        // Reset the percentile back to the default.
+        let default_pct = crate::settings::ClipOptions::default().percent;
+        if ui
+            .add_enabled(
+                tone.clip.enabled && tone.clip.percent != default_pct,
+                egui::Button::new("⟲").small(),
+            )
+            .on_hover_text(format!("Reset to the default ({default_pct} %)"))
+            .clicked()
+        {
+            tone.clip.percent = default_pct;
+        }
     });
     ui.end_row();
 
