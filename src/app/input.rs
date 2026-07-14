@@ -102,8 +102,24 @@ impl CimApp {
     pub(super) fn advance_playback(&mut self, ctx: &egui::Context) {
         if !self.playback.playing {
             self.playback.prefetch = None; // pausing abandons any in-flight step
+            self.playback.last_tick = None; // resume starts timing afresh
             return;
         }
+        // Wall-clock dt (`i.time` is an accurate absolute clock). NOT
+        // `i.stable_dt`: egui substitutes a fixed `predicted_dt` (1/60 s) for the
+        // real elapsed time on any frame that wasn't preceded by an *immediate*
+        // repaint request — which is every paced `request_repaint_after` wake-up,
+        // i.e. all of playback when the user isn't providing input. With that,
+        // a 25 fps setting was credited only ~17 ms per ~40 ms wake and played at
+        // a fraction of the requested rate (input events masked it by making the
+        // dts real again — moving the mouse visibly sped playback up).
+        let now = ctx.input(|i| i.time);
+        let dt = self
+            .playback
+            .last_tick
+            .map_or(0.0, |t| ((now - t) as f32).clamp(0.0, 0.25));
+        self.playback.last_tick = Some(now);
+        let step = 1.0 / self.playback.fps.max(0.1);
         // Playback is render-gated: a step is pre-rendered into `play_prefetch`,
         // and the timeline only advances once every on-screen pane has that frame
         // ready (`refresh_textures` clears it on commit). While one is in flight,
@@ -113,8 +129,6 @@ impl CimApp {
         // after this one *fired*, not after it committed), but cap the backlog at
         // one step so a slow operator can't burst several frames when it lands.
         if self.playback.prefetch.is_some() {
-            let dt = ctx.input(|i| i.stable_dt).min(0.25);
-            let step = 1.0 / self.playback.fps.max(0.1);
             self.playback.accum = (self.playback.accum + dt).min(step);
             return;
         }
@@ -128,15 +142,14 @@ impl CimApp {
         if hi <= lo && at_end {
             return;
         }
-        let dt = ctx.input(|i| i.stable_dt).min(0.25);
         self.playback.accum += dt;
-        let step = 1.0 / self.playback.fps.max(0.1);
         if self.playback.accum < step {
             return;
         }
-        // One frame per commit — the render gate, not the accumulator, paces us
-        // when an operator is slow, so never carry a backlog into a burst.
-        self.playback.accum = 0.0;
+        // Carry the overshoot into the next interval (else per-frame lateness —
+        // e.g. the wake landing a few ms past due — compounds into a rate error),
+        // but cap the surplus at one step so a stall can't burst several frames.
+        self.playback.accum = (self.playback.accum - step).min(step);
 
         // Fast-forward: advance by `ff` frames per step, skimming the ones in
         // between (they're never staged, and the frontier is discovered by header

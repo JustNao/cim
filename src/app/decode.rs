@@ -558,11 +558,13 @@ impl CimApp {
     /// by `refresh_textures`. Returns whether `target` is ready — already in `tex`,
     /// or staged in `pending`.
     ///
-    /// The plain LUT render (Linear / Linear+Clip, and masks) is cheap and stays
-    /// **synchronous**. The heavy proprietary operators (LUT_ALPHA / details)
-    /// render on the [`RenderPool`] and land in `pending` via `pump_render`, so a
-    /// slow operator never blocks the UI thread. An errored pane reports ready so
-    /// it can't stall a lockstep commit.
+    /// The plain LUT render (Linear / Linear+Clip, and masks) of a small or
+    /// decimated frame is cheap and stays **synchronous**. The heavy proprietary
+    /// operators (LUT_ALPHA / details) — and a plain LUT of a **large**
+    /// full-resolution frame (`ASYNC_RENDER_PIXELS`), which is itself tens of
+    /// milliseconds — render on the [`RenderPool`] and land in `pending` via
+    /// `pump_render`, so neither a slow operator nor a big frame blocks the UI
+    /// thread. An errored pane reports ready so it can't stall a lockstep commit.
     fn stage(&mut self, ctx: &egui::Context, idx: usize, target: usize, ppp: f32) -> bool {
         if self.panes[idx].error.is_some() {
             return true; // can't produce a frame; keep the last texture
@@ -608,8 +610,20 @@ impl CimApp {
                 contrast == ContrastMode::LutAlpha,
                 self.details_of(idx),
             );
+        // A plain LUT render of a *large* full-resolution frame is itself tens of
+        // milliseconds — done synchronously it blocks this whole update, which
+        // reads as a regular hitch when playback steps while the user pans at
+        // 60 Hz. Push it to the render pool too (the worker's plain-LUT path is
+        // pixel-identical by test), leaving only the texture upload on the UI
+        // thread. Only at `step == 1`: a decimated (minified) render is small and
+        // cheap, and the worker renders full-resolution only, so its result would
+        // never match a `step > 1` commit.
+        let big = !cmap
+            && !heavy
+            && step == 1
+            && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
 
-        if heavy {
+        if heavy || big {
             // Render off-thread. One render per pane at a time, so rapid tone /
             // frame changes coalesce instead of piling up jobs.
             let id = self.panes[idx].id;
@@ -681,7 +695,8 @@ impl CimApp {
         let t = crate::debug::enabled().then(std::time::Instant::now);
         let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
-        // Heavy proprietary-operator renders run at full resolution (step 1).
+        // Off-thread renders (operators, or a big plain LUT) run at full
+        // resolution (step 1) — see `stage`.
         set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, f, sig, 1);
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());

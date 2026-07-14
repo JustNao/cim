@@ -53,6 +53,14 @@ const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 /// the dominant idle cost over VNC / software rendering. ~30 fps.
 const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 
+/// Frames at least this many pixels render their plain LUT **off-thread** (on
+/// the pane's render worker) instead of synchronously in `stage`: a large
+/// full-resolution LUT render is tens of milliseconds, and doing it on the UI
+/// thread blocks that whole update — a visible hitch whenever playback steps
+/// while the user is interacting. Below this, the synchronous render is cheaper
+/// than the worker round-trip. ~1 MP.
+const ASYNC_RENDER_PIXELS: usize = 1 << 20;
+
 /// How long a transient status notification (top toolbar, far right) stays up
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
@@ -317,6 +325,12 @@ struct Playback {
     loop_drag: Option<bool>,
     fps: f32,
     accum: f32,
+    /// `ctx.input(|i| i.time)` at the last `advance_playback` tick, for a
+    /// wall-clock dt. egui's `stable_dt` is unusable here: it substitutes a fixed
+    /// `predicted_dt` (1/60 s) for the real elapsed time on every frame woken by
+    /// a *delayed* repaint request — which is all of paced playback (§13).
+    /// `None` while paused, so resuming starts timing afresh.
+    last_tick: Option<f64>,
     /// Fast-forward stride (≥1, default 1): decode only 1 of every `fast_forward`
     /// frames; the `fast_forward - 1` between are skimmed by a metadata-only header
     /// probe (never decoded), to skim a huge sequence quickly. Affects **both**
@@ -341,6 +355,7 @@ impl Default for Playback {
             loop_drag: None,
             fps: 25.0,
             accum: 0.0,
+            last_tick: None,
             fast_forward: 1,
             prefetch: None,
         }

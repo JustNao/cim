@@ -392,10 +392,16 @@ paths that use it match pixel-for-pixel by construction rather than by disciplin
 It runs in two places: the **export worker** (`export.rs::ExportPane::render` — on
 the **cropped region only**, §10) and, for live view, the off-UI-thread
 `renderer.rs` `RenderPool` (`renderer::Worker::render`). `stage` splits by weight:
-**Linear (clipped or not), masks, and any non-single-channel-U16 or library-absent
-case render synchronously** (cheap `render_into_scaled`, no operators), while
-**LUT_ALPHA / details on a single-channel U16 frame go off-thread** to
-`render_display`. The export worker honours the pane's **clip toggle and
+**small or decimated plain-LUT renders (Linear, masks, Colormap) stay synchronous**
+(cheap `render_into_scaled`), while **LUT_ALPHA / details on a single-channel U16
+frame — and any plain-LUT render of a large (`ASYNC_RENDER_PIXELS`, ~1 MP)
+full-resolution (`step == 1`) non-Colormap frame** — go off-thread to
+`render_display` (the worker's plain-LUT path is pixel-identical by test): a big
+synchronous LUT render is itself tens of milliseconds, and on the UI thread it
+blocked a whole update — a visible hitch whenever playback stepped while the user
+panned. Only the texture upload remains on the UI thread. The off-thread route is
+gated to `step == 1` because the worker renders full-resolution only — a `step > 1`
+result would never match the commit's step check. The export worker honours the pane's **clip toggle and
 percentile** too (`ExportPane.clip: Option<f32>` → `clip_bounds`/`display_bounds`),
 so an exported frame matches the live view's tone exactly.
 
@@ -485,7 +491,14 @@ frame-bar Prev/Next buttons via `ui.ctx()`): stepping inside `[lo, hi]` moves on
 at an edge a sub-range wraps to the other edge, a full range wraps only once the real end
 is known (else holds at the frontier). `draw_scrubber` shades resident frames (contiguous runs merged), dims
 outside the window, and draws the brackets. `advance_playback` accumulates
-`stable_dt`, steps at `fps`, and advances unsynced panes independently. With a
+**wall-clock time** (`i.time` deltas via `Playback.last_tick` — **never
+`stable_dt`**: egui substitutes a fixed `predicted_dt` of 1/60 s for the real
+elapsed time on any frame woken by a *delayed* repaint request, i.e. every paced
+`request_repaint_after` wake — which silently ran playback at a fraction of the
+requested fps unless input events kept the dts real), steps at `fps` carrying the
+overshoot into the next interval (capped at one step, so lateness doesn't compound
+into a rate error but a stall can't burst), and advances unsynced panes
+independently. With a
 **fast-forward stride** (`fast_forward` > 1, §6) it steps by `fast_forward` frames
 (clamped to the window end), skimming those in between; `prefetch_playback` strides to
 match and `ensure_lookahead` probes (headers) rather than decoding the jumped-over
@@ -916,6 +929,13 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 - Export decodes independently of the display cache; export length = the **known**
   timeline at build time (press "Load all" or "Load offsets" first for a full export —
   offsets suffices, since export only needs the discovered length).
+- **Never time anything with `i.stable_dt`.** egui only reports the real elapsed
+  time when the previous frame requested an *immediate* repaint; on a frame woken
+  by `request_repaint_after` — i.e. every paced wake in this app — it substitutes
+  a fixed `predicted_dt` (1/60 s). Under paced repaints that under-credits time by
+  the pacing ratio (playback at 25 fps was credited ~17 ms per ~40 ms wake and ran
+  at a fraction of the set rate; any user input masked it by making dts real).
+  Use `i.time` deltas (wall clock) instead — see `Playback.last_tick`.
 
 ---
 
@@ -931,11 +951,14 @@ the synchronous render so a grid of sequences doesn't render/copy/upload full-re
 the screen can't show; seamless across 1×), **playback decode prefetch** (§5 — overlap
 decode with display so first-pass / multi-pane playback doesn't stall on decode latency,
 now **fair-dispatched** across panes and **adaptive-depth** on measured decode latency),
-**worker wake-ups + accum-aware playback pacing** (§13/§8 — the decode/render pools
-`request_repaint` on completion and playback wakes when the next frame is actually due, so
-render-gated playback holds the requested fps instead of collapsing to a fraction of it
-when frames need a decode / off-thread render), and a **configurable decode-thread count**
-(§5 — cap the pool per instance on a shared host). For shared multi-user servers there's also a **">8 sequences" resource warning**
+**worker wake-ups + wall-clock playback pacing** (§13/§8 — the decode/render pools
+`request_repaint` on completion, playback wakes when the next frame is actually due and
+times itself on `i.time` deltas rather than the paced-repaint-poisoned `stable_dt`
+(§14), so render-gated playback holds the requested fps instead of collapsing to a
+fraction of it), **off-thread big plain-LUT renders** (§7 — `ASYNC_RENDER_PIXELS`, so a
+playback step's tens-of-ms LUT render doesn't block an update and hitch a concurrent
+pan), and a **configurable decode-thread count** (§5 — cap the pool per instance on a
+shared host). For shared multi-user servers there's also a **">8 sequences" resource warning**
 (§13) before opening a heavy number of sequences at once. Remaining candidates: minor
 per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /
 lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads
