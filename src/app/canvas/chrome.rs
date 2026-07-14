@@ -51,7 +51,12 @@ impl CimApp {
         // Close removes it.
         let close_w = 44.0;
         let hide_w = 34.0;
-        let reload_w = 26.0;
+        // "Reload" as a labelled button; size it to its text so it never clips.
+        let reload_w = ui.fonts(|f| {
+            f.layout_no_wrap("Reload".to_owned(), FontId::proportional(12.0), Color32::WHITE)
+                .rect
+                .width()
+        }) + 14.0;
         // The Auto-reload (watch) toggle sits left of Reload, but only for panes
         // backed by a file — a Compute pane has its own Auto-refresh instead. It's
         // a labelled "Auto-reload" button; size it to its text so it never clips.
@@ -146,8 +151,8 @@ impl CimApp {
         hp.text(
             reload.center(),
             Align2::CENTER_CENTER,
-            "⟳",
-            FontId::proportional(14.0),
+            "Reload",
+            FontId::proportional(12.0),
             if reload_resp.hovered() {
                 Color32::from_gray(235)
             } else {

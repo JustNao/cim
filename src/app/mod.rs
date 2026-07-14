@@ -413,7 +413,7 @@ impl StatusLine {
 enum Deferred {
     /// Remove the pane at this vec index (header ✕ / manager).
     Remove(usize),
-    /// Reload the pane at this vec index from disk (header ⟳ / `R`).
+    /// Reload the pane at this vec index from disk (header Reload / `R`).
     Reload(usize),
     /// Reload every pane (`Ctrl+R` / manager).
     ReloadAll,

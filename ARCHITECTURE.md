@@ -559,12 +559,12 @@ shows the shared position with **both** A and B values.
 
 The header is a **single row** (`header_h_for`, feeding `image_area`): the
 **Transformations** button on the left, the title, then the **Auto-reload**
-toggle, **⟳ Reload** (re-reads this media from disk → `pending_reload`), **Hide**
+toggle, **Reload** (re-reads this media from disk → `pending_reload`), **Hide**
 (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on the
 right, matching styles (Close tints red on hover to flag that it removes the pane).
 
 **Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
-⟳ Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
+Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
 `poll_watches` (run each `update`, before `refresh_textures`) stats the pane's
 source file(s) — `source_file_sig` = latest mtime + total length across
 `Source::File` / `Source::Sequence` — and reloads the pane once a change has
@@ -858,7 +858,7 @@ config storing a bare key name still parses (a no-modifier chord). Matching is
 `Ctrl+R` (reload all) stay distinct; rebinding captures the key press together with
 the modifiers held at that moment (`Chord::from_modifiers`, egui emits no Key event
 for a bare modifier). Default `Reload focused = R`, `Reload all = Ctrl+R`, `Hide = H`.
-The pane header also has a **⟳ Reload** button (left of Hide). New default bindings do
+The pane header also has a **Reload** button (left of Hide). New default bindings do
 **not** retroactively apply to a saved config (shows `—` until rebound).
 `handle_input` skips the shortcut scan while `ctx.wants_keyboard_input()` (a text
 field has focus), so typing doesn't trigger views. **Tab** (default `ToggleView`)
