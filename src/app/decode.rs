@@ -436,7 +436,7 @@ impl CimApp {
                 }
             }
             if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
-                self.upload_tex(ctx, idx, d.size, &d.rgba, d.frame, d.sig);
+                self.upload_tex(ctx, idx, d.image, d.frame, d.sig);
             }
         }
     }
@@ -694,11 +694,12 @@ impl CimApp {
         }
     }
 
-    /// Stage an RGBA buffer as pane `idx`'s **pending** texture, tagged `(f, sig)`
-    /// (committed to the front by `refresh_textures`).
-    fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, size: [usize; 2], rgba: &[u8], f: usize, sig: u64) {
+    /// Stage a worker-rendered image as pane `idx`'s **pending** texture, tagged
+    /// `(f, sig)` (committed to the front by `refresh_textures`). The worker
+    /// already did the `ColorImage` conversion copy, so the UI thread only
+    /// queues the texture delta here (the recorded upload time reflects that).
+    fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, img: ColorImage, f: usize, sig: u64) {
         let t = crate::debug::enabled().then(std::time::Instant::now);
-        let img = ColorImage::from_rgba_unmultiplied(size, rgba);
         let name = format!("m{}", self.panes[idx].id);
         // Off-thread renders (operators, or a big plain LUT) run at full
         // resolution (step 1) — see `stage`.

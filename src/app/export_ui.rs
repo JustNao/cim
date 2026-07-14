@@ -36,6 +36,12 @@ enum ExportOutcome {
 
 /// Worker body: compose + encode every frame, publishing progress and honouring
 /// a cancel request between frames. Runs on its own thread.
+///
+/// **Pipelined**: composition runs on a second thread, double-buffered against
+/// the encode through a bounded channel (capacity 1 → at most two frames in
+/// flight), so frame `t+1` composes while ffmpeg encodes `t` — the export runs
+/// at the pace of the slower of the two stages instead of their sum. The
+/// composer owns the plan; this thread owns the encoder.
 fn run_export(
     mut enc: Encoder,
     mut plan: ExportPlan,
@@ -43,22 +49,46 @@ fn run_export(
     progress: Arc<AtomicUsize>,
     cancel: Arc<AtomicBool>,
 ) -> ExportOutcome {
-    for t in 0..total {
-        if cancel.load(Ordering::Relaxed) {
-            enc.kill();
-            return ExportOutcome::Cancelled;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    let cancel2 = Arc::clone(&cancel);
+    let composer = thread::spawn(move || {
+        for t in 0..total {
+            if cancel2.load(Ordering::Relaxed) {
+                return; // cancelled: stop composing
+            }
+            let buf = plan.compose(t);
+            if tx.send(buf).is_err() {
+                return; // encoder side bailed (write error / cancel): stop
+            }
         }
-        let buf = plan.compose(t);
-        if let Err(e) = enc.write_frame(&buf) {
-            enc.kill();
-            return ExportOutcome::Failed(format!("Export failed: {e}"));
+    });
+    let outcome = (|| {
+        for t in 0..total {
+            let Ok(buf) = rx.recv() else {
+                // The composer only stops sending early on a cancel.
+                enc.kill();
+                return ExportOutcome::Cancelled;
+            };
+            if cancel.load(Ordering::Relaxed) {
+                enc.kill();
+                return ExportOutcome::Cancelled;
+            }
+            if let Err(e) = enc.write_frame(&buf) {
+                enc.kill();
+                return ExportOutcome::Failed(format!("Export failed: {e}"));
+            }
+            progress.store(t + 1, Ordering::Relaxed);
         }
-        progress.store(t + 1, Ordering::Relaxed);
-    }
-    match enc.finish() {
-        Ok(()) => ExportOutcome::Done(total),
-        Err(e) => ExportOutcome::Failed(e),
-    }
+        match enc.finish() {
+            Ok(()) => ExportOutcome::Done(total),
+            Err(e) => ExportOutcome::Failed(e),
+        }
+    })();
+    // Unblock a composer stuck in `send` on the (bounded) channel before joining
+    // it — on an early exit above nothing would ever `recv` again.
+    drop(rx);
+    let _ = composer.join();
+    outcome
 }
 
 impl CimApp {

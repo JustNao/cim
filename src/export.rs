@@ -496,12 +496,32 @@ impl ExportPlan {
         // compute the source-space crop box each one actually needs and render
         // only that sub-rectangle — the tone pipeline (LUT + operators) never
         // touches pixels outside the exported region.
-        for p in &mut self.panes {
-            p.decode(self.start + t);
+        //
+        // Panes are fully independent here (each owns its reader, operator
+        // instances and caches), so with several panes both phases run them on
+        // **scoped threads in parallel** — a grid export is paced by its slowest
+        // pane, not the sum of all panes. The box computation between the phases
+        // needs every pane's decoded size, hence two joins. A single pane skips
+        // the spawn overhead and runs inline.
+        let start = self.start;
+        if self.panes.len() == 1 {
+            self.panes[0].decode(start + t);
+        } else {
+            thread::scope(|s| {
+                for p in &mut self.panes {
+                    s.spawn(move || p.decode(start + t));
+                }
+            });
         }
         let boxes = self.pane_boxes();
-        for (p, b) in self.panes.iter_mut().zip(boxes) {
-            p.render(b);
+        if self.panes.len() == 1 {
+            self.panes[0].render(boxes[0]);
+        } else {
+            thread::scope(|s| {
+                for (p, b) in self.panes.iter_mut().zip(boxes) {
+                    s.spawn(move || p.render(b));
+                }
+            });
         }
         let (w, h) = (self.out_w, self.out_h);
         let (rw, rh) = (self.region.width(), self.region.height());
@@ -853,6 +873,53 @@ mod tests {
                 let expect = (4 - oy) * 8 + (5 - ox);
                 let got = buf[(oy * 4 + ox) * 4] as usize;
                 assert_eq!(got, expect, "pixel ({ox},{oy})");
+            }
+        }
+    }
+
+    /// Two panes decode + render on scoped threads (the parallel compose path):
+    /// a side-by-side grid of two stills must land each pane's pixels in its own
+    /// half, exactly as the sequential path did.
+    #[test]
+    fn two_pane_grid_composes_in_parallel() {
+        let a = FrameData::new([4, 4], 1, Samples::U8(vec![50; 16]));
+        let b = FrameData::new([4, 4], 1, Samples::U8(vec![200; 16]));
+        let cell = |x0: f32| Rect::from_min_size(Pos2::new(x0, 0.0), Vec2::new(4.0, 4.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(2.0, 2.0),
+            needs_fit: false,
+        };
+        let mk = |f: FrameData| {
+            ExportPane::new(
+                view,
+                ContrastMode::Linear,
+                false,
+                None, // no clip
+                1,
+                true,
+                0,
+                ExportSource::Still(Arc::new(f)),
+            )
+        };
+        let cells = vec![
+            GridCell { pane: 0, place: cell(0.0), area: cell(0.0), content: cell(0.0) },
+            GridCell { pane: 1, place: cell(4.0), area: cell(4.0), content: cell(4.0) },
+        ];
+        let mut plan = ExportPlan {
+            panes: vec![mk(a), mk(b)],
+            layout: ExportLayout::Grid(cells),
+            region: Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 4.0)),
+            out_w: 8,
+            out_h: 4,
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+        for y in 0..4usize {
+            for x in 0..8usize {
+                let v = buf[(y * 8 + x) * 4];
+                assert_eq!(v, if x < 4 { 50 } else { 200 }, "pixel ({x},{y})");
             }
         }
     }

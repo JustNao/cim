@@ -48,8 +48,11 @@ pub struct RenderDone {
     pub id: u64,
     pub frame: usize,
     pub sig: u64,
-    pub size: [usize; 2],
-    pub rgba: Vec<u8>,
+    /// The finished display image, already converted to egui's `ColorImage` **on
+    /// the worker**: `from_rgba_unmultiplied` is a full-buffer conversion copy
+    /// (several ms on a large frame), so doing it here leaves only the cheap
+    /// texture-delta queueing (`tex.set`) on the UI thread.
+    pub image: eframe::egui::ColorImage,
     /// LUT / tone map time (the gray or 8-bit render), for the `CIM_DEBUG` profiler.
     pub lut_time: std::time::Duration,
     /// Proprietary-operator `apply` time (zero when no operator ran).
@@ -158,12 +161,14 @@ impl Worker {
             &mut self.lut,
             &mut rgba,
         );
+        // Convert to egui's image format here, off the UI thread (a full-buffer
+        // copy — see `RenderDone::image`).
+        let image = eframe::egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
         RenderDone {
             id: job.id,
             frame: job.frame,
             sig: job.sig,
-            size,
-            rgba,
+            image,
             lut_time,
             ops_time,
         }
@@ -190,6 +195,9 @@ mod tests {
         let (lo, hi) = (500.0, 60000.0);
         let mut reference = Vec::new();
         frame.render_into(lo, hi, &mut reference);
+        // The worker hands back an already-converted `ColorImage` (the
+        // conversion copy runs off the UI thread); compare in that space.
+        let reference = eframe::egui::ColorImage::from_rgba_unmultiplied([8, 4], &reference);
 
         let mut worker = Worker::default();
         for (lut_alpha, details) in [(false, false), (true, false), (false, true)] {
@@ -203,9 +211,9 @@ mod tests {
                 lut_alpha,
                 details,
             });
-            assert_eq!(done.size, [8, 4]);
+            assert_eq!(done.image.size, [8, 4]);
             assert_eq!(
-                done.rgba, reference,
+                done.image, reference,
                 "lut_alpha={lut_alpha} details={details}"
             );
         }

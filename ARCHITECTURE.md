@@ -399,7 +399,9 @@ full-resolution (`step == 1`) non-Colormap frame** — go off-thread to
 `render_display` (the worker's plain-LUT path is pixel-identical by test): a big
 synchronous LUT render is itself tens of milliseconds, and on the UI thread it
 blocked a whole update — a visible hitch whenever playback stepped while the user
-panned. Only the texture upload remains on the UI thread. The off-thread route is
+panned. The worker also does the `ColorImage::from_rgba_unmultiplied` conversion (a
+full-buffer copy, several ms on a large frame) and hands back a ready `ColorImage`
+(`RenderDone.image`), so the UI thread only queues the texture delta (`tex.set`). The off-thread route is
 gated to `step == 1` because the worker renders full-resolution only — a `step > 1`
 result would never match the commit's step check. The export worker honours the pane's **clip toggle and
 percentile** too (`ExportPane.clip: Option<f32>` → `clip_bounds`/`display_bounds`),
@@ -745,7 +747,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   Still | Seq { path } | Files { paths } | Concat { files, map }`.
 - **Region-limited render pipeline.** `compose` runs in two phases: **(1) `decode`** every
   pane's source frame (so all sizes are known), then **(2) `render`** each pane on **only
-  the cropped region**. `ExportPlan::pane_boxes` computes, per pane, the axis-aligned
+  the cropped region**. With several panes both phases run the panes on **scoped threads
+  in parallel** (each `ExportPane` is fully independent — own reader, operator instances,
+  caches), so a grid export is paced by its slowest pane; a single pane runs inline. `ExportPlan::pane_boxes` computes, per pane, the axis-aligned
   bounding box *in the unrotated source image* of the pixels the output actually samples —
   by mapping the four corners of that pane's composition rectangle through
   `view.screen_to_img` + `unrotate` (the map is a pure affine, so the corner bound is exact
@@ -783,10 +787,15 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   completion tells the user the whole sequence isn't resident — the length was still
   fully discovered, so the range is right and the encoder reads the rest from disk (§6).
 - Output filename typed in the panel, written to the **cwd**. For video `start_export`
-  spawns `run_export` (compose + `Encoder` write per frame) on a **worker thread**,
-  sharing an `AtomicUsize` progress + `AtomicBool` cancel; `export_tick` just polls it
-  each update, relaying cancel and joining the thread for the final outcome
-  (`ExportOutcome`). A still skips all that and saves synchronously.
+  spawns `run_export` on a **worker thread**, sharing an `AtomicUsize` progress +
+  `AtomicBool` cancel; `export_tick` just polls it each update, relaying cancel and
+  joining the thread for the final outcome (`ExportOutcome`). Inside `run_export` the
+  compose and encode are **pipelined**: a second thread owns the plan and composes
+  frames into a bounded `sync_channel(1)` (double-buffer — at most two frames in
+  flight) while `run_export` writes them to ffmpeg, so frame `t+1` composes during the
+  encode of `t` and the export runs at the slower stage's pace, not their sum. On any
+  early exit the receiver is dropped before the join so a composer blocked in `send`
+  can't deadlock. A still skips all that and saves synchronously.
 
 ---
 
@@ -995,7 +1004,8 @@ mask/intensity renders, region stats + save round-trip; **percentile equivalence
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--window` / `--tone colormap`** parsing;
-`export` full compose→ffmpeg encode, **pixel-exact region crop** (incl. rotated),
+`export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
+**pixel-exact region crop** (incl. rotated),
 **full-frame export == live LUT render**, content-only export (`content_region`
 excludes background) + still background crop. The parity/equivalence tests are the
 net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
