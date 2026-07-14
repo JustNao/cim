@@ -111,7 +111,7 @@ impl CimApp {
     pub(super) fn draw_frame_bar(&mut self, ui: &mut egui::Ui) {
         let len = self.timeline_len();
         let at_end = self.current_at_end();
-        let cur = self.control.min(self.panes.len().saturating_sub(1));
+        let cur = self.loop_control();
         let name = self
             .panes
             .get(cur)
@@ -276,7 +276,7 @@ impl CimApp {
         // runs so a long cached span is one rect (cheap, and reads as solid).
         let mut res: Vec<usize> = self
             .panes
-            .get(self.control)
+            .get(self.loop_control())
             .map(|p| {
                 p.media
                     .resident_frames()
@@ -720,19 +720,26 @@ impl CimApp {
                                     {
                                         self.set_sync_tone(i, ts);
                                     }
-                                    // Only a sequence can drive the timeline; pick
-                                    // which one the transport / loop follows.
-                                    if self.panes[i].media.frame_count() > 1
-                                        && ui
-                                            .selectable_label(self.control == i, "Control")
-                                            .on_hover_text(
-                                                "This sequence drives the timeline & playback",
-                                            )
-                                            .clicked()
+                                    // The Control pane is the shared clip-bounds
+                                    // source (any media) and, when it's a sequence,
+                                    // also drives the timeline / loop.
+                                    if ui
+                                        .selectable_label(self.control == i, "Control")
+                                        .on_hover_text(
+                                            "This media is the shared clip source; a sequence also drives the timeline & playback",
+                                        )
+                                        .clicked()
                                         && self.control != i
                                     {
+                                        let old_loop = self.loop_control();
                                         self.control = i;
-                                        self.playback.loop_range = None; // range is per-sequence
+                                        // A loop sub-range belongs to a specific
+                                        // sequence; drop it only if the loop-driving
+                                        // sequence actually changed (picking a still
+                                        // as Control leaves the loop untouched).
+                                        if self.loop_control() != old_loop {
+                                            self.playback.loop_range = None;
+                                        }
                                     }
                                 });
 

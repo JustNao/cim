@@ -198,8 +198,8 @@ len)` grows length by one.
   that pane forward (metadata only, no full decode of the pages in between) and
   `refresh_textures` **skips staging it** — it holds its last committed frame (blank if
   new) instead of flipping through 0…N — until its own length passes the target, then it
-  stages just that frame. The `update` clamp pins `shared_frame` to the **control** pane's
-  length, so the control pane is never "catching up" (that's `pending_seek`'s job); this
+  stages just that frame. The `update` clamp pins `shared_frame` to the **loop-driving**
+  pane's (`loop_control`) length, so that pane is never "catching up" (that's `pending_seek`'s job); this
   covers the *other*, shorter/newer synced panes, and only while paused (playback still
   discovers frame-by-frame at the frontier). Both this and `pending_seek` **repaint
   immediately** while riding the frontier, so discovery runs as fast as probes land rather
@@ -236,7 +236,7 @@ len)` grows length by one.
   and `probe`; `pump_decoder` drains (insert + `touch`, or `note_frontier` for a probe
   hit, or `frontier_ended`, or set pane `error`).
 - **Playback prefetch (`prefetch_playback`).** While playing, each on-screen pane (plus
-  the control pane) pre-decodes the next `PLAY_PREFETCH` (3) frames along the loop window
+  the loop-driving pane) pre-decodes the next `PLAY_PREFETCH` (3) frames along the loop window
   (same walk as `advance_playback`; wraps when looping), so playback overlaps decode with
   display instead of stalling on decode latency at a not-yet-resident frame — the win grows
   with pane count, since the lock-step commit waits for the slowest pane. Requests dedupe
@@ -366,12 +366,18 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   plain render; each texel is still one true source sample (only its colour is the
   palette). The diverging ramp suits a signed **Diff** Compute pane (zero → white).
 
-Plus a per-pane **manual window** (`ToneOptions.window` — an explicit `[lo,hi]` in
-native units) that **overrides** the clip / auto / region bounds for any non-LUT_ALPHA
-tone, so panes can be **locked to identical display bounds** and real intensity
-differences show as brightness rather than being hidden by per-pane auto-normalisation.
-Edited in the popup's **Window** row (greys out the clip when on); read by `tone_bounds`,
-hashed in `tone_sig`, snapshotted for export, and round-tripped via `--window`.
+Plus a per-pane **Share clip** toggle (`ToneOptions.share_clip`) that locks the pane's
+display bounds to the **Control** media's own `[lo,hi]` (`control_clip_bounds` — the
+Control pane's clip / full-range map on its current frame) instead of computing its own,
+for any non-LUT_ALPHA tone, so panes are **locked to identical display bounds** and real
+intensity differences show as brightness rather than being hidden by per-pane
+auto-normalisation. `tone_bounds` splits into `own_tone_bounds` (a pane's own clip / region
+bounds) and the Share-clip path (which reads the Control's `own_tone_bounds`, so it can't
+recurse); the effective bounds move with the Control pane's frame/clip, so `tone_sig` folds
+in the Control frame's identity (`control_frame_key` — pane index + frame `Arc` pointer)
+plus its clip/region inputs (cheap — never the computed percentile). Edited in the popup's
+**Share clip** row (greys out the clip when on); snapshotted for export (`ExportPane.window`
+= the Control's bounds at plan time), and round-tripped via `--share-clip`.
 
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
@@ -479,10 +485,17 @@ flags; `CimApp` holds `shared_view`/`shared_frame`. `view_ref/view_mut(i)` and
 its last frame**), else the pane's own. Toggling sync **off** snapshots the shared
 state into the pane so it doesn't jump. (Transformations sync is §9.)
 
-`timeline_len()` = the **control** pane's known length (drives the loop). The control
-pane is **separate from `current`** (the focused pane for Single/keyboard/tint), so
-viewing a still doesn't hijack playback; `ensure_control` keeps it on a sequence, and
-the manager's **Control** selector chooses which.
+The **Control** pane (manager's **Control** selector) has two roles: it is the shared
+**clip-bounds source** for any *Share clip* pane (§7) — so it may be **any** media — and,
+when it's a sequence, it also **drives the loop**. Because a still can now be the Control,
+the loop driver is *derived*: `loop_control()` = the Control pane when it's a sequence,
+else the first sequence (a still Control supplies the shared bounds but can't drive the
+loop). `timeline_len()` / `current_at_end()` and the frontier walks
+(`ensure_lookahead`/`prefetch_playback`/`drive_seek`) all read `loop_control()`, while the
+scrubber/transport show it too. `ensure_control` now only **clamps** `control` in range (it
+no longer repoints onto a sequence). The Control pane is **separate from `current`** (the
+focused pane for Single/keyboard/tint), so viewing a still doesn't hijack playback. Picking
+a new Control drops the `loop_range` only when `loop_control()` actually changes.
 
 Playback loops over a **window** `loop_bounds(len)` — a user sub-range (`loop_range`,
 set by dragging the scrubber brackets; `None` = whole sequence). A full range with an
@@ -809,8 +822,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `--tone` (per-pane `linear|lutalpha|colormap[:viridis|turbo|diverging]`;
   `linearclip`/`clip` are accepted as deprecated aliases for `linear`), `--clip`
   (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
-  at each pane's depth default), `--window` (per-pane manual display window: `off` or
-  `LO:HI` in native units, overriding the clip), `--detail` (per-pane `1`/`0`),
+  at each pane's depth default), `--share-clip` (per-pane `1`/`0` — lock the pane's bounds
+  to the Control media's), `--detail` (per-pane `1`/`0`),
   `--show` (per-pane visibility), `--tsync` (per-pane Transformations-sync),
   `--rotate` (per-pane display rotation in degrees, `-180..180`), `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
@@ -1003,7 +1016,7 @@ mask/intensity renders, region stats + save round-trip; **percentile equivalence
 (whole-image == full-frame region, integer and float, with golden values);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; `palette` endpoints /
-diverging-centre / token round-trip; `cli` **`--window` / `--tone colormap`** parsing;
+diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated),
 **full-frame export == live LUT render**, content-only export (`content_region`

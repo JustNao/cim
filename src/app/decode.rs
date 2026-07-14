@@ -189,7 +189,7 @@ impl CimApp {
             self.pending_seek = None;
             return;
         }
-        let i = self.control.min(self.panes.len() - 1);
+        let i = self.loop_control();
         let known = self.panes[i].media.frame_count();
         if known > target {
             self.shared_frame = target;
@@ -225,10 +225,10 @@ impl CimApp {
         if self.panes.is_empty() || self.pending_seek.is_some() {
             return;
         }
-        // The control pane drives the shared timeline/scrubber even when it isn't
-        // on screen, so it must keep discovering its frontier too.
+        // The loop-driving pane drives the shared timeline/scrubber even when it
+        // isn't on screen, so it must keep discovering its frontier too.
         let mut targets = self.displayed_indices();
-        let ctrl = self.control.min(self.panes.len().saturating_sub(1));
+        let ctrl = self.loop_control();
         if !targets.contains(&ctrl) {
             targets.push(ctrl);
         }
@@ -273,10 +273,10 @@ impl CimApp {
         let full = self.playback.loop_range.is_none();
         let at_end = self.current_at_end();
 
-        // Same targets as lookahead: on-screen panes plus the control pane (which
-        // drives the shared timeline even when it isn't displayed).
+        // Same targets as lookahead: on-screen panes plus the loop-driving pane
+        // (which drives the shared timeline even when it isn't displayed).
         let mut targets = self.displayed_indices();
-        let ctrl = self.control.min(self.panes.len() - 1);
+        let ctrl = self.loop_control();
         if !targets.contains(&ctrl) {
             targets.push(ctrl);
         }
@@ -726,10 +726,27 @@ impl CimApp {
         // The clip toggle and its percentile both change the Linear mapping.
         tone.clip.enabled.hash(&mut h);
         tone.clip.percent.to_bits().hash(&mut h);
-        // A manual display window overrides those bounds when enabled.
-        tone.window.enabled.hash(&mut h);
-        tone.window.lo.to_bits().hash(&mut h);
-        tone.window.hi.to_bits().hash(&mut h);
+        // "Share clip" locks the bounds to the Control media's; the effective
+        // bounds then move with the Control pane's frame and clip settings, so
+        // fold that pane's identity in (cheap — its frame Arc pointer, clip and
+        // region inputs, not the computed percentile) so this pane re-renders
+        // whenever the Control's bounds would change.
+        tone.share_clip.hash(&mut h);
+        if tone.share_clip {
+            if let Some((ci, ptr)) = self.control_frame_key() {
+                ci.hash(&mut h);
+                ptr.hash(&mut h);
+                let ct = self.tone_of(ci);
+                self.contrast_of(ci).label().hash(&mut h);
+                ct.clip.enabled.hash(&mut h);
+                ct.clip.percent.to_bits().hash(&mut h);
+                let creg = self.panes[ci].region_tone;
+                creg.hash(&mut h);
+                if creg {
+                    self.stats_gen.hash(&mut h);
+                }
+            }
+        }
         // The Colormap palette changes the rendered colour.
         tone.palette.id().hash(&mut h);
         self.details_of(idx).hash(&mut h);
@@ -744,15 +761,29 @@ impl CimApp {
 
     /// The linear display bounds `[lo, hi]` for pane `idx`'s current tone: the
     /// per-tail percentile clip, the full range / float extent, or — when
-    /// region-tone is pinned — the shared stats region's bounds.
+    /// region-tone is pinned — the shared stats region's bounds. With "Share
+    /// clip" on, the Control media's bounds are used instead so panes lock to
+    /// identical bounds.
     fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
         let contrast = self.contrast_of(idx);
         let tone = self.tone_of(idx);
-        // An explicit manual window overrides the auto / percentile / region
-        // bounds (but not LUT_ALPHA, which does its own contrast).
-        if contrast != ContrastMode::LutAlpha && tone.window.enabled {
-            return (tone.window.lo, tone.window.hi);
+        // "Share clip" locks the bounds to the Control media's own bounds (but
+        // not for LUT_ALPHA, which does its own contrast). Falls through to this
+        // pane's own bounds when the Control frame isn't resident yet.
+        if contrast != ContrastMode::LutAlpha && tone.share_clip {
+            if let Some(b) = self.control_clip_bounds() {
+                return b;
+            }
         }
+        self.own_tone_bounds(idx, frame)
+    }
+
+    /// A pane's *own* display bounds (its clip / full-range map, or its region
+    /// bounds when region-tone is pinned) — ignoring "Share clip", so it can be
+    /// read for the Control media itself without recursing.
+    fn own_tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
+        let contrast = self.contrast_of(idx);
+        let tone = self.tone_of(idx);
         let pct = tone.clip.percent;
         // Clip the built-in maps (Linear and Colormap share the same bounds),
         // only when the toggle is on; LUT_ALPHA takes the full range (own contrast).
@@ -772,6 +803,33 @@ impl CimApp {
         } else {
             base(clip)
         }
+    }
+
+    /// The Control media's currently shown frame (its pane index + `Arc`), if
+    /// resident. The source of the shared bounds for any "Share clip" pane.
+    fn control_frame(&self) -> Option<(usize, std::sync::Arc<media::FrameData>)> {
+        if self.panes.is_empty() {
+            return None;
+        }
+        let c = self.control.min(self.panes.len() - 1);
+        let f = self.frame_disp(c);
+        self.panes[c].media.resident(f).map(|fr| (c, fr))
+    }
+
+    /// A cheap identity key for the Control media's shown frame (pane index +
+    /// frame `Arc` pointer), used by `tone_sig` so a "Share clip" pane re-renders
+    /// when the Control navigates or reloads.
+    pub(super) fn control_frame_key(&self) -> Option<(usize, usize)> {
+        self.control_frame()
+            .map(|(c, fr)| (c, std::sync::Arc::as_ptr(&fr) as usize))
+    }
+
+    /// The Control media's own display bounds `[lo, hi]` for its current frame,
+    /// applied to any pane with "Share clip" on. `None` when the Control frame
+    /// isn't resident yet (the pane then falls back to its own bounds).
+    pub(super) fn control_clip_bounds(&self) -> Option<(f32, f32)> {
+        let (c, fr) = self.control_frame()?;
+        Some(self.own_tone_bounds(c, &fr))
     }
 
     /// Ensure the tinted overlay texture for pane `idx` is current, returning it

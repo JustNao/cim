@@ -171,11 +171,14 @@ impl CimApp {
             p.frame,
             self.export_source(idx),
         );
-        // A manual display window overrides the clip for any non-LUT_ALPHA tone.
+        // "Share clip" locks the bounds to the Control media's; snapshot them as
+        // an explicit window override for any non-LUT_ALPHA tone so the exported
+        // frame matches the live view. (Falls back to the pane's own bounds when
+        // the Control frame isn't resident.)
         {
             let t = self.tone_of(idx);
-            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.window.enabled {
-                pane.window = Some((t.window.lo, t.window.hi));
+            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.share_clip {
+                pane.window = self.control_clip_bounds();
             }
             if self.contrast_of(idx) == ContrastMode::Colormap {
                 pane.palette = Some(t.palette);

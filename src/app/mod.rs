@@ -1054,11 +1054,29 @@ impl CimApp {
         self.panes[i].overlay_tex = None;
     }
 
-    /// Length of the shared timeline: the **control** media drives the loop.
+    /// The pane that drives the shared timeline / loop: the **Control** pane
+    /// when it's a sequence, else the first sequence (a *still* Control still
+    /// supplies the shared clip bounds, but only a sequence can drive the loop).
+    /// Falls back to the clamped Control index when nothing is a sequence.
+    pub(super) fn loop_control(&self) -> usize {
+        if self.panes.is_empty() {
+            return 0;
+        }
+        let c = self.control.min(self.panes.len() - 1);
+        if self.panes[c].media.frame_count() > 1 {
+            return c;
+        }
+        self.panes
+            .iter()
+            .position(|p| p.media.frame_count() > 1)
+            .unwrap_or(c)
+    }
+
+    /// Length of the shared timeline: the loop-driving sequence drives the loop.
     /// Other synced sequences clamp/hold against this length.
     pub(super) fn timeline_len(&self) -> usize {
         self.panes
-            .get(self.control)
+            .get(self.loop_control())
             .map(|p| p.media.frame_count())
             .unwrap_or(1)
             .max(1)
@@ -1093,7 +1111,7 @@ impl CimApp {
     /// timeline holds at the last discovered frame rather than wrapping early.
     pub(super) fn current_at_end(&self) -> bool {
         self.panes
-            .get(self.control)
+            .get(self.loop_control())
             .is_none_or(|p| p.media.at_end())
     }
 
@@ -1116,27 +1134,16 @@ impl CimApp {
         }
     }
 
-    /// Keep `control` pointing at a sequence: clamp it in range, and if it isn't
-    /// a multi-frame media, repoint to the first one that is (leaving a valid
-    /// user choice untouched).
+    /// Keep `control` in range. The Control pane may be **any** media (it is the
+    /// shared clip-bounds source); only a sequence drives the loop, which
+    /// `loop_control` derives — so this no longer repoints Control onto a
+    /// sequence.
     pub(super) fn ensure_control(&mut self) {
         if self.panes.is_empty() {
             self.control = 0;
             return;
         }
-        let before = self.control;
         self.control = self.control.min(self.panes.len() - 1);
-        let is_seq = |p: &Pane| p.media.frame_count() > 1;
-        if !self.panes.get(self.control).is_some_and(|p| is_seq(p)) {
-            if let Some(i) = self.panes.iter().position(is_seq) {
-                self.control = i;
-            }
-        }
-        // A loop sub-range belongs to a specific sequence; drop it if control
-        // moved to a different one.
-        if self.control != before {
-            self.playback.loop_range = None;
-        }
     }
 
     /// Pixel size of pane `i` if it can serve as an overlay source — i.e. its
@@ -1323,7 +1330,8 @@ impl CimApp {
         self.poll_decoding_all();
         self.enforce_cache_budget();
 
-        // Keep `control` on a sequence, then clamp the shared timeline to it.
+        // Clamp `control` into range, then clamp the shared timeline to the
+        // loop-driving sequence.
         self.ensure_control();
         let tl = self.timeline_len();
         if self.shared_frame >= tl {

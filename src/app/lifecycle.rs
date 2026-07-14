@@ -70,18 +70,11 @@ impl CimApp {
                 p.sync_tone = false;
             }
         }
-        // Per-pane manual window (`--window`): overrides the clip. Per-pane like
-        // --tone/--clip, so unsync the panes it sets.
-        if let Some(windows) = &vs.windows {
-            for (p, w) in self.panes.iter_mut().zip(windows) {
-                match w {
-                    cli::WindowSpec::Off => p.tone.window.enabled = false,
-                    cli::WindowSpec::On(lo, hi) => {
-                        p.tone.window.enabled = true;
-                        p.tone.window.lo = *lo;
-                        p.tone.window.hi = *hi;
-                    }
-                }
+        // Per-pane "Share clip" (`--share-clip`): lock the bounds to the Control
+        // media's. Per-pane like --tone/--clip, so unsync the panes it sets.
+        if let Some(shares) = &vs.share_clip {
+            for (p, s) in self.panes.iter_mut().zip(shares) {
+                p.tone.share_clip = *s;
                 p.sync_tone = false;
             }
         }
@@ -225,20 +218,13 @@ impl CimApp {
             if (0..n).any(|i| clips[i].as_str() != clip_default(i)) {
                 parts.push(format!("--clip {}", clips.join(",")));
             }
-            // Per-pane manual window (effective): `off`, or `LO:HI`. Omit when no
-            // pane has one enabled (the default).
-            if (0..n).any(|i| self.tone_of(i).window.enabled) {
-                let windows: Vec<String> = (0..n)
-                    .map(|i| {
-                        let w = self.tone_of(i).window;
-                        if w.enabled {
-                            format!("{}:{}", w.lo, w.hi)
-                        } else {
-                            "off".into()
-                        }
-                    })
+            // Per-pane "Share clip" (effective): 1/0. Omit when no pane shares
+            // (the default).
+            if (0..n).any(|i| self.tone_of(i).share_clip) {
+                let shares: Vec<&str> = (0..n)
+                    .map(|i| if self.tone_of(i).share_clip { "1" } else { "0" })
                     .collect();
-                parts.push(format!("--window {}", windows.join(",")));
+                parts.push(format!("--share-clip {}", shares.join(",")));
             }
             // Details / show / Transformations-sync — omit when all at default
             // (details off, all visible, all synced).

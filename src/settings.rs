@@ -323,34 +323,19 @@ impl Default for ClipOptions {
     }
 }
 
-/// An explicit display window `[lo, hi]` in **native units**, overriding the
-/// auto / percentile / region bounds so panes can be locked to identical bounds
-/// — real intensity differences then show as brightness differences instead of
-/// being hidden by per-pane auto-normalisation. Off by default (the clip /
-/// full-range map applies); takes precedence over the clip when on. Ignored by
-/// LUT_ALPHA, which does its own contrast.
-#[derive(Clone, Copy, PartialEq)]
-pub struct ManualWindow {
-    /// Whether the explicit window overrides the automatic bounds.
-    pub enabled: bool,
-    pub lo: f32,
-    pub hi: f32,
-}
-
-impl Default for ManualWindow {
-    fn default() -> Self {
-        Self { enabled: false, lo: 0.0, hi: 255.0 }
-    }
-}
-
 /// Per-pane tone options. Extend by growing this struct and reading it in
 /// `stage`/`tone_bounds`/`tone_sig`/`view_command`/`export_pane`. (LUT_ALPHA has
 /// no options; it runs the operator at full strength.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
-    /// Explicit display window, overriding `clip` when enabled (see [`ManualWindow`]).
-    pub window: ManualWindow,
+    /// Lock this pane's display bounds to the **Control** media's `[lo, hi]`
+    /// (its clip / full-range map) instead of computing its own, so panes share
+    /// identical bounds — real intensity differences then show as brightness
+    /// rather than being hidden by per-pane auto-normalisation. Off by default;
+    /// overrides this pane's own clip when on. Ignored by LUT_ALPHA, which does
+    /// its own contrast.
+    pub share_clip: bool,
     /// Palette for the Colormap tone (ignored by other modes).
     pub palette: crate::palette::Palette,
 }

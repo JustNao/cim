@@ -62,16 +62,6 @@ pub enum ClipSpec {
     On(f32),
 }
 
-/// Per-pane manual display window carried by `--window`: `off`, or an explicit
-/// `LO:HI` (native units) that overrides the clip. Mirrors the app's `ManualWindow`.
-#[derive(Clone, Copy, PartialEq)]
-pub enum WindowSpec {
-    /// No manual window — the clip / auto bounds apply.
-    Off,
-    /// Map the explicit `[lo, hi]` display window.
-    On(f32, f32),
-}
-
 /// A viewpoint captured from a running session and replayed on the next launch.
 /// Every field is optional: only the flags actually present on the command line
 /// override the app's defaults. Produced by the "View command" panel and parsed
@@ -89,8 +79,8 @@ pub struct ViewState {
     pub tones: Option<Vec<Tone>>,
     /// Per-pane Linear clip state (`--clip`), in pane order.
     pub clips: Option<Vec<ClipSpec>>,
-    /// Per-pane manual display window (`--window`), in pane order.
-    pub windows: Option<Vec<WindowSpec>>,
+    /// Per-pane "Share clip" toggles (`--share-clip`), in pane order.
+    pub share_clip: Option<Vec<bool>>,
     /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
@@ -99,7 +89,8 @@ pub struct ViewState {
     pub tsync: Option<Vec<bool>>,
     /// Per-pane display rotation in degrees (`--rotate`), in pane order.
     pub rotations: Option<Vec<f32>>,
-    /// Which pane drives the timeline / playback (`--control`).
+    /// The Control media: the shared clip-bounds source, and — when it's a
+    /// sequence — the timeline / playback driver (`--control`).
     pub control: Option<usize>,
     /// Inclusive playback loop range `LO,HI` (`--loop`), 0-based.
     pub loop_range: Option<(usize, usize)>,
@@ -178,8 +169,8 @@ pub fn parse(args: Vec<String>) -> Cli {
                 view.clips = next(i).and_then(parse_clips);
                 i += 1;
             }
-            "--window" => {
-                view.windows = next(i).and_then(parse_windows);
+            "--share-clip" => {
+                view.share_clip = next(i).and_then(parse_details);
                 i += 1;
             }
             "--detail" => {
@@ -274,22 +265,6 @@ fn parse_clips(s: &str) -> Option<Vec<ClipSpec>> {
         .collect()
 }
 
-/// Parse a comma-separated per-pane manual-window list for `--window`. Each token
-/// is `off` (no window) or `LO:HI` (native units). Any unrecognised token makes
-/// the whole flag ignored.
-fn parse_windows(s: &str) -> Option<Vec<WindowSpec>> {
-    s.split(',')
-        .map(|t| {
-            let t = t.trim();
-            if t.eq_ignore_ascii_case("off") || t.eq_ignore_ascii_case("none") {
-                return Some(WindowSpec::Off);
-            }
-            let (lo, hi) = t.split_once(':')?;
-            Some(WindowSpec::On(lo.trim().parse().ok()?, hi.trim().parse().ok()?))
-        })
-        .collect()
-}
-
 /// Parse a comma-separated per-pane float list for `--rotate` (degrees). Any
 /// unparseable token makes the whole flag ignored.
 fn parse_floats(s: &str) -> Option<Vec<f32>> {
@@ -297,7 +272,7 @@ fn parse_floats(s: &str) -> Option<Vec<f32>> {
 }
 
 /// Parse a comma-separated per-pane on/off list (`1`/`0`), shared by `--detail`,
-/// `--show` and `--tsync`.
+/// `--share-clip`, `--show` and `--tsync`.
 fn parse_details(s: &str) -> Option<Vec<bool>> {
     Some(
         s.split(',')
@@ -346,12 +321,12 @@ VIEW STATE:
         --tone <T,T,...>         Per-pane tone: linear | lutalpha |
                                colormap[:viridis|turbo|diverging]
         --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
-        --window <W,W,...>       Per-pane manual display window: off | LO:HI
+        --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
         --show <B,B,...>         Per-pane visibility / show-hide (1/0)
         --tsync <B,B,...>        Per-pane Transformations-sync toggles (1/0)
         --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
-        --control <N>            Pane that drives the timeline / playback
+        --control <N>            Control media: shared clip source (+ timeline if a sequence)
         --loop <LO,HI>           Inclusive playback loop range (0-based)
 
 SHELL COMPLETION:
@@ -662,28 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_manual_window() {
-        let args = "a.tif b.tif --window 100:2000,off"
+    fn parses_share_clip() {
+        let args = "a.tif b.tif --share-clip 1,0"
             .split(' ')
             .map(String::from)
             .collect();
         let Cli::Run { view, .. } = parse(args) else {
             panic!("expected Run");
         };
-        assert!(matches!(
-            view.windows.as_deref(),
-            Some([WindowSpec::On(lo, hi), WindowSpec::Off])
-                if (lo - 100.0).abs() < 1e-6 && (hi - 2000.0).abs() < 1e-6
-        ));
-        // A malformed token drops the whole flag.
-        let bad = "a.tif --window 100"
-            .split(' ')
-            .map(String::from)
-            .collect();
-        let Cli::Run { view, .. } = parse(bad) else {
-            panic!("expected Run");
-        };
-        assert!(view.windows.is_none());
+        assert_eq!(view.share_clip, Some(vec![true, false]));
     }
 
     #[test]

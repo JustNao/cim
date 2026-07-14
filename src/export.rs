@@ -45,7 +45,8 @@ pub struct ExportPane {
     /// always `None` — it takes the full range and does its own contrast).
     pub clip: Option<f32>,
     /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
-    /// `Some` (mirrors the pane's manual window; `None` for LUT_ALPHA / off).
+    /// `Some` (the "Share clip" snapshot of the Control media's bounds; `None`
+    /// for LUT_ALPHA / off).
     pub window: Option<(f32, f32)>,
     /// Colormap palette when the pane's tone is `Colormap` (else `None`).
     pub palette: Option<crate::palette::Palette>,
@@ -316,7 +317,8 @@ impl ExportPane {
             cropped = frame.crop(x0, y0, cw, ch);
             &cropped
         };
-        // A manual window overrides the clip / auto bounds (mirrors tone_bounds).
+        // Explicit bounds (from "Share clip" — the Control media's [lo, hi])
+        // override the clip / auto bounds (mirrors tone_bounds).
         let (lo, hi) = match (self.window, self.clip) {
             (Some(win), _) => win,
             (None, Some(pct)) => sub.clip_bounds(pct),
