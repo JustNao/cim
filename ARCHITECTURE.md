@@ -890,9 +890,20 @@ id each frame so Tab cleanly cycles the view and no button ever holds focus.
 
 ## 13. The update loop (`app/mod.rs::update`)
 
-Each frame: apply `ui_scale`; `clock += 1` (on the **first** frame re-assert
-`ViewportCommand::Maximized(true)` — Linux/Wayland often ignores `with_maximized` at
-window creation, Windows already honoured it); **rebuild the decode pool if
+Each frame: apply `ui_scale`; `clock += 1` (on the **first** frame send
+`ViewportCommand::Maximized(true)` — the window is **not** created maximized:
+on Windows winit applies `with_maximized` at creation via `ShowWindow(SW_MAXIMIZE)`,
+flashing the still-unpainted window **white** before eframe's own
+hidden-until-first-frame logic can help, and Linux/Wayland often ignores the builder
+flag anyway. Instead `main.rs` asks for an oversized window (eframe clamps it to the
+monitor) and this command — processed after the first frame is painted — maximizes
+it. On Windows the window is additionally **DWM-cloaked** in `new`
+(`set_window_cloak`) because eframe *shows* the window just **before** the first
+`swap_buffers` presents it — a race the DWM intermittently loses, compositing the
+still-blank window white for a few frames. A cloaked window is fully managed but
+never composited, so nothing can flash; `tick` **uncloaks on the third frame**, once
+a real maximized frame has been swapped, requesting repaints until then so those
+first frames come even while idle); **rebuild the decode pool if
 `resolve_decode_threads` changed** (§5); `pump_decoder` → `pump_render` (stage
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while

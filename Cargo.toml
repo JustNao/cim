@@ -1,11 +1,14 @@
 [package]
 name = "cim"
-version = "0.1.0"
+version = "1.3.0"
 edition = "2021"
 description = "Compare Images & Sequences — lossless side-by-side viewer for images and sequences"
 
 [dependencies]
 eframe = { version = "0.29", default-features = true }
+# Already in the tree via winit; used to reach the Win32 HWND for the
+# startup DWM cloak (no white flash — see app/mod.rs::set_window_cloak).
+raw-window-handle = "0.6"
 image = "0.25"
 tiff = "0.11"
 rfd = "0.14"

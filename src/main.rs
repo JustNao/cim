@@ -31,8 +31,16 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_min_inner_size([640.0, 400.0])
-            // Open filling the screen; the inner size above is the restored size.
-            .with_maximized(true)
+            // The app opens filling the screen, but NOT via `with_maximized`:
+            // on Windows winit applies that flag at window creation with
+            // `ShowWindow(SW_MAXIMIZE)`, which shows the still-unpainted
+            // window — a white flash — defeating eframe's own
+            // hidden-until-first-frame handling. Instead ask for an oversized
+            // window (eframe clamps it to the monitor) so the first frame is
+            // painted at full-screen size while hidden, and let `tick`
+            // maximize on the first update. Unmaximizing then restores to
+            // roughly the monitor size.
+            .with_inner_size([10000.0, 10000.0])
             .with_title("cim")
             .with_icon(app_icon()),
         ..Default::default()

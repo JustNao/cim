@@ -711,6 +711,11 @@ pub struct CimApp {
     /// Reused RGBA scratch buffer for texture rendering, so `prepare` doesn't
     /// allocate a full-image buffer on every frame change.
     render_scratch: Vec<u8>,
+    /// Windows: the main window's Win32 handle while it is still DWM-cloaked
+    /// against the startup white flash; `tick` uncloaks and clears it once the
+    /// first maximized frame has been presented (see `set_window_cloak`).
+    #[cfg(windows)]
+    cloaked_hwnd: Option<isize>,
 }
 
 impl CimApp {
@@ -771,6 +776,30 @@ impl CimApp {
         let cpp_dir = cpp_lib_dir(&config);
         crate::imageproc::init(cpp_dir.as_deref());
         let cpp_dir_active = config.cpp_lib_dir.clone();
+
+        // eframe shows the window right after the first frame is *painted* but
+        // just before it is *presented* (`set_visible` runs before
+        // `swap_buffers` in its glow backend), so on Windows the DWM can
+        // composite the still-blank window first — an intermittent white flash
+        // at startup. Cloak the window now: a cloaked window is fully managed
+        // (shown, resized, maximized) but never composited to the screen, so
+        // no show/present race can flash anything. `tick` uncloaks it once the
+        // first maximized frame has actually been swapped.
+        #[cfg(windows)]
+        let cloaked_hwnd = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match cc.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => {
+                    let hwnd = h.hwnd.get();
+                    set_window_cloak(hwnd, true);
+                    Some(hwnd)
+                }
+                // No handle (unexpected): skip cloaking — worst case is the
+                // old startup flash, never a stuck-invisible window.
+                _ => None,
+            }
+        };
+
         let mut app = Self {
             saved_config: config.clone(),
             config,
@@ -840,6 +869,8 @@ impl CimApp {
             warn_popup: None,
             clock: 0,
             render_scratch: Vec::new(),
+            #[cfg(windows)]
+            cloaked_hwnd,
         };
         app.open_inputs(inputs);
         if app.pending_open.is_some() {
@@ -1286,13 +1317,30 @@ impl CimApp {
     fn tick(&mut self, ctx: &egui::Context) {
         self.clock = self.clock.wrapping_add(1);
 
-        // Linux (esp. Wayland) frequently ignores `with_maximized(true)` from the
-        // `ViewportBuilder` at window creation, so the window opens at the
-        // restored size. Re-assert it once the window actually exists (first
-        // frame) — Windows already honoured the builder, and re-sending is a
-        // no-op there.
+        // The window is NOT created maximized: on Windows winit applies
+        // `with_maximized` at creation with `ShowWindow(SW_MAXIMIZE)`, showing
+        // the still-unpainted window as a white flash (and Linux/Wayland
+        // frequently ignores the builder flag anyway). Instead the window is
+        // created hidden at (clamped) monitor size, eframe shows it after the
+        // first painted frame, and this command — processed after that frame
+        // is painted and swapped — maximizes it. Shrinking to the work area
+        // exposes no unpainted region, so nothing white is ever presented.
         if self.clock == 1 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+
+        // Uncloak the window (created cloaked in `new` — see there) on the
+        // third frame: frame 1 was painted and swapped at the (clamped)
+        // monitor size with the maximize applied after it, frame 2 painted and
+        // swapped at the final maximized size — so the surface now holds a
+        // real full-size frame and revealing the window can never show white.
+        // The repaint requests keep those first frames coming even when the
+        // app would otherwise go idle.
+        #[cfg(windows)]
+        if self.clock < 3 {
+            ctx.request_repaint();
+        } else if let Some(hwnd) = self.cloaked_hwnd.take() {
+            set_window_cloak(hwnd, false);
         }
 
         // Rebuild the decode pool if the thread setting changed (live-applied like
@@ -1655,6 +1703,36 @@ fn wrap180(mut d: f32) -> f32 {
         d += 360.0;
     }
     d
+}
+
+/// Set or clear the DWM "cloak" attribute on a Win32 window: a cloaked window
+/// is fully managed (it can be shown, resized and maximized) but is never
+/// composited to the screen. Cloaked in `CimApp::new` and uncloaked in `tick`
+/// once a real frame has been presented, this hides the startup race where the
+/// window becomes visible before its first GL swap and the DWM shows it white.
+#[cfg(windows)]
+fn set_window_cloak(hwnd: isize, cloak: bool) {
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: isize,
+            attr: u32,
+            value: *const std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const DWMWA_CLOAK: u32 = 13;
+    let value: i32 = cloak as i32; // Win32 BOOL
+    // Failure (very old DWM) just leaves the window uncloaked: the flash may
+    // show, but the app is never stuck invisible.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            (&value as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
 }
 
 /// `<cim executable directory>/LIBS`, used when no library folder is configured.
