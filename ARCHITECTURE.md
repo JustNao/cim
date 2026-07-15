@@ -43,7 +43,10 @@
 ```
 src/
   main.rs        Entry point: parse CLI, then launch the eframe window (maximized).
-  cli.rs         CLI: --help, shell completion, sequence-token expansion.
+  cli.rs         CLI: --help, shell completion, sequence-token expansion, and
+                 directory expansion (a folder arg → one concatenated sequence of
+                 its loadable files, alphabetical; `input_for_path` shares it with
+                 drops/dialog).
   media/         Data model, split by concern (re-exported from mod.rs):
     mod.rs       FrameData/Samples core (accessors, crop), save_frame,
                  placeholder_frame.

@@ -292,10 +292,11 @@ impl CimApp {
     }
 
     // ---- loading ---------------------------------------------------------
-    /// Open plain paths (from the file dialog or a drag-and-drop) — each becomes
-    /// its own pane. Sequences only come from the command line (`open_inputs`).
+    /// Open plain paths (from the file dialog or a drag-and-drop) — each file
+    /// becomes its own pane, while a **dropped directory** opens as one
+    /// concatenated sequence of its loadable files (like `cim folder`).
     pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>) {
-        self.open_inputs(paths.into_iter().map(cli::Input::Single).collect());
+        self.open_inputs(paths.into_iter().map(cli::input_for_path).collect());
     }
 
     /// Open a list of CLI inputs: a `Single` becomes one media, a `Sequence`

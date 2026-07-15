@@ -6,6 +6,12 @@
 //! `frame_%05u.tif,0,12` stands for `frame_00000.tif` … `frame_00012.tif`.
 //! The GUI never has to enumerate a directory: the token carries the whole
 //! range, so the shell offers it on Tab and the app expands it on launch.
+//!
+//! A bare **directory** argument (`cim folder` / `cim folder/`) is a second way
+//! to name a sequence: every loadable file directly inside it, sorted
+//! **alphabetically**, is concatenated into one pane. Unlike the numbered token
+//! this needs no `%0Xu` range and so works for any file naming; the directory
+//! path itself is the token, round-tripped by the view command.
 
 use std::path::{Path, PathBuf};
 
@@ -292,10 +298,12 @@ USAGE:
     cim [OPTIONS] [FILES|SEQUENCES]...
 
 ARGS:
-    <FILES|SEQUENCES>...
-        Any number of images or sequences to open ({exts}).
+    <FILES|SEQUENCES|DIRS>...
+        Any number of images, sequences or directories to open ({exts}).
         A numbered run may be given compactly as PREFIX%0Xu SUFFIX,START,END,
         e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
+        A directory (e.g. `cim folder`) opens every loadable file inside it,
+        sorted alphabetically, concatenated into one pane.
 
 OPTIONS:
     -h, --help                 Print this help and exit
@@ -340,10 +348,30 @@ SHELL COMPLETION:
 
 // ---- sequence-token expansion -------------------------------------------
 
-/// Turn one positional argument into an `Input`. A sequence token naming two or
-/// more files becomes a single `Sequence`; a token that resolves to one file, or
-/// any plain path, becomes a `Single`.
+/// Turn one positional argument into an `Input`. A **directory** becomes one
+/// concatenated sequence of the loadable files it contains (alphabetical order);
+/// a sequence token naming two or more files becomes a single `Sequence`; a token
+/// that resolves to one file, or any plain path, becomes a `Single`.
 fn expand_arg(arg: &str, out: &mut Vec<Input>) {
+    // A directory opens all the loadable files directly inside it, sorted
+    // alphabetically, as one concatenated pane — the same downstream path as a
+    // numbered token, but the frames come from a listing so any naming works.
+    // The arg (not a normalised path) is kept as the token so the view command
+    // round-trips `cim folder` verbatim.
+    if Path::new(arg).is_dir() {
+        let mut files = list_dir_files(Path::new(arg));
+        match files.len() {
+            // Nothing loadable: fall through as a plain path so opening surfaces
+            // a clear "failed to open" error rather than silently doing nothing.
+            0 => out.push(Input::Single(PathBuf::from(arg))),
+            1 => out.push(Input::Single(files.pop().unwrap())),
+            _ => out.push(Input::Sequence {
+                token: arg.to_string(),
+                files,
+            }),
+        }
+        return;
+    }
     match expand_sequence_token(arg) {
         Some(files) if files.len() >= 2 => out.push(Input::Sequence {
             token: arg.to_string(),
@@ -352,6 +380,48 @@ fn expand_arg(arg: &str, out: &mut Vec<Input>) {
         Some(mut files) => out.push(Input::Single(files.pop().unwrap_or_default())),
         None => out.push(Input::Single(PathBuf::from(arg))),
     }
+}
+
+/// Build the `Input` for one filesystem path (from a drag-and-drop or the file
+/// dialog): a **directory** expands to a concatenated sequence of its loadable
+/// files (alphabetical), everything else is a plain `Single`. Shares the folder
+/// listing with the CLI's `expand_arg`.
+pub fn input_for_path(path: PathBuf) -> Input {
+    if path.is_dir() {
+        let mut files = list_dir_files(&path);
+        if files.len() >= 2 {
+            return Input::Sequence {
+                token: path.to_string_lossy().into_owned(),
+                files,
+            };
+        }
+        if let Some(only) = files.pop() {
+            return Input::Single(only);
+        }
+    }
+    Input::Single(path)
+}
+
+/// List the loadable files directly inside `dir`, sorted **alphabetically** by
+/// path (which, all being in the same directory, orders them by file name — the
+/// order that defines the concatenated frame sequence). Sub-directories and files
+/// whose extension isn't loadable (e.g. a stray `.txt`/`.json`) are skipped.
+fn list_dir_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| is_loadable(&n.to_string_lossy()))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 /// Expand a `PREFIX%0Xu SUFFIX,START,END` token into the files it stands for, or
@@ -769,6 +839,54 @@ mod tests {
             }
             _ => panic!("both inputs should be sequences"),
         }
+    }
+
+    #[test]
+    fn directory_becomes_one_concat_sequence() {
+        use std::fs;
+        // A unique temp dir with a mix of loadable files and a non-image file.
+        let dir = std::env::temp_dir().join(format!("cim_dir_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("b_002.tif"), b"").unwrap();
+        fs::write(dir.join("a_001.tif"), b"").unwrap();
+        fs::write(dir.join("c.png"), b"").unwrap();
+        fs::write(dir.join("notes.txt"), b"").unwrap(); // must be ignored
+
+        let mut out = Vec::new();
+        expand_arg(dir.to_str().unwrap(), &mut out);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Input::Sequence { token, files } => {
+                assert_eq!(token, dir.to_str().unwrap());
+                // .txt excluded; the rest sorted alphabetically by name.
+                assert_eq!(files.len(), 3);
+                assert!(files[0].ends_with("a_001.tif"));
+                assert!(files[1].ends_with("b_002.tif"));
+                assert!(files[2].ends_with("c.png"));
+            }
+            _ => panic!("a directory should open as one sequence"),
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn single_file_directory_becomes_a_single() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("cim_dir_solo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("only.tif"), b"").unwrap();
+        fs::write(dir.join("readme.md"), b"").unwrap(); // ignored
+
+        let mut out = Vec::new();
+        expand_arg(dir.to_str().unwrap(), &mut out);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Input::Single(p) => assert!(p.ends_with("only.tif")),
+            _ => panic!("a one-file directory should open as a single image"),
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
