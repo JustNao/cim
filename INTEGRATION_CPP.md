@@ -180,7 +180,17 @@ the `.so` on the loader path — no rebuild of cim needed to swap a library late
   when a frame's dimensions change, and destroyed on that thread when the pane is
   closed/reloaded (`RenderPool::forget`). Export runs the operators on its own
   worker thread with its own `PaneOps`. There is no shared operator state across
-  panes to guard.
+  panes to guard **at `apply` time**. **`create`/`destroy` are the exception:**
+  cim serialises every operator construction and teardown process-wide behind one
+  mutex (`CONSTRUCT` in `src/imageproc.rs`), because switching several synced panes
+  to LUT_ALPHA / Details at once fires their per-pane render jobs in the same frame,
+  so their worker threads would otherwise enter a vendor `create` **simultaneously**
+  — and heavy constructors routinely touch process-global state on first use (FFTW
+  planner setup, static-table init, one-time library bring-up) that is not reentrant,
+  giving an intermittent segfault. The lock covers only the one-time build/free, not
+  the per-frame `apply`, so steady-state rendering keeps its per-pane parallelism.
+  (If your vendor `create` is already fully thread-safe this lock is merely
+  redundant, not harmful.)
 - **Determinism / caching.** cim only re-runs an operator when a frame's texture
   is stale (frame changed, or the user toggled the mode). `apply` must be a pure
   function of its input (given a fixed size) for that cache to stay correct.

@@ -57,7 +57,7 @@
 
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, PoisonError, RwLock};
 
 /// The C symbols each operator library exports (see the module docs):
 /// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
@@ -113,6 +113,25 @@ unsafe impl Sync for Operator {}
 /// build its own instance.
 static LUT_ALPHA: RwLock<Option<Operator>> = RwLock::new(None);
 static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
+
+/// Process-wide lock serialising every operator **`create` and `destroy`** call.
+///
+/// Per-instance `apply` stays fully parallel (each pane owns its instance on its
+/// own worker thread — that is the point of the pool), but **construction and
+/// teardown are serialised across all panes**. The proprietary operators are only
+/// promised to be safe when a single instance is touched by a single thread; they
+/// are *not* promised that two threads may enter `create`/`destroy` at once, and
+/// heavy size-dependent constructors routinely touch process-global state on first
+/// use — FFTW planner setup, static lookup-table init, one-time library bring-up —
+/// none of which is guaranteed reentrant. When several synced panes are switched to
+/// LUT_ALPHA / Details in the same frame they each fire a render job at once, so
+/// their worker threads call `create` **simultaneously** and race that global init
+/// (intermittent segfault); applying the operator to one desynced pane at a time
+/// never overlaps two constructions, which is why that path never crashes. This
+/// mutex makes the concurrent case behave like the serial one. It is held only for
+/// the one-time build/free, not for the per-frame `apply`, so steady-state
+/// rendering keeps its per-pane parallelism.
+static CONSTRUCT: Mutex<()> = Mutex::new(());
 
 /// Load one operator library and resolve its `create`/`apply`/`destroy` symbols.
 /// `stem` is the operator's symbol prefix (e.g. `cim_lut_alpha`), to which
@@ -227,6 +246,11 @@ struct Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        // Serialise teardown against other panes' `create`/`destroy` for the same
+        // reason those are serialised (see `CONSTRUCT`): the vendor destructor may
+        // touch shared global state that construction also mutates. Recover a
+        // poisoned guard rather than double-panic while unwinding a drop.
+        let _guard = CONSTRUCT.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: `handle` came from the matching `create` and is freed exactly
         // once, here, on the owning worker thread.
         unsafe { (self.destroy)(self.handle) };
@@ -343,6 +367,11 @@ impl PaneOps {
             // rebuild never holds two instances at once.
             *slot = None;
             if let Some(operator) = op.read().unwrap().as_ref() {
+                // Serialise construction across all panes: two worker threads must
+                // not enter a vendor `create` at once (see `CONSTRUCT`). This is
+                // the one-time, size-dependent build, not the per-frame `apply`, so
+                // parallel steady-state rendering is unaffected.
+                let _guard = CONSTRUCT.lock().unwrap_or_else(PoisonError::into_inner);
                 // SAFETY: `create` per the documented ABI; the returned handle is
                 // freed exactly once in `Instance::drop`.
                 let handle = unsafe { (operator.create)(w, h) };
