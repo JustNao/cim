@@ -864,8 +864,11 @@ New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved conf
 loads.
 
 `Action` = all bindable actions (view toggles, next/prev media & frame, fit/actual/
-zoom, load all, open, toggle panels, play/pause, **reload focused / reload all / hide
-media**, `SelectMedia(0..12)`).
+zoom, load all, open, toggle panels, **open Compute pane** (default `C`), play/pause,
+**reload focused / reload all / hide media**, `SelectMedia(0..12)`). Buttons that
+replicate an action carry its current shortcut in their hover tooltip
+(`CimApp::hover_for` — `"Ctrl+R. <desc>"`, or just the chord when the button had no
+description); it reads the live binding, so a rebind updates the tooltip immediately.
 `Keybindings` is a `BTreeMap<action_id, chord_string>` with unique bindings, where a
 **`Chord`** is a key **plus optional Ctrl/Shift/Alt modifiers** (`ctrl` = egui's
 cross-platform `command`). It serialises as a `Ctrl+Shift+Key` string, so an older

@@ -22,7 +22,9 @@ impl CimApp {
         // "Transformations" button on the LEFT of row 1 (away from the close ×
         // so it's hard to mis-click), toggling this pane's options popup.
         let modify = Rect::from_min_size(header.min, Vec2::new(MODIFY_W, HEADER_H));
-        let mod_resp = ui.interact(modify, Id::new(("modify", idx)), Sense::click());
+        let mod_resp = ui
+            .interact(modify, Id::new(("modify", idx)), Sense::click())
+            .on_hover_text(self.hover_for(Action::ToggleVis, ""));
         let open = self.panes[idx].show_opts;
         hp.rect_filled(
             modify,
@@ -144,7 +146,7 @@ impl CimApp {
         );
         let reload_resp = ui
             .interact(reload, Id::new(("reload", idx)), Sense::click())
-            .on_hover_text("Reload this media from disk");
+            .on_hover_text(self.hover_for(Action::ReloadMedia, "Reload this media from disk"));
         if reload_resp.hovered() {
             hp.rect_filled(reload, 0.0, Color32::from_gray(70));
         }
@@ -211,7 +213,9 @@ impl CimApp {
             }
         }
 
-        let hide_resp = ui.interact(hide, Id::new(("hide", idx)), Sense::click());
+        let hide_resp = ui
+            .interact(hide, Id::new(("hide", idx)), Sense::click())
+            .on_hover_text(self.hover_for(Action::HideMedia, ""));
         if hide_resp.hovered() {
             hp.rect_filled(hide, 0.0, Color32::from_gray(70));
         }

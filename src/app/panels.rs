@@ -6,24 +6,41 @@ use super::*;
 impl CimApp {
     pub(super) fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Open").clicked() {
+            if ui
+                .button("Open")
+                .on_hover_text(self.hover_for(Action::OpenFiles, ""))
+                .clicked()
+            {
                 self.open_dialog();
             }
             ui.separator();
-            for (mode, label) in [
-                (Mode::Grid, "Grid"),
-                (Mode::Single, "Single"),
-                (Mode::Ab, "A/B"),
+            for (mode, label, action) in [
+                (Mode::Grid, "Grid", Action::ViewGrid),
+                (Mode::Single, "Single", Action::ViewSingle),
+                (Mode::Ab, "A/B", Action::ViewAb),
             ] {
-                if ui.selectable_label(self.mode == mode, label).clicked() {
+                if ui
+                    .selectable_label(self.mode == mode, label)
+                    .on_hover_text(self.hover_for(action, ""))
+                    .clicked()
+                {
                     self.mode = mode;
                 }
             }
             ui.separator();
-            if ui.button("Fit").clicked() {
+            if ui
+                .button("Fit")
+                .on_hover_text(self.hover_for(Action::ResetView, ""))
+                .clicked()
+            {
                 self.apply_action_local(Action::ResetView);
             }
-            if ui.button("100%").clicked() && !self.panes.is_empty() {
+            if ui
+                .button("100%")
+                .on_hover_text(self.hover_for(Action::ActualSize, ""))
+                .clicked()
+                && !self.panes.is_empty()
+            {
                 let size = self.panes[self.current].media.size();
                 self.view_mut(self.current).actual_size(size);
             }
@@ -32,23 +49,37 @@ impl CimApp {
             // full-width bottom frame bar, shown when the media is a sequence.
 
             ui.separator();
-            if ui.selectable_label(self.show_manager, "Media").clicked() {
+            if ui
+                .selectable_label(self.show_manager, "Media")
+                .on_hover_text(self.hover_for(Action::ToggleManager, ""))
+                .clicked()
+            {
                 self.show_manager = !self.show_manager;
             }
             if ui
                 .selectable_label(false, "Compute")
-                .on_hover_text("Add a Compute pane (mean / std / diff of other media)")
+                .on_hover_text(
+                    self.hover_for(Action::OpenCompute, "Add a Compute pane (mean / std / diff of other media)"),
+                )
                 .clicked()
             {
                 self.deferred.push(Deferred::CreateCompute);
             }
-            if ui.selectable_label(self.export.show, "Export").clicked() {
+            if ui
+                .selectable_label(self.export.show, "Export")
+                .on_hover_text(self.hover_for(Action::ToggleExport, ""))
+                .clicked()
+            {
                 self.toggle_export();
             }
             if ui.selectable_label(self.show_viewcmd, "View cmd").clicked() {
                 self.show_viewcmd = !self.show_viewcmd;
             }
-            if ui.selectable_label(self.show_settings, "Settings").clicked() {
+            if ui
+                .selectable_label(self.show_settings, "Settings")
+                .on_hover_text(self.hover_for(Action::ToggleSettings, ""))
+                .clicked()
+            {
                 self.show_settings = !self.show_settings;
             }
             // Pipeline profiler — only offered when launched with CIM_DEBUG=1.
@@ -121,15 +152,27 @@ impl CimApp {
         ui.horizontal(|ui| {
             // --- transport group ---
             let play = if self.playback.playing { "Pause" } else { "Play" };
-            if ui.button(play).clicked() {
+            if ui
+                .button(play)
+                .on_hover_text(self.hover_for(Action::PlayPause, ""))
+                .clicked()
+            {
                 self.playback.playing = !self.playback.playing;
             }
             // Step through `apply_action` so these obey the active loop window
             // exactly like the keyboard / Ctrl+wheel controls.
-            if ui.button("Prev").on_hover_text("Previous frame").clicked() {
+            if ui
+                .button("Prev")
+                .on_hover_text(self.hover_for(Action::PrevFrame, "Previous frame"))
+                .clicked()
+            {
                 self.apply_action(Action::PrevFrame, ui.ctx());
             }
-            if ui.button("Next").on_hover_text("Next frame").clicked() {
+            if ui
+                .button("Next")
+                .on_hover_text(self.hover_for(Action::NextFrame, "Next frame"))
+                .clicked()
+            {
                 self.apply_action(Action::NextFrame, ui.ctx());
             }
             ui.separator();
@@ -185,10 +228,11 @@ impl CimApp {
             } else {
                 if ui
                     .button("Load all")
-                    .on_hover_text(
+                    .on_hover_text(self.hover_for(
+                        Action::LoadAll,
                         "Decode every frame (up to the frame-cache budget; the rest \
                          continue as offsets/headers only)",
-                    )
+                    ))
                     .clicked()
                 {
                     self.load_all();
@@ -626,7 +670,7 @@ impl CimApp {
                                 });
                                 if ui
                                     .small_button("⟳")
-                                    .on_hover_text("Reload all from disk")
+                                    .on_hover_text(self.hover_for(Action::ReloadAll, "Reload all from disk"))
                                     .clicked()
                                 {
                                     self.deferred.push(Deferred::ReloadAll);
@@ -676,7 +720,9 @@ impl CimApp {
 
                                 if ui
                                     .selectable_label(self.current == i, "▢")
-                                    .on_hover_text("Show alone in Single view")
+                                    .on_hover_text(
+                                        self.hover_for(Action::SelectMedia(i), "Show alone in Single view"),
+                                    )
                                     .clicked()
                                 {
                                     self.current = i;

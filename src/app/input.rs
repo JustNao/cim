@@ -3,6 +3,18 @@
 use super::*;
 
 impl CimApp {
+    /// Build a button's hover tooltip prefixed with the current shortcut for the
+    /// action the button replicates: `"Ctrl+R. <desc>"`, or just `"Ctrl+R"` when
+    /// the button had no description. Reads the live keybinding, so a rebind is
+    /// reflected immediately; an unbound action falls back to `desc` unchanged.
+    pub(super) fn hover_for(&self, action: Action, desc: &str) -> String {
+        match self.config.keybindings.chord_for(action) {
+            Some(c) if desc.is_empty() => c.name(),
+            Some(c) => format!("{}. {}", c.name(), desc),
+            None => desc.to_string(),
+        }
+    }
+
     pub(super) fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
         let n = self.panes.len();
         match action {
@@ -81,6 +93,7 @@ impl CimApp {
                 }
             }
             Action::ToggleExport => self.toggle_export(),
+            Action::OpenCompute => self.deferred.push(Deferred::CreateCompute),
             Action::PlayPause => self.playback.playing = !self.playback.playing,
             Action::ReloadMedia if n > 0 => {
                 self.deferred.push(Deferred::Reload(self.current.min(n - 1)))

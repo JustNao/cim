@@ -28,6 +28,7 @@ pub enum Action {
     ToggleManager,
     ToggleVis,
     ToggleExport,
+    OpenCompute,
     PlayPause,
     ReloadMedia,
     ReloadAll,
@@ -57,6 +58,7 @@ impl Action {
             Action::ToggleManager => "toggle_manager".into(),
             Action::ToggleVis => "toggle_vis".into(),
             Action::ToggleExport => "toggle_export".into(),
+            Action::OpenCompute => "open_compute".into(),
             Action::PlayPause => "play_pause".into(),
             Action::ReloadMedia => "reload_media".into(),
             Action::ReloadAll => "reload_all".into(),
@@ -86,6 +88,7 @@ impl Action {
             Action::ToggleManager => "Toggle media manager".into(),
             Action::ToggleVis => "Toggle Transformations popup (focused pane)".into(),
             Action::ToggleExport => "Toggle export panel".into(),
+            Action::OpenCompute => "Add a Compute pane".into(),
             Action::PlayPause => "Play / pause sequences".into(),
             Action::ReloadMedia => "Reload focused media from disk".into(),
             Action::ReloadAll => "Reload all media from disk".into(),
@@ -115,6 +118,7 @@ impl Action {
             Action::ToggleManager,
             Action::ToggleVis,
             Action::ToggleExport,
+            Action::OpenCompute,
             Action::PlayPause,
             Action::ReloadMedia,
             Action::ReloadAll,
@@ -223,6 +227,7 @@ impl Default for Keybindings {
         set(Action::ToggleManager, Key::M);
         set(Action::ToggleVis, Key::V);
         set(Action::ToggleExport, Key::E);
+        set(Action::OpenCompute, Key::C);
         set(Action::PlayPause, Key::Space);
         set(Action::ReloadMedia, Key::R);
         set(Action::HideMedia, Key::H);
