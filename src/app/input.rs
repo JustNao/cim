@@ -158,10 +158,20 @@ impl CimApp {
         let f = self.shared_frame;
         let next = if f < lo {
             Some(lo) // jump into the window
-        } else if f < hi {
-            Some((f + ff).min(hi)) // stride, but never overshoot the window end
+        } else if f + ff <= hi {
+            Some(f + ff) // a full stride fits inside the discovered window
+        } else if f < hi && (!full || at_end) {
+            // The stride would overshoot, but the window end is a *real* boundary (a
+            // sub-range, or the true end of a fully-discovered sequence): take the
+            // final short stride onto it.
+            Some(hi)
         } else if full && !at_end {
-            None // at the frontier of a still-discovering sequence: hold
+            // The stride would run past the still-undiscovered frontier. Hold rather
+            // than clamp onto it — clamping would land on (and decode) every frontier
+            // frame one at a time and defeat the stride. `ensure_lookahead` keeps
+            // probing the frontier `ff` ahead (headers only), so once `f + ff` is
+            // discovered the full-stride branch above fires.
+            None
         } else if self.playback.loop_playback {
             Some(lo) // wrap to the window start
         } else {

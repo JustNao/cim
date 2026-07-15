@@ -232,6 +232,14 @@ impl CimApp {
         if !targets.contains(&ctrl) {
             targets.push(ctrl);
         }
+        // How far past the shown frame the frontier must stay discovered. Normally
+        // one page. **While playing with a fast-forward stride, keep `ff` pages
+        // ahead** so playback's next strided target (`frame + ff`) is already known:
+        // otherwise the frontier only advances a page at a time and `advance_playback`
+        // is forced to land on (and decode) every frontier frame instead of striding
+        // past them — the very frames the stride is meant to skim.
+        let ff = self.playback.fast_forward.max(1);
+        let margin = if self.playback.playing { ff + 1 } else { 2 };
         for i in targets {
             if self.panes[i].eager != Eager::Off || self.panes[i].media.at_end() {
                 continue; // a bulk load (drive_eager) already drives this pane's frontier
@@ -242,12 +250,12 @@ impl CimApp {
                 // timeline): discover with a metadata-only probe so the pages in
                 // between aren't decoded — only the target lands (see `stage`).
                 self.probe(i, known);
-            } else if self.frame_disp(i) + 2 > known {
+            } else if self.frame_disp(i) + margin > known {
                 // Browsing at the frontier. With a fast-forward stride, skim it by
                 // header only (probe) so the frames jumped over aren't decoded — the
                 // one landed on decodes on demand in `stage`; otherwise prefetch the
                 // next page with a full decode.
-                if self.playback.fast_forward > 1 {
+                if ff > 1 {
                     self.probe(i, known);
                 } else {
                     self.request(i, known);
@@ -307,8 +315,14 @@ impl CimApp {
                 // to the window start when looping — exactly the frames it shows next.
                 let mut f = self.playback.prefetch.unwrap_or(self.shared_frame);
                 for _ in 0..depth {
-                    f = if f < hi {
-                        (f + ff).min(hi)
+                    // Mirror `advance_playback`'s stride decision exactly, so prefetch
+                    // requests only the frames playback will actually land on — never a
+                    // partial stride onto the undiscovered frontier (which would decode
+                    // a frame the stride is meant to skim).
+                    f = if f + ff <= hi {
+                        f + ff // a full stride fits inside the discovered window
+                    } else if f < hi && (!full || at_end) {
+                        hi // final short stride onto a real window end
                     } else if full && !at_end {
                         break; // holding at the frontier; discovery is ensure_lookahead's job
                     } else if self.playback.loop_playback {
