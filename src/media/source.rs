@@ -116,6 +116,16 @@ impl SeqCache {
         }
     }
 
+    /// Grow the known length to (at least) `len` in one step, all empty slots —
+    /// how a **fast jump** records that pages exist through a validated target
+    /// without probing each one. Never shrinks; existing slots are untouched.
+    pub(super) fn note_len_to(&mut self, len: usize) {
+        if len > self.cache.len() {
+            self.cache.resize(len, None);
+            self.last_used.resize(len, 0);
+        }
+    }
+
     fn touch(&mut self, idx: usize, clock: u64) {
         let Some(&old) = self.last_used.get(idx) else {
             return;
@@ -506,5 +516,40 @@ impl ConcatSeq {
         if self.disc_file >= self.files.len() {
             self.at_end = true;
         }
+    }
+
+    /// A **fast jump** measured the exact page counts of files `0..file`
+    /// (`counts`, one per file) and validated the target page at (`file`,
+    /// `page`): extend the global map through the target in one step, without
+    /// probing anything in between. The measured layout must agree with
+    /// whatever prefix ordinary discovery had already built — a mismatch means
+    /// the stride prediction and the real IFD chain disagree, so the jump is
+    /// refused (`Err`) and **nothing changes**. Never shrinks the known length.
+    pub(super) fn extend_known(
+        &mut self,
+        counts: &[usize],
+        file: usize,
+        page: usize,
+    ) -> Result<(), String> {
+        debug_assert_eq!(counts.len(), file);
+        let mut new_map: Vec<(usize, usize)> =
+            Vec::with_capacity(counts.iter().sum::<usize>() + page + 1);
+        for (i, &n) in counts.iter().enumerate() {
+            new_map.extend((0..n).map(|p| (i, p)));
+        }
+        new_map.extend((0..=page).map(|p| (file, p)));
+
+        let known = self.map.len().min(new_map.len());
+        if self.map[..known] != new_map[..known] {
+            return Err("measured page counts disagree with the discovered timeline".into());
+        }
+        if new_map.len() <= self.map.len() {
+            return Ok(()); // already discovered this far — nothing to extend
+        }
+        self.map = new_map;
+        self.disc_file = file;
+        self.disc_page = page + 1;
+        self.frames.note_len_to(self.map.len());
+        Ok(())
     }
 }

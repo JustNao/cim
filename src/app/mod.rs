@@ -517,6 +517,12 @@ struct Pane {
     eager: Eager,
     /// Auto-reload file-watch state (the "Auto-reload" header toggle). See [`Watch`].
     watch: Watch,
+    /// Cached Fast-jump availability for this media: `None` = not yet measured
+    /// (the frame bar measures lazily — a few tiny header reads, but still file
+    /// I/O, so once per pane); `Some(Err(reason))` = the greyed button's hover
+    /// text; `Some(Ok(()))` = a regular page stride was measured, jumps can be
+    /// attempted. Reset on reload (the file may have changed shape).
+    fast_jump: Option<Result<(), String>>,
 }
 
 /// A pane's auto-reload file-watch state: watch the source file(s) on disk and
@@ -585,6 +591,11 @@ pub struct CimApp {
     /// target), so a jump can be committed on Enter without stepping through the
     /// intervening frames.
     frame_edit: String,
+    /// The Fast-jump index field, `Some(buffer)` while open (the button
+    /// toggles it). Enter commits the typed index to `do_fast_jump`; a failed
+    /// jump raises the fixed modal and simply closes the field — no fallback
+    /// discovery is started.
+    fast_jump_edit: Option<String>,
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
@@ -821,6 +832,7 @@ impl CimApp {
             shared_overlay: None,
             pending_seek: None,
             frame_edit: String::new(),
+            fast_jump_edit: None,
             mode: Mode::Grid,
             current: 0,
             control: 0,
@@ -1142,6 +1154,37 @@ impl CimApp {
             // Beyond the frontier: discover forward without drawing each step.
             self.playback.playing = false;
             self.pending_seek = Some(target);
+        }
+    }
+
+    /// Run a committed **Fast jump** (0-based, like the frame readout) on the
+    /// timeline-driving media: validate + decode `target` at its predicted file
+    /// position and grow the known length through it in one step
+    /// (`media::fast_jump`), then jump the timeline there — never riding the
+    /// frontier, never decoding anything in between. If the prediction can't be
+    /// made or doesn't validate, the fixed modal is raised and **nothing else
+    /// happens** — the jump is cancelled outright, with no fallback discovery
+    /// toward the target. A target already inside the known length (or past a
+    /// fully-known end) doesn't need prediction and routes through `seek_to`.
+    pub(super) fn do_fast_jump(&mut self, target: usize) {
+        let i = self.loop_control();
+        let Some(pane) = self.panes.get_mut(i) else {
+            return;
+        };
+        if target < pane.media.frame_count() || pane.media.at_end() {
+            self.seek_to(target); // already known (or clamps at a known end)
+            return;
+        }
+        match media::fast_jump(&mut pane.media, target) {
+            Ok(()) => {
+                let clock = self.clock;
+                self.panes[i].media.touch(target, clock);
+                self.seek_to(target); // within the known length now: jumps directly
+            }
+            Err(_) => {
+                self.error_popup =
+                    Some("Fast jump could not be made from the current format".into());
+            }
         }
     }
 

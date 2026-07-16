@@ -54,6 +54,9 @@ src/
                  the source kinds behind one interface, length discovery, LRU.
     loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
                  decoder), bilevel-mask bit handling.
+    fastscan.rs  Fast jump (§4): measure a regular page stride from the first
+                 two IFDs, then predict + validate + raw-decode page N in O(1)
+                 (never trusted unvalidated; falls back to the chain walk).
     render.rs    Tone rendering: cached-LUT render (ToneLut + render_into*_lut /
                  _scaled / _gray_u16 / _cmap), mask/intensity overlay tints, display-bounds.
     stats.rs     Histograms, region stats/bounds, Compute reductions (mean/std/diff).
@@ -212,6 +215,28 @@ len)` grows length by one.
 - **`ConcatSeq`** reuses all of this: a frontier miss rolls to the next file's
   page 0, so the run discovers as one seamless length (∑ page counts) with no
   concat-specific code in `drive_seek`/lookahead/playback.
+- **Fast jump (`media/fastscan.rs`)** — an O(1) shortcut past all of the above for
+  **regularly laid out** TIFFs (uniform, uncompressed pages at a fixed byte
+  stride — the `tifffile`/ImageJ capture case). `FastScan::open` measures the
+  stride from the first two IFDs (with a long list of rejections: compression,
+  tiling, planar, differing pages, irregular placement…); page N is then
+  *predicted* at `ifd0 + N×stride` and **validated before trust** (template
+  match tag-for-tag, strip data on the same stride, predecessor's next-IFD
+  pointer landing on it), so a wrong frame can never be shown — a failed
+  validation just falls back to the ordinary chain walk. Used twice: every
+  `SeqReader` consults a measured layout so far probes/decodes skip the chain
+  walk, and the frame bar's **Fast jump** button (left of the frame readout;
+  greyed with the rejection reason as hover text) takes a typed index,
+  validates + raw-decodes it directly and grows the known length through it in
+  one step (`SeqCache::note_len_to`) — no intervening discovery at all. A
+  `ConcatSeq` works too: each file before the target gets an exact page count
+  by binary-searching the largest validating page (~20 header reads/file), and
+  the global map is extended through the target (`ConcatSeq::extend_known`),
+  verified against whatever prefix ordinary discovery already built. Any
+  failure (unmeasurable layout, invalid prediction, past the real end,
+  map disagreement) raises a fixed modal and cancels outright — nothing is
+  mutated and **no fallback discovery is started**. Availability is cached per
+  pane (`Pane.fast_jump`, reset on reload).
 
 ---
 

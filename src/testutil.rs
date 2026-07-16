@@ -41,7 +41,7 @@ pub fn write_multipage_tiff_u16(path: &Path, sizes: &[[usize; 2]]) {
     let mut file = File::create(path).expect("create tiff");
     let mut enc = TiffEncoder::new(&mut file).expect("tiff encoder");
     for (k, &[w, h]) in sizes.iter().enumerate() {
-        let data = gray16_page(w, h, (k as u16) * 1000);
+        let data = gray16_page(w, h, (k as u16).wrapping_mul(1000)); // wraps past page 65
         enc.write_image::<colortype::Gray16>(w as u32, h as u32, &data)
             .expect("write tiff page");
     }

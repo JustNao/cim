@@ -211,9 +211,18 @@ impl Seek for TimedFile {
 /// within a single `Decoder`. Keeping one `SeqReader` alive per sequence keeps
 /// that cache warm, so seeking to page `k` no longer re-walks the whole IFD
 /// chain from the start on every decode (which made a sweep O(N²)).
+///
+/// When the file has a **regular page stride** (uniform uncompressed pages —
+/// see [`FastScan`](super::fastscan::FastScan)), decodes and probes first try
+/// the predicted position (O(1), validated before trust) and only fall back to
+/// the chain walk when the prediction doesn't hold — so a far seek, and the
+/// lookahead right after a fast jump, don't pay O(N) either.
 pub struct SeqReader {
     dec: Decoder<BufReader<TimedFile>>,
     io_nanos: Arc<AtomicU64>,
+    /// Measured stride layout, when the file has one. Owns its own file handle;
+    /// its handful of tiny header reads aren't counted in `io_nanos` (noise).
+    fast: Option<super::fastscan::FastScan>,
 }
 
 impl SeqReader {
@@ -226,6 +235,8 @@ impl SeqReader {
                 io_nanos: Arc::clone(&io_nanos),
             }))?,
             io_nanos,
+            // Irregular / unsupported layouts simply don't get the fast path.
+            fast: super::fastscan::FastScan::open(path).ok(),
         })
     }
 
@@ -238,9 +249,18 @@ impl SeqReader {
 
     /// Decode page `idx` at native bit depth, or `Ok(None)` when `idx` is past
     /// the last page (how the caller learns the true length without counting
-    /// ahead). Always seeks first — the reader may sit on any page from a prior
-    /// call — which is cheap once the offset is cached.
+    /// ahead). A measured stride layout decodes the page at its predicted
+    /// position first (validated, bit-exact by test); otherwise — or when the
+    /// prediction doesn't hold — always seeks via the chain, which is cheap
+    /// once the offset is cached.
     pub fn decode(&mut self, idx: usize) -> Result<Option<FrameData>> {
+        if let Some(fast) = &mut self.fast {
+            if let Some(frame) = fast.read_page(idx) {
+                return Ok(Some(frame));
+            }
+            // Prediction failed: past the end, or irregular after all. The
+            // chain walk below is the ground truth either way.
+        }
         if self.dec.seek_to_image(idx).is_err() {
             return Ok(None);
         }
@@ -249,10 +269,18 @@ impl SeqReader {
 
     /// Metadata-only frontier probe: seek to page `idx` and confirm it exists by
     /// reading its IFD, **without** decoding pixels. `Ok(true)` the page is
-    /// there, `Ok(false)` it is past the last page. `seek_to_image` walks the
-    /// IFD chain (cheap once offsets are cached) but never touches the strip
-    /// data, so fast-forwarding a seek this way skips the per-page decompress.
+    /// there, `Ok(false)` it is past the last page. A measured stride layout
+    /// answers from the predicted position (O(1)); the fallback `seek_to_image`
+    /// walks the IFD chain (cheap once offsets are cached) but never touches the
+    /// strip data, so fast-forwarding a seek this way skips the per-page
+    /// decompress.
     pub fn probe(&mut self, idx: usize) -> Result<bool> {
+        if let Some(fast) = &mut self.fast {
+            if fast.validate(idx) {
+                return Ok(true);
+            }
+            // A failed validation isn't proof of absence — fall through.
+        }
         Ok(self.dec.seek_to_image(idx).is_ok())
     }
 }

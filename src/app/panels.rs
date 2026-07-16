@@ -292,10 +292,87 @@ impl CimApp {
                     self.frame_edit = self.shared_frame.to_string();
                 }
                 ui.monospace("frame");
+                self.draw_fast_jump(ui, at_end);
             });
         });
 
         self.draw_scrubber(ui, len, at_end);
+    }
+
+    /// The **Fast jump** button (left of the frame readout) and its index
+    /// field. Enabled only when the timeline-driving media measured a regular
+    /// page stride (`media::fast_jump_availability`, cached per pane — a few
+    /// header reads, re-measured after a reload); greyed otherwise with the
+    /// reason as hover text. Clicking toggles a small field; Enter commits the
+    /// typed (0-based) index to `do_fast_jump`, which either jumps straight to
+    /// a validated prediction or raises the fixed failure modal and cancels.
+    fn draw_fast_jump(&mut self, ui: &mut egui::Ui, at_end: bool) {
+        let ctl = self.loop_control();
+        let Some(pane) = self.panes.get_mut(ctl) else {
+            return;
+        };
+        // Measure availability lazily, once per pane (file I/O, though tiny).
+        let avail = pane
+            .fast_jump
+            .get_or_insert_with(|| media::fast_jump_availability(&pane.media))
+            .clone();
+
+        // With the length fully known the readout already seeks anywhere
+        // instantly, so there is nothing for prediction to add.
+        let (enabled, hover) = if at_end {
+            (
+                false,
+                "The sequence length is already fully known — type an index in the frame \
+                 readout instead"
+                    .to_string(),
+            )
+        } else {
+            match avail {
+                Ok(()) => (
+                    true,
+                    "Jump straight to any frame index by predicting its position in the \
+                     file (pages are uniform and uncompressed, so page N sits at a fixed \
+                     stride). The target is validated before being shown."
+                        .to_string(),
+                ),
+                Err(reason) => (false, format!("Fast jump unavailable: {reason}")),
+            }
+        };
+
+        let open = self.fast_jump_edit.is_some();
+        let edit_id = Id::new("fast_jump_edit");
+        // Added before the button in this right-to-left cluster, so the field
+        // pops up between the button and the "frame" readout.
+        if let Some(buf) = &mut self.fast_jump_edit {
+            let field = egui::TextEdit::singleline(buf)
+                .id(edit_id)
+                .desired_width(52.0)
+                .horizontal_align(egui::Align::Max)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("index");
+            let resp = ui.add(field);
+            if resp.lost_focus() {
+                let commit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let target = buf.trim().parse::<usize>();
+                self.fast_jump_edit = None; // closed on Enter and on click-away alike
+                if commit {
+                    if let Ok(target) = target {
+                        self.do_fast_jump(target);
+                    }
+                }
+            }
+        }
+        if ui
+            .add_enabled(enabled, egui::SelectableLabel::new(open, "Fast jump"))
+            .on_hover_text(&hover)
+            .on_disabled_hover_text(&hover)
+            .clicked()
+        {
+            self.fast_jump_edit = if open { None } else { Some(String::new()) };
+            if !open {
+                ui.memory_mut(|m| m.request_focus(edit_id));
+            }
+        }
     }
 
     /// A wide, click/drag-seekable frame track filling the panel width. Frames

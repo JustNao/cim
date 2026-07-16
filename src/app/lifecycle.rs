@@ -411,6 +411,7 @@ impl CimApp {
             error: None,
             eager: Eager::Off,
             watch: Watch::default(),
+            fast_jump: None,
         });
     }
 
@@ -480,6 +481,7 @@ impl CimApp {
                 self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
+                self.panes[i].fast_jump = None; // re-measure the (possibly new) layout
                 // If this is a mask, invalidate overlay textures whose effective
                 // source is it, so they rebuild from the reloaded contents.
                 let shared_src = self.shared_overlay.map(|o| o.src_id);

@@ -11,12 +11,14 @@
 //! Video (mp4/avi) will slot in later as another `Media` variant behind the
 //! same interface.
 
+mod fastscan;
 mod loader;
 mod percentile;
 mod render;
 mod source;
 mod stats;
 
+pub use fastscan::{availability as fast_jump_availability, fast_jump};
 pub use loader::{decode_file, load, load_sequence, SeqReader};
 pub use render::ToneLut;
 pub use source::{DecodeReq, Media};
