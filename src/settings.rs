@@ -373,7 +373,7 @@ pub struct Config {
     /// The reserved header space is dropped when on, so the image fills the cell
     /// and the revealed header floats over its top edge (never shifting the
     /// image). Toggled in Settings and by `Action::ToggleHeaders`.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_hide_headers: bool,
     /// Directory holding the proprietary C++ operator shared libraries (`.so`).
     /// Empty = resolve them by bare name via the system loader search path
@@ -407,7 +407,7 @@ impl Default for Config {
             cache_budget_mb: default_cache_budget_mb(),
             decode_threads: default_decode_threads(),
             cursor_dot: true,
-            auto_hide_headers: true,
+            auto_hide_headers: false,
             cpp_lib_dir: String::new(),
             keybindings: Keybindings::default(),
         }
