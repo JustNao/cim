@@ -229,7 +229,7 @@ impl CimApp {
         let items: Vec<(usize, Rect, Rect)> = cells
             .iter()
             .map(|&(idx, cell)| {
-                let area = image_area(cell);
+                let area = self.image_area(cell);
                 (idx, self.pane_content_in(idx, area), area)
             })
             .collect();
@@ -281,7 +281,7 @@ impl CimApp {
         let r = match self.export.mode {
             Mode::Single => {
                 let idx = self.current.min(n - 1);
-                self.pane_content_in(idx, image_area(area))
+                self.pane_content_in(idx, self.image_area(area))
             }
             Mode::Ab => {
                 let a = self.slot_a.min(n - 1);
@@ -430,7 +430,7 @@ impl CimApp {
                         pane.view = region_view(reg);
                         Rect::from_min_size(Pos2::ZERO, reg.size())
                     }
-                    None => image_area(area),
+                    None => self.image_area(area),
                 };
                 panes.push(pane);
                 ExportLayout::Single(0, cell)

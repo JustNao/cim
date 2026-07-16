@@ -103,6 +103,9 @@ impl CimApp {
                 self.panes[self.current.min(n - 1)].visible = false;
                 self.reselect_if_hidden();
             }
+            Action::ToggleHeaders => {
+                self.config.auto_hide_headers = !self.config.auto_hide_headers;
+            }
             Action::SelectMedia(i) if i < n => {
                 self.current = i;
                 self.mode = Mode::Single;

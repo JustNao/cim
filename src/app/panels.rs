@@ -974,6 +974,12 @@ impl CimApp {
                         "Mark the hovered pixel on every other pane with a red dot, so \
                          the same location is easy to compare across panes.",
                     );
+                ui.checkbox(&mut self.config.auto_hide_headers, "Auto-hide pane headers")
+                    .on_hover_text(
+                        "Hide each pane's header bar until the cursor moves over the top \
+                         of the pane, so the image uses the full cell. Revealing it never \
+                         shifts the image (the header floats over the top edge).",
+                    );
 
                 ui.add_space(8.0);
                 ui.separator();

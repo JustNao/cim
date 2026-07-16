@@ -33,6 +33,7 @@ pub enum Action {
     ReloadMedia,
     ReloadAll,
     HideMedia,
+    ToggleHeaders,
     SelectMedia(usize),
 }
 
@@ -63,6 +64,7 @@ impl Action {
             Action::ReloadMedia => "reload_media".into(),
             Action::ReloadAll => "reload_all".into(),
             Action::HideMedia => "hide_media".into(),
+            Action::ToggleHeaders => "toggle_headers".into(),
             Action::SelectMedia(i) => format!("select_media_{}", i + 1),
         }
     }
@@ -93,6 +95,7 @@ impl Action {
             Action::ReloadMedia => "Reload focused media from disk".into(),
             Action::ReloadAll => "Reload all media from disk".into(),
             Action::HideMedia => "Hide focused media".into(),
+            Action::ToggleHeaders => "Toggle auto-hiding pane headers".into(),
             Action::SelectMedia(i) => format!("Select media {}", i + 1),
         }
     }
@@ -123,6 +126,7 @@ impl Action {
             Action::ReloadMedia,
             Action::ReloadAll,
             Action::HideMedia,
+            Action::ToggleHeaders,
         ];
         v.extend((0..12).map(Action::SelectMedia));
         v
@@ -231,6 +235,7 @@ impl Default for Keybindings {
         set(Action::PlayPause, Key::Space);
         set(Action::ReloadMedia, Key::R);
         set(Action::HideMedia, Key::H);
+        set(Action::ToggleHeaders, Key::T);
         // Media 1..=9 -> digit keys; 10..12 left unbound by default (rebindable).
         let digits = [
             Key::Num1,
@@ -364,6 +369,12 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// Hide each pane's header bar until the cursor moves over its top strip.
+    /// The reserved header space is dropped when on, so the image fills the cell
+    /// and the revealed header floats over its top edge (never shifting the
+    /// image). Toggled in Settings and by `Action::ToggleHeaders`.
+    #[serde(default = "default_true")]
+    pub auto_hide_headers: bool,
     /// Directory holding the proprietary C++ operator shared libraries (`.so`).
     /// Empty = resolve them by bare name via the system loader search path
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
@@ -396,6 +407,7 @@ impl Default for Config {
             cache_budget_mb: default_cache_budget_mb(),
             decode_threads: default_decode_threads(),
             cursor_dot: true,
+            auto_hide_headers: true,
             cpp_lib_dir: String::new(),
             keybindings: Keybindings::default(),
         }

@@ -1200,6 +1200,28 @@ impl CimApp {
     /// one commits — so a differently sized page never briefly appears at the
     /// page-0 fallback size while it decodes. Before the first commit, fall back to
     /// the resident target frame's own size, then the page-0 size.
+    /// Height reserved at the top of every cell for the header bar. **Zero** when
+    /// `auto_hide_headers` is on: the header then floats over the image's top edge
+    /// only while revealed, so the image already fills that space and revealing the
+    /// header never shifts it — only toggling the setting reflows the image.
+    pub(super) fn header_reserved(&self) -> f32 {
+        if self.config.auto_hide_headers {
+            0.0
+        } else {
+            HEADER_H
+        }
+    }
+
+    /// The image sub-rect of a cell, flush between its (possibly hidden) header
+    /// and its footer bar (no margin, so nothing shows through between the image
+    /// and those strips).
+    pub(super) fn image_area(&self, cell: Rect) -> Rect {
+        Rect::from_min_max(
+            Pos2::new(cell.min.x, cell.min.y + self.header_reserved()),
+            Pos2::new(cell.max.x, cell.max.y - FOOTER_H),
+        )
+    }
+
     pub(super) fn disp_size(&self, i: usize) -> [usize; 2] {
         if let Some(t) = &self.panes[i].tex.front {
             return t.size;
@@ -1665,19 +1687,10 @@ impl eframe::App for CimApp {
 
 // ---- shared free helpers -------------------------------------------------
 
-/// Total header height for a cell. A single row now that the header holds only
-/// the Transformations button (Compute moved to the toolbar).
+/// Drawn height of a visible header row. A single row now that the header holds
+/// only the Transformations button (Compute moved to the toolbar).
 fn header_h_for(_width: f32) -> f32 {
     HEADER_H
-}
-
-/// The image sub-rect of a cell, flush between its header and footer bars (no
-/// margin, so nothing shows through between the image and those strips).
-fn image_area(cell: Rect) -> Rect {
-    Rect::from_min_max(
-        Pos2::new(cell.min.x, cell.min.y + header_h_for(cell.width())),
-        Pos2::new(cell.max.x, cell.max.y - FOOTER_H),
-    )
 }
 
 /// The footer strip at the bottom of a cell.

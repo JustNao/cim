@@ -37,7 +37,7 @@ impl CimApp {
         match self.mode {
             Mode::Single => {
                 let idx = self.current.min(self.panes.len() - 1);
-                let ia = image_area(area);
+                let ia = self.image_area(area);
                 self.cursor_img = hover.and_then(|p| self.hover_img_pos(idx, ia, ia, p));
                 self.cursor_pane = self.cursor_img.map(|_| idx);
                 self.draw_pane(ui, ctx, idx, area);
@@ -58,7 +58,7 @@ impl CimApp {
                 // The cursor's image position comes from whichever cell it's over.
                 if let Some(p) = hover {
                     for &(idx, cell) in &cells {
-                        let ia = image_area(cell);
+                        let ia = self.image_area(cell);
                         if let Some(ci) = self.hover_img_pos(idx, ia, ia, p) {
                             self.cursor_img = Some(ci);
                             self.cursor_pane = Some(idx);
@@ -127,12 +127,12 @@ impl CimApp {
         let Some(reg) = self.export.region else { return };
         let panes_areas: Vec<(usize, Rect)> = match self.mode {
             Mode::Single => {
-                vec![(self.current.min(self.panes.len() - 1), image_area(area))]
+                vec![(self.current.min(self.panes.len() - 1), self.image_area(area))]
             }
             Mode::Grid => self
                 .grid_cells(&self.visible_indices(), area)
                 .iter()
-                .map(|&(idx, cell)| (idx, image_area(cell)))
+                .map(|&(idx, cell)| (idx, self.image_area(cell)))
                 .collect(),
             // The wipe shares one image area; both sides are spatially the same
             // place, so pane A's view is representative.
@@ -194,7 +194,7 @@ impl CimApp {
     }
 
     pub(super) fn draw_pane(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, idx: usize, cell: Rect) {
-        let img_area = image_area(cell);
+        let img_area = self.image_area(cell);
         let size = self.panes[idx].media.size();
 
         // Fit this pane's effective view on first draw / after a reset.
@@ -235,7 +235,15 @@ impl CimApp {
         let resp = ui.interact(img_area, Id::new(("pane", idx)), Sense::click_and_drag());
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         let alt = ctx.input(|i| i.modifiers.alt);
-        if resp.hovered() {
+        // With auto-hidden headers the image fills the cell, so a revealed header
+        // floats over its top strip. While the cursor is over that strip the header
+        // owns the input — don't let the pane zoom/rotate/reorder/focus underneath
+        // it. (An in-progress pan started lower down still continues; only new
+        // interactions are suppressed here.)
+        let header_strip = Rect::from_min_size(cell.min, Vec2::new(cell.width(), HEADER_H));
+        let over_header = self.config.auto_hide_headers
+            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| header_strip.contains(p));
+        if resp.hovered() && !over_header {
             let scroll = wheel_delta(ctx);
             if scroll != 0.0 {
                 if ctrl {
@@ -255,7 +263,7 @@ impl CimApp {
         }
         // Alt + primary drag rotates the pane about its image centre (à la
         // Photoshop): the pane follows the cursor's angle around the pivot.
-        if !self.export.selecting && resp.drag_started_by(PointerButton::Primary) {
+        if !self.export.selecting && !over_header && resp.drag_started_by(PointerButton::Primary) {
             if alt {
                 let rect = self.view_ref(idx).image_rect(self.disp_size(idx), img_area);
                 let pivot = rect.center();
@@ -289,7 +297,7 @@ impl CimApp {
             let d = resp.drag_delta();
             self.view_mut(idx).pan(d);
         }
-        if !self.export.selecting && resp.clicked() {
+        if !self.export.selecting && !over_header && resp.clicked() {
             self.current = idx;
         }
 
@@ -305,7 +313,13 @@ impl CimApp {
             self.draw_compute_ui(ctx, idx, img_area);
         }
 
-        self.draw_header(ui, idx, cell);
+        // Auto-hidden headers reserve no space (the image fills the cell); the
+        // header floats over the top strip only while the cursor is over it
+        // (`over_header`), or while this pane's Transformations popup is open (so it
+        // stays anchored under the header).
+        if !self.config.auto_hide_headers || over_header || self.panes[idx].show_opts {
+            self.draw_header(ui, idx, cell);
+        }
         if self.panes[idx].show_opts {
             self.draw_options_popup(ctx, idx, cell);
         }
@@ -335,7 +349,7 @@ impl CimApp {
             };
             // Inset by a full stroke width so the outline sits clear of the cell
             // edges (and the screen edge for the outermost panes).
-            let border = image_area(cell).shrink(bw);
+            let border = self.image_area(cell).shrink(bw);
             ui.painter().rect_stroke(border, 0.0, Stroke::new(bw, color));
         }
     }
