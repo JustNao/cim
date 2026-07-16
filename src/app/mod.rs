@@ -115,6 +115,13 @@ enum Mode {
 struct CachedTex {
     handle: TextureHandle,
     shown: usize, // frame index currently uploaded
+    /// Native pixel size of the frame this texture shows (**not** the rendered
+    /// texel count, which decimates at `step > 1`). Drawing/readout size the pane
+    /// from the committed texture via `disp_size`, so the geometry holds the last
+    /// committed frame's size until the next frame commits — a page whose size
+    /// differs (sequences vary) never flashes at the page-0 fallback size while it
+    /// decodes.
+    size: [usize; 2],
     /// Tone signature the texture was rendered with (`CimApp::tone_sig`); with
     /// `shown` it tells a still-current texture from a stale one. The overlay
     /// texture doesn't tone-map, so it leaves this at 0.
@@ -1186,9 +1193,17 @@ impl CimApp {
     }
 
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a
-    /// sequence may differ in resolution, so use the resident frame's own size,
-    /// falling back to the page-0 size before anything has decoded.
+    /// sequence may differ in resolution, so this follows the **committed
+    /// texture's** frame, not the target: while navigating to a not-yet-decoded
+    /// frame the pane keeps showing its last committed frame (the lock-step
+    /// commit, §7), and its geometry/readout keep that frame's size until the new
+    /// one commits — so a differently sized page never briefly appears at the
+    /// page-0 fallback size while it decodes. Before the first commit, fall back to
+    /// the resident target frame's own size, then the page-0 size.
     pub(super) fn disp_size(&self, i: usize) -> [usize; 2] {
+        if let Some(t) = &self.panes[i].tex.front {
+            return t.size;
+        }
         let f = self.frame_disp(i);
         self.panes[i]
             .media

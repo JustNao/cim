@@ -700,7 +700,8 @@ impl CimApp {
             let t = debug.then(std::time::Instant::now);
             let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
-            set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, target, sig, step);
+            let native = frame.size; // `size` above is the decimated texel count
+            set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, target, native, sig, step);
             if let Some(t) = t {
                 self.metrics.upload.record(t.elapsed());
             }
@@ -716,8 +717,10 @@ impl CimApp {
         let t = crate::debug::enabled().then(std::time::Instant::now);
         let name = format!("m{}", self.panes[idx].id);
         // Off-thread renders (operators, or a big plain LUT) run at full
-        // resolution (step 1) — see `stage`.
-        set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, f, sig, 1);
+        // resolution (step 1) — see `stage` — so the image's own size is the
+        // frame's native size.
+        let native = img.size;
+        set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, f, native, sig, 1);
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());
         }
@@ -898,9 +901,10 @@ impl CimApp {
                 frame.render_intensity_rgba(rgb, alpha, &mut buf);
             }
             let img = ColorImage::from_rgba_unmultiplied(frame.size, &buf);
-            // Overlay textures don't tone-map (sig 0) and aren't decimated (step 1).
+            // Overlay textures don't tone-map (sig 0) and aren't decimated (step 1);
+            // `disp_size` never reads the overlay slot, so its size is unused.
             let name = format!("ov{}_{}", idx, src_id);
-            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, 0, 1);
+            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, frame.size, 0, 1);
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
     }
@@ -910,12 +914,14 @@ impl CimApp {
 /// it with the frame it shows and its tone signature. Shared by the pane image,
 /// the tinted overlay, and the off-thread render upload, so the set-or-create
 /// dance (and the `NEAREST` filtering the tool depends on) lives in one place.
+#[allow(clippy::too_many_arguments)]
 fn set_cached_tex(
     slot: &mut Option<CachedTex>,
     ctx: &egui::Context,
     name: String,
     img: ColorImage,
     shown: usize,
+    size: [usize; 2],
     sig: u64,
     step: usize,
 ) {
@@ -924,12 +930,13 @@ fn set_cached_tex(
         Some(t) => {
             t.handle.set(img, opts);
             t.shown = shown;
+            t.size = size;
             t.sig = sig;
             t.step = step;
         }
         None => {
             let handle = ctx.load_texture(name, img, opts);
-            *slot = Some(CachedTex { handle, shown, sig, step });
+            *slot = Some(CachedTex { handle, shown, size, sig, step });
         }
     }
 }
