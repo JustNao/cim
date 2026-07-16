@@ -132,6 +132,28 @@ impl CimApp {
             Color32::from_gray(220),
         );
 
+        // For a multi-file sequence (a numbered run or folder concatenated into
+        // one timeline), a hover tooltip on the title reports which underlying
+        // file the current frame comes from and its index within that file. The
+        // label is selectable so the path can be copied out of the tooltip.
+        if let Some((file, local)) = self
+            .panes[idx]
+            .media
+            .local_file(self.frame_disp(idx))
+            .map(|(p, i)| (p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), i))
+        {
+            let title_rect = Rect::from_min_max(
+                Pos2::new(title_x, header.min.y),
+                Pos2::new(title_right, header.max.y),
+            );
+            ui.interact(title_rect, Id::new(("title", idx)), Sense::hover())
+                .on_hover_ui(|ui| {
+                    ui.add(
+                        egui::Label::new(format!("Local file: {file} {local}")).selectable(true),
+                    );
+                });
+        }
+
         let close = Rect::from_min_size(
             Pos2::new(header.max.x - close_w, header.min.y),
             Vec2::new(close_w, HEADER_H),

@@ -3,7 +3,7 @@
 //! residency / LRU bookkeeping, and how each frame is decoded (`DecodeReq`).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::FrameData;
@@ -258,6 +258,24 @@ impl Media {
             Media::TiffSeq(t) => t.size,
             Media::FileSeq(f) => f.size,
             Media::ConcatSeq(c) => c.size,
+        }
+    }
+
+    /// For a sequence built from **several files concatenated into one timeline**
+    /// (a numbered `%0Xd` run or a folder), the source file backing global frame
+    /// `idx` and that frame's index **within** the file: a `FileSeq` is one still
+    /// per file (in-file index always 0); a `ConcatSeq` maps the global frame to a
+    /// `(file, page)` in its multi-page TIFFs. `None` for single-file media — a
+    /// still or one multi-page TIFF — where there's no distinct local file to
+    /// report (and for a not-yet-discovered `ConcatSeq` frame).
+    pub fn local_file(&self, idx: usize) -> Option<(&Path, usize)> {
+        match self {
+            Media::FileSeq(f) => f.paths.get(idx).map(|p| (p.as_path(), 0)),
+            Media::ConcatSeq(c) => c
+                .map
+                .get(idx)
+                .map(|&(file, page)| (c.files[file].as_path(), page)),
+            _ => None,
         }
     }
 
