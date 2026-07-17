@@ -149,10 +149,18 @@ impl CimApp {
         let mut parts: Vec<String> = vec!["cim".into()];
         for p in &self.panes {
             // Re-emit a numbered sequence as its compact token so a replay
-            // reopens it as one sequence (not a pane per file).
+            // reopens it as one sequence (not a pane per file). Paths are made
+            // absolute (against the current working directory) so the command
+            // reopens the same files regardless of where it's later run from —
+            // cim is often launched from a desktop/app launcher whose CWD isn't
+            // where the media lives (a relative arg would then miss). `absolute_path`
+            // is lexical, so it absolutises the numbered token's prefix too without
+            // disturbing the `%0Xu…,START,END` tail.
             match &p.source {
-                Source::File(path) => parts.push(quote_path(path)),
-                Source::Sequence { token, .. } => parts.push(quote_arg(token)),
+                Source::File(path) => parts.push(quote_path(&absolute_path(path))),
+                Source::Sequence { token, .. } => {
+                    parts.push(quote_arg(&absolute_path(Path::new(token)).display().to_string()))
+                }
                 // A computed image isn't reproducible from a CLI path; skip it.
                 Source::Computed => {}
             }

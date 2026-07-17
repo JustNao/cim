@@ -60,6 +60,16 @@ pub(super) fn wheel_delta(ctx: &egui::Context) -> f32 {
     })
 }
 
+/// Best-effort absolute form of a path, for the filename hover and the reopen
+/// command. Resolves a relative path against the current working directory
+/// **lexically** (`std::path::absolute` — no filesystem access, so no symlink
+/// resolution and, on Windows, no `\\?\` verbatim prefix); an already-absolute
+/// path is normalised. Falls back to the path unchanged if it can't be resolved
+/// (e.g. the CWD is unavailable).
+pub(super) fn absolute_path(p: &Path) -> PathBuf {
+    std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 pub(super) fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

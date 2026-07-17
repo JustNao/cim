@@ -131,25 +131,26 @@ impl CimApp {
             Color32::from_gray(220),
         );
 
-        // For a multi-file sequence (a numbered run or folder concatenated into
-        // one timeline), a hover tooltip on the title reports which underlying
-        // file the current frame comes from and its index within that file. The
-        // label is selectable so the path can be copied out of the tooltip.
-        if let Some((file, local)) = self
-            .panes[idx]
-            .media
-            .local_file(self.frame_disp(idx))
-            .map(|(p, i)| (p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), i))
-        {
+        // A hover tooltip on the title reports the absolute path of the file the
+        // currently shown frame comes from (works for any media type). For a
+        // multi-file sequence (a numbered run or folder concatenated into one
+        // timeline) it adds the page index within that underlying file. The path
+        // label is selectable so it can be copied out of the tooltip.
+        let cur_path = self.current_file_path(idx);
+        let local_page = self.panes[idx].media.local_file(self.frame_disp(idx)).map(|(_, i)| i);
+        if cur_path.is_some() || local_page.is_some() {
             let title_rect = Rect::from_min_max(
                 Pos2::new(title_x, header.min.y),
                 Pos2::new(title_right, header.max.y),
             );
             ui.interact(title_rect, Id::new(("title", idx)), Sense::hover())
                 .on_hover_ui(|ui| {
-                    ui.add(
-                        egui::Label::new(format!("Local file: {file} {local}")).selectable(true),
-                    );
+                    if let Some(path) = &cur_path {
+                        ui.add(egui::Label::new(path.display().to_string()).selectable(true));
+                    }
+                    if let Some(page) = local_page {
+                        ui.label(format!("page {page} in this file"));
+                    }
                 });
         }
 
@@ -283,6 +284,22 @@ impl CimApp {
             header.max.y - 0.5,
             Stroke::new(1.0_f32, CHROME_BORDER),
         );
+    }
+
+    /// Absolute path of the file backing the currently shown frame, for the
+    /// filename hover. A multi-file sequence resolves to the specific file its
+    /// current global frame maps to (`local_file`); any other file-backed media
+    /// (a still or one multi-page TIFF) resolves to its own source path. `None`
+    /// for a computed pane, or a sequence frame not yet mapped to a file.
+    pub(super) fn current_file_path(&self, idx: usize) -> Option<PathBuf> {
+        let pane = &self.panes[idx];
+        if let Some((p, _)) = pane.media.local_file(self.frame_disp(idx)) {
+            return Some(absolute_path(p));
+        }
+        match &pane.source {
+            Source::File(p) => Some(absolute_path(p)),
+            _ => None,
+        }
     }
 
     /// Bottom status strip: resolution (h×w), the shared cursor pixel, and this
