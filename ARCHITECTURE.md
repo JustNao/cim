@@ -54,7 +54,7 @@ src/
                  the source kinds behind one interface, length discovery, LRU.
     loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
                  decoder), bilevel-mask bit handling.
-    fastscan.rs  Fast jump (§4): measure a regular page stride from the first
+    fastscan.rs  Fast scan (§4): measure a regular page stride from the first
                  two IFDs, then predict + validate + raw-decode page N in O(1)
                  (never trusted unvalidated; falls back to the chain walk).
     render.rs    Tone rendering: cached-LUT render (ToneLut + render_into*_lut /
@@ -215,7 +215,7 @@ len)` grows length by one.
 - **`ConcatSeq`** reuses all of this: a frontier miss rolls to the next file's
   page 0, so the run discovers as one seamless length (∑ page counts) with no
   concat-specific code in `drive_seek`/lookahead/playback.
-- **Fast jump (`media/fastscan.rs`)** — an O(1) shortcut past all of the above for
+- **Fast scan (`media/fastscan.rs`)** — an O(1) shortcut past all of the above for
   **regularly laid out** TIFFs (uniform, uncompressed pages at a fixed byte
   stride — the `tifffile`/ImageJ capture case). `FastScan::open` measures the
   stride from the first two IFDs (with a long list of rejections: compression,
@@ -223,20 +223,27 @@ len)` grows length by one.
   *predicted* at `ifd0 + N×stride` and **validated before trust** (template
   match tag-for-tag, strip data on the same stride, predecessor's next-IFD
   pointer landing on it), so a wrong frame can never be shown — a failed
-  validation just falls back to the ordinary chain walk. Used twice: every
-  `SeqReader` consults a measured layout so far probes/decodes skip the chain
-  walk, and the frame bar's **Fast jump** button (left of the frame readout;
-  greyed with the rejection reason as hover text) takes a typed index,
-  validates + raw-decodes it directly and grows the known length through it in
-  one step (`SeqCache::note_len_to`) — no intervening discovery at all. A
-  `ConcatSeq` works too: each file before the target gets an exact page count
-  by binary-searching the largest validating page (~20 header reads/file), and
-  the global map is extended through the target (`ConcatSeq::extend_known`),
-  verified against whatever prefix ordinary discovery already built. Any
-  failure (unmeasurable layout, invalid prediction, past the real end,
-  map disagreement) raises a fixed modal and cancels outright — nothing is
-  mutated and **no fallback discovery is started**. Availability is cached per
-  pane (`Pane.fast_jump`, reset on reload).
+  validation just falls back to the ordinary chain walk. Used three ways:
+  - every `SeqReader` consults a measured layout so far probes/decodes skip the
+    chain walk (falling back when a prediction fails);
+  - **Load offsets fast** (frame-bar button, right of *Load offsets*, shown only
+    when the layout is measurable) finds each file's exact page count by
+    binary-searching the largest validating page (~log₂(pages) header reads/file
+    — `FastScan::page_count`), then marks the whole timeline known and ended
+    (`SeqCache::note_len_to` + `ConcatSeq::set_full_layout`) so any index is
+    instantly seekable — `media::fast_load_offsets`, run synchronously; a pane
+    it can't handle falls back to the ordinary `Eager::Offsets` discovery;
+  - the **frame readout** (typed index) tries `media::fast_jump` first — validate
+    + raw-decode that one frame at its predicted position and grow the known
+    length through it in one step, no intervening discovery — then falls back to
+    riding the frontier (`seek_to`/`pending_seek`) when the prediction can't be
+    made. A `ConcatSeq` works throughout: files before the target are page-counted
+    by binary search and the global map extended (`ConcatSeq::extend_known` /
+    `set_full_layout`), always **verified against whatever prefix ordinary
+    discovery already built** (a disagreement refuses the fast path, nothing
+    mutated). The *Load offsets* hover carries the rejection reason when the fast
+    path isn't available; availability is cached per pane (`Pane.fast_jump`, reset
+    on reload).
 
 ---
 

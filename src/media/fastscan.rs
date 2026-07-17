@@ -14,11 +14,13 @@
 //! caller falls back to the ordinary chain walk or cancels), so this is purely
 //! an opportunistic O(1) shortcut.
 //!
-//! Used two ways: [`SeqReader`](super::SeqReader) consults a measured layout to
-//! make far probes/decodes O(1), and the frame bar's **Fast jump** button calls
-//! [`fast_jump`] to validate + decode an arbitrary index directly and grow the
-//! known length past it in one step ([`availability`] drives the button's
-//! greyed-out hover text).
+//! Used three ways: [`SeqReader`](super::SeqReader) consults a measured layout
+//! to make far probes/decodes O(1); the frame bar's **Load offsets fast** button
+//! calls [`fast_load_offsets`] to complete the whole timeline length by
+//! binary-searching each file's page count; and the frame readout calls
+//! [`fast_jump`] to validate + decode an arbitrary typed index directly (falling
+//! back to riding the frontier when the prediction can't be made).
+//! [`availability`] gates the button and rides the *Load offsets* hover text.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -458,9 +460,11 @@ fn get_u32(b: &[u8], big_endian: bool) -> u32 {
 
 // ---- the Fast-jump feature entry points ------------------------------------
 
-/// Whether the frame bar's Fast jump can work on this media at all, measured
-/// from its (first) file. `Err` is the greyed-out button's hover text. Cheap —
-/// three small header reads — but file I/O, so callers cache it per pane.
+/// Whether a fast path (jump / offset discovery) can work on this media at all,
+/// measured from its (first) file. `Err(reason)` is user-facing — it's shown in
+/// the frame bar's **Load offsets** hover text, and gates whether the **Load
+/// offsets fast** button appears. Cheap — a few small header reads — but file
+/// I/O, so callers cache it per pane.
 pub fn availability(media: &Media) -> Result<(), String> {
     match media {
         Media::TiffSeq(t) => FastScan::open(&t.path).map(drop),
@@ -472,6 +476,33 @@ pub fn availability(media: &Media) -> Result<(), String> {
             Err("a still run's length is already known — seek via the frame readout".into())
         }
         Media::Still(_) => Err("not a multi-page sequence".into()),
+    }
+}
+
+/// "Load offsets fast": discover the sequence's **whole** length in one pass of
+/// binary searches (each file's exact page count in ~log₂(pages) header reads —
+/// [`FastScan::page_count`]) instead of probing every frame, then mark the
+/// timeline fully known so the frame readout can seek anywhere instantly. On
+/// `Err` **nothing changes** (the caller falls back to the ordinary
+/// metadata-only discovery). A `ConcatSeq` counts every file and builds the
+/// complete global map, verified against whatever prefix ordinary discovery had
+/// already built.
+pub fn fast_load_offsets(media: &mut Media) -> Result<(), String> {
+    match media {
+        Media::TiffSeq(t) => {
+            let count = FastScan::open(&t.path)?.page_count()?;
+            t.frames.note_len_to(count);
+            t.at_end = true;
+            Ok(())
+        }
+        Media::ConcatSeq(c) => {
+            let mut counts = Vec::with_capacity(c.files.len());
+            for path in c.files.clone() {
+                counts.push(FastScan::open(&path)?.page_count()?);
+            }
+            c.set_full_layout(&counts)
+        }
+        _ => Err("fast offset discovery only applies to multi-page TIFF sequences".into()),
     }
 }
 
@@ -612,6 +643,35 @@ mod tests {
         // Past the real end: the jump cancels and nothing changes.
         assert!(fast_jump(&mut media, 10).is_err());
         assert_eq!(media.frame_count(), 5);
+    }
+
+    #[test]
+    fn fast_load_offsets_completes_length_in_one_step() {
+        let dir = fixture_dir("fastoffsets");
+
+        // Lone TIFF: the whole length is discovered and the end is marked, with
+        // no frame decoded (offsets only).
+        let path = dir.join("run.tif");
+        write_multipage_tiff_u16(&path, &[[6, 5]; 9]);
+        let mut media = load(&path).unwrap();
+        assert_eq!(media.frame_count(), 1);
+        assert!(!media.at_end());
+        fast_load_offsets(&mut media).expect("regular layout");
+        assert_eq!(media.frame_count(), 9);
+        assert!(media.at_end());
+        assert_eq!(media.resident_count(), 0); // offsets only — no page decoded
+
+        // Concatenation: every file counted, one seamless map, end marked.
+        let a = dir.join("c_000.tif");
+        let b = dir.join("c_001.tif");
+        write_multipage_tiff_u16(&a, &[[6, 5]; 2]);
+        write_multipage_tiff_u16(&b, &[[6, 5]; 3]);
+        let mut concat = load_sequence(&[a, b], "c".into()).unwrap();
+        fast_load_offsets(&mut concat).expect("regular concat");
+        assert_eq!(concat.frame_count(), 5);
+        assert!(concat.at_end());
+        let (_, map) = concat.concat_layout().unwrap();
+        assert_eq!(map, vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2)]);
     }
 
     #[test]

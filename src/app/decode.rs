@@ -114,6 +114,28 @@ impl CimApp {
         self.decoding_all = true;
     }
 
+    /// "Load offsets fast": complete every still-discovering sequence's length
+    /// **synchronously** by binary-searching each file's page count (§4), rather
+    /// than probing frame by frame. A pane whose layout isn't predictable falls
+    /// back to the ordinary metadata-only discovery (`Eager::Offsets`), so a mix
+    /// of regular and irregular sequences still finishes. Runs on the UI thread
+    /// (a handful of tiny header reads per file), so when every pane is regular
+    /// it's instant and `decoding_all` never turns on.
+    pub(super) fn load_offsets_fast(&mut self) {
+        for p in &mut self.panes {
+            if p.media.at_end() {
+                continue; // length already fully known
+            }
+            if media::fast_load_offsets(&mut p.media).is_err() && p.eager != Eager::Full {
+                p.eager = Eager::Offsets; // fall back to the ordinary discovery
+                self.decoding_all = true;
+            }
+        }
+        if self.decoding_all {
+            self.status.set("Discovering sequence length (headers only)…");
+        }
+    }
+
     /// Cancel any in-progress bulk load ("Load all" / "Load offsets").
     pub(super) fn stop_load(&mut self) {
         for p in &mut self.panes {

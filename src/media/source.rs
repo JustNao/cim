@@ -552,4 +552,28 @@ impl ConcatSeq {
         self.frames.note_len_to(self.map.len());
         Ok(())
     }
+
+    /// A **fast offset discovery** measured every file's exact page count
+    /// (`counts`, one per file): build the complete global map from them, grow
+    /// the known length to the total, and mark the real end — so the whole
+    /// timeline becomes seekable at once. Like `extend_known`, the measured
+    /// layout must agree with whatever prefix ordinary discovery already built
+    /// (`Err` on disagreement, nothing changed).
+    pub(super) fn set_full_layout(&mut self, counts: &[usize]) -> Result<(), String> {
+        debug_assert_eq!(counts.len(), self.files.len());
+        let mut new_map: Vec<(usize, usize)> = Vec::with_capacity(counts.iter().sum());
+        for (i, &n) in counts.iter().enumerate() {
+            new_map.extend((0..n).map(|p| (i, p)));
+        }
+        let known = self.map.len().min(new_map.len());
+        if self.map[..known] != new_map[..known] {
+            return Err("measured page counts disagree with the discovered timeline".into());
+        }
+        self.map = new_map;
+        self.frames.note_len_to(self.map.len());
+        self.disc_file = self.files.len();
+        self.disc_page = 0;
+        self.at_end = true;
+        Ok(())
+    }
 }
