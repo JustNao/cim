@@ -37,8 +37,7 @@ impl CimApp {
         match self.mode {
             Mode::Single => {
                 let idx = self.current.min(self.panes.len() - 1);
-                let ia = self.image_area(area);
-                self.cursor_img = hover.and_then(|p| self.hover_img_pos(idx, ia, ia, p));
+                self.cursor_img = hover.and_then(|p| self.hover_img_pos(idx, area, area, p));
                 self.cursor_pane = self.cursor_img.map(|_| idx);
                 self.draw_pane(ui, ctx, idx, area);
             }
@@ -58,8 +57,7 @@ impl CimApp {
                 // The cursor's image position comes from whichever cell it's over.
                 if let Some(p) = hover {
                     for &(idx, cell) in &cells {
-                        let ia = self.image_area(cell);
-                        if let Some(ci) = self.hover_img_pos(idx, ia, ia, p) {
+                        if let Some(ci) = self.hover_img_pos(idx, cell, cell, p) {
                             self.cursor_img = Some(ci);
                             self.cursor_pane = Some(idx);
                             break;
@@ -127,16 +125,12 @@ impl CimApp {
         let Some(reg) = self.export.region else { return };
         let panes_areas: Vec<(usize, Rect)> = match self.mode {
             Mode::Single => {
-                vec![(self.current.min(self.panes.len() - 1), self.image_area(area))]
+                vec![(self.current.min(self.panes.len() - 1), area)]
             }
-            Mode::Grid => self
-                .grid_cells(&self.visible_indices(), area)
-                .iter()
-                .map(|&(idx, cell)| (idx, self.image_area(cell)))
-                .collect(),
+            Mode::Grid => self.grid_cells(&self.visible_indices(), area),
             // The wipe shares one image area; both sides are spatially the same
             // place, so pane A's view is representative.
-            Mode::Ab => vec![(self.slot_a.min(self.panes.len() - 1), ab_image_rect(area))],
+            Mode::Ab => vec![(self.slot_a.min(self.panes.len() - 1), area)],
         };
         for (idx, img_area) in panes_areas {
             // The region is stored in the pane's *unrotated* view frame (it is
@@ -194,7 +188,9 @@ impl CimApp {
     }
 
     pub(super) fn draw_pane(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, idx: usize, cell: Rect) {
-        let img_area = self.image_area(cell);
+        // The image fills the whole cell; the header/footer bars float over its
+        // top/bottom strips (when shown), so hiding them never moves the image.
+        let img_area = cell;
         let size = self.panes[idx].media.size();
 
         // Fit this pane's effective view on first draw / after a reset.
@@ -235,15 +231,17 @@ impl CimApp {
         let resp = ui.interact(img_area, Id::new(("pane", idx)), Sense::click_and_drag());
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         let alt = ctx.input(|i| i.modifiers.alt);
-        // With auto-hidden headers the image fills the cell, so a revealed header
-        // floats over its top strip. While the cursor is over that strip the header
-        // owns the input — don't let the pane zoom/rotate/reorder/focus underneath
-        // it. (An in-progress pan started lower down still continues; only new
+        // The header and footer bars float over the cell's top/bottom strips.
+        // While the cursor is over either shown bar, the bar owns the input —
+        // don't let the pane zoom/rotate/reorder/focus underneath it. (An
+        // in-progress pan started lower down still continues; only new
         // interactions are suppressed here.)
         let header_strip = Rect::from_min_size(cell.min, Vec2::new(cell.width(), HEADER_H));
-        let over_header = self.config.auto_hide_headers
-            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| header_strip.contains(p));
-        if resp.hovered() && !over_header {
+        let over_chrome = self.show_chrome
+            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+                header_strip.contains(p) || footer_area(cell).contains(p)
+            });
+        if resp.hovered() && !over_chrome {
             let scroll = wheel_delta(ctx);
             if scroll != 0.0 {
                 if ctrl {
@@ -263,7 +261,7 @@ impl CimApp {
         }
         // Alt + primary drag rotates the pane about its image centre (à la
         // Photoshop): the pane follows the cursor's angle around the pivot.
-        if !self.export.selecting && !over_header && resp.drag_started_by(PointerButton::Primary) {
+        if !self.export.selecting && !over_chrome && resp.drag_started_by(PointerButton::Primary) {
             if alt {
                 let rect = self.view_ref(idx).image_rect(self.disp_size(idx), img_area);
                 let pivot = rect.center();
@@ -297,7 +295,7 @@ impl CimApp {
             let d = resp.drag_delta();
             self.view_mut(idx).pan(d);
         }
-        if !self.export.selecting && !over_header && resp.clicked() {
+        if !self.export.selecting && !over_chrome && resp.clicked() {
             self.current = idx;
         }
 
@@ -313,17 +311,16 @@ impl CimApp {
             self.draw_compute_ui(ctx, idx, img_area);
         }
 
-        // Auto-hidden headers reserve no space (the image fills the cell); the
-        // header floats over the top strip only while the cursor is over it
-        // (`over_header`), or while this pane's Transformations popup is open (so it
-        // stays anchored under the header).
-        if !self.config.auto_hide_headers || over_header || self.panes[idx].show_opts {
+        // The header and footer bars, floating over the image's top/bottom
+        // strips. All chrome hides together (`Action::ToggleChrome`) — including
+        // the Transformations popup, whose open state survives the round trip.
+        if self.show_chrome {
             self.draw_header(ui, idx, cell);
+            if self.panes[idx].show_opts {
+                self.draw_options_popup(ctx, idx, cell);
+            }
+            self.draw_footer(ui, idx, footer_area(cell));
         }
-        if self.panes[idx].show_opts {
-            self.draw_options_popup(ctx, idx, cell);
-        }
-        self.draw_footer(ui, idx, footer_area(cell));
 
         // The ctrl-drag reorder border is drawn in a separate pass over all
         // cells (`draw_reorder_borders`), after every pane, so it can't be
@@ -332,9 +329,9 @@ impl CimApp {
 
     /// Reorder feedback borders for the grid, drawn in one pass **after** every
     /// pane so no later-drawn neighbour can cover an earlier pane's outline.
-    /// Inset *inside* the image area (excluding the header/footer info bars) so
-    /// the whole outline stays visible even with no gap between cells — blue on
-    /// the pane being moved, green on the pane it would swap with.
+    /// Inset inside the cell so the whole outline stays visible even with no gap
+    /// between cells — blue on the pane being moved, green on the pane it would
+    /// swap with.
     pub(super) fn draw_reorder_borders(&self, ui: &egui::Ui, ctx: &egui::Context, cells: &[(usize, Rect)]) {
         let Some(src) = self.drag_src else { return };
         let bw = 2.0;
@@ -349,7 +346,7 @@ impl CimApp {
             };
             // Inset by a full stroke width so the outline sits clear of the cell
             // edges (and the screen edge for the outermost panes).
-            let border = self.image_area(cell).shrink(bw);
+            let border = cell.shrink(bw);
             ui.painter().rect_stroke(border, 0.0, Stroke::new(bw, color));
         }
     }

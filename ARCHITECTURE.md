@@ -586,7 +586,15 @@ next/prev-frame keys (same frontier-hold / wrap-at-end). Reads `raw_scroll_delta
 populated even under Ctrl); egui's own Ctrl-scroll UI-zoom is never applied (the app pins
 `zoom_factor` to `config.ui_scale` each frame). Works in Grid/Single and both A/B sides.
 
-Per pane: `image_area(cell)` (between header and `FOOTER_H`), `draw_header` (buttons,
+Per pane: the image fills the **whole cell**; the header (top, `HEADER_H`) and footer
+(bottom, `footer_area`/`FOOTER_H`) are opaque strips floating **over** the image's
+edges, so showing/hiding them never moves the image. All chrome — these pane bars
+plus the global toolbar and frame bar — hides together via **`Action::ToggleChrome`**
+(default `T`, transient, always back on at startup) for an image-only view; every
+shortcut still works while hidden (old configs' `toggle_headers` binding is migrated
+on load). While a shown bar is under the cursor (`over_chrome`) new pane
+interactions (zoom/rotate/reorder/focus) are suppressed so the bar owns the input.
+`draw_header` (buttons,
 index, name, `frame/known(+)`, `in mem`, sync markers, close ×; the **filename is
 dropped** when the header is too narrow to fit the full title — measured against the
 Hide/Close span — leaving the index number and frame info so small grid cells stay
@@ -607,7 +615,7 @@ spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
 per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
 shows the shared position with **both** A and B values.
 
-The header is a **single row** (`header_h_for`, feeding `image_area`): the
+The header is a **single row** (`header_h_for`): the
 **Transformations** button on the left, the title, then the **Auto-reload**
 toggle, **Reload** (re-reads this media from disk → `pending_reload`), **Hide**
 (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on the
@@ -628,9 +636,8 @@ an otherwise-idle app wakes every `WATCH_POLL` to stat — the one intentional b
 from "idle requests no repaint", kept slow to stay VNC-friendly (§13/§15).
 Hiding the **focused** pane (via the header button or the manager checkbox) moves
 focus to the nearest still-shown media (`reselect_if_hidden`), so `current` never
-sits on a hidden pane while others are visible. `image_area` is **flush** to the header/footer bars (no margin), and
-egui window/popup **shadows are disabled** in `new` so nothing casts under panes or the
-Compute form.
+sits on a hidden pane while others are visible. egui window/popup **shadows are
+disabled** in `new` so nothing casts under panes or the Compute form.
 
 **Transformations popup** (`draw_options_popup`). The header's **Transformations**
 button (left, away from ×) toggles `Pane.show_opts`, opening a foreground `Area`
@@ -950,11 +957,13 @@ re-renders and commits in the same lock-step group as the other panes, never dra
 between the two; `refresh_textures`
 (stage on-screen panes and, when all ready, flip them + commit a playback step — runs last so
 it sees settled frame/tone state, just before drawing reads the textures); expire
-the transient `status` note; draw toolbar,
-bottom frame bar (shown whenever **any** media is a sequence), central panel, the compute
-draft, windows (manager/export/settings/view-command), error popup, the **">8 sequences"
-resource warning** (`pending_open` — Open anyway → `commit_open`, Quit → close); apply
-deferred actions; `export_tick`; then a **paced repaint**.
+the transient `status` note; draw the central panel (always the **whole window** —
+the toolbar and bottom frame bar are anchored `Area` **overlays** floating over its
+top/bottom edges, not layout panels, so hiding them via `Action::ToggleChrome` never
+reflows the images; the frame bar shows whenever **any** media is a sequence), the
+compute draft, windows (manager/export/settings/view-command), error popup, the
+**">8 sequences" resource warning** (`pending_open` — Open anyway → `commit_open`,
+Quit → close); apply deferred actions; `export_tick`; then a **paced repaint**.
 
 **Transient notifications (`status`).** A single line shown **top-right in the toolbar**
 at normal size (e.g. "Settings saved", "View command copied"). `update` shadows the

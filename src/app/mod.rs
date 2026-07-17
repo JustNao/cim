@@ -657,6 +657,12 @@ pub struct CimApp {
     status: StatusLine,
     /// Global error not tied to a sequence — rendered as a modal popup.
     error_popup: Option<String>,
+    /// Whether the UI bars (toolbar, frame bar, pane headers/footers) are shown.
+    /// All of them float **over** the image area (nothing reserves layout space),
+    /// so toggling this — `Action::ToggleChrome` — shows an image-only view
+    /// without moving the images. Transient (always back on at startup); every
+    /// keyboard shortcut still works while hidden.
+    show_chrome: bool,
     last_area: Rect,
     /// The hovered pane's cursor position in **image space**, recomputed each
     /// frame in `draw_central`. Replicated across every pane (a red dot + the
@@ -854,6 +860,7 @@ impl CimApp {
             export: Export::default(),
             status: StatusLine::default(),
             error_popup: None,
+            show_chrome: true,
             last_area: Rect::NOTHING,
             cursor_img: None,
             cursor_pane: None,
@@ -1235,28 +1242,6 @@ impl CimApp {
     /// one commits — so a differently sized page never briefly appears at the
     /// page-0 fallback size while it decodes. Before the first commit, fall back to
     /// the resident target frame's own size, then the page-0 size.
-    /// Height reserved at the top of every cell for the header bar. **Zero** when
-    /// `auto_hide_headers` is on: the header then floats over the image's top edge
-    /// only while revealed, so the image already fills that space and revealing the
-    /// header never shifts it — only toggling the setting reflows the image.
-    pub(super) fn header_reserved(&self) -> f32 {
-        if self.config.auto_hide_headers {
-            0.0
-        } else {
-            HEADER_H
-        }
-    }
-
-    /// The image sub-rect of a cell, flush between its (possibly hidden) header
-    /// and its footer bar (no margin, so nothing shows through between the image
-    /// and those strips).
-    pub(super) fn image_area(&self, cell: Rect) -> Rect {
-        Rect::from_min_max(
-            Pos2::new(cell.min.x, cell.min.y + self.header_reserved()),
-            Pos2::new(cell.max.x, cell.max.y - FOOTER_H),
-        )
-    }
-
     pub(super) fn disp_size(&self, i: usize) -> [usize; 2] {
         if let Some(t) = &self.panes[i].tex.front {
             return t.size;
@@ -1613,31 +1598,50 @@ impl eframe::App for CimApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            self.draw_toolbar(ui);
-            ui.add_space(2.0);
-        });
-
-        // Full-width transport bar, pinned to the bottom. Shown whenever any
-        // loaded media is a sequence (not just the focused one), so selecting a
-        // still doesn't drop the bar and shift the whole layout. It follows the
-        // `control` sequence.
-        if self.any_sequence() {
-            egui::TopBottomPanel::bottom("framebar").show(ctx, |ui| {
-                ui.add_space(4.0);
-                self.draw_frame_bar(ui);
-                ui.add_space(4.0);
-            });
-        }
-
-        // No frame margin: the image area runs flush to the window edges
-        // (top under the toolbar, left and right).
+        // The image area always spans the whole window: the toolbar and frame
+        // bar are floating overlays (below), not layout panels, so showing or
+        // hiding them — `Action::ToggleChrome` — never reflows the images.
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 self.draw_central(ui, ctx);
             });
+
+        if self.show_chrome {
+            // Toolbar, floating over the top edge. Anchored areas sit above the
+            // central panel, so their widgets get pointer priority over the pane
+            // pan/zoom underneath.
+            let frame = egui::Frame::side_top_panel(&ctx.style());
+            let m = frame.inner_margin;
+            let full_w = ctx.screen_rect().width() - m.left - m.right;
+            egui::Area::new(egui::Id::new("toolbar_overlay"))
+                .anchor(Align2::LEFT_TOP, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    frame.show(ui, |ui| {
+                        ui.set_min_width(full_w);
+                        ui.add_space(2.0);
+                        self.draw_toolbar(ui);
+                        ui.add_space(2.0);
+                    });
+                });
+
+            // Full-width transport bar, floating over the bottom edge. Shown
+            // whenever any loaded media is a sequence (not just the focused
+            // one), so selecting a still doesn't drop the bar. It follows the
+            // `control` sequence.
+            if self.any_sequence() {
+                egui::Area::new(egui::Id::new("framebar_overlay"))
+                    .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        frame.show(ui, |ui| {
+                            ui.set_min_width(full_w);
+                            ui.add_space(4.0);
+                            self.draw_frame_bar(ui);
+                            ui.add_space(4.0);
+                        });
+                    });
+            }
+        }
 
         if self.show_manager {
             self.draw_manager(ctx);
@@ -1728,17 +1732,10 @@ fn header_h_for(_width: f32) -> f32 {
     HEADER_H
 }
 
-/// The footer strip at the bottom of a cell.
+/// The footer strip a pane's readout floats over: the bottom of the cell. Like
+/// every UI bar it overlays the image — the image itself fills the whole cell.
 fn footer_area(cell: Rect) -> Rect {
     Rect::from_min_max(Pos2::new(cell.min.x, cell.max.y - FOOTER_H), cell.max)
-}
-
-/// The image sub-rect of the A/B view: the whole `area` minus the shared footer
-/// strip at the bottom (both wipe sides share this rect). Kept in one place so
-/// the live drawing and the export composition can't drift on how much the
-/// footer reserves.
-fn ab_image_rect(area: Rect) -> Rect {
-    Rect::from_min_max(area.min, Pos2::new(area.max.x, area.max.y - FOOTER_H - 2.0))
 }
 
 fn uv() -> Rect {

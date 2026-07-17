@@ -228,10 +228,7 @@ impl CimApp {
         // (media index, content sub-rect, view-reference area) per pane, in order.
         let items: Vec<(usize, Rect, Rect)> = cells
             .iter()
-            .map(|&(idx, cell)| {
-                let area = self.image_area(cell);
-                (idx, self.pane_content_in(idx, area), area)
-            })
+            .map(|&(idx, cell)| (idx, self.pane_content_in(idx, cell), cell))
             .collect();
 
         let mut col_w = vec![0f32; cols];
@@ -281,16 +278,15 @@ impl CimApp {
         let r = match self.export.mode {
             Mode::Single => {
                 let idx = self.current.min(n - 1);
-                self.pane_content_in(idx, self.image_area(area))
+                self.pane_content_in(idx, area)
             }
             Mode::Ab => {
                 let a = self.slot_a.min(n - 1);
                 let b = self.slot_b.min(n - 1);
-                let img = ab_image_rect(area);
                 // A and B share the image area spatially; cover both.
-                self.pane_content_in(a, img)
-                    .union(self.pane_content_in(b, img))
-                    .intersect(img)
+                self.pane_content_in(a, area)
+                    .union(self.pane_content_in(b, area))
+                    .intersect(area)
             }
             // Grid packs content flush, so its region is the packed total.
             Mode::Grid => return self.packed_grid().map(|(r, _)| r),
@@ -430,7 +426,7 @@ impl CimApp {
                         pane.view = region_view(reg);
                         Rect::from_min_size(Pos2::ZERO, reg.size())
                     }
-                    None => self.image_area(area),
+                    None => area,
                 };
                 panes.push(pane);
                 ExportLayout::Single(0, cell)
@@ -447,7 +443,7 @@ impl CimApp {
                         pb.view = region_view(reg);
                         Rect::from_min_size(Pos2::ZERO, reg.size())
                     }
-                    None => ab_image_rect(area),
+                    None => area,
                 };
                 panes.push(pa);
                 panes.push(pb);

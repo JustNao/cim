@@ -33,7 +33,7 @@ pub enum Action {
     ReloadMedia,
     ReloadAll,
     HideMedia,
-    ToggleHeaders,
+    ToggleChrome,
     SelectMedia(usize),
 }
 
@@ -64,7 +64,7 @@ impl Action {
             Action::ReloadMedia => "reload_media".into(),
             Action::ReloadAll => "reload_all".into(),
             Action::HideMedia => "hide_media".into(),
-            Action::ToggleHeaders => "toggle_headers".into(),
+            Action::ToggleChrome => "toggle_chrome".into(),
             Action::SelectMedia(i) => format!("select_media_{}", i + 1),
         }
     }
@@ -95,7 +95,7 @@ impl Action {
             Action::ReloadMedia => "Reload focused media from disk".into(),
             Action::ReloadAll => "Reload all media from disk".into(),
             Action::HideMedia => "Hide focused media".into(),
-            Action::ToggleHeaders => "Toggle auto-hiding pane headers".into(),
+            Action::ToggleChrome => "Show/hide all UI bars (image-only view)".into(),
             Action::SelectMedia(i) => format!("Select media {}", i + 1),
         }
     }
@@ -126,7 +126,7 @@ impl Action {
             Action::ReloadMedia,
             Action::ReloadAll,
             Action::HideMedia,
-            Action::ToggleHeaders,
+            Action::ToggleChrome,
         ];
         v.extend((0..12).map(Action::SelectMedia));
         v
@@ -235,7 +235,7 @@ impl Default for Keybindings {
         set(Action::PlayPause, Key::Space);
         set(Action::ReloadMedia, Key::R);
         set(Action::HideMedia, Key::H);
-        set(Action::ToggleHeaders, Key::T);
+        set(Action::ToggleChrome, Key::T);
         // Media 1..=9 -> digit keys; 10..12 left unbound by default (rebindable).
         let digits = [
             Key::Num1,
@@ -276,6 +276,15 @@ impl Keybindings {
 
     pub fn clear(&mut self, action: Action) {
         self.map.remove(&action.id());
+    }
+
+    /// Rename legacy action ids in a loaded config so old bindings carry over
+    /// (`toggle_headers` — the removed auto-hide-headers toggle — became
+    /// `toggle_chrome`, the show/hide-all-UI toggle).
+    fn migrate(&mut self) {
+        if let Some(v) = self.map.remove("toggle_headers") {
+            self.map.entry(Action::ToggleChrome.id()).or_insert(v);
+        }
     }
 }
 
@@ -369,12 +378,6 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
-    /// Hide each pane's header bar until the cursor moves over its top strip.
-    /// The reserved header space is dropped when on, so the image fills the cell
-    /// and the revealed header floats over its top edge (never shifting the
-    /// image). Toggled in Settings and by `Action::ToggleHeaders`.
-    #[serde(default)]
-    pub auto_hide_headers: bool,
     /// Directory holding the proprietary C++ operator shared libraries (`.so`).
     /// Empty = resolve them by bare name via the system loader search path
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
@@ -407,7 +410,6 @@ impl Default for Config {
             cache_budget_mb: default_cache_budget_mb(),
             decode_threads: default_decode_threads(),
             cursor_dot: true,
-            auto_hide_headers: false,
             cpp_lib_dir: String::new(),
             keybindings: Keybindings::default(),
         }
@@ -432,7 +434,11 @@ impl Config {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(s) => {
+                let mut c: Config = serde_json::from_str(&s).unwrap_or_default();
+                c.keybindings.migrate();
+                c
+            }
             Err(_) => Self::default(),
         }
     }

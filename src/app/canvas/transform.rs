@@ -10,7 +10,7 @@ impl CimApp {
     /// export crop, aligned to the viewer (see [`select_region_bounds`]).
     pub(super) fn screen_rect_to_image(&self, r: Rect, area: Rect) -> Option<Rect> {
         let idx = self.current.min(self.panes.len().checked_sub(1)?);
-        self.select_region_bounds(idx, r, self.image_area(area))
+        self.select_region_bounds(idx, r, area)
     }
 
     /// Convert a screen-space selection rect into the image-space region it

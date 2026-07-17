@@ -12,8 +12,9 @@ impl CimApp {
         let a = self.slot_a.min(n - 1);
         let b = self.slot_b.min(n - 1);
 
-        // Reserve a footer strip; images live in `img`.
-        let img = ab_image_rect(area);
+        // Images fill the whole area; the shared footer floats over the bottom
+        // strip (when chrome is shown), so hiding it never moves the images.
+        let img = area;
         let footer = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - FOOTER_H), area.max);
 
         for &idx in &[a, b] {
@@ -104,8 +105,12 @@ impl CimApp {
             }
         }
 
-        // Footer: shared cursor position with both sides' native values.
-        self.draw_ab_footer(ui, a, b, footer);
+        // Footer: shared cursor position with both sides' native values. Chrome
+        // — hidden in the image-only view along with the corner labels; the
+        // divider stays (the wipe itself is content, not UI).
+        if self.show_chrome {
+            self.draw_ab_footer(ui, a, b, footer);
+        }
 
         // Right-drag statistics region on each side. Both sides share `img` as
         // the coordinate area (image_rect maps against it); the clip rect limits
@@ -142,7 +147,10 @@ impl CimApp {
         }
         // Replicate the shared cursor on this side (clipped to it).
         self.draw_cursor_dot(&painter, idx, area, clip);
-        // Corner label.
+        // Corner label — chrome, hidden in the image-only view.
+        if !self.show_chrome {
+            return;
+        }
         let tag = format!(
             "{}  {}",
             if is_a { "A" } else { "B" },
