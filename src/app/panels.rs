@@ -237,10 +237,13 @@ impl CimApp {
                 {
                     self.load_all();
                 }
-                // Fast offset discovery availability for the timeline-driving
-                // media (cached per pane; a few header reads, re-measured on
-                // reload). Its reason rides the Load offsets hover, and gates
-                // whether the Load offsets fast button appears.
+                // A single offset-discovery button. Fast offset discovery
+                // availability for the timeline-driving media (cached per pane; a
+                // few header reads, re-measured on reload) picks both the label
+                // and the action: when it's available the button reads "Load
+                // offsets (fast)" and runs the instant binary-search path;
+                // otherwise it reads "Load offset" and rides the ordinary
+                // header-probe discovery (its reason rides the hover).
                 let fast_avail = self
                     .panes
                     .get_mut(cur)
@@ -250,23 +253,9 @@ impl CimApp {
                             .clone()
                     })
                     .unwrap_or_else(|| Err(String::new()));
-                let offsets_hover = match &fast_avail {
-                    Ok(()) => "Discover the full sequence length via headers only (no \
-                               pixel decode, no cache pressure)"
-                        .to_string(),
-                    Err(reason) => format!(
-                        "Discover the full sequence length via headers only (no pixel \
-                         decode, no cache pressure).\n\nFast offset discovery isn't \
-                         available here: {reason}"
-                    ),
-                };
-                if ui.button("Load offsets").on_hover_text(offsets_hover).clicked() {
-                    self.load_offsets();
-                }
-                // Only shown when the fast path can work; hidden otherwise.
-                if fast_avail.is_ok()
-                    && ui
-                        .button("Load offsets fast")
+                if fast_avail.is_ok() {
+                    if ui
+                        .button("Load offsets (fast)")
                         .on_hover_text(
                             "Discover the whole length at once by binary-searching each \
                              file's page count (pages are uniform and uncompressed, so a \
@@ -274,8 +263,25 @@ impl CimApp {
                              seekable in the readout",
                         )
                         .clicked()
-                {
-                    self.load_offsets_fast();
+                    {
+                        self.load_offsets_fast();
+                    }
+                } else {
+                    let reason = fast_avail.as_ref().err().map_or("", String::as_str);
+                    let offsets_hover = if reason.is_empty() {
+                        "Discover the full sequence length via headers only (no pixel \
+                         decode, no cache pressure)"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Discover the full sequence length via headers only (no pixel \
+                             decode, no cache pressure).\n\nFast offset discovery isn't \
+                             available here: {reason}"
+                        )
+                    };
+                    if ui.button("Load offset").on_hover_text(offsets_hover).clicked() {
+                        self.load_offsets();
+                    }
                 }
             }
             // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
@@ -324,6 +330,17 @@ impl CimApp {
                     self.frame_edit = self.shared_frame.to_string();
                 }
                 ui.monospace("frame");
+                // While a typed seek is riding the frontier (target past the
+                // discovered end), offer a Stop to abandon the look-ahead so the
+                // timeline stays where it is instead of chasing the frontier.
+                if self.pending_seek.is_some()
+                    && ui
+                        .button("Stop")
+                        .on_hover_text("Stop seeking to the typed frame")
+                        .clicked()
+                {
+                    self.pending_seek = None;
+                }
             });
         });
 
