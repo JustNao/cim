@@ -49,6 +49,14 @@ impl CimApp {
             save_name: "computed.tif".into(),
             status: String::new(),
         });
+        // A Compute result is its own thing (a derived still), so it doesn't
+        // follow the shared Transformations by default — it carries its own tone:
+        // a plain Linear LUT with no clip and no share clip. The user can still
+        // opt it into the synced group or dial in a clip afterward.
+        self.panes[i].sync_tone = false;
+        self.panes[i].contrast = ContrastMode::Linear;
+        self.panes[i].tone.clip.enabled = false;
+        self.panes[i].tone.share_clip = false;
         self.current = i;
         if was_empty {
             self.shared_view.needs_fit = true;
@@ -111,8 +119,10 @@ impl CimApp {
     }
 
     /// Recompute a Compute pane from current memory, replacing its displayed
-    /// still. Float results default to Linear+Clip so they're legible. The input
-    /// signature is recorded either way, so auto-refresh doesn't spin on failure.
+    /// still. The pane keeps its own (un-synced) tone — Linear LUT, no clip, no
+    /// share clip by default (see `add_compute_pane`) — so a recompute never
+    /// clobbers a look the user has since dialled in. The input signature is
+    /// recorded either way, so auto-refresh doesn't spin on failure.
     pub(super) fn recompute_pane(&mut self, idx: usize) {
         let Some(c) = self.panes[idx].compute.as_ref() else {
             return;
@@ -124,12 +134,9 @@ impl CimApp {
         };
         match result {
             Ok((fr, name, status)) => {
-                let hi = fr.hi_depth();
                 self.panes[idx].media = media::Media::still(name, fr);
                 self.panes[idx].tex.clear();
                 self.panes[idx].hist = None; // recompute for the new result
-                self.panes[idx].contrast = ContrastMode::Linear;
-                self.panes[idx].tone.clip.enabled = hi; // clip >8-bit results
 
                 if let Some(c) = self.panes[idx].compute.as_mut() {
                     c.computed = true; // switch from the config form to the result

@@ -117,13 +117,13 @@ impl CimApp {
         let cur = (if is_a { self.slot_a } else { self.slot_b }).min(n - 1);
         ui.label(if is_a { "A:" } else { "B:" });
         // A dropdown listing every open media (1-based index · name).
-        let cur_text = format!("{}·{}", cur + 1, ellipsize(self.panes[cur].media.name(), 16));
+        let cur_text = format!("{}·{}", cur + 1, self.panes[cur].media.name());
         let mut chosen = cur;
         egui::ComboBox::from_id_salt(if is_a { "ab_pick_a" } else { "ab_pick_b" })
             .selected_text(cur_text)
             .show_ui(ui, |ui| {
                 for i in 0..n {
-                    let label = format!("{}·{}", i + 1, ellipsize(self.panes[i].media.name(), 20));
+                    let label = format!("{}·{}", i + 1, self.panes[i].media.name());
                     ui.selectable_value(&mut chosen, i, label);
                 }
             });
