@@ -49,7 +49,7 @@ const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 /// Hairline that separates a floating chrome bar (pane header/footer, global
 /// toolbar / frame bar) from the image it overlays — the panels used to draw
 /// their own separators; the overlays paint this instead.
-const CHROME_BORDER: Color32 = Color32::from_gray(70);
+const CHROME_BORDER: Color32 = Color32::from_gray(40);
 
 /// How often to repaint while background decodes are pending (and we're not
 /// playing or exporting): often enough to pick up landed frames and keep the
