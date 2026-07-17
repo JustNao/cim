@@ -175,6 +175,12 @@ impl CimApp {
     fn draw_ab_footer(&self, ui: &egui::Ui, a: usize, b: usize, footer: Rect) {
         let fp = ui.painter_at(footer);
         fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+        // Top border, matching the per-pane footer (it floats over the image).
+        fp.hline(
+            footer.x_range(),
+            footer.min.y + 0.5,
+            Stroke::new(1.0_f32, CHROME_BORDER),
+        );
         let [w, h] = self.disp_size(a);
         let text = match self.cursor_img {
             Some(ci) => format!(

@@ -276,6 +276,14 @@ impl CimApp {
         if close_resp.clicked() {
             self.deferred.push(Deferred::Remove(idx));
         }
+
+        // Bottom border: the header floats over the image (and, in the top row,
+        // under the global toolbar), so a hairline separates it from what's below.
+        hp.hline(
+            header.x_range(),
+            header.max.y - 0.5,
+            Stroke::new(1.0_f32, CHROME_BORDER),
+        );
     }
 
     /// Bottom status strip: resolution (h×w), the shared cursor pixel, and this
@@ -283,6 +291,13 @@ impl CimApp {
     pub(super) fn draw_footer(&self, ui: &egui::Ui, idx: usize, footer: Rect) {
         let fp = ui.painter_at(footer);
         fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+        // Top border: the footer floats over the image, so a hairline separates
+        // it from the image above (matching the header's bottom border).
+        fp.hline(
+            footer.x_range(),
+            footer.min.y + 0.5,
+            Stroke::new(1.0_f32, CHROME_BORDER),
+        );
 
         let [w, h] = self.disp_size(idx);
         // Native sample format (uint8 / uint16 / float32), when the frame is

@@ -46,6 +46,10 @@ const FOOTER_H: f32 = 20.0;
 const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
+/// Hairline that separates a floating chrome bar (pane header/footer, global
+/// toolbar / frame bar) from the image it overlays — the panels used to draw
+/// their own separators; the overlays paint this instead.
+const CHROME_BORDER: Color32 = Color32::from_gray(70);
 
 /// How often to repaint while background decodes are pending (and we're not
 /// playing or exporting): often enough to pick up landed frames and keep the
@@ -1611,7 +1615,12 @@ impl eframe::App for CimApp {
             // Toolbar, floating over the top edge. Anchored areas sit above the
             // central panel, so their widgets get pointer priority over the pane
             // pan/zoom underneath.
-            let frame = egui::Frame::side_top_panel(&ctx.style());
+            // A hairline border round the bar; since each bar spans the full
+            // width and is flush to a window edge, only its inner edge shows (the
+            // toolbar's bottom, the frame bar's top) — the separator the panels
+            // used to draw.
+            let frame =
+                egui::Frame::side_top_panel(&ctx.style()).stroke(Stroke::new(1.0_f32, CHROME_BORDER));
             let m = frame.inner_margin;
             let full_w = ctx.screen_rect().width() - m.left - m.right;
             egui::Area::new(egui::Id::new("toolbar_overlay"))
