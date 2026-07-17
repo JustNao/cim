@@ -5,8 +5,7 @@
 use crate::app::*;
 
 impl CimApp {
-    pub(super) fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, cell: Rect) {
-        let header = Rect::from_min_size(cell.min, Vec2::new(cell.width(), header_h_for(cell.width())));
+    pub(super) fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, header: Rect) {
         let hp = ui.painter_at(header);
         let focused = idx == self.current;
         hp.rect_filled(

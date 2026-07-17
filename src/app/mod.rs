@@ -43,7 +43,6 @@ use export_ui::ExportRun;
 
 const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
-const GAP: f32 = 0.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 /// Hairline that separates a floating chrome bar (pane header/footer, global
@@ -667,6 +666,18 @@ pub struct CimApp {
     /// without moving the images. Transient (always back on at startup); every
     /// keyboard shortcut still works while hidden.
     show_chrome: bool,
+    /// Measured heights of the two full-width global bars (toolbar, frame bar),
+    /// captured when they're drawn each frame. A top-row pane header (and a
+    /// bottom-row footer) is pushed clear of the bar covering that window edge so
+    /// the two stack **adjacently** instead of the global bar painting over the
+    /// pane bar. Zero when a bar isn't shown. See `chrome_insets`.
+    toolbar_h: f32,
+    framebar_h: f32,
+    /// Display scale (`ctx.pixels_per_point`), captured each frame. Grid cell
+    /// edges are snapped to this pixel grid so vertically/horizontally adjacent
+    /// cells share an *exact* boundary — a fractional edge otherwise anti-aliases
+    /// into a faint seam that reads as a gap beneath a pane's footer.
+    ppp: f32,
     last_area: Rect,
     /// The hovered pane's cursor position in **image space**, recomputed each
     /// frame in `draw_central`. Replicated across every pane (a red dot + the
@@ -865,6 +876,9 @@ impl CimApp {
             status: StatusLine::default(),
             error_popup: None,
             show_chrome: true,
+            toolbar_h: 0.0,
+            framebar_h: 0.0,
+            ppp: 1.0,
             last_area: Rect::NOTHING,
             cursor_img: None,
             cursor_pane: None,
@@ -1246,6 +1260,21 @@ impl CimApp {
     /// one commits — so a differently sized page never briefly appears at the
     /// page-0 fallback size while it decodes. Before the first commit, fall back to
     /// the resident target frame's own size, then the page-0 size.
+    /// How far the full-width global bars intrude into a cell's top and bottom
+    /// edges. A pane header/footer flush to a window edge would be painted over
+    /// by the toolbar / frame bar covering that edge; pushing it in by the bar's
+    /// height stacks the two adjacently instead. Only cells touching the central
+    /// area's top/bottom edge are affected; interior grid rows get `(0, 0)`.
+    pub(super) fn chrome_insets(&self, cell: Rect) -> (f32, f32) {
+        if !self.show_chrome {
+            return (0.0, 0.0);
+        }
+        let a = self.last_area;
+        let top = if cell.min.y <= a.min.y + 0.5 { self.toolbar_h } else { 0.0 };
+        let bot = if cell.max.y >= a.max.y - 0.5 { self.framebar_h } else { 0.0 };
+        (top, bot)
+    }
+
     pub(super) fn disp_size(&self, i: usize) -> [usize; 2] {
         if let Some(t) = &self.panes[i].tex.front {
             return t.size;
@@ -1592,6 +1621,8 @@ impl eframe::App for CimApp {
         if (ctx.zoom_factor() - scale).abs() > 1e-3 {
             ctx.set_zoom_factor(scale);
         }
+        // Pixel grid used to snap grid cell edges (see `grid_cells`).
+        self.ppp = ctx.pixels_per_point();
 
         self.tick(ctx);
 
@@ -1602,19 +1633,15 @@ impl eframe::App for CimApp {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
         }
 
-        // The image area always spans the whole window: the toolbar and frame
-        // bar are floating overlays (below), not layout panels, so showing or
-        // hiding them — `Action::ToggleChrome` — never reflows the images.
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                self.draw_central(ui, ctx);
-            });
-
+        // The toolbar and frame bar are floating overlays (anchored Areas, in a
+        // layer above the central panel), not layout panels — so showing or
+        // hiding them, `Action::ToggleChrome`, never reflows the images, which
+        // always span the whole window. They're drawn **before** the central
+        // panel so their measured heights are available while the panes lay out
+        // (see `chrome_insets`); the layer order still paints them on top.
+        self.toolbar_h = 0.0;
+        self.framebar_h = 0.0;
         if self.show_chrome {
-            // Toolbar, floating over the top edge. Anchored areas sit above the
-            // central panel, so their widgets get pointer priority over the pane
-            // pan/zoom underneath.
             // A hairline border round the bar; since each bar spans the full
             // width and is flush to a window edge, only its inner edge shows (the
             // toolbar's bottom, the frame bar's top) — the separator the panels
@@ -1623,7 +1650,8 @@ impl eframe::App for CimApp {
                 egui::Frame::side_top_panel(&ctx.style()).stroke(Stroke::new(1.0_f32, CHROME_BORDER));
             let m = frame.inner_margin;
             let full_w = ctx.screen_rect().width() - m.left - m.right;
-            egui::Area::new(egui::Id::new("toolbar_overlay"))
+            // Toolbar, floating over the top edge.
+            let tb = egui::Area::new(egui::Id::new("toolbar_overlay"))
                 .anchor(Align2::LEFT_TOP, Vec2::ZERO)
                 .show(ctx, |ui| {
                     frame.show(ui, |ui| {
@@ -1633,13 +1661,14 @@ impl eframe::App for CimApp {
                         ui.add_space(2.0);
                     });
                 });
+            self.toolbar_h = tb.response.rect.height();
 
             // Full-width transport bar, floating over the bottom edge. Shown
             // whenever any loaded media is a sequence (not just the focused
             // one), so selecting a still doesn't drop the bar. It follows the
             // `control` sequence.
             if self.any_sequence() {
-                egui::Area::new(egui::Id::new("framebar_overlay"))
+                let fb = egui::Area::new(egui::Id::new("framebar_overlay"))
                     .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO)
                     .show(ctx, |ui| {
                         frame.show(ui, |ui| {
@@ -1649,8 +1678,17 @@ impl eframe::App for CimApp {
                             ui.add_space(4.0);
                         });
                     });
+                self.framebar_h = fb.response.rect.height();
             }
         }
+
+        // The image area always spans the whole window; the bars above overlay
+        // its top/bottom edges.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                self.draw_central(ui, ctx);
+            });
 
         if self.show_manager {
             self.draw_manager(ctx);
@@ -1734,18 +1772,6 @@ impl eframe::App for CimApp {
 }
 
 // ---- shared free helpers -------------------------------------------------
-
-/// Drawn height of a visible header row. A single row now that the header holds
-/// only the Transformations button (Compute moved to the toolbar).
-fn header_h_for(_width: f32) -> f32 {
-    HEADER_H
-}
-
-/// The footer strip a pane's readout floats over: the bottom of the cell. Like
-/// every UI bar it overlays the image — the image itself fills the whole cell.
-fn footer_area(cell: Rect) -> Rect {
-    Rect::from_min_max(Pos2::new(cell.min.x, cell.max.y - FOOTER_H), cell.max)
-}
 
 fn uv() -> Rect {
     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))

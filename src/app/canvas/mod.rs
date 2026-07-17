@@ -153,17 +153,26 @@ impl CimApp {
         let n = vis.len();
         let cols = self.config.max_columns.max(1).min(n).max(1);
         let rows = n.div_ceil(cols);
-        let cw = (area.width() - GAP * (cols as f32 - 1.0)) / cols as f32;
-        let ch = (area.height() - GAP * (rows as f32 - 1.0)) / rows as f32;
+        // Column/row edges snapped to the physical pixel grid, so cells tile with
+        // no gap and every shared boundary is exact. A fractional edge would make
+        // two adjacent cells' fills anti-alias against each other, leaving a
+        // faint seam right under a pane's footer (visible only where a bright
+        // image sits in the next row — hence never on the bottom row).
+        let ppp = self.ppp.max(0.01);
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let x_edge = |c: usize| snap(area.min.x + area.width() * c as f32 / cols as f32);
+        let y_edge = |r: usize| snap(area.min.y + area.height() * r as f32 / rows as f32);
         let mut cells = Vec::with_capacity(n);
         for (k, &idx) in vis.iter().enumerate() {
             let r = k / cols;
             let c = k % cols;
-            let min = Pos2::new(
-                area.min.x + c as f32 * (cw + GAP),
-                area.min.y + r as f32 * (ch + GAP),
-            );
-            cells.push((idx, Rect::from_min_size(min, Vec2::new(cw, ch))));
+            cells.push((
+                idx,
+                Rect::from_min_max(
+                    Pos2::new(x_edge(c), y_edge(r)),
+                    Pos2::new(x_edge(c + 1), y_edge(r + 1)),
+                ),
+            ));
         }
         cells
     }
@@ -231,15 +240,26 @@ impl CimApp {
         let resp = ui.interact(img_area, Id::new(("pane", idx)), Sense::click_and_drag());
         let ctrl = ctx.input(|i| i.modifiers.ctrl);
         let alt = ctx.input(|i| i.modifiers.alt);
-        // The header and footer bars float over the cell's top/bottom strips.
+        // The header and footer bars float over the cell's top/bottom strips —
+        // pushed clear of any full-width global bar covering that window edge
+        // (`chrome_insets`), so a top-row header sits below the toolbar and a
+        // bottom-row footer above the frame bar rather than under them.
+        let (top_in, bot_in) = self.chrome_insets(cell);
+        let header_strip = Rect::from_min_size(
+            Pos2::new(cell.min.x, cell.min.y + top_in),
+            Vec2::new(cell.width(), HEADER_H),
+        );
+        let footer_strip = Rect::from_min_max(
+            Pos2::new(cell.min.x, cell.max.y - bot_in - FOOTER_H),
+            Pos2::new(cell.max.x, cell.max.y - bot_in),
+        );
         // While the cursor is over either shown bar, the bar owns the input —
         // don't let the pane zoom/rotate/reorder/focus underneath it. (An
         // in-progress pan started lower down still continues; only new
         // interactions are suppressed here.)
-        let header_strip = Rect::from_min_size(cell.min, Vec2::new(cell.width(), HEADER_H));
         let over_chrome = self.show_chrome
             && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-                header_strip.contains(p) || footer_area(cell).contains(p)
+                header_strip.contains(p) || footer_strip.contains(p)
             });
         if resp.hovered() && !over_chrome {
             let scroll = wheel_delta(ctx);
@@ -315,11 +335,11 @@ impl CimApp {
         // strips. All chrome hides together (`Action::ToggleChrome`) — including
         // the Transformations popup, whose open state survives the round trip.
         if self.show_chrome {
-            self.draw_header(ui, idx, cell);
+            self.draw_header(ui, idx, header_strip);
             if self.panes[idx].show_opts {
-                self.draw_options_popup(ctx, idx, cell);
+                self.draw_options_popup(ctx, idx, cell, header_strip.max.y);
             }
-            self.draw_footer(ui, idx, footer_area(cell));
+            self.draw_footer(ui, idx, footer_strip);
         }
 
         // The ctrl-drag reorder border is drawn in a separate pass over all

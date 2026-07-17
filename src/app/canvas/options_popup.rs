@@ -14,7 +14,7 @@ impl CimApp {
     /// pane `cell`. When the pane is tone-synced, edits target the *shared*
     /// Transformations (and every synced pane re-renders); otherwise the pane's
     /// own. Nothing is written unless something changed.
-    pub(super) fn draw_options_popup(&mut self, ctx: &egui::Context, idx: usize, cell: Rect) {
+    pub(super) fn draw_options_popup(&mut self, ctx: &egui::Context, idx: usize, cell: Rect, header_bottom: f32) {
         let pane_id = self.panes[idx].id;
         let synced = self.panes[idx].sync_tone;
         // Edit the effective values (shared when synced, else the pane's own).
@@ -68,10 +68,7 @@ impl CimApp {
             .order(egui::Order::Foreground)
             .movable(false)
             .constrain_to(cell)
-            .fixed_pos(Pos2::new(
-                cell.left() + 4.0,
-                cell.top() + header_h_for(cell.width()) + 2.0,
-            ))
+            .fixed_pos(Pos2::new(cell.left() + 4.0, header_bottom + 2.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(230.0);

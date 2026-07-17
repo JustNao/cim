@@ -30,7 +30,10 @@ impl ViewTransform {
         let ih = img[1].max(1) as f32;
         let sx = pane.width() / iw;
         let sy = pane.height() / ih;
-        self.zoom = (sx.min(sy) * 0.98).max(1e-4);
+        // Fill the limiting dimension exactly (no shrink margin): the floating
+        // header/footer bars overlay the image's edges, so a gap here would leave
+        // a sliver of pane background showing between a bar and the image.
+        self.zoom = sx.min(sy).max(1e-4);
         self.center = Vec2::new(iw / 2.0, ih / 2.0);
         self.needs_fit = false;
     }

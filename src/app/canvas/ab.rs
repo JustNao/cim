@@ -13,9 +13,15 @@ impl CimApp {
         let b = self.slot_b.min(n - 1);
 
         // Images fill the whole area; the shared footer floats over the bottom
-        // strip (when chrome is shown), so hiding it never moves the images.
+        // strip (when chrome is shown), so hiding it never moves the images. It's
+        // pushed clear of the global frame bar (`chrome_insets`), and the A/B
+        // corner labels clear of the toolbar, so neither is painted over.
         let img = area;
-        let footer = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - FOOTER_H), area.max);
+        let (top_in, bot_in) = self.chrome_insets(area);
+        let footer = Rect::from_min_max(
+            Pos2::new(area.min.x, area.max.y - bot_in - FOOTER_H),
+            Pos2::new(area.max.x, area.max.y - bot_in),
+        );
 
         for &idx in &[a, b] {
             let size = self.panes[idx].media.size();
@@ -43,8 +49,8 @@ impl CimApp {
             self.cursor_pane = self.cursor_img.map(|_| side);
         }
 
-        self.draw_ab_side(ui, a, ta, oa, img, left, true);
-        self.draw_ab_side(ui, b, tb, ob, img, right, false);
+        self.draw_ab_side(ui, a, ta, oa, img, left, true, top_in);
+        self.draw_ab_side(ui, b, tb, ob, img, right, false, top_in);
         self.draw_pane_error(ui, a, left);
         self.draw_pane_error(ui, b, right);
 
@@ -133,6 +139,7 @@ impl CimApp {
         area: Rect,
         clip: Rect,
         is_a: bool,
+        top_inset: f32,
     ) {
         let painter = ui.painter_at(clip);
         painter.rect_filled(clip, 0.0, Color32::from_gray(18));
@@ -157,9 +164,9 @@ impl CimApp {
             self.panes[idx].media.name()
         );
         let anchor = if is_a {
-            (clip.left_top() + Vec2::new(8.0, 8.0), Align2::LEFT_TOP)
+            (clip.left_top() + Vec2::new(8.0, 8.0 + top_inset), Align2::LEFT_TOP)
         } else {
-            (clip.right_top() + Vec2::new(-8.0, 8.0), Align2::RIGHT_TOP)
+            (clip.right_top() + Vec2::new(-8.0, 8.0 + top_inset), Align2::RIGHT_TOP)
         };
         painter.text(
             anchor.0,
