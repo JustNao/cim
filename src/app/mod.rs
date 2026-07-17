@@ -1656,9 +1656,9 @@ impl eframe::App for CimApp {
                 .show(ctx, |ui| {
                     frame.show(ui, |ui| {
                         ui.set_min_width(full_w);
-                        ui.add_space(2.0);
+                        ui.add_space(4.0);
                         self.draw_toolbar(ui);
-                        ui.add_space(2.0);
+                        ui.add_space(0.5);
                     });
                 });
             self.toolbar_h = tb.response.rect.height();

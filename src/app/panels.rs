@@ -327,6 +327,8 @@ impl CimApp {
             });
         });
 
+        ui.add_space(3.0);
+
         self.draw_scrubber(ui, len, at_end);
     }
 
