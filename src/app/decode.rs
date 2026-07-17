@@ -143,6 +143,13 @@ impl CimApp {
         }
         self.decoding_all = false;
         self.export_load_pending = false;
+        // Flipping `eager` only stops *queuing* new frames; a "Load all" over an
+        // already-length-known (e.g. offsets-loaded) sequence has already queued
+        // its whole backlog, and the worker pool would keep grinding through it.
+        // Cancel that backlog and drop the now-orphaned inflight markers so the
+        // frames the user actually views re-request cleanly.
+        self.decoder.cancel_pending();
+        self.inflight.clear();
         self.status.set("Stopped loading");
     }
 

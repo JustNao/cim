@@ -12,6 +12,7 @@
 //! file is read sequentially anyway).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -23,6 +24,11 @@ struct Job {
     id: u64,
     frame: usize,
     req: DecodeReq,
+    /// The cancellation epoch this job was queued under. A worker drops the job
+    /// (without decoding) if `epoch` is older than the decoder's current epoch —
+    /// how `cancel_pending` discards a whole queued backlog (e.g. the thousands
+    /// of frames a "Load all" queues at once) the instant Stop is pressed.
+    epoch: u64,
 }
 
 pub struct Done {
@@ -60,6 +66,9 @@ pub struct BackgroundDecoder {
     job_tx: mpsc::Sender<Job>,
     done_rx: mpsc::Receiver<Done>,
     readers: Readers,
+    /// Bumped by `cancel_pending`; workers skip any job queued under an older
+    /// epoch. Jobs stamp the value at submit time (see `request`).
+    epoch: Arc<AtomicU64>,
 }
 
 impl BackgroundDecoder {
@@ -73,11 +82,13 @@ impl BackgroundDecoder {
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         let job_rx = Arc::new(Mutex::new(job_rx));
         let readers: Readers = Arc::new(Mutex::new(HashMap::new()));
+        let epoch = Arc::new(AtomicU64::new(0));
 
         for _ in 0..threads.max(1) {
             let job_rx = Arc::clone(&job_rx);
             let done_tx = done_tx.clone();
             let readers = Arc::clone(&readers);
+            let epoch = Arc::clone(&epoch);
             let ctx = ctx.clone();
             thread::spawn(move || loop {
                 // Hold the job lock only for the hand-off, then decode unlocked
@@ -86,6 +97,12 @@ impl BackgroundDecoder {
                     Ok(job) => job,
                     Err(_) => break, // sender dropped: app is shutting down
                 };
+                // A cancelled backlog (Stop / new load) bumps the epoch: drop the
+                // stale job without decoding or reporting it. The UI clears
+                // `inflight` in step, so a still-wanted frame is simply re-queued.
+                if job.epoch < epoch.load(Ordering::Relaxed) {
+                    continue;
+                }
 
                 let started = std::time::Instant::now();
                 let mut io = std::time::Duration::ZERO;
@@ -159,11 +176,27 @@ impl BackgroundDecoder {
             job_tx,
             done_rx,
             readers,
+            epoch,
         }
     }
 
     pub fn request(&self, id: u64, frame: usize, req: DecodeReq) {
-        let _ = self.job_tx.send(Job { id, frame, req });
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let _ = self.job_tx.send(Job {
+            id,
+            frame,
+            req,
+            epoch,
+        });
+    }
+
+    /// Discard every job queued so far (workers skip anything older than the new
+    /// epoch). A job already mid-decode still lands — harmless, since a landed
+    /// frame is always valid; the caller clears `inflight` so wanted frames are
+    /// re-queued under the new epoch. This is how Stop halts a "Load all" whose
+    /// entire backlog is already sitting in the queue.
+    pub fn cancel_pending(&self) {
+        self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Drop every persistent reader for `id` (all of a concatenation's files) so
