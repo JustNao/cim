@@ -217,7 +217,9 @@ len)` grows length by one.
   concat-specific code in `drive_seek`/lookahead/playback.
 - **Fast scan (`media/fastscan.rs`)** — an O(1) shortcut past all of the above for
   **regularly laid out** TIFFs (uniform, uncompressed pages at a fixed byte
-  stride — the `tifffile`/ImageJ capture case). `FastScan::open` measures the
+  stride — the `tifffile`/ImageJ capture case), classic **or BigTIFF** (64-bit
+  offsets / wider IFDs, branched on `FastScan::big` — the ≥4 GiB case where the
+  shortcut matters most). `FastScan::open` measures the
   stride from the first two IFDs (with a long list of rejections: compression,
   tiling, planar, differing pages, irregular placement…); page N is then
   *predicted* at `ifd0 + N×stride` and **validated before trust** (template

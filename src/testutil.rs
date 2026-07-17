@@ -47,6 +47,19 @@ pub fn write_multipage_tiff_u16(path: &Path, sizes: &[[usize; 2]]) {
     }
 }
 
+/// Like [`write_multipage_tiff_u16`] but writes a **BigTIFF** (64-bit offsets,
+/// wider IFDs) via the encoder's `new_big`, so the fast-scan reader's BigTIFF
+/// path has ground truth to validate against.
+pub fn write_multipage_bigtiff_u16(path: &Path, sizes: &[[usize; 2]]) {
+    let mut file = File::create(path).expect("create bigtiff");
+    let mut enc = TiffEncoder::new_big(&mut file).expect("bigtiff encoder");
+    for (k, &[w, h]) in sizes.iter().enumerate() {
+        let data = gray16_page(w, h, (k as u16).wrapping_mul(1000));
+        enc.write_image::<colortype::Gray16>(w as u32, h as u32, &data)
+            .expect("write bigtiff page");
+    }
+}
+
 /// Write a numbered 8-bit grayscale PNG run (`frame_000.png`, …) into `dir`,
 /// returning the paths in order. Frame `k` is a ramp offset by `k * 10`.
 pub fn write_png_run(dir: &Path, count: usize, w: usize, h: usize) -> Vec<PathBuf> {

@@ -12,7 +12,9 @@
 //! the same stride, and its predecessor's next-IFD pointer must land on it. A
 //! prediction that fails any check is discarded (never a wrong frame — the
 //! caller falls back to the ordinary chain walk or cancels), so this is purely
-//! an opportunistic O(1) shortcut.
+//! an opportunistic O(1) shortcut. Both classic TIFF and **BigTIFF** (64-bit
+//! offsets, wider IFDs — the ≥4 GiB case where the shortcut matters most) are
+//! handled; the width-dependent reads branch on `FastScan::big`.
 //!
 //! Used three ways: [`SeqReader`](super::SeqReader) consults a measured layout
 //! to make far probes/decodes O(1); the frame bar's **Load offsets fast** button
@@ -49,7 +51,7 @@ const T_SAMPLE_FORMAT: u16 = 339;
 /// affect where the strip data lives, which is all prediction relies on.
 #[derive(Clone, PartialEq)]
 struct PageIfd {
-    entries: u16,
+    entries: u64,
     width: u32,
     height: u32,
     /// Bits per sample, one per channel (all required equal).
@@ -70,22 +72,67 @@ struct PageIfd {
 /// A measured regular layout plus its own file handle: page N's IFD is
 /// predicted at `ifd0 + N × stride` and validated against `template` before
 /// anything is trusted. Built by [`FastScan::open`]; the `Err(reason)` strings
-/// are user-facing (the greyed Fast-jump button's hover text).
+/// are user-facing (they ride the *Load offsets* hover text).
 pub struct FastScan {
     file: File,
     file_len: u64,
     big_endian: bool,
+    /// BigTIFF (magic 43): 64-bit offsets, an 8-byte IFD entry count, 20-byte
+    /// entries and an 8-byte value/offset field — otherwise identical to classic
+    /// TIFF (magic 42). All the width-dependent reads branch on this.
+    big: bool,
     ifd0: u64,
     stride: u64,
     template: PageIfd,
 }
 
 impl FastScan {
-    /// Open `path` and measure its page stride from the first two IFDs,
-    /// rejecting (with a human-readable reason) any file whose page positions
-    /// can't be predicted: compression, tiling, planar layout, pages differing
-    /// in shape, an irregular stride, or sample layouts the raw reader can't
-    /// reproduce bit-exactly.
+    /// Width of the IFD entry-count field at the start of an IFD (u16 classic,
+    /// u64 BigTIFF).
+    fn count_width(&self) -> u64 {
+        if self.big {
+            8
+        } else {
+            2
+        }
+    }
+
+    /// Width of an entry's *value count* field and its value/offset field, both
+    /// this wide (u32 classic, u64 BigTIFF). An entry is thus `4 + 2·field_width`
+    /// bytes (12 classic, 20 BigTIFF), with the value/offset at `4 + field_width`.
+    fn field_width(&self) -> usize {
+        if self.big {
+            8
+        } else {
+            4
+        }
+    }
+
+    /// Read a field/offset-sized integer: u32 (classic) or u64 (BigTIFF).
+    fn read_field(&self, b: &[u8]) -> u64 {
+        if self.big {
+            get_u64(b, self.big_endian)
+        } else {
+            get_u32(b, self.big_endian) as u64
+        }
+    }
+
+    /// Read the IFD entry count: u16 (classic) or u64 (BigTIFF).
+    fn read_count(&self, b: &[u8]) -> u64 {
+        if self.big {
+            get_u64(b, self.big_endian)
+        } else {
+            get_u16(b, self.big_endian) as u64
+        }
+    }
+}
+
+impl FastScan {
+    /// Open `path` (classic TIFF or BigTIFF) and measure its page stride from the
+    /// first two IFDs, rejecting (with a human-readable reason) any file whose
+    /// page positions can't be predicted: compression, tiling, planar layout,
+    /// pages differing in shape, an irregular stride, or sample layouts the raw
+    /// reader can't reproduce bit-exactly.
     pub fn open(path: &Path) -> Result<FastScan, String> {
         let mut file = File::open(path).map_err(|e| format!("can't open the file: {e}"))?;
         let file_len = file
@@ -93,22 +140,35 @@ impl FastScan {
             .map_err(|e| format!("can't stat the file: {e}"))?
             .len();
 
-        let mut header = [0u8; 8];
+        // 16 bytes covers both header shapes (any real TIFF is far larger).
+        let mut header = [0u8; 16];
         read_at(&mut file, 0, &mut header).ok_or("not a readable TIFF")?;
         let big_endian = match &header[..2] {
             b"II" => false,
             b"MM" => true,
             _ => return Err("not a TIFF file".into()),
         };
-        if get_u16(&header[2..4], big_endian) != 42 {
-            return Err("not a classic TIFF (BigTIFF isn't supported)".into());
-        }
-        let ifd0 = get_u32(&header[4..8], big_endian) as u64;
+        // Classic TIFF (magic 42): 8-byte header, 32-bit first-IFD offset.
+        // BigTIFF (magic 43): a 16-byte header carrying the offset bytesize
+        // (must be 8) + a zero word, then the 64-bit first-IFD offset.
+        let (big, ifd0) = match get_u16(&header[2..4], big_endian) {
+            42 => (false, get_u32(&header[4..8], big_endian) as u64),
+            43 => {
+                if get_u16(&header[4..6], big_endian) != 8
+                    || get_u16(&header[6..8], big_endian) != 0
+                {
+                    return Err("malformed BigTIFF header".into());
+                }
+                (true, get_u64(&header[8..16], big_endian))
+            }
+            _ => return Err("not a TIFF file".into()),
+        };
 
         let mut scan = FastScan {
             file,
             file_len,
             big_endian,
+            big,
             ifd0,
             stride: 0,                 // measured below
             template: PageIfd::default(), // replaced below
@@ -278,62 +338,70 @@ impl FastScan {
     /// The next-IFD pointer of the IFD at `off` (with an entry-count sanity
     /// check against the template). `None` when unreadable.
     fn next_of(&mut self, off: u64) -> Option<u64> {
-        let mut n = [0u8; 2];
-        read_at(&mut self.file, off, &mut n)?;
-        let n = get_u16(&n, self.big_endian);
+        let (cw, fw) = (self.count_width(), self.field_width());
+        let es = 4 + 2 * fw; // entry size
+        let mut cb = [0u8; 8];
+        read_at(&mut self.file, off, &mut cb[..cw as usize])?;
+        let n = self.read_count(&cb);
         if n != self.template.entries {
             return None;
         }
-        let mut next = [0u8; 4];
-        read_at(&mut self.file, off + 2 + n as u64 * 12, &mut next)?;
-        Some(get_u32(&next, self.big_endian) as u64)
+        let mut next = [0u8; 8];
+        read_at(&mut self.file, off + cw + n * es as u64, &mut next[..fw])?;
+        Some(self.read_field(&next))
     }
 
     /// Parse the IFD at `off` into the fields prediction cares about. `None`
     /// when it can't be a plausible IFD (truncated, absurd entry count, or a
-    /// required tag missing / of an unexpected type).
+    /// required tag missing / of an unexpected type). Handles both classic and
+    /// BigTIFF entry widths via `count_width`/`field_width`.
     fn read_ifd(&mut self, off: u64) -> Option<PageIfd> {
-        if off == 0 || off + 2 > self.file_len {
+        let (cw, fw) = (self.count_width(), self.field_width());
+        let es = 4 + 2 * fw; // entry size (12 classic, 20 BigTIFF)
+        if off == 0 || off + cw > self.file_len {
             return None;
         }
-        let mut nb = [0u8; 2];
-        read_at(&mut self.file, off, &mut nb)?;
-        let n = get_u16(&nb, self.big_endian);
+        let mut cb = [0u8; 8];
+        read_at(&mut self.file, off, &mut cb[..cw as usize])?;
+        let n = self.read_count(&cb);
         if n == 0 || n > 4096 {
             return None;
         }
-        let mut buf = vec![0u8; n as usize * 12 + 4];
-        read_at(&mut self.file, off + 2, &mut buf)?;
+        let mut buf = vec![0u8; n as usize * es + fw]; // entries + next-IFD pointer
+        read_at(&mut self.file, off + cw, &mut buf)?;
 
         let mut p = PageIfd {
             entries: n,
             ..PageIfd::default()
         };
-        p.next = get_u32(&buf[n as usize * 12..], self.big_endian) as u64;
-        for e in buf[..n as usize * 12].chunks_exact(12) {
+        p.next = self.read_field(&buf[n as usize * es..]);
+        for e in buf[..n as usize * es].chunks_exact(es) {
             let be = self.big_endian;
             let (tag, ty) = (get_u16(&e[0..2], be), get_u16(&e[2..4], be));
-            let count = get_u32(&e[4..8], be);
+            let count = self.read_field(&e[4..4 + fw]);
+            let val = &e[4 + fw..]; // the value/offset field
             // Only the tags prediction needs are parsed; a value too large for
             // scalar use below simply fails the read (`values` handles arrays).
             match tag {
-                T_WIDTH => p.width = self.value(ty, count, &e[8..])? as u32,
-                T_HEIGHT => p.height = self.value(ty, count, &e[8..])? as u32,
+                T_WIDTH => p.width = self.value(ty, count, val)? as u32,
+                T_HEIGHT => p.height = self.value(ty, count, val)? as u32,
                 T_BITS => {
                     p.bits = self
-                        .values(ty, count, &e[8..])?
+                        .values(ty, count, val)?
                         .into_iter()
                         .map(|v| v as u16)
                         .collect()
                 }
-                T_COMPRESSION => p.compression = self.value(ty, count, &e[8..])? as u16,
-                T_PHOTOMETRIC => p.photometric = self.value(ty, count, &e[8..])? as u16,
-                T_STRIP_OFFSETS => p.strip_offsets = self.values(ty, count, &e[8..])?,
-                T_SPP => p.spp = self.value(ty, count, &e[8..])? as u16,
-                T_STRIP_COUNTS => p.strip_counts = self.values(ty, count, &e[8..])?,
-                T_PLANAR => p.planar = self.value(ty, count, &e[8..])? as u16,
-                T_PREDICTOR => p.predictor = self.value(ty, count, &e[8..])? as u16,
-                T_SAMPLE_FORMAT => p.sample_format = self.values(ty, count, &e[8..])?[0] as u16,
+                T_COMPRESSION => p.compression = self.value(ty, count, val)? as u16,
+                T_PHOTOMETRIC => p.photometric = self.value(ty, count, val)? as u16,
+                T_STRIP_OFFSETS => p.strip_offsets = self.values(ty, count, val)?,
+                T_SPP => p.spp = self.value(ty, count, val)? as u16,
+                T_STRIP_COUNTS => p.strip_counts = self.values(ty, count, val)?,
+                T_PLANAR => p.planar = self.value(ty, count, val)? as u16,
+                T_PREDICTOR => p.predictor = self.value(ty, count, val)? as u16,
+                T_SAMPLE_FORMAT => {
+                    p.sample_format = self.values(ty, count, val)?.first().copied()? as u16
+                }
                 T_TILE_WIDTH => p.tiled = true,
                 _ => {}
             }
@@ -348,27 +416,29 @@ impl FastScan {
     }
 
     /// A single scalar tag value.
-    fn value(&mut self, ty: u16, count: u32, val: &[u8]) -> Option<u64> {
+    fn value(&mut self, ty: u16, count: u64, val: &[u8]) -> Option<u64> {
         if count != 1 {
             return None;
         }
         self.values(ty, count, val).map(|v| v[0])
     }
 
-    /// A tag's values (SHORT or LONG), inline in the 4-byte value field when
-    /// they fit, else read from the offset it holds.
-    fn values(&mut self, ty: u16, count: u32, val: &[u8]) -> Option<Vec<u64>> {
+    /// A tag's values (SHORT / LONG / BigTIFF LONG8), inline in the value/offset
+    /// field when they fit (≤ 4 bytes classic, ≤ 8 BigTIFF), else read from the
+    /// offset it holds.
+    fn values(&mut self, ty: u16, count: u64, val: &[u8]) -> Option<Vec<u64>> {
         let each = match ty {
-            3 => 2, // SHORT
-            4 => 4, // LONG
+            3 => 2,  // SHORT
+            4 => 4,  // LONG
+            16 => 8, // LONG8 (BigTIFF)
             _ => return None,
         };
         let total = each * count as usize;
         let inline;
-        let bytes: &[u8] = if total <= 4 {
+        let bytes: &[u8] = if total <= self.field_width() {
             &val[..total]
         } else {
-            let off = get_u32(val, self.big_endian) as u64;
+            let off = self.read_field(val);
             let mut buf = vec![0u8; total];
             read_at(&mut self.file, off, &mut buf)?;
             inline = buf;
@@ -377,9 +447,10 @@ impl FastScan {
         Some(
             bytes
                 .chunks_exact(each)
-                .map(|c| match ty {
-                    3 => get_u16(c, self.big_endian) as u64,
-                    _ => get_u32(c, self.big_endian) as u64,
+                .map(|c| match each {
+                    2 => get_u16(c, self.big_endian) as u64,
+                    4 => get_u32(c, self.big_endian) as u64,
+                    _ => get_u64(c, self.big_endian),
                 })
                 .collect(),
         )
@@ -455,6 +526,15 @@ fn get_u32(b: &[u8], big_endian: bool) -> u32 {
         u32::from_be_bytes(b)
     } else {
         u32::from_le_bytes(b)
+    }
+}
+
+fn get_u64(b: &[u8], big_endian: bool) -> u64 {
+    let b: [u8; 8] = b[..8].try_into().unwrap();
+    if big_endian {
+        u64::from_be_bytes(b)
+    } else {
+        u64::from_le_bytes(b)
     }
 }
 
@@ -556,7 +636,9 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::media::{load, load_sequence, SeqReader};
-    use crate::testutil::{fixture_dir, write_bilevel_tiff, write_multipage_tiff_u16};
+    use crate::testutil::{
+        fixture_dir, write_bilevel_tiff, write_multipage_bigtiff_u16, write_multipage_tiff_u16,
+    };
 
     fn u16s(f: &FrameData) -> &[u16] {
         match &f.samples {
@@ -585,6 +667,32 @@ mod tests {
             assert_eq!(fast.size, slow.size);
             assert_eq!(u16s(&fast), u16s(&slow), "page {k} must match");
         }
+    }
+
+    #[test]
+    fn bigtiff_measures_reads_and_jumps() {
+        let dir = fixture_dir("fastscan_big");
+        let path = dir.join("big.tif");
+        write_multipage_bigtiff_u16(&path, &[[9, 7]; 6]);
+
+        // The 64-bit-offset layout measures and counts just like a classic one.
+        let mut scan = FastScan::open(&path).expect("BigTIFF measures");
+        assert!(scan.big, "should be detected as BigTIFF");
+        assert_eq!(scan.page_count().unwrap(), 6);
+
+        // Raw decode is bit-exact with the tiff-crate chain walk.
+        let mut reader = SeqReader::open(&path).unwrap();
+        for k in [0usize, 2, 5] {
+            let fast = scan.read_page(k).expect("page reads at prediction");
+            let slow = reader.decode(k).unwrap().expect("page exists");
+            assert_eq!(u16s(&fast), u16s(&slow), "BigTIFF page {k} must match");
+        }
+
+        // The whole feature works end to end on a BigTIFF.
+        let mut media = load(&path).unwrap();
+        fast_load_offsets(&mut media).expect("regular BigTIFF");
+        assert_eq!(media.frame_count(), 6);
+        assert!(media.at_end());
     }
 
     #[test]
