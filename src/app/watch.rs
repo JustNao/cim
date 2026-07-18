@@ -5,28 +5,41 @@
 use super::*;
 
 impl CimApp {
-    /// On-disk signature of a pane's source: the latest mtime across its file(s)
-    /// and their total length. `None` for a Compute pane (no file) or when any
-    /// file can't be stat-ed right now (e.g. mid-rename) — in which case the
-    /// watch simply waits for the next poll rather than reloading torn contents.
+    /// On-disk signature of a pane's source: a hash of the file bytes across its
+    /// file(s) plus their total length. `None` for a Compute pane (no file) or
+    /// when any file can't be read right now (e.g. mid-rename, or the writer holds
+    /// it with no share-read) — in which case the watch simply waits for the next
+    /// poll rather than acting on torn contents.
+    ///
+    /// Content-based rather than mtime-based on purpose: the common case here is a
+    /// tool overwriting an image **in place** with the same dimensions, so neither
+    /// the byte length nor (on Windows, while the writer keeps the handle open) the
+    /// mtime moves — only the pixels do. Reading + hashing the bytes catches that.
+    /// The files being watched are single images / stills, page-cache-hot after the
+    /// first read, so hashing them a few times a second is cheap.
     pub(super) fn source_file_sig(source: &Source) -> Option<FileSig> {
+        use std::hash::Hasher;
+        use std::io::Read;
         let paths: &[PathBuf] = match source {
             Source::File(p) => std::slice::from_ref(p),
             Source::Sequence { files, .. } => files.as_slice(),
             Source::Computed => return None,
         };
-        let mut latest: Option<std::time::SystemTime> = None;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut total = 0u64;
+        let mut buf = [0u8; 64 * 1024];
         for p in paths {
-            let m = std::fs::metadata(p).ok()?;
-            total += m.len();
-            let mt = m.modified().ok()?;
-            latest = Some(match latest {
-                Some(l) if l >= mt => l,
-                _ => mt,
-            });
+            let mut f = std::fs::File::open(p).ok()?;
+            loop {
+                let n = f.read(&mut buf).ok()?;
+                if n == 0 {
+                    break;
+                }
+                hasher.write(&buf[..n]);
+                total += n as u64;
+            }
         }
-        latest.map(|l| (l, total))
+        Some((hasher.finish(), total))
     }
 
     /// Poll every watched pane's source file(s) and reload those whose contents

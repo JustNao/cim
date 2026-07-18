@@ -67,20 +67,25 @@ const ASYNC_RENDER_PIXELS: usize = 1 << 20;
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
 
-/// How often a **watched** pane's source file(s) are stat-ed for changes (also
-/// the idle wake-up interval while any pane is watching). A `stat` is
-/// microseconds, so this is negligible next to a single decode; it's kept slow
-/// on purpose to stay friendly to the paced-repaint model over VNC.
-const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often a **watched** pane's source file(s) are read + hashed for changes
+/// (also the idle wake-up interval while any pane is watching). Kept moderate to
+/// stay friendly to the paced-repaint model over VNC while still feeling
+/// reactive; the actual pixels don't change on a quiet wake, so a delta-based
+/// remote framebuffer sends ~nothing.
+const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// A watched file must stay unchanged (same mtime + size) for this long after a
-/// change before it's reloaded — a debounce so a file still being written
-/// externally isn't read half-finished (each further write resets the timer).
-const WATCH_DEBOUNCE: f64 = 0.4;
+/// A watched file's contents must stay unchanged for this long after a change
+/// before it's reloaded — a debounce so a file still being written externally
+/// (e.g. overwritten frame-by-frame) isn't read half-finished. Each further
+/// change resets the timer, so a burst of writes reloads once, after it stops.
+const WATCH_DEBOUNCE: f64 = 0.25;
 
-/// Identity of a source's on-disk contents for change detection: the latest
-/// modification time across its file(s) and their total byte length.
-type FileSig = (std::time::SystemTime, u64);
+/// Identity of a source's on-disk contents for change detection: a hash of the
+/// file bytes and their total length. Content-based (not mtime-based) so an
+/// in-place, same-size overwrite is detected — mtime is unreliable for that,
+/// especially on Windows, where the last-write time isn't updated while the
+/// writing process keeps the file handle open.
+type FileSig = (u64, u64);
 
 /// How many frames ahead of the shown one playback pre-decodes for each on-screen
 /// pane (`prefetch_playback`), so it overlaps decode with display instead of

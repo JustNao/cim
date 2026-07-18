@@ -624,17 +624,24 @@ button.)
 
 **Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
 Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
-`poll_watches` (run each `update`, before `refresh_textures`) stats the pane's
-source file(s) — `source_file_sig` = latest mtime + total length across
-`Source::File` / `Source::Sequence` — and reloads the pane once a change has
+`poll_watches` (run each `update`, before `refresh_textures`) reads the pane's
+source file(s) — `source_file_sig` = a **hash of the file bytes** + total length
+across `Source::File` / `Source::Sequence` — and reloads the pane once a change has
 **settled** (`WATCH_DEBOUNCE`, so a file still being written externally isn't read
-half-finished; each further change re-arms the timer). A `stat` is microseconds, so
-watching is negligible; only the (heavier) `reload` fires, and only on quiescence.
-`watch_loaded` is the baseline signature (re-based after any reload and when the
-toggle is switched on, so enabling never triggers an immediate reload); an
-unreadable stat (mid-rename) simply waits for the next poll. While any pane watches,
-an otherwise-idle app wakes every `WATCH_POLL` to stat — the one intentional break
-from "idle requests no repaint", kept slow to stay VNC-friendly (§13/§15).
+half-finished; each further change re-arms the timer). The signature is
+**content-based, not mtime-based**, on purpose: the common case is a tool
+overwriting an image **in place** with identical dimensions, so neither the byte
+length nor (on Windows, while the writer keeps the file handle open) the mtime moves
+— only the pixels do, and an mtime/size signature would miss it entirely. The
+watched files are single images / stills, page-cache-hot after the first read, so
+hashing them at the poll rate is cheap; only the (heavier) `reload` fires, and only
+on quiescence. `watch_loaded` is the baseline signature (re-based after any reload
+and when the toggle is switched on, so enabling never triggers an immediate reload);
+an unreadable file (mid-rename, or held with no share-read) simply waits for the next
+poll. While any pane watches, an otherwise-idle app wakes every `WATCH_POLL` to
+re-hash — the one intentional break from "idle requests no repaint", kept moderate to
+stay VNC-friendly (a quiet wake changes no pixels, so a delta framebuffer sends
+~nothing) (§13/§15).
 Hiding the **focused** pane (via the header button or the manager checkbox) moves
 focus to the nearest still-shown media (`reselect_if_hidden`), so `current` never
 sits on a hidden pane while others are visible. egui window/popup **shadows are
