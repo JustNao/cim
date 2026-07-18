@@ -513,7 +513,7 @@ struct Compute {
 
 /// One opened media plus its per-pane view/timeline state.
 struct Pane {
-    id: u64, // stable across reorder/close; matches background-decode results
+    id: u64,        // stable across reorder/close; matches background-decode results
     source: Source, // how to reload it / re-emit it in a replay command
     media: Media,
     /// The committed front texture plus the staged next one. See [`PaneTex`].
@@ -658,7 +658,7 @@ pub struct CimApp {
     /// Decoupled from `current` so selecting a still to view doesn't take over
     /// (or hide) the transport. Kept pointing at a sequence by `ensure_control`.
     control: usize,
-    slot_a: usize,  // A/B view operands
+    slot_a: usize, // A/B view operands
     slot_b: usize,
     ab_split: f32, // 0..1 divider position
     ab_handle_grabbed: bool,
@@ -856,7 +856,11 @@ impl CimApp {
             egui::FontData::from_static(include_bytes!("../../assets/cimicons.ttf")),
         );
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push("cimicons".to_owned());
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("cimicons".to_owned());
         }
         cc.egui_ctx.set_fonts(fonts);
 
@@ -1352,8 +1356,16 @@ impl CimApp {
             return (0.0, 0.0);
         }
         let a = self.last_area;
-        let top = if cell.min.y <= a.min.y + 0.5 { self.toolbar_h } else { 0.0 };
-        let bot = if cell.max.y >= a.max.y - 0.5 { self.framebar_h } else { 0.0 };
+        let top = if cell.min.y <= a.min.y + 0.5 {
+            self.toolbar_h
+        } else {
+            0.0
+        };
+        let bot = if cell.max.y >= a.max.y - 0.5 {
+            self.framebar_h
+        } else {
+            0.0
+        };
         (top, bot)
     }
 
@@ -1736,8 +1748,8 @@ impl eframe::App for CimApp {
             // width and is flush to a window edge, only its inner edge shows (the
             // toolbar's bottom, the frame bar's top) — the separator the panels
             // used to draw.
-            let frame =
-                egui::Frame::side_top_panel(&ctx.style()).stroke(Stroke::new(1.0_f32, CHROME_BORDER));
+            let frame = egui::Frame::side_top_panel(&ctx.style())
+                .stroke(Stroke::new(1.0_f32, CHROME_BORDER));
             let m = frame.inner_margin;
             let full_w = ctx.screen_rect().width() - m.left - m.right;
             // Toolbar, floating over the top edge.
@@ -1843,7 +1855,8 @@ impl eframe::App for CimApp {
                 std::time::Duration::from_secs_f32(remaining)
             };
             ctx.request_repaint_after(wait);
-        } else if self.pending_seek.is_some() || (0..self.panes.len()).any(|i| self.catching_up(i)) {
+        } else if self.pending_seek.is_some() || (0..self.panes.len()).any(|i| self.catching_up(i))
+        {
             // Actively riding the frontier (a length-discovery seek, or a pane
             // catching up to an advanced timeline): each probe grows the length
             // by one, so repaint immediately — discovery runs as fast as probes
@@ -1911,8 +1924,8 @@ fn set_window_cloak(hwnd: isize, cloak: bool) {
     }
     const DWMWA_CLOAK: u32 = 13;
     let value: i32 = cloak as i32; // Win32 BOOL
-    // Failure (very old DWM) just leaves the window uncloaked: the flash may
-    // show, but the app is never stuck invisible.
+                                   // Failure (very old DWM) just leaves the window uncloaked: the flash may
+                                   // show, but the app is never stuck invisible.
     unsafe {
         DwmSetWindowAttribute(
             hwnd,

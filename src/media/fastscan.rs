@@ -170,12 +170,10 @@ impl FastScan {
             big_endian,
             big,
             ifd0,
-            stride: 0,                 // measured below
+            stride: 0,                    // measured below
             template: PageIfd::default(), // replaced below
         };
-        let p0 = scan
-            .read_ifd(ifd0)
-            .ok_or("unreadable first page header")?;
+        let p0 = scan.read_ifd(ifd0).ok_or("unreadable first page header")?;
 
         // Everything prediction (and the raw strip reader) depends on.
         if p0.tiled {
@@ -287,22 +285,14 @@ impl FastScan {
         let be = self.big_endian;
         let samples = match (t.bits[0], t.sample_format) {
             (8, _) => Samples::U8(raw),
-            (16, _) => Samples::U16(
-                raw.chunks_exact(2)
-                    .map(|c| get_u16(c, be))
-                    .collect(),
-            ),
+            (16, _) => Samples::U16(raw.chunks_exact(2).map(|c| get_u16(c, be)).collect()),
             (32, 3) => Samples::F32(
                 raw.chunks_exact(4)
                     .map(|c| f32::from_bits(get_u32(c, be)))
                     .collect(),
             ),
             // 32-bit uint: widen to f32, matching `decode_current`'s fallback.
-            (32, _) => Samples::F32(
-                raw.chunks_exact(4)
-                    .map(|c| get_u32(c, be) as f32)
-                    .collect(),
-            ),
+            (32, _) => Samples::F32(raw.chunks_exact(4).map(|c| get_u32(c, be) as f32).collect()),
             _ => return None, // open() admits no other layout
         };
         Some(FrameData::new(
@@ -380,8 +370,8 @@ impl FastScan {
             let (tag, ty) = (get_u16(&e[0..2], be), get_u16(&e[2..4], be));
             let count = self.read_field(&e[4..4 + fw]);
             let val = &e[4 + fw..]; // the value/offset field
-            // Only the tags prediction needs are parsed; a value too large for
-            // scalar use below simply fails the read (`values` handles arrays).
+                                    // Only the tags prediction needs are parsed; a value too large for
+                                    // scalar use below simply fails the read (`values` handles arrays).
             match tag {
                 T_WIDTH => p.width = self.value(ty, count, val)? as u32,
                 T_HEIGHT => p.height = self.value(ty, count, val)? as u32,
@@ -745,7 +735,11 @@ mod tests {
         fast_jump(&mut media, 271).expect("far jump");
         assert_eq!(media.frame_count(), 272);
         let jumped = media.resident(271).unwrap();
-        let slow = SeqReader::open(&path).unwrap().decode(271).unwrap().unwrap();
+        let slow = SeqReader::open(&path)
+            .unwrap()
+            .decode(271)
+            .unwrap()
+            .unwrap();
         assert_eq!(u16s(&jumped), u16s(&slow));
     }
 

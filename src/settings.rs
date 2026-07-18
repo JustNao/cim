@@ -148,12 +148,22 @@ pub struct Chord {
 impl Chord {
     /// A key with no modifiers.
     pub fn plain(key: Key) -> Self {
-        Self { ctrl: false, shift: false, alt: false, key }
+        Self {
+            ctrl: false,
+            shift: false,
+            alt: false,
+            key,
+        }
     }
 
     /// Build from a captured key-press event's modifier state.
     pub fn from_modifiers(key: Key, m: egui::Modifiers) -> Self {
-        Self { ctrl: m.command, shift: m.shift, alt: m.alt, key }
+        Self {
+            ctrl: m.command,
+            shift: m.shift,
+            alt: m.alt,
+            key,
+        }
     }
 
     /// Canonical `Ctrl+Shift+Alt+Key` string (used for both storage and display).
@@ -186,7 +196,12 @@ impl Chord {
                 _ => key = Key::from_name(p),
             }
         }
-        Some(Self { ctrl, shift, alt, key: key? })
+        Some(Self {
+            ctrl,
+            shift,
+            alt,
+            key: key?,
+        })
     }
 
     /// True when this exact chord (its key **and** its modifier set) fired this
@@ -255,7 +270,13 @@ impl Default for Keybindings {
         // (Inserted after the `set` closure's last use so it doesn't clash on `map`.)
         map.insert(
             Action::ReloadAll.id(),
-            Chord { ctrl: true, shift: false, alt: false, key: Key::R }.name(),
+            Chord {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::R,
+            }
+            .name(),
         );
         Self { map }
     }
@@ -309,8 +330,11 @@ pub enum ContrastMode {
 
 impl ContrastMode {
     /// The modes in dropdown order.
-    pub const ORDER: [ContrastMode; 3] =
-        [ContrastMode::Linear, ContrastMode::LutAlpha, ContrastMode::Colormap];
+    pub const ORDER: [ContrastMode; 3] = [
+        ContrastMode::Linear,
+        ContrastMode::LutAlpha,
+        ContrastMode::Colormap,
+    ];
 
     /// Short label for the media-manager dropdown.
     pub fn label(self) -> &'static str {
@@ -338,7 +362,10 @@ pub struct ClipOptions {
 
 impl Default for ClipOptions {
     fn default() -> Self {
-        Self { enabled: true, percent: 0.01 }
+        Self {
+            enabled: true,
+            percent: 0.01,
+        }
     }
 }
 

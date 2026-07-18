@@ -33,8 +33,8 @@ impl CimApp {
             Action::NextFrame => {
                 self.pending_seek = None; // manual step cancels an automatic seek
                 self.playback.prefetch = None; // …and any in-flight playback step
-                // Step within the active loop window (the same one playback
-                // obeys), not the whole timeline.
+                                               // Step within the active loop window (the same one playback
+                                               // obeys), not the whole timeline.
                 let tl = self.timeline_len();
                 let (lo, hi) = self.loop_bounds(tl);
                 let full = self.playback.loop_range.is_none();
@@ -79,7 +79,8 @@ impl CimApp {
             }
             Action::ZoomOut if n > 0 => {
                 let a = self.last_area;
-                self.view_mut(self.current).zoom_at(1.0 / 1.25, a.center(), a);
+                self.view_mut(self.current)
+                    .zoom_at(1.0 / 1.25, a.center(), a);
             }
             Action::LoadAll => self.load_all(),
             Action::OpenFiles => self.open_dialog(),
@@ -93,9 +94,9 @@ impl CimApp {
             Action::ToggleExport => self.toggle_export(),
             Action::OpenCompute => self.deferred.push(Deferred::CreateCompute),
             Action::PlayPause => self.playback.playing = !self.playback.playing,
-            Action::ReloadMedia if n > 0 => {
-                self.deferred.push(Deferred::Reload(self.current.min(n - 1)))
-            }
+            Action::ReloadMedia if n > 0 => self
+                .deferred
+                .push(Deferred::Reload(self.current.min(n - 1))),
             Action::ReloadAll => self.deferred.push(Deferred::ReloadAll),
             Action::HideMedia if n > 0 => {
                 self.panes[self.current.min(n - 1)].visible = false;
@@ -240,7 +241,9 @@ impl CimApp {
             if let Some((k, m)) = hit {
                 if k != Key::Escape {
                     // Live immediately; persisted only on an explicit Save.
-                    self.config.keybindings.set(action, Chord::from_modifiers(k, m));
+                    self.config
+                        .keybindings
+                        .set(action, Chord::from_modifiers(k, m));
                 }
                 self.rebinding = None;
             }

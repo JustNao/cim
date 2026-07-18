@@ -122,7 +122,9 @@ impl CimApp {
         }
 
         // Region chosen: show it on every pane it applies to.
-        let Some(reg) = self.export.region else { return };
+        let Some(reg) = self.export.region else {
+            return;
+        };
         let panes_areas: Vec<(usize, Rect)> = match self.mode {
             Mode::Single => {
                 vec![(self.current.min(self.panes.len() - 1), area)]
@@ -196,7 +198,13 @@ impl CimApp {
         self.drag_src = None;
     }
 
-    pub(super) fn draw_pane(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, idx: usize, cell: Rect) {
+    pub(super) fn draw_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        idx: usize,
+        cell: Rect,
+    ) {
         // The image fills the whole cell; the header/footer bars float over its
         // top/bottom strips (when shown), so hiding them never moves the image.
         let img_area = cell;
@@ -258,9 +266,9 @@ impl CimApp {
         // in-progress pan started lower down still continues; only new
         // interactions are suppressed here.)
         let over_chrome = self.show_chrome
-            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-                header_strip.contains(p) || footer_strip.contains(p)
-            });
+            && ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|p| header_strip.contains(p) || footer_strip.contains(p));
         if resp.hovered() && !over_chrome {
             let scroll = wheel_delta(ctx);
             if scroll != 0.0 {
@@ -268,14 +276,19 @@ impl CimApp {
                     // Ctrl + wheel scrubs the sequence a frame at a time (up =
                     // next, down = previous) instead of zooming — same stepping as
                     // the next/prev-frame keys (advances the shared timeline).
-                    let step = if scroll > 0.0 { Action::NextFrame } else { Action::PrevFrame };
+                    let step = if scroll > 0.0 {
+                        Action::NextFrame
+                    } else {
+                        Action::PrevFrame
+                    };
                     self.apply_action(step, ctx);
                 } else {
                     let anchor = ctx
                         .input(|i| i.pointer.hover_pos())
                         .unwrap_or(img_area.center());
                     let speed = zoom_speed(ctx);
-                    self.view_mut(idx).zoom_at((scroll * speed).exp(), anchor, img_area);
+                    self.view_mut(idx)
+                        .zoom_at((scroll * speed).exp(), anchor, img_area);
                 }
             }
         }
@@ -353,7 +366,12 @@ impl CimApp {
     /// Inset inside the cell so the whole outline stays visible even with no gap
     /// between cells — blue on the pane being moved, green on the pane it would
     /// swap with.
-    pub(super) fn draw_reorder_borders(&self, ui: &egui::Ui, ctx: &egui::Context, cells: &[(usize, Rect)]) {
+    pub(super) fn draw_reorder_borders(
+        &self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        cells: &[(usize, Rect)],
+    ) {
         let Some(src) = self.drag_src else { return };
         let bw = 2.0;
         let ptr = ctx.input(|i| i.pointer.interact_pos());
@@ -368,7 +386,8 @@ impl CimApp {
             // Inset by a full stroke width so the outline sits clear of the cell
             // edges (and the screen edge for the outermost panes).
             let border = cell.shrink(bw);
-            ui.painter().rect_stroke(border, 0.0, Stroke::new(bw, color));
+            ui.painter()
+                .rect_stroke(border, 0.0, Stroke::new(bw, color));
         }
     }
     // ---- compute pane controls -------------------------------------------

@@ -353,81 +353,81 @@ impl CimApp {
         // toggle was just flipped (then the pane adopts the shared set instead of
         // pushing its own stale effective values into it).
         if !vis_sync_changed {
-        // Reconcile the overlay. It rides the Visualization sync: when synced, edit
-        // the shared overlay and rebuild every synced pane's tinted texture;
-        // otherwise just this pane's. A newly *selected* source must match this
-        // pane's pixel size — reject a mismatch with an error popup (colour/alpha
-        // edits on the same source skip the check).
-        let synced = self.panes[idx].sync_tone;
-        let cur = self.overlay_of(idx);
-        let new = ov_src.map(|src_id| OverlaySpec {
-            src_id,
-            color: ov_color,
-            opacity: ov_alpha,
-        });
-        if cur != new {
-            let src_changed = new.map(|n| n.src_id) != cur.map(|c| c.src_id);
-            let size_ok = match new.filter(|_| src_changed) {
-                Some(spec) => match self.panes.iter().position(|p| p.id == spec.src_id) {
-                    Some(src) => {
-                        let (base, ov) = (self.disp_size(idx), self.disp_size(src));
-                        if base == ov {
-                            true
-                        } else {
-                            let sname = self.panes[src].media.name().to_string();
-                            self.error_popup = Some(format!(
-                                "Overlay size mismatch\n\n\
+            // Reconcile the overlay. It rides the Visualization sync: when synced, edit
+            // the shared overlay and rebuild every synced pane's tinted texture;
+            // otherwise just this pane's. A newly *selected* source must match this
+            // pane's pixel size — reject a mismatch with an error popup (colour/alpha
+            // edits on the same source skip the check).
+            let synced = self.panes[idx].sync_tone;
+            let cur = self.overlay_of(idx);
+            let new = ov_src.map(|src_id| OverlaySpec {
+                src_id,
+                color: ov_color,
+                opacity: ov_alpha,
+            });
+            if cur != new {
+                let src_changed = new.map(|n| n.src_id) != cur.map(|c| c.src_id);
+                let size_ok = match new.filter(|_| src_changed) {
+                    Some(spec) => match self.panes.iter().position(|p| p.id == spec.src_id) {
+                        Some(src) => {
+                            let (base, ov) = (self.disp_size(idx), self.disp_size(src));
+                            if base == ov {
+                                true
+                            } else {
+                                let sname = self.panes[src].media.name().to_string();
+                                self.error_popup = Some(format!(
+                                    "Overlay size mismatch\n\n\
                                  This image is {}×{} but the overlay “{sname}” is {}×{}.\n\
                                  An overlay must match the image dimensions.",
-                                base[0], base[1], ov[0], ov[1],
-                            ));
-                            false
+                                    base[0], base[1], ov[0], ov[1],
+                                ));
+                                false
+                            }
                         }
-                    }
-                    None => false, // source vanished; leave the overlay unchanged
-                },
-                None => true, // clearing, or a colour/alpha edit on the same source
-            };
-            if size_ok {
-                if synced {
-                    self.shared_overlay = new;
-                    for p in &mut self.panes {
-                        if p.sync_tone {
-                            p.overlay_tex = None;
+                        None => false, // source vanished; leave the overlay unchanged
+                    },
+                    None => true, // clearing, or a colour/alpha edit on the same source
+                };
+                if size_ok {
+                    if synced {
+                        self.shared_overlay = new;
+                        for p in &mut self.panes {
+                            if p.sync_tone {
+                                p.overlay_tex = None;
+                            }
                         }
+                    } else {
+                        self.panes[idx].overlay = new;
+                        self.panes[idx].overlay_tex = None;
                     }
-                } else {
-                    self.panes[idx].overlay = new;
-                    self.panes[idx].overlay_tex = None;
                 }
             }
-        }
 
-        // Write the effective tone back (own or shared). No texture nulling: every
-        // synced pane's `tone_sig` now reflects the new shared tone, so `stage`
-        // re-renders and commits each while it keeps showing its last frame —
-        // nulling `tex` would flash a heavy LUT_ALPHA/details render to black.
-        if synced {
-            if self.shared_contrast != contrast
-                || self.shared_tone != tone
-                || self.shared_details != details
-            {
-                self.shared_contrast = contrast;
-                self.shared_tone = tone;
-                self.shared_details = details;
+            // Write the effective tone back (own or shared). No texture nulling: every
+            // synced pane's `tone_sig` now reflects the new shared tone, so `stage`
+            // re-renders and commits each while it keeps showing its last frame —
+            // nulling `tex` would flash a heavy LUT_ALPHA/details render to black.
+            if synced {
+                if self.shared_contrast != contrast
+                    || self.shared_tone != tone
+                    || self.shared_details != details
+                {
+                    self.shared_contrast = contrast;
+                    self.shared_tone = tone;
+                    self.shared_details = details;
+                }
+            } else {
+                let p = &mut self.panes[idx];
+                if p.contrast != contrast || p.tone != tone || p.details != details {
+                    p.contrast = contrast;
+                    p.tone = tone;
+                    p.details = details;
+                    // No texture invalidation: the new tone changes `tone_sig`, so
+                    // `stage` re-renders and commits the fresh frame while the pane
+                    // keeps showing its last committed `tex` — nulling it here would
+                    // blank a heavy (async) LUT_ALPHA/details render to black instead.
+                }
             }
-        } else {
-            let p = &mut self.panes[idx];
-            if p.contrast != contrast || p.tone != tone || p.details != details {
-                p.contrast = contrast;
-                p.tone = tone;
-                p.details = details;
-                // No texture invalidation: the new tone changes `tone_sig`, so
-                // `stage` re-renders and commits the fresh frame while the pane
-                // keeps showing its last committed `tex` — nulling it here would
-                // blank a heavy (async) LUT_ALPHA/details render to black instead.
-            }
-        }
         } // !vis_sync_changed
 
         // Rotation is applied at draw time (no texture to invalidate); it rides
@@ -446,12 +446,7 @@ impl CimApp {
 /// `Grid` (each row ends with `end_row`). Extend by adding a `match` arm or a
 /// row: each mode reads/writes its own sub-struct of `ToneOptions`, so options
 /// never collide across modes.
-fn draw_tone_options(
-    ui: &mut egui::Ui,
-    _pane_id: u64,
-    mode: ContrastMode,
-    tone: &mut ToneOptions,
-) {
+fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone: &mut ToneOptions) {
     match mode {
         // Linear and Colormap share the same bounds controls (clip + share);
         // Colormap additionally picks a palette.
@@ -515,8 +510,9 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     // all panes share identical clamp/scaling (even if it over/under-saturates
     // some) rather than each auto-normalising. Rides the Transformations sync.
     ui.label("Share clip");
-    ui.add(egui::Checkbox::without_text(&mut tone.share_clip)).on_hover_text(
-        "Apply the Control media's exact LUT (lo/hi) to every pane — identical clamp/scaling",
-    );
+    ui.add(egui::Checkbox::without_text(&mut tone.share_clip))
+        .on_hover_text(
+            "Apply the Control media's exact LUT (lo/hi) to every pane — identical clamp/scaling",
+        );
     ui.end_row();
 }

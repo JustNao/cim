@@ -135,13 +135,13 @@ impl CimApp {
                     Source::Sequence { files, .. } => ExportSource::Files {
                         paths: files.clone(),
                     },
-                    _ => ExportSource::Still(
-                        p.media.resident(0).expect("sequence frame 0 resident"),
-                    ),
+                    _ => {
+                        ExportSource::Still(p.media.resident(0).expect("sequence frame 0 resident"))
+                    }
                 },
-                None => ExportSource::Still(
-                    p.media.resident(0).expect("still frame always resident"),
-                ),
+                None => {
+                    ExportSource::Still(p.media.resident(0).expect("still frame always resident"))
+                }
             }
         }
     }
@@ -307,14 +307,9 @@ impl CimApp {
                         let n = self.visible_indices().len().max(1);
                         let cols = self.config.max_columns.max(1).min(n);
                         let rows = n.div_ceil(cols);
-                        Rect::from_min_size(
-                            Pos2::ZERO,
-                            Vec2::new(cols as f32 * w, rows as f32 * h),
-                        )
+                        Rect::from_min_size(Pos2::ZERO, Vec2::new(cols as f32 * w, rows as f32 * h))
                     }
-                    Mode::Single | Mode::Ab => {
-                        Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))
-                    }
+                    Mode::Single | Mode::Ab => Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h)),
                 }
             }
             None => self.content_region().unwrap_or(self.last_area),
@@ -402,7 +397,12 @@ impl CimApp {
                         pane.view = region_view(reg);
                         panes.push(pane);
                         // Crop already fills the cell 1:1: place = area = content.
-                        v.push(GridCell { pane: k, place: cell, area: cell, content: cell });
+                        v.push(GridCell {
+                            pane: k,
+                            place: cell,
+                            area: cell,
+                            content: cell,
+                        });
                     }
                 } else {
                     // No crop: pack each pane's on-screen content flush, so the
@@ -641,9 +641,21 @@ impl CimApp {
                                     Mode::Ab => "A / B wipe",
                                 })
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.export.mode, Mode::Grid, "Side by side");
-                                    ui.selectable_value(&mut self.export.mode, Mode::Single, "Single");
-                                    ui.selectable_value(&mut self.export.mode, Mode::Ab, "A / B wipe");
+                                    ui.selectable_value(
+                                        &mut self.export.mode,
+                                        Mode::Grid,
+                                        "Side by side",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.export.mode,
+                                        Mode::Single,
+                                        "Single",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.export.mode,
+                                        Mode::Ab,
+                                        "A / B wipe",
+                                    );
                                 });
                             ui.end_row();
 
@@ -667,7 +679,10 @@ impl CimApp {
                                     self.export.selecting = true;
                                 }
                                 let has = self.export.region.is_some();
-                                if ui.add_enabled(has, egui::Button::new("Full view")).clicked() {
+                                if ui
+                                    .add_enabled(has, egui::Button::new("Full view"))
+                                    .clicked()
+                                {
                                     self.export.region = None;
                                 }
                                 match self.export.region {
@@ -685,16 +700,13 @@ impl CimApp {
                             ui.horizontal(|ui| {
                                 let mut all = self.export.range.is_none();
                                 if ui.checkbox(&mut all, "all").changed() {
-                                    self.export.range =
-                                        if all { None } else { Some((0, tl - 1)) };
+                                    self.export.range = if all { None } else { Some((0, tl - 1)) };
                                 }
                                 if let Some((s, e)) = self.export.range {
                                     // 0-based inclusive (matches the transport bar).
                                     let (mut s0, mut e0) = (s, e);
                                     ui.add(
-                                        egui::DragValue::new(&mut s0)
-                                            .range(0..=e0)
-                                            .prefix("from "),
+                                        egui::DragValue::new(&mut s0).range(0..=e0).prefix("from "),
                                     );
                                     ui.add(
                                         egui::DragValue::new(&mut e0)
@@ -718,15 +730,17 @@ impl CimApp {
                                     )
                                     .clicked()
                                 {
-                                    self.export.range =
-                                        Some((llo, lhi.saturating_sub(1).max(llo)));
+                                    self.export.range = Some((llo, lhi.saturating_sub(1).max(llo)));
                                 }
                             });
                             ui.end_row();
 
                             ui.label("Output height");
                             ui.horizontal(|ui| {
-                                ui.add(egui::DragValue::new(&mut self.export.out_height).range(120..=2160));
+                                ui.add(
+                                    egui::DragValue::new(&mut self.export.out_height)
+                                        .range(120..=2160),
+                                );
                                 if ui.button("= view").clicked() {
                                     self.export.out_height = region.height().round() as u32;
                                 }
@@ -764,7 +778,9 @@ impl CimApp {
                         } else {
                             if ui
                                 .button("Load all")
-                                .on_hover_text("Decode every frame; warns if the cache is too small")
+                                .on_hover_text(
+                                    "Decode every frame; warns if the cache is too small",
+                                )
                                 .clicked()
                             {
                                 self.load_all();
@@ -807,10 +823,10 @@ impl CimApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}",
-                            &std::env::current_dir()
-                                .unwrap_or_default()
-                                .display()
-                                .to_string(),
+                        &std::env::current_dir()
+                            .unwrap_or_default()
+                            .display()
+                            .to_string(),
                     ))
                     .weak()
                     .small(),

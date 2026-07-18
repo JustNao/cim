@@ -141,7 +141,8 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
     // inherently unsafe; these are trusted, distributed alongside the binary.
     unsafe {
         let lib = libloading::Library::new(lib_path)?;
-        let create: libloading::Symbol<CreateFn> = lib.get(format!("{stem}_create\0").as_bytes())?;
+        let create: libloading::Symbol<CreateFn> =
+            lib.get(format!("{stem}_create\0").as_bytes())?;
         // Resolved as the canonical `ApplyFn`; DETAILS_ENHANCED's call site
         // transmutes it to its own `DetailsApplyFn` (same fn-pointer address).
         let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
@@ -361,7 +362,12 @@ impl PaneOps {
     /// Ensure `slot` holds an instance of `op` built for `(w, h)`, creating it (or
     /// rebuilding after a size change) as needed. Returns whether a usable instance
     /// is present — `false` if the library is absent or `create` returned null.
-    fn ensure(slot: &mut Option<Instance>, op: &RwLock<Option<Operator>>, w: usize, h: usize) -> bool {
+    fn ensure(
+        slot: &mut Option<Instance>,
+        op: &RwLock<Option<Operator>>,
+        w: usize,
+        h: usize,
+    ) -> bool {
         if slot.as_ref().map(|i| i.dims) != Some((w, h)) {
             // Drop the old instance first (frees it on this thread) so a heavy
             // rebuild never holds two instances at once.
@@ -407,6 +413,11 @@ fn run_details(inst: &Instance, gray: &mut [u16], companion: &[u8]) {
     // transmute recovers the correct type.
     unsafe {
         let apply: DetailsApplyFn = std::mem::transmute(inst.apply);
-        apply(inst.handle, gray.as_mut_ptr(), companion.as_ptr(), gray.len());
+        apply(
+            inst.handle,
+            gray.as_mut_ptr(),
+            companion.as_ptr(),
+            gray.len(),
+        );
     }
 }

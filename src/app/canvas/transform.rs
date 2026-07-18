@@ -34,7 +34,10 @@ impl CimApp {
         let mut reg = Rect::from_two_pos(a.to_pos2(), b.to_pos2());
         if self.pane_theta(idx) == 0.0 {
             let [w, h] = self.disp_size(idx);
-            reg = reg.intersect(Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32)));
+            reg = reg.intersect(Rect::from_min_max(
+                Pos2::ZERO,
+                Pos2::new(w as f32, h as f32),
+            ));
         }
         (reg.width() >= 1.0 && reg.height() >= 1.0).then_some(reg)
     }
@@ -43,7 +46,13 @@ impl CimApp {
     /// when it lands on a real pixel of that pane (so the shared cursor tracks an
     /// actual source sample). `coord_area` maps screen↔image; `clip` bounds where
     /// the pointer counts as being over this pane.
-    pub(super) fn hover_img_pos(&self, idx: usize, coord_area: Rect, clip: Rect, pos: Pos2) -> Option<Vec2> {
+    pub(super) fn hover_img_pos(
+        &self,
+        idx: usize,
+        coord_area: Rect,
+        clip: Rect,
+        pos: Pos2,
+    ) -> Option<Vec2> {
         if !clip.contains(pos) {
             return None;
         }
@@ -171,7 +180,11 @@ pub(super) fn dim_outside(painter: &egui::Painter, area: Rect, r: Rect) {
         0.0,
         dim,
     );
-    painter.rect_stroke(r, 0.0, Stroke::new(2.0_f32, Color32::from_rgb(240, 200, 80)));
+    painter.rect_stroke(
+        r,
+        0.0,
+        Stroke::new(2.0_f32, Color32::from_rgb(240, 200, 80)),
+    );
 }
 
 /// Format a rotation angle for the Transformations text box: whole degrees

@@ -170,9 +170,9 @@ impl CimApp {
             // disturbing the `%0Xu…,START,END` tail.
             match &p.source {
                 Source::File(path) => parts.push(quote_path(&absolute_path(path))),
-                Source::Sequence { token, .. } => {
-                    parts.push(quote_arg(&absolute_path(Path::new(token)).display().to_string()))
-                }
+                Source::Sequence { token, .. } => parts.push(quote_arg(
+                    &absolute_path(Path::new(token)).display().to_string(),
+                )),
                 // A Compute pane: re-emit it as a `@compute` token referencing
                 // its sources by pane index, so a replay recreates it in place
                 // (keeping the positional per-pane flags below aligned). A pane
@@ -523,10 +523,7 @@ impl CimApp {
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
-        if self
-            .shared_overlay
-            .is_some_and(|o| o.src_id == removed_id)
-        {
+        if self.shared_overlay.is_some_and(|o| o.src_id == removed_id) {
             self.shared_overlay = None;
         }
         for p in &mut self.panes {
@@ -583,8 +580,8 @@ impl CimApp {
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
                 self.panes[i].fast_jump = None; // re-measure the (possibly new) layout
-                // If this is a mask, invalidate overlay textures whose effective
-                // source is it, so they rebuild from the reloaded contents.
+                                                // If this is a mask, invalidate overlay textures whose effective
+                                                // source is it, so they rebuild from the reloaded contents.
                 let shared_src = self.shared_overlay.map(|o| o.src_id);
                 for p in &mut self.panes {
                     let eff = if p.sync_tone {

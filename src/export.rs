@@ -25,9 +25,13 @@ const BG: [u8; 4] = [24, 24, 24, 255];
 /// Where a pane's frames come from during export.
 pub enum ExportSource {
     Still(Arc<FrameData>),
-    Seq { path: std::path::PathBuf },
+    Seq {
+        path: std::path::PathBuf,
+    },
     /// A numbered still sequence: one file per frame.
-    Files { paths: Vec<std::path::PathBuf> },
+    Files {
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Several multi-page TIFFs concatenated: `map[frame] = (file, page)`.
     Concat {
         files: Vec<std::path::PathBuf>,
@@ -145,9 +149,9 @@ fn decode_source(
                 _ => None,
             }
         }
-        ExportSource::Files { paths } => {
-            crate::media::decode_file(paths.get(idx)?).ok().map(Arc::new)
-        }
+        ExportSource::Files { paths } => crate::media::decode_file(paths.get(idx)?)
+            .ok()
+            .map(Arc::new),
         ExportSource::Concat { files, map } => {
             let &(file, page) = map.get(idx)?;
             if *cur_file != Some(file) {
@@ -327,9 +331,20 @@ impl ExportPane {
         let mut rgba = Vec::new();
         // Colormap is a plain mono-only palette render (mirrors the live sync
         // path); everything else goes through the shared operator render tail.
-        match self.palette.filter(|_| sub.color_channels() == 1 && !sub.is_mask()) {
+        match self
+            .palette
+            .filter(|_| sub.color_channels() == 1 && !sub.is_mask())
+        {
             Some(pal) => {
-                sub.render_into_scaled_cmap(lo, hi, 1, pal.table(), pal.id(), &mut self.lut, &mut rgba);
+                sub.render_into_scaled_cmap(
+                    lo,
+                    hi,
+                    1,
+                    pal.table(),
+                    pal.id(),
+                    &mut self.lut,
+                    &mut rgba,
+                );
             }
             None => {
                 // The one shared render tail (plain LUT, or operators on a full-
@@ -441,7 +456,8 @@ pub struct GridCell {
 pub enum ExportLayout {
     Grid(Vec<GridCell>),
     Single(usize, Rect), // pane, image area
-    Ab {                 // wipe
+    Ab {
+        // wipe
         a: usize,
         b: usize,
         img: Rect,
@@ -460,11 +476,13 @@ struct Located {
 impl ExportLayout {
     fn locate(&self, c: Pos2) -> Option<Located> {
         match self {
-            ExportLayout::Grid(cells) => cells.iter().find(|g| g.place.contains(c)).map(|g| Located {
-                pane: g.pane,
-                area: g.area,
-                sample: g.content.min + (c - g.place.min),
-            }),
+            ExportLayout::Grid(cells) => {
+                cells.iter().find(|g| g.place.contains(c)).map(|g| Located {
+                    pane: g.pane,
+                    area: g.area,
+                    sample: g.content.min + (c - g.place.min),
+                })
+            }
             ExportLayout::Single(i, r) => r.contains(c).then_some(Located {
                 pane: *i,
                 area: *r,
@@ -565,7 +583,10 @@ impl ExportPlan {
     fn pane_boxes(&self) -> Vec<Option<[usize; 4]>> {
         // Accumulate a float bbox (min/max source x,y) per pane over mapped corners.
         let mut acc: Vec<Option<(f32, f32, f32, f32)>> = vec![None; self.panes.len()];
-        let hit = |acc: &mut Vec<Option<(f32, f32, f32, f32)>>, pane: usize, sample: Pos2, area: Rect| {
+        let hit = |acc: &mut Vec<Option<(f32, f32, f32, f32)>>,
+                   pane: usize,
+                   sample: Pos2,
+                   area: Rect| {
             let p = &self.panes[pane];
             let ip = p.unrotate(p.view.screen_to_img(sample, area));
             let e = &mut acc[pane];
@@ -656,18 +677,27 @@ pub struct Encoder {
 impl Encoder {
     pub fn start(path: &Path, w: usize, h: usize, fps: f32, crf: u32) -> Result<Self, String> {
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-y", "-f", "rawvideo", "-pixel_format", "rgba", "-video_size"])
-            .arg(format!("{w}x{h}"))
-            .arg("-framerate")
-            .arg(format!("{fps}"))
-            .args(["-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", "medium"])
-            .args(["-pix_fmt", "yuv420p", "-crf"])
-            .arg(format!("{crf}"))
-            .args(["-movflags", "+faststart"])
-            .arg(path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgba",
+            "-video_size",
+        ])
+        .arg(format!("{w}x{h}"))
+        .arg("-framerate")
+        .arg(format!("{fps}"))
+        .args([
+            "-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", "medium",
+        ])
+        .args(["-pix_fmt", "yuv420p", "-crf"])
+        .arg(format!("{crf}"))
+        .args(["-movflags", "+faststart"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -774,7 +804,9 @@ pub fn save_image(path: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<(), St
             image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
                 .map_err(|e| format!("write JPEG: {e}"))
         }
-        other => Err(format!("unsupported image extension '.{other}' — use .png or .jpg")),
+        other => Err(format!(
+            "unsupported image extension '.{other}' — use .png or .jpg"
+        )),
     }
 }
 
@@ -905,8 +937,18 @@ mod tests {
             )
         };
         let cells = vec![
-            GridCell { pane: 0, place: cell(0.0), area: cell(0.0), content: cell(0.0) },
-            GridCell { pane: 1, place: cell(4.0), area: cell(4.0), content: cell(4.0) },
+            GridCell {
+                pane: 0,
+                place: cell(0.0),
+                area: cell(0.0),
+                content: cell(0.0),
+            },
+            GridCell {
+                pane: 1,
+                place: cell(4.0),
+                area: cell(4.0),
+                content: cell(4.0),
+            },
         ];
         let mut plan = ExportPlan {
             panes: vec![mk(a), mk(b)],
@@ -1059,7 +1101,11 @@ mod tests {
         };
         let buf = plan.compose(0);
         for i in 0..4 * 4 {
-            assert_eq!(buf[i * 4 + 3], 255, "pixel {i} must be content, not background");
+            assert_eq!(
+                buf[i * 4 + 3],
+                255,
+                "pixel {i} must be content, not background"
+            );
         }
     }
 

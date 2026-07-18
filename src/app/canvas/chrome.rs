@@ -28,9 +28,13 @@ impl CimApp {
         let hide_w = 34.0;
         // "Reload" as a labelled button; size it to its text so it never clips.
         let reload_w = ui.fonts(|f| {
-            f.layout_no_wrap("Reload".to_owned(), FontId::proportional(12.0), Color32::WHITE)
-                .rect
-                .width()
+            f.layout_no_wrap(
+                "Reload".to_owned(),
+                FontId::proportional(12.0),
+                Color32::WHITE,
+            )
+            .rect
+            .width()
         }) + 14.0;
         // The Auto-reload (watch) toggle sits left of Reload, but only for panes
         // backed by a file — a Compute pane has its own Auto-refresh instead. It's
@@ -38,9 +42,13 @@ impl CimApp {
         let watchable = !matches!(self.panes[idx].source, Source::Computed);
         let watch_w = if watchable {
             let w = ui.fonts(|f| {
-                f.layout_no_wrap("Auto-reload".to_owned(), FontId::proportional(12.0), Color32::WHITE)
-                    .rect
-                    .width()
+                f.layout_no_wrap(
+                    "Auto-reload".to_owned(),
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
+                )
+                .rect
+                .width()
             });
             w + 14.0
         } else {
@@ -54,10 +62,7 @@ impl CimApp {
         let idx_str = format!("{}", idx + 1);
         let (title_full, title_short) = if count > 1 {
             let resident = self.panes[idx].media.resident_count();
-            let sync = match (
-                self.panes[idx].sync_spatial,
-                self.panes[idx].sync_temporal,
-            ) {
+            let sync = match (self.panes[idx].sync_spatial, self.panes[idx].sync_temporal) {
                 (true, true) => "",
                 (false, true) => "  ⊘pos",
                 (true, false) => "  ⊘time",
@@ -77,7 +82,10 @@ impl CimApp {
                 resident,
                 sync
             );
-            (format!("{idx_str}  {name}{tail}"), format!("{idx_str}{tail}"))
+            (
+                format!("{idx_str}  {name}{tail}"),
+                format!("{idx_str}{tail}"),
+            )
         } else {
             (format!("{idx_str}  {name}"), idx_str.clone())
         };
@@ -89,7 +97,11 @@ impl CimApp {
         let title_right = header.max.x - close_w - hide_w - reload_w - watch_w - 6.0;
         let font = FontId::proportional(13.0);
         let fits = |ui: &egui::Ui, s: &str| {
-            let w = ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).rect.width());
+            let w = ui.fonts(|f| {
+                f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE)
+                    .rect
+                    .width()
+            });
             w <= (title_right - title_x)
         };
         let title = if fits(ui, &title_full) {
@@ -111,7 +123,10 @@ impl CimApp {
         // timeline) it adds the page index within that underlying file. The path
         // label is selectable so it can be copied out of the tooltip.
         let cur_path = self.current_file_path(idx);
-        let local_page = self.panes[idx].media.local_file(self.frame_disp(idx)).map(|(_, i)| i);
+        let local_page = self.panes[idx]
+            .media
+            .local_file(self.frame_disp(idx))
+            .map(|(_, i)| i);
         if cur_path.is_some() || local_page.is_some() {
             let title_rect = Rect::from_min_max(
                 Pos2::new(title_x, header.min.y),
@@ -355,7 +370,13 @@ impl CimApp {
     /// `coord_area` maps image→screen; `clip` hides it when it maps off the pane.
     /// Skipped when disabled in Settings, and never drawn on the pane the cursor
     /// is actually over (its own OS cursor already marks the spot).
-    pub(super) fn draw_cursor_dot(&self, painter: &egui::Painter, idx: usize, coord_area: Rect, clip: Rect) {
+    pub(super) fn draw_cursor_dot(
+        &self,
+        painter: &egui::Painter,
+        idx: usize,
+        coord_area: Rect,
+        clip: Rect,
+    ) {
         if !self.config.cursor_dot || self.cursor_pane == Some(idx) {
             return;
         }
@@ -365,6 +386,10 @@ impl CimApp {
             return;
         }
         painter.circle_filled(sp, 3.5, Color32::from_rgb(235, 40, 40));
-        painter.circle_stroke(sp, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(160)));
+        painter.circle_stroke(
+            sp,
+            3.5,
+            Stroke::new(1.0_f32, Color32::from_black_alpha(160)),
+        );
     }
 }

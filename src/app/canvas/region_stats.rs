@@ -142,9 +142,8 @@ impl CimApp {
                 format!("{v:.3}")
             }
         };
-        let vals = |v: &[f32]| -> String {
-            v.iter().map(|x| fmt(*x)).collect::<Vec<_>>().join(" / ")
-        };
+        let vals =
+            |v: &[f32]| -> String { v.iter().map(|x| fmt(*x)).collect::<Vec<_>>().join(" / ") };
         // One result per row (mean / std / n), aligned labels.
         let rows = [
             format!("{:<4} = {}", "mean", vals(&data.mean)),
@@ -177,7 +176,9 @@ impl CimApp {
         } else {
             (clip.bottom() - h).max(clip.top())
         };
-        let left = r.left().clamp(clip.left(), (clip.right() - w).max(clip.left()));
+        let left = r
+            .left()
+            .clamp(clip.left(), (clip.right() - w).max(clip.left()));
         let panel = Rect::from_min_size(Pos2::new(left, top), Vec2::new(w, h));
 
         let painter = ui.painter_at(clip);
@@ -237,10 +238,7 @@ impl CimApp {
             Pos2::new(panel.right() - pad, panel.bottom() - pad),
         );
         let on = self.panes[idx].region_tone;
-        let resp = ui.put(
-            btn_rect,
-            egui::SelectableLabel::new(on, "LUT from region"),
-        );
+        let resp = ui.put(btn_rect, egui::SelectableLabel::new(on, "LUT from region"));
         if resp.clicked() {
             self.apply_region_tone(!on);
         }
@@ -267,7 +265,9 @@ impl CimApp {
         } else {
             (r.top() - size.y - 4.0).max(clip.top())
         };
-        let left = r.left().clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
+        let left = r
+            .left()
+            .clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
         let btn_rect = Rect::from_min_size(Pos2::new(left, top), size);
         if ui
             .put(btn_rect, egui::Button::new("Stats"))

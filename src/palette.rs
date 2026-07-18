@@ -160,7 +160,10 @@ mod tests {
     #[test]
     fn diverging_center_is_light() {
         let mid = Palette::Diverging.table()[128];
-        assert!(mid.iter().all(|&c| c > 220), "center should be light: {mid:?}");
+        assert!(
+            mid.iter().all(|&c| c > 220),
+            "center should be light: {mid:?}"
+        );
     }
 
     /// Tokens round-trip through `from_token`.

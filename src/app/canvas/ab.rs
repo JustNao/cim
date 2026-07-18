@@ -100,12 +100,17 @@ impl CimApp {
                     if ctx.input(|i| i.modifiers.ctrl) {
                         // Ctrl + wheel scrubs the sequence (up = next, down = prev)
                         // instead of zooming — matches the grid/single pane path.
-                        let step = if scroll > 0.0 { Action::NextFrame } else { Action::PrevFrame };
+                        let step = if scroll > 0.0 {
+                            Action::NextFrame
+                        } else {
+                            Action::PrevFrame
+                        };
                         self.apply_action(step, ctx);
                     } else if let Some(pos) = ptr {
                         let side = if pos.x < split_x { a } else { b };
                         let speed = zoom_speed(ctx);
-                        self.view_mut(side).zoom_at((scroll * speed).exp(), pos, img);
+                        self.view_mut(side)
+                            .zoom_at((scroll * speed).exp(), pos, img);
                     }
                 }
             }
@@ -164,9 +169,15 @@ impl CimApp {
             self.panes[idx].media.name()
         );
         let anchor = if is_a {
-            (clip.left_top() + Vec2::new(8.0, 8.0 + top_inset), Align2::LEFT_TOP)
+            (
+                clip.left_top() + Vec2::new(8.0, 8.0 + top_inset),
+                Align2::LEFT_TOP,
+            )
         } else {
-            (clip.right_top() + Vec2::new(-8.0, 8.0 + top_inset), Align2::RIGHT_TOP)
+            (
+                clip.right_top() + Vec2::new(-8.0, 8.0 + top_inset),
+                Align2::RIGHT_TOP,
+            )
         };
         painter.text(
             anchor.0,

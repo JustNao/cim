@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use super::{FrameData, Samples};
 
-
 /// Per-channel histogram plus the true value extent, for the Visualise panel.
 pub struct HistData {
     pub bins: Vec<Vec<u32>>, // 1 curve if mono, else R,G,B
@@ -264,7 +263,14 @@ impl FrameData {
 
     /// Region variant of [`FrameData::percentile_bounds`]: the `p`% and
     /// `(100 - p)`% percentile values within the pixel rectangle.
-    fn region_percentile_bounds(&self, x0: usize, y0: usize, x1: usize, y1: usize, p: f32) -> (f32, f32) {
+    fn region_percentile_bounds(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        p: f32,
+    ) -> (f32, f32) {
         if self.is_float() {
             return self.region_percentile_float(x0, y0, x1, y1, p);
         }
@@ -274,7 +280,14 @@ impl FrameData {
 
     /// Region percentile stretch for float frames (bins across the region's
     /// value extent, mirroring [`FrameData::percentile_bounds_float`]).
-    fn region_percentile_float(&self, x0: usize, y0: usize, x1: usize, y1: usize, p: f32) -> (f32, f32) {
+    fn region_percentile_float(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        p: f32,
+    ) -> (f32, f32) {
         self.percentile_rect_float(x0, y0, x1, y1, p, self.region_extent(x0, y0, x1, y1))
     }
 }
@@ -303,7 +316,10 @@ mod tests {
 
         // Linear (no clip) region bounds are the region's own min/max — the
         // bright pixel at x=0 is excluded, so it will clamp to white on render.
-        assert_eq!(f.region_display_bounds(1, 0, 3, 1, false, 0.01), (10.0, 20.0));
+        assert_eq!(
+            f.region_display_bounds(1, 0, 3, 1, false, 0.01),
+            (10.0, 20.0)
+        );
 
         // Whole-image full-range bounds still span the outlier.
         assert_eq!(f.display_bounds(false), (0.0, 255.0));
@@ -330,7 +346,10 @@ mod tests {
         // Per-pixel signed difference, as a float frame (negatives survive).
         let da = FrameData::new([2, 1], 1, Samples::U8(vec![0, 10]));
         let db = FrameData::new([2, 1], 1, Samples::U8(vec![4, 20]));
-        assert_eq!(diff_frames(&da, &db).expect("diff").color_f32().1, vec![-4.0, -10.0]);
+        assert_eq!(
+            diff_frames(&da, &db).expect("diff").color_f32().1,
+            vec![-4.0, -10.0]
+        );
         // Mismatched shapes don't diff.
         let wide = FrameData::new([3, 1], 1, Samples::U8(vec![0, 0, 0]));
         assert!(diff_frames(&da, &wide).is_none());
@@ -387,6 +406,9 @@ mod tests {
         // Golden: 25% per tail of [0, 10, 20, 30] cuts to ~(10, 20) (binned).
         let gf = FrameData::new([4, 1], 1, Samples::F32(vec![0.0, 10.0, 20.0, 30.0]));
         let (lo, hi) = gf.percentile_bounds_float(25.0);
-        assert!((lo - 10.0).abs() < 0.01 && (hi - 20.0).abs() < 0.01, "({lo}, {hi})");
+        assert!(
+            (lo - 10.0).abs() < 0.01 && (hi - 20.0).abs() < 0.01,
+            "({lo}, {hi})"
+        );
     }
 }

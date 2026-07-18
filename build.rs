@@ -58,7 +58,9 @@ fn embed_windows_icon() {
         // Prefer a hand-exported size, crisp from the vector; else resize.
         let exact = per_size(n);
         let rgba: RgbaImage = if exact.exists() {
-            let img = image::open(&exact).expect("decode per-size icon").to_rgba8();
+            let img = image::open(&exact)
+                .expect("decode per-size icon")
+                .to_rgba8();
             if img.dimensions() == (n, n) {
                 img
             } else {

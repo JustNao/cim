@@ -126,7 +126,7 @@ fn load_concat(files: &[PathBuf], name: String) -> Result<Media> {
         size,
         hi_depth,
         frames,
-        map: vec![(0, 0)],  // global frame 0 = file 0, page 0
+        map: vec![(0, 0)], // global frame 0 = file 0, page 0
         disc_file: 0,
         disc_page: 1, // next frontier probe: page 1 of file 0
         at_end: false,
@@ -403,4 +403,3 @@ fn color_bits(c: ColorType) -> u8 {
         _ => 8,
     }
 }
-

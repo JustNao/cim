@@ -33,7 +33,11 @@ pub(super) fn drop_target(rows: &[(usize, egui::Rangef)], y: f32) -> Option<usiz
         return Some(idx);
     }
     rows.iter()
-        .min_by(|a, b| (a.1.center() - y).abs().total_cmp(&(b.1.center() - y).abs()))
+        .min_by(|a, b| {
+            (a.1.center() - y)
+                .abs()
+                .total_cmp(&(b.1.center() - y).abs())
+        })
         .map(|&(idx, _)| idx)
 }
 

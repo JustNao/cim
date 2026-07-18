@@ -68,9 +68,10 @@ impl CimApp {
             }
             if ui
                 .selectable_label(false, "Compute")
-                .on_hover_text(
-                    self.hover_for(Action::OpenCompute, "Add a Compute pane (mean / std / diff of other media)"),
-                )
+                .on_hover_text(self.hover_for(
+                    Action::OpenCompute,
+                    "Add a Compute pane (mean / std / diff of other media)",
+                ))
                 .clicked()
             {
                 self.deferred.push(Deferred::CreateCompute);
@@ -161,7 +162,11 @@ impl CimApp {
 
         ui.horizontal(|ui| {
             // --- transport group ---
-            let play = if self.playback.playing { "Pause" } else { "Play" };
+            let play = if self.playback.playing {
+                "Pause"
+            } else {
+                "Play"
+            };
             if ui
                 .button(play)
                 .on_hover_text(self.hover_for(Action::PlayPause, ""))
@@ -196,7 +201,10 @@ impl CimApp {
                 self.playback.loop_playback = !self.playback.loop_playback;
             }
             if ui
-                .add_enabled(self.playback.loop_range.is_some(), egui::Button::new("Full"))
+                .add_enabled(
+                    self.playback.loop_range.is_some(),
+                    egui::Button::new("Full"),
+                )
                 .on_hover_text("Reset the loop range to the whole sequence")
                 .clicked()
             {
@@ -289,7 +297,11 @@ impl CimApp {
                              available here: {reason}"
                         )
                     };
-                    if ui.button("Load offset").on_hover_text(offsets_hover).clicked() {
+                    if ui
+                        .button("Load offset")
+                        .on_hover_text(offsets_hover)
+                        .clicked()
+                    {
                         self.load_offsets();
                     }
                 }
@@ -299,10 +311,12 @@ impl CimApp {
             ui.label("FF");
             let mut ff = self.playback.fast_forward.max(1);
             if ui
-                .add(egui::DragValue::new(&mut ff).range(1..=1_000_000).speed(0.1))
-                .on_hover_text(
-                    "Fast-forward stride",
+                .add(
+                    egui::DragValue::new(&mut ff)
+                        .range(1..=1_000_000)
+                        .speed(0.1),
                 )
+                .on_hover_text("Fast-forward stride")
                 .changed()
             {
                 self.playback.fast_forward = ff.max(1);
@@ -365,8 +379,7 @@ impl CimApp {
     /// marks the current frame, and per-frame ticks appear when short enough.
     pub(super) fn draw_scrubber(&mut self, ui: &mut egui::Ui, len: usize, at_end: bool) {
         let width = ui.available_width();
-        let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click_and_drag());
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
         let span = (len.saturating_sub(1)).max(1) as f32;
@@ -432,7 +445,10 @@ impl CimApp {
             for k in 0..len {
                 let x = x_of(k);
                 painter.line_segment(
-                    [Pos2::new(x, rect.bottom() - 5.0), Pos2::new(x, rect.bottom())],
+                    [
+                        Pos2::new(x, rect.bottom() - 5.0),
+                        Pos2::new(x, rect.bottom()),
+                    ],
                     Stroke::new(1.0_f32, Color32::from_gray(90)),
                 );
             }
@@ -562,12 +578,11 @@ impl CimApp {
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
-                ui.label(
-                    "Time each frame spends per stage on its way to the screen.",
-                );
+                ui.label("Time each frame spends per stage on its way to the screen.");
                 ui.add_space(6.0);
 
-                let ms = |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into());
+                let ms =
+                    |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into());
                 let row = |ui: &mut egui::Ui, name: &str, s: &Stage| {
                     ui.label(name);
                     ui.monospace(ms(s.last()));
@@ -1056,15 +1071,14 @@ impl CimApp {
                 ui.horizontal(|ui| {
                     ui.label("Decode threads");
                     ui.add(
-                        egui::Slider::new(&mut self.config.decode_threads, 0..=16).custom_formatter(
-                            |n, _| {
+                        egui::Slider::new(&mut self.config.decode_threads, 0..=16)
+                            .custom_formatter(|n, _| {
                                 if n == 0.0 {
                                     "auto".to_owned()
                                 } else {
                                     format!("{n}")
                                 }
-                            },
-                        ),
+                            }),
                     )
                     .on_hover_text(
                         "Background image-decoding worker threads shared by all sequences. \
@@ -1083,13 +1097,12 @@ impl CimApp {
                 ui.heading("Image operators (C++)");
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Library folder")
-                        .on_hover_text(
-                            "Folder holding the proprietary operator libraries \
+                    ui.label("Library folder").on_hover_text(
+                        "Folder holding the proprietary operator libraries \
                              (LUT_ALPHA / Details). Leave empty to use the LIBS \
                              folder next to the cim executable. Libraries load \
                              automatically when this folder changes.",
-                        );
+                    );
                     if ui.button("📂 Browse…").clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             self.config.cpp_lib_dir = dir.to_string_lossy().into_owned();
@@ -1157,40 +1170,42 @@ impl CimApp {
                 );
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    egui::Grid::new("keys")
-                        .num_columns(3)
-                        .striped(true)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| {
-                            for action in Action::all() {
-                                ui.label(action.label());
-                                let key_txt = self
-                                    .config
-                                    .keybindings
-                                    .chord_for(action)
-                                    .map(|c| c.name())
-                                    .unwrap_or_else(|| "—".into());
-                                if self.rebinding == Some(action) {
-                                    ui.colored_label(
-                                        Color32::from_rgb(240, 200, 120),
-                                        "press a key or chord…",
-                                    );
-                                } else {
-                                    ui.monospace(key_txt);
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("keys")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                for action in Action::all() {
+                                    ui.label(action.label());
+                                    let key_txt = self
+                                        .config
+                                        .keybindings
+                                        .chord_for(action)
+                                        .map(|c| c.name())
+                                        .unwrap_or_else(|| "—".into());
+                                    if self.rebinding == Some(action) {
+                                        ui.colored_label(
+                                            Color32::from_rgb(240, 200, 120),
+                                            "press a key or chord…",
+                                        );
+                                    } else {
+                                        ui.monospace(key_txt);
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Rebind").clicked() {
+                                            self.rebinding = Some(action);
+                                        }
+                                        if ui.small_button("Clear").clicked() {
+                                            self.config.keybindings.clear(action);
+                                        }
+                                    });
+                                    ui.end_row();
                                 }
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("Rebind").clicked() {
-                                        self.rebinding = Some(action);
-                                    }
-                                    if ui.small_button("Clear").clicked() {
-                                        self.config.keybindings.clear(action);
-                                    }
-                                });
-                                ui.end_row();
-                            }
-                        });
-                });
+                            });
+                    });
 
                 ui.add_space(8.0);
                 ui.separator();

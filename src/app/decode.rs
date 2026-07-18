@@ -96,7 +96,8 @@ impl CimApp {
         }
         self.load_cache_exhausted = false;
         self.export_load_pending = false; // only the export button sets this
-        self.status.set("Queued all frames for background decoding…");
+        self.status
+            .set("Queued all frames for background decoding…");
         self.decoding_all = true;
     }
 
@@ -110,7 +111,8 @@ impl CimApp {
                 p.eager = Eager::Offsets;
             }
         }
-        self.status.set("Discovering sequence length (headers only)…");
+        self.status
+            .set("Discovering sequence length (headers only)…");
         self.decoding_all = true;
     }
 
@@ -132,7 +134,8 @@ impl CimApp {
             }
         }
         if self.decoding_all {
-            self.status.set("Discovering sequence length (headers only)…");
+            self.status
+                .set("Discovering sequence length (headers only)…");
         }
     }
 
@@ -489,7 +492,10 @@ impl CimApp {
             self.decoding_all = false;
             // Clear only our own transient load notes (don't clobber a newer one).
             if self.status.text() == "Queued all frames for background decoding…"
-                || self.status.text().starts_with("Discovering sequence length")
+                || self
+                    .status
+                    .text()
+                    .starts_with("Discovering sequence length")
                 || self.status.text().starts_with("Frame cache full")
             {
                 self.status.clear();
@@ -606,7 +612,10 @@ impl CimApp {
     fn stage_target(&self, idx: usize) -> usize {
         let c = self.panes[idx].media.frame_count().max(1);
         if self.panes[idx].sync_temporal {
-            self.playback.prefetch.unwrap_or(self.shared_frame).min(c - 1)
+            self.playback
+                .prefetch
+                .unwrap_or(self.shared_frame)
+                .min(c - 1)
         } else {
             self.panes[idx].frame % c
         }
@@ -692,9 +701,8 @@ impl CimApp {
         let contrast = self.contrast_of(idx);
         // Colormap is a plain (mono-only) palette render, done synchronously; it
         // takes precedence over the proprietary operators (details is ignored).
-        let cmap = contrast == ContrastMode::Colormap
-            && frame.color_channels() == 1
-            && !frame.is_mask();
+        let cmap =
+            contrast == ContrastMode::Colormap && frame.color_channels() == 1 && !frame.is_mask();
         // The proprietary operators only run on single-channel 16-bit frames with
         // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
         // render, so there's nothing heavy to push off-thread.
@@ -712,10 +720,8 @@ impl CimApp {
         // thread. Only at `step == 1`: a decimated (minified) render is small and
         // cheap, and the worker renders full-resolution only, so its result would
         // never match a `step > 1` commit.
-        let big = !cmap
-            && !heavy
-            && step == 1
-            && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+        let big =
+            !cmap && !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
 
         if heavy || big {
             // Render off-thread. One render per pane at a time, so rapid tone /
@@ -776,7 +782,16 @@ impl CimApp {
             let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
             let name = format!("m{}", self.panes[idx].id);
             let native = frame.size; // `size` above is the decimated texel count
-            set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, target, native, sig, step);
+            set_cached_tex(
+                &mut self.panes[idx].tex.pending,
+                ctx,
+                name,
+                img,
+                target,
+                native,
+                sig,
+                step,
+            );
             if let Some(t) = t {
                 self.metrics.upload.record(t.elapsed());
             }
@@ -795,7 +810,16 @@ impl CimApp {
         // resolution (step 1) — see `stage` — so the image's own size is the
         // frame's native size.
         let native = img.size;
-        set_cached_tex(&mut self.panes[idx].tex.pending, ctx, name, img, f, native, sig, 1);
+        set_cached_tex(
+            &mut self.panes[idx].tex.pending,
+            ctx,
+            name,
+            img,
+            f,
+            native,
+            sig,
+            1,
+        );
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());
         }
@@ -949,10 +973,7 @@ impl CimApp {
         let Some(frame) = self.panes[src].media.resident(f) else {
             // Not decoded yet: request it and keep the previous overlay texture.
             self.request(src, f);
-            return self.panes[idx]
-                .overlay_tex
-                .as_ref()
-                .map(|t| t.handle.id());
+            return self.panes[idx].overlay_tex.as_ref().map(|t| t.handle.id());
         };
         // Never stretch a mismatched overlay onto the base: if the source frame's
         // size differs from this pane's current frame, skip drawing it. (A newly
@@ -983,7 +1004,16 @@ impl CimApp {
             // Overlay textures don't tone-map (sig 0) and aren't decimated (step 1);
             // `disp_size` never reads the overlay slot, so its size is unused.
             let name = format!("ov{}_{}", idx, src_id);
-            set_cached_tex(&mut self.panes[idx].overlay_tex, ctx, name, img, f, frame.size, 0, 1);
+            set_cached_tex(
+                &mut self.panes[idx].overlay_tex,
+                ctx,
+                name,
+                img,
+                f,
+                frame.size,
+                0,
+                1,
+            );
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
     }
@@ -1015,7 +1045,13 @@ fn set_cached_tex(
         }
         None => {
             let handle = ctx.load_texture(name, img, opts);
-            *slot = Some(CachedTex { handle, shown, size, sig, step });
+            *slot = Some(CachedTex {
+                handle,
+                shown,
+                size,
+                sig,
+                step,
+            });
         }
     }
 }
@@ -1088,9 +1124,14 @@ mod tests {
         assert_eq!(
             interleave_prefetch(&plans),
             vec![
-                (0, 10), (1, 20), (2, 30), // distance 1: all panes
-                (0, 11), (1, 21), (2, 31), // distance 2: all panes
-                (0, 12), (2, 32),          // distance 3: pane 1 has dropped out
+                (0, 10),
+                (1, 20),
+                (2, 30), // distance 1: all panes
+                (0, 11),
+                (1, 21),
+                (2, 31), // distance 2: all panes
+                (0, 12),
+                (2, 32), // distance 3: pane 1 has dropped out
             ]
         );
     }

@@ -68,7 +68,6 @@ impl FrameData {
         out
     }
 
-
     /// Render the 8-bit RGBA display buffer into `out` (resized to fit), mapping
     /// native samples through `[lo, hi] → [0, 255]`.
     ///
@@ -162,7 +161,13 @@ impl FrameData {
             // mapping each output pixel arithmetically — so skip the table then.
             Samples::U16(v) if opx < (1 << 16) => {
                 if self.mask {
-                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0 { 255 } else { 0 });
+                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| {
+                        if s != 0 {
+                            255
+                        } else {
+                            0
+                        }
+                    });
                 } else {
                     let map_f = map_u8(lo, hi);
                     fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| map_f(s as f32));
@@ -173,7 +178,13 @@ impl FrameData {
                 fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| tab[s as usize]);
             }
             Samples::F32(v) if self.mask => {
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| if s != 0.0 { 255 } else { 0 });
+                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| {
+                    if s != 0.0 {
+                        255
+                    } else {
+                        0
+                    }
+                });
             }
             Samples::F32(v) => {
                 let map_f = map_u8(lo, hi);
@@ -228,7 +239,9 @@ impl FrameData {
             // Small decimated output maps arithmetically (skip the 64 Ki table).
             Samples::U16(v) if decim && opx < (1 << 16) => {
                 let map_f = map_u8(lo, hi);
-                fill_rgb_decimated(out, v, w, ch, ow, oh, step, |s| palette[map_f(s as f32) as usize]);
+                fill_rgb_decimated(out, v, w, ch, ow, oh, step, |s| {
+                    palette[map_f(s as f32) as usize]
+                });
             }
             Samples::U16(v) => {
                 let tab = lut.map_rgb(lo, hi, palette, palette_id, 1 << 16);
@@ -259,7 +272,13 @@ impl FrameData {
     /// RGBA (and downscaled to 8 bits) for the texture only after the operators
     /// have run. Only called for single-channel frames (see [`is_op_input`]);
     /// the first channel is taken for any wider source. Mirrors [`render_into`].
-    pub fn render_into_gray_u16_lut(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut Vec<u16>) {
+    pub fn render_into_gray_u16_lut(
+        &self,
+        lo: f32,
+        hi: f32,
+        lut: &mut ToneLut,
+        out: &mut Vec<u16>,
+    ) {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
         out.clear();
@@ -539,7 +558,6 @@ fn fill_gray<T: Copy, U: Copy>(out: &mut [U], v: &[T], ch: usize, px: usize, map
 mod tests {
     use crate::media::{FrameData, Samples};
 
-
     /// A boolean mask renders as pure black/white regardless of the tone
     /// window, and its overlay buffer tints true pixels while leaving false
     /// pixels transparent.
@@ -571,12 +589,8 @@ mod tests {
         let mut ov = Vec::new();
         f.render_intensity_rgba([10, 20, 30], 200, &mut ov);
         // 0 → transparent; 128/255*200 ≈ 100; 255 → full 200. Tint constant.
-        assert_eq!(
-            ov,
-            vec![0, 0, 0, 0, 10, 20, 30, 100, 10, 20, 30, 200]
-        );
+        assert_eq!(ov, vec![0, 0, 0, 0, 10, 20, 30, 100, 10, 20, 30, 200]);
     }
-
 
     /// The LUT render path must produce exactly what the straightforward
     /// per-pixel float mapping would, for both integer widths and both
@@ -637,19 +651,28 @@ mod tests {
         let mut full = Vec::new();
         f.render_into(lo, hi, &mut full);
         let mut one = Vec::new();
-        assert_eq!(f.render_into_scaled_lut(lo, hi, 1, &mut lut, &mut one), [4, 2]);
+        assert_eq!(
+            f.render_into_scaled_lut(lo, hi, 1, &mut lut, &mut one),
+            [4, 2]
+        );
         assert_eq!(one, full);
 
         // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
         let mut half = Vec::new();
-        assert_eq!(f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half), [2, 1]);
+        assert_eq!(
+            f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half),
+            [2, 1]
+        );
         assert_eq!(half.len(), 2 * 1 * 4);
         assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
 
         // step 3 -> ceil(4/3) x ceil(2/3) = 2x1, sampling (0,0) and (3,0): 0, 30.
         let mut third = Vec::new();
-        assert_eq!(f.render_into_scaled_lut(lo, hi, 3, &mut lut, &mut third), [2, 1]);
+        assert_eq!(
+            f.render_into_scaled_lut(lo, hi, 3, &mut lut, &mut third),
+            [2, 1]
+        );
         assert_eq!([third[0], third[4]], [0, 30]);
     }
 
@@ -679,7 +702,10 @@ mod tests {
         // Changing the window rebuilds the table (new key).
         let mut cached = Vec::new();
         a.render_into_lut(500.0, 40000.0, &mut lut, &mut cached);
-        assert_eq!(lut.key8, Some((500f32.to_bits(), 40000f32.to_bits(), false, 1 << 16)));
+        assert_eq!(
+            lut.key8,
+            Some((500f32.to_bits(), 40000f32.to_bits(), false, 1 << 16))
+        );
         let mut plain = Vec::new();
         a.render_into(500.0, 40000.0, &mut plain);
         assert_eq!(cached, plain);

@@ -355,7 +355,10 @@ mod tests {
                 Some(frame) => {
                     // Per-page native size and values survive the round trip.
                     let [w, h] = frame.size;
-                    assert_eq!(frame.sample(0), gray16_page(w, h, pages as u16 * 1000)[0] as u32);
+                    assert_eq!(
+                        frame.sample(0),
+                        gray16_page(w, h, pages as u16 * 1000)[0] as u32
+                    );
                     pages += 1;
                 }
                 None => break,
@@ -491,9 +494,7 @@ mod tests {
         let dir = fixture_dir("bilevel");
         let (w, h) = (13usize, 6usize);
         // Stored truth: left half true — what a `numpy` bool block would set.
-        let bits: Vec<u8> = (0..w * h)
-            .map(|i| u8::from(i % w < w / 2))
-            .collect();
+        let bits: Vec<u8> = (0..w * h).map(|i| u8::from(i % w < w / 2)).collect();
 
         for white_is_zero in [true, false] {
             let path = dir.join(format!("mask_wiz{}.tif", white_is_zero as u8));
@@ -574,7 +575,11 @@ mod tests {
         m.evict(0);
         assert_eq!(m.resident_bytes(), 0);
         assert!(m.resident(0).is_none());
-        assert_eq!(m.frame_count(), len, "eviction must not change known length");
+        assert_eq!(
+            m.frame_count(),
+            len,
+            "eviction must not change known length"
+        );
     }
 
     /// The incremental LRU peeks the oldest resident frame (by `last_used`),
@@ -590,7 +595,11 @@ mod tests {
         // Make frames 0..4 resident with strictly increasing recency (frame i
         // used at tick i+1), so frame 0 is the least recently used.
         for i in 0..4 {
-            let f = SeqReader::open(&path).unwrap().decode(i).unwrap().expect("page");
+            let f = SeqReader::open(&path)
+                .unwrap()
+                .decode(i)
+                .unwrap()
+                .expect("page");
             m.insert(i, Arc::new(f));
             m.touch(i, i as u64 + 1);
         }
@@ -610,6 +619,4 @@ mod tests {
         m.evict(1);
         assert_eq!(m.lru_evictable(0), None); // only the shown frame is left
     }
-
 }
-

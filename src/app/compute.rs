@@ -129,8 +129,8 @@ impl CimApp {
         let frames: Vec<std::sync::Arc<media::FrameData>> =
             (0..cnt).filter_map(|f| src.media.resident(f)).collect();
         let used = frames.len();
-        let fr =
-            media::reduce_frames(&frames, kind).ok_or_else(|| "No source frames in memory".to_string())?;
+        let fr = media::reduce_frames(&frames, kind)
+            .ok_or_else(|| "No source frames in memory".to_string())?;
         let name = format!("{} · {}", kind.label(), base);
         let status = format!("{} of {used} frame(s) in memory", kind.label());
         Ok((fr, name, status))
@@ -145,8 +145,12 @@ impl CimApp {
     ) -> Result<(media::FrameData, String, String), String> {
         let a_id = a_id.ok_or_else(|| "Pick source A".to_string())?;
         let b_id = b_id.ok_or_else(|| "Pick source B".to_string())?;
-        let ia = self.pane_idx(a_id).ok_or_else(|| "Source A no longer available".to_string())?;
-        let ib = self.pane_idx(b_id).ok_or_else(|| "Source B no longer available".to_string())?;
+        let ia = self
+            .pane_idx(a_id)
+            .ok_or_else(|| "Source A no longer available".to_string())?;
+        let ib = self
+            .pane_idx(b_id)
+            .ok_or_else(|| "Source B no longer available".to_string())?;
         let (fa, fb) = (self.frame_disp(ia), self.frame_disp(ib));
         let a = self.panes[ia]
             .media

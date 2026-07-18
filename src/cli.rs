@@ -35,7 +35,10 @@ pub enum Input {
     Single(PathBuf),
     /// A numbered still sequence: `token` is the original compact argument (so
     /// the view-command panel can round-trip it) and `files` are its frames.
-    Sequence { token: String, files: Vec<PathBuf> },
+    Sequence {
+        token: String,
+        files: Vec<PathBuf>,
+    },
     /// A Compute pane recreated from a view command (`compute:<kind>:<srcs>`).
     /// Its sources are given as **pane indices** (0-based over the whole pane
     /// list) — resolved to the newly created panes once they all exist. `Diff`
@@ -582,7 +585,10 @@ fn group_files(files: &[String], dir_disp: &str) -> Vec<String> {
     for name in files {
         match split_index(name) {
             Some((prefix, idx, width, suffix)) => {
-                buckets.entry((prefix, width, suffix)).or_default().push(idx);
+                buckets
+                    .entry((prefix, width, suffix))
+                    .or_default()
+                    .push(idx);
             }
             None => out.push(format!("{dir_disp}{name}")),
         }
@@ -722,7 +728,10 @@ mod tests {
         ];
         let mut out = group_files(&files, "");
         out.sort();
-        assert_eq!(out, vec!["f_%03u.tif,0,2".to_string(), "solo.png".to_string()]);
+        assert_eq!(
+            out,
+            vec!["f_%03u.tif,0,2".to_string(), "solo.png".to_string()]
+        );
     }
 
     #[test]
@@ -851,11 +860,21 @@ mod tests {
         assert_eq!(inputs.len(), 4);
         assert!(matches!(
             inputs[2],
-            Input::Compute { kind: Reduce::Diff, a: 0, b: Some(1), auto: true }
+            Input::Compute {
+                kind: Reduce::Diff,
+                a: 0,
+                b: Some(1),
+                auto: true
+            }
         ));
         assert!(matches!(
             inputs[3],
-            Input::Compute { kind: Reduce::Mean, a: 0, b: None, auto: false }
+            Input::Compute {
+                kind: Reduce::Mean,
+                a: 0,
+                b: None,
+                auto: false
+            }
         ));
         // A malformed token isn't silently turned into a phantom pane — it just
         // falls through to a (non-existent) path Single, like any other arg.
@@ -888,10 +907,8 @@ mod tests {
 
     #[test]
     fn token_becomes_one_sequence_input() {
-        let Cli::Run { inputs, .. } = parse(vec![
-            "frame_%03u.png,0,11".into(),
-            "solo.png".into(),
-        ]) else {
+        let Cli::Run { inputs, .. } = parse(vec!["frame_%03u.png,0,11".into(), "solo.png".into()])
+        else {
             panic!("expected Run");
         };
         assert_eq!(inputs.len(), 2);
@@ -918,8 +935,14 @@ mod tests {
         assert_eq!(inputs.len(), 2);
         match (&inputs[0], &inputs[1]) {
             (
-                Input::Sequence { token: t0, files: f0 },
-                Input::Sequence { token: t1, files: f1 },
+                Input::Sequence {
+                    token: t0,
+                    files: f0,
+                },
+                Input::Sequence {
+                    token: t1,
+                    files: f1,
+                },
             ) => {
                 assert_eq!(t0, "partA_%03u.png,0,49");
                 assert_eq!(f0.len(), 50);

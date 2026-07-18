@@ -18,7 +18,16 @@ impl CimApp {
         footer_top: f32,
     ) {
         let pane_id = self.panes[idx].id;
-        let (mut kind, mut source_id, mut source_b, computed, mut auto, mut saving, mut save_name, status) = {
+        let (
+            mut kind,
+            mut source_id,
+            mut source_b,
+            computed,
+            mut auto,
+            mut saving,
+            mut save_name,
+            status,
+        ) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
             (
                 c.kind,
@@ -60,7 +69,10 @@ impl CimApp {
                         );
                         let ready = source_id.is_some()
                             && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
-                        if ui.add_enabled(ready, egui::Button::new("Compute")).clicked() {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Compute"))
+                            .clicked()
+                        {
                             recompute = true;
                         }
                     } else {
