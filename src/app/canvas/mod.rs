@@ -28,7 +28,7 @@ impl CimApp {
                 Align2::CENTER_CENTER,
                 "Open images or drop files here",
                 FontId::proportional(18.0),
-                Color32::from_gray(140),
+                TEXT_DEFAULT,
             );
             return;
         }
@@ -49,7 +49,7 @@ impl CimApp {
                         Align2::CENTER_CENTER,
                         "All media hidden — enable some in ☰ Media",
                         FontId::proportional(16.0),
-                        Color32::from_gray(140),
+                        TEXT_DEFAULT,
                     );
                     return;
                 }
