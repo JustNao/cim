@@ -136,6 +136,52 @@ impl CimApp {
         }
     }
 
+    /// Queue a background fast-offset scan for pane `i` when its length is still
+    /// being discovered and its layout might be fast-scannable (a lone TIFF or a
+    /// concatenation). Runs off the UI thread (`crate::offsets`); the result is
+    /// applied by `pump_offset_scans`. Media that isn't fast-scannable Errs there
+    /// and is left to lazy discovery — no classic probe storm is started, and no
+    /// file I/O touches the UI thread (only a cheap variant match here).
+    pub(super) fn request_offset_scan(&mut self, i: usize) {
+        let Some(p) = self.panes.get_mut(i) else {
+            return;
+        };
+        if p.media.at_end() {
+            return; // length already fully known (a still / numbered run / done)
+        }
+        let Some(paths) = media::offset_paths(&p.media) else {
+            return; // not a lazily-discovered TIFF sequence
+        };
+        self.offset_gen += 1;
+        let gen = self.offset_gen;
+        p.offset_scan = Some(gen);
+        let id = p.id;
+        self.scanner.request(id, gen, paths);
+    }
+
+    /// Drain finished background offset scans and apply their page counts to the
+    /// still-matching pane. A scan whose generation no longer matches (the pane
+    /// was reloaded, or closed) is discarded; an `Err` (layout not fast-scannable)
+    /// is ignored, leaving the sequence to discover its length lazily.
+    pub(super) fn pump_offset_scans(&mut self) {
+        for done in self.scanner.drain() {
+            let Some(i) = self.panes.iter().position(|p| p.id == done.id) else {
+                continue; // pane closed
+            };
+            if self.panes[i].offset_scan != Some(done.gen) {
+                continue; // superseded by a reload / newer scan
+            }
+            self.panes[i].offset_scan = None;
+            if let Ok(counts) = done.result {
+                // Skip if lazy discovery already reached the end meanwhile; else
+                // apply (a ConcatSeq re-verifies against the discovered prefix).
+                if !self.panes[i].media.at_end() {
+                    let _ = media::apply_offset_counts(&mut self.panes[i].media, &counts);
+                }
+            }
+        }
+    }
+
     /// Cancel any in-progress bulk load ("Load all" / "Load offsets").
     pub(super) fn stop_load(&mut self) {
         for p in &mut self.panes {

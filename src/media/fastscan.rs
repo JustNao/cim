@@ -26,7 +26,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::source::Media;
@@ -568,20 +568,57 @@ pub fn availability(media: &Media) -> Result<(), String> {
 /// complete global map, verified against whatever prefix ordinary discovery had
 /// already built.
 pub fn fast_load_offsets(media: &mut Media) -> Result<(), String> {
+    let paths = offset_paths(media)
+        .ok_or("fast offset discovery only applies to multi-page TIFF sequences")?;
+    let counts = scan_offset_counts(&paths)?;
+    apply_offset_counts(media, &counts)
+}
+
+/// The file(s) an offset scan would measure — one path for a lone TIFF, every
+/// file for a concatenation — or `None` for media with no lazily-discovered
+/// length to complete (a still, or a numbered run whose length is already known).
+/// A cheap variant match, no I/O, so the UI thread can decide whether to queue a
+/// background scan without touching the disk.
+pub fn offset_paths(media: &Media) -> Option<Vec<PathBuf>> {
+    match media {
+        Media::TiffSeq(t) => Some(vec![t.path.clone()]),
+        Media::ConcatSeq(c) => Some(c.files.clone()),
+        _ => None,
+    }
+}
+
+/// Measure each file's exact page count by binary search (§4) — the I/O-bound
+/// half of a fast offset discovery, split out so it can run **off the UI thread**
+/// (`crate::offsets`), taking only paths (never the pane's `Media`). `Err` means
+/// the layout isn't fast-scannable; the caller then leaves the sequence to
+/// discover its length lazily.
+pub fn scan_offset_counts(paths: &[PathBuf]) -> Result<Vec<usize>, String> {
+    if paths.is_empty() {
+        return Err("empty sequence".into());
+    }
+    let mut counts = Vec::with_capacity(paths.len());
+    for path in paths {
+        counts.push(FastScan::open(path)?.page_count()?);
+    }
+    Ok(counts)
+}
+
+/// Apply page counts measured by [`scan_offset_counts`] to `media`: grow its
+/// known length to the total and mark the end, so the whole timeline is instantly
+/// seekable. The mutating half, run on the UI thread. A `ConcatSeq` verifies the
+/// counts against whatever prefix ordinary discovery already built (`Err`,
+/// nothing changed, on disagreement — see `set_full_layout`).
+pub fn apply_offset_counts(media: &mut Media, counts: &[usize]) -> Result<(), String> {
     match media {
         Media::TiffSeq(t) => {
-            let count = FastScan::open(&t.path)?.page_count()?;
+            let count = *counts
+                .first()
+                .ok_or("no page count measured for the sequence")?;
             t.frames.note_len_to(count);
             t.at_end = true;
             Ok(())
         }
-        Media::ConcatSeq(c) => {
-            let mut counts = Vec::with_capacity(c.files.len());
-            for path in c.files.clone() {
-                counts.push(FastScan::open(&path)?.page_count()?);
-            }
-            c.set_full_layout(&counts)
-        }
+        Media::ConcatSeq(c) => c.set_full_layout(counts),
         _ => Err("fast offset discovery only applies to multi-page TIFF sequences".into()),
     }
 }
@@ -751,6 +788,32 @@ mod tests {
         // Past the real end: the jump cancels and nothing changes.
         assert!(fast_jump(&mut media, 10).is_err());
         assert_eq!(media.frame_count(), 5);
+    }
+
+    #[test]
+    fn scan_and_apply_offsets_split_matches_and_rejects_irregular() {
+        let dir = fixture_dir("scan_split");
+
+        // A regular run: measurement (off-thread half) returns the per-file
+        // counts, and applying them (UI-thread half) completes the length.
+        let path = dir.join("run.tif");
+        write_multipage_tiff_u16(&path, &[[6, 5]; 7]);
+        let mut media = load(&path).unwrap();
+        let paths = offset_paths(&media).expect("a TIFF seq exposes its file");
+        let counts = scan_offset_counts(&paths).expect("regular layout measures");
+        assert_eq!(counts, vec![7]);
+        assert_eq!(media.frame_count(), 1); // nothing applied yet
+        apply_offset_counts(&mut media, &counts).expect("apply");
+        assert_eq!(media.frame_count(), 7);
+        assert!(media.at_end());
+
+        // An irregular (mixed-size) run isn't fast-scannable: the measurement
+        // Errs, so the auto-scan leaves the sequence to discover lazily.
+        let mixed = dir.join("mixed.tif");
+        write_multipage_tiff_u16(&mixed, &[[9, 7], [5, 4], [9, 7]]);
+        let mixed_media = load(&mixed).unwrap();
+        let mixed_paths = offset_paths(&mixed_media).unwrap();
+        assert!(scan_offset_counts(&mixed_paths).is_err());
     }
 
     #[test]

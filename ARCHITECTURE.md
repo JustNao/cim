@@ -68,6 +68,8 @@ src/
                  per-operator instances (create/apply/destroy; 16-bit only) and
                  the shared render tail render_display; ops_active gates them.
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
+  offsets.rs     Off-UI-thread fast-offset scanner: measures a fast-scannable
+                 sequence's page counts on open/reload (§4) without hitching paint.
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
                  PaneOps::render_display) for heavy panes so the UI never blocks.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
@@ -235,6 +237,25 @@ len)` grows length by one.
     (`SeqCache::note_len_to` + `ConcatSeq::set_full_layout`) so any index is
     instantly seekable — `media::fast_load_offsets`, run synchronously; a pane
     it can't handle falls back to the ordinary `Eager::Offsets` discovery;
+  - **automatically on open (and reload)**, off the UI thread. `add_pane` /
+    `reload` call `request_offset_scan`, which — for a still-discovering TIFF
+    sequence (`media::offset_paths` is `Some`) — hands the file paths to a
+    dedicated single worker thread (`crate::offsets::OffsetScanner`, mirroring the
+    decode/render pools: `ctx.request_repaint` on completion, drained by
+    `pump_offset_scans`). The scan is split from the mutation on purpose:
+    `media::scan_offset_counts(paths)` (the I/O-bound binary search) runs on the
+    worker and returns only a `Vec<usize>` of per-file page counts — never the
+    pane's `Media`, which stays UI-thread-owned — and `media::apply_offset_counts`
+    applies them on drain. A **dedicated thread, not the decode pool**: `FastScan`
+    uses its own file handle (nothing to gain from the pool's persistent
+    `SeqReader` cache) and a whole-sequence count vector doesn't fit the pool's
+    per-frame `Decoded` result, and this way an open's scan never occupies a
+    worker that should be decoding the first visible frame. A **generation** tags
+    each scan (`Pane.offset_scan` = the in-flight gen, `CimApp.offset_gen` the
+    counter): pane ids are stable across reload, so a scan returning after a reload
+    is recognised as stale and dropped. A layout that isn't fast-scannable just
+    `Err`s on the worker and is left to lazy discovery — **no** classic
+    `Eager::Offsets` probe storm is auto-started;
   - the **frame readout** (typed index) tries `media::fast_jump` first — validate
     + raw-decode that one frame at its predicted position and grow the known
     length through it in one step, no intervening discovery — then falls back to

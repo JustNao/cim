@@ -500,10 +500,16 @@ impl CimApp {
             compute: None,
             render_gen: 0,
             error: None,
+            offset_scan: None,
             eager: Eager::Off,
             watch: Watch::default(),
             fast_jump: None,
         });
+        // Complete a fast-scannable sequence's length in the background as soon as
+        // it opens, so the scrubber shows the true length and any index is
+        // instantly seekable without the user pressing "Load offsets".
+        let i = self.panes.len() - 1;
+        self.request_offset_scan(i);
     }
 
     pub(super) fn remove_media(&mut self, i: usize) {
@@ -621,6 +627,10 @@ impl CimApp {
                 // doesn't immediately fire again on the change we just picked up.
                 self.panes[i].watch.loaded = Self::source_file_sig(&self.panes[i].source);
                 self.panes[i].watch.seen = None;
+                // Re-complete the (fresh, length-1) media's offsets in the
+                // background under a new generation — this also supersedes any
+                // scan still in flight against the old contents.
+                self.request_offset_scan(i);
             }
             Err(e) => self.panes[i].error = Some(format!("Reload failed: {e}")),
         }

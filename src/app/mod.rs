@@ -566,6 +566,11 @@ struct Pane {
     render_gen: u64,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
+    /// Generation of the in-flight background offset scan for this pane (`None`
+    /// when none is pending). A returning scan is applied only if it still
+    /// matches — a reload re-requests under a new generation, so a scan started
+    /// against the old contents can't stamp stale counts onto the reloaded media.
+    offset_scan: Option<u64>,
     /// Background bulk-load mode for this pane (frame-bar / export buttons).
     eager: Eager,
     /// Auto-reload file-watch state (the "Auto-reload" header toggle). See [`Watch`].
@@ -777,6 +782,12 @@ pub struct CimApp {
     /// at most one runs per pane at a time (rapid tone/frame changes coalesce).
     renderer: crate::renderer::RenderPool,
     render_inflight: HashSet<u64>,
+    /// Off-UI-thread fast-offset scanner: on open/reload a fast-scannable
+    /// sequence's whole length is discovered here instead of the UI thread.
+    /// `offset_gen` tags each scan so a result returning after a reload (pane ids
+    /// are stable across reload) is recognised as stale and discarded.
+    scanner: crate::offsets::OffsetScanner,
+    offset_gen: u64,
     /// Pipeline timing profiler and its window toggle — only populated / shown
     /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
     metrics: crate::debug::Metrics,
@@ -956,6 +967,8 @@ impl CimApp {
             // known to be reentrant, to render several panes in parallel.
             renderer: crate::renderer::RenderPool::new(cc.egui_ctx.clone()),
             render_inflight: HashSet::new(),
+            scanner: crate::offsets::OffsetScanner::new(cc.egui_ctx.clone()),
+            offset_gen: 0,
             metrics: crate::debug::Metrics::default(),
             decode_ema_secs: 0.0,
             show_debug: false,
@@ -1525,6 +1538,7 @@ impl CimApp {
 
         self.pump_decoder();
         self.pump_render(ctx);
+        self.pump_offset_scans(); // apply finished background offset scans
         self.handle_input(ctx);
         self.advance_playback(ctx);
         self.drive_seek();
