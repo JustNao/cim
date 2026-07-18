@@ -780,7 +780,7 @@ holds its last frame instead of blanking to black each time it recomputes (nulli
 `tex` would blank a large/off-thread render until it lands).
 
 **View-command round-trip.** A Compute pane re-emits in `view_command` as a
-`@compute:<kind>:<srcs>[:auto]` positional token (`compute_token`), its sources given
+`compute:<kind>:<srcs>[:auto]` positional token (`compute_token`), its sources given
 as **pane indices** (0-based over the whole list) — so it keeps its slot and the
 positional per-pane flags (`--tone`/`--tsync`/…) stay aligned. `cli::parse_compute_token`
 turns it back into `cli::Input::Compute`; `commit_open` recreates the panes **in order**
@@ -788,7 +788,14 @@ turns it back into `cli::Input::Compute`; `commit_open` recreates the panes **in
 recomputes (best-effort — a not-yet-resident source just leaves a status; `auto` recomputes
 once frames land). A pane whose source is gone is skipped rather than emitting a dangling
 index. Because the transformations-sync flag is per-pane positional (`--tsync`), it now
-round-trips for Compute panes too (they default un-synced).
+round-trips for Compute panes too (they default un-synced). The token is deliberately
+**not** prefixed with `@` — a leading `@` is PowerShell's splatting operator and would
+silently drop the argument before it reached cim.
+
+**`--tsync` is emitted whenever a per-pane transform flag is** (`--tone`/`--clip`/
+`--share-clip`/`--detail`/`--rotate`), not only when a pane is unsynced. Each of those
+flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced session (where
+`--tsync` is otherwise omitted as the default) would replay unsynced without it.
 
 ---
 
@@ -901,7 +908,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   ≥2 files → `Sequence` opening as **one** pane (`.tif` run → `ConcatSeq`, else
   `FileSeq`). `token` is kept on the pane's `Source` so reload/round-trip work.
   Drag-and-drop / the file dialog only produce `Single`s.
-- A positional **`@compute:<kind>:<srcs>[:auto]`** token (kind = `mean|std|diff`;
+- A positional **`compute:<kind>:<srcs>[:auto]`** token (kind = `mean|std|diff`;
   `srcs` = one pane index for the reductions or `A,B` for `diff`; trailing `:auto`
   restores auto-refresh) → `Input::Compute`, recreating a **Compute pane** from a
   view command (`view_command` emits it for a `Source::Computed` pane; §9). Normally

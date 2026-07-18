@@ -36,7 +36,7 @@ pub enum Input {
     /// A numbered still sequence: `token` is the original compact argument (so
     /// the view-command panel can round-trip it) and `files` are its frames.
     Sequence { token: String, files: Vec<PathBuf> },
-    /// A Compute pane recreated from a view command (`@compute:<kind>:<srcs>`).
+    /// A Compute pane recreated from a view command (`compute:<kind>:<srcs>`).
     /// Its sources are given as **pane indices** (0-based over the whole pane
     /// list) — resolved to the newly created panes once they all exist. `Diff`
     /// carries two indices, the reductions one. `auto` restores auto-refresh.
@@ -314,7 +314,7 @@ ARGS:
         e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
         A directory (e.g. `cim folder`) opens every loadable file inside it,
         sorted alphabetically, concatenated into one pane.
-        A @compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
+        A compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
         pane index, or A,B for diff) recreates a Compute pane; it is normally
         generated for you by the \"View cmd\" panel, not typed by hand.
 
@@ -366,9 +366,11 @@ SHELL COMPLETION:
 /// a sequence token naming two or more files becomes a single `Sequence`; a token
 /// that resolves to one file, or any plain path, becomes a `Single`.
 fn expand_arg(arg: &str, out: &mut Vec<Input>) {
-    // A `@compute:…` token recreates a Compute pane (emitted by the view
-    // command for a computed pane). Recognised before any filesystem probing so
-    // it's never mistaken for a path.
+    // A `compute:…` token recreates a Compute pane (emitted by the view command
+    // for a computed pane). Recognised before any filesystem probing so it's
+    // never mistaken for a path. (Deliberately not prefixed with `@`: a leading
+    // `@` is PowerShell's splatting operator and would mangle the argument before
+    // it reaches us.)
     if let Some(input) = parse_compute_token(arg) {
         out.push(input);
         return;
@@ -444,13 +446,13 @@ fn list_dir_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Parse a `@compute:<kind>:<srcs>[:auto]` token into an `Input::Compute`, or
+/// Parse a `compute:<kind>:<srcs>[:auto]` token into an `Input::Compute`, or
 /// `None` when `arg` isn't such a token. `<kind>` is `mean`/`std`/`diff`;
 /// `<srcs>` is one pane index for the reductions or `A,B` for `diff`; a trailing
 /// `:auto` restores the auto-refresh toggle. Indices are 0-based over the pane
 /// list and resolved to panes once they all exist.
 fn parse_compute_token(arg: &str) -> Option<Input> {
-    let rest = arg.strip_prefix("@compute:")?;
+    let rest = arg.strip_prefix("compute:")?;
     let mut segs = rest.split(':');
     let kind = crate::media::Reduce::from_token(segs.next()?)?;
     let srcs = segs.next()?;
@@ -833,8 +835,8 @@ mod tests {
         let Cli::Run { inputs, .. } = parse(vec![
             "a.tif".into(),
             "b.tif".into(),
-            "@compute:diff:0,1:auto".into(),
-            "@compute:mean:0".into(),
+            "compute:diff:0,1:auto".into(),
+            "compute:mean:0".into(),
         ]) else {
             panic!("expected Run");
         };
@@ -849,7 +851,7 @@ mod tests {
         ));
         // A malformed token isn't silently turned into a phantom pane — it just
         // falls through to a (non-existent) path Single, like any other arg.
-        let Cli::Run { inputs, .. } = parse(vec!["@compute:bogus:0".into()]) else {
+        let Cli::Run { inputs, .. } = parse(vec!["compute:bogus:0".into()]) else {
             panic!("expected Run");
         };
         assert!(matches!(inputs[0], Input::Single(_)));

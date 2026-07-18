@@ -21,10 +21,11 @@ impl CimApp {
         self.panes.iter().position(|p| p.id == id)
     }
 
-    /// Build the `@compute:<kind>:<srcs>[:auto]` view-command token for Compute
+    /// Build the `compute:<kind>:<srcs>[:auto]` view-command token for Compute
     /// pane `p`, or `None` if a source is no longer open (a dangling index would
     /// replay wrong). Sources are emitted as **pane indices** (0-based over the
-    /// whole pane list), matching the positional per-pane flags.
+    /// whole pane list), matching the positional per-pane flags. (No `@` prefix:
+    /// a leading `@` is PowerShell's splatting operator and would mangle the arg.)
     pub(super) fn compute_token(&self, p: &Pane) -> Option<String> {
         let c = p.compute.as_ref()?;
         let a = self.pane_idx(c.source_id?)?;
@@ -34,7 +35,7 @@ impl CimApp {
         } else {
             a.to_string()
         };
-        let mut tok = format!("@compute:{}:{}", c.kind.token(), srcs);
+        let mut tok = format!("compute:{}:{}", c.kind.token(), srcs);
         if c.auto {
             tok.push_str(":auto");
         }

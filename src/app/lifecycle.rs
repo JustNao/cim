@@ -208,8 +208,15 @@ impl CimApp {
                     }
                 })
                 .collect();
+            // Any per-pane transformation flag below makes `apply_view_state`
+            // *unsync* the panes it sets; whenever we emit one we must also emit
+            // `--tsync` to restore the sync state (otherwise an all-synced session
+            // would replay unsynced — the default is synced, so `--tsync` is
+            // normally omitted).
+            let mut per_pane_transform = false;
             if (0..n).any(|i| tones[i] != "linear") {
                 parts.push(format!("--tone {}", tones.join(",")));
+                per_pane_transform = true;
             }
             // Per-pane Linear clip (effective): `off` or the per-tail percentile.
             // Omit when every pane is at its depth-appropriate default (on at
@@ -233,6 +240,7 @@ impl CimApp {
             };
             if (0..n).any(|i| clips[i].as_str() != clip_default(i)) {
                 parts.push(format!("--clip {}", clips.join(",")));
+                per_pane_transform = true;
             }
             // Per-pane "Share clip" (effective): 1/0. Omit when no pane shares
             // (the default).
@@ -241,30 +249,15 @@ impl CimApp {
                     .map(|i| if self.tone_of(i).share_clip { "1" } else { "0" })
                     .collect();
                 parts.push(format!("--share-clip {}", shares.join(",")));
+                per_pane_transform = true;
             }
-            // Details / show / Transformations-sync — omit when all at default
-            // (details off, all visible, all synced).
+            // Details — omit when all off (the default).
             if (0..n).any(|i| self.details_of(i)) {
                 let details: Vec<&str> = (0..n)
                     .map(|i| if self.details_of(i) { "1" } else { "0" })
                     .collect();
                 parts.push(format!("--detail {}", details.join(",")));
-            }
-            if self.panes.iter().any(|p| !p.visible) {
-                let show: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.visible { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--show {}", show.join(",")));
-            }
-            if self.panes.iter().any(|p| !p.sync_tone) {
-                let ts: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.sync_tone { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--tsync {}", ts.join(",")));
+                per_pane_transform = true;
             }
             // Per-pane effective rotation — omit when every pane is unrotated.
             if (0..n).any(|i| self.rotation_of(i) != 0.0) {
@@ -275,6 +268,28 @@ impl CimApp {
                     })
                     .collect();
                 parts.push(format!("--rotate {}", rots.join(",")));
+                per_pane_transform = true;
+            }
+            // Visibility — omit when all visible (the default).
+            if self.panes.iter().any(|p| !p.visible) {
+                let show: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.visible { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--show {}", show.join(",")));
+            }
+            // Transformations-sync. Emit when any pane is unsynced *or* any of the
+            // per-pane transform flags above was emitted (they unsync on replay, so
+            // an all-synced session needs `--tsync 1,1,…` to re-sync — otherwise it
+            // would come back unsynced).
+            if self.panes.iter().any(|p| !p.sync_tone) || per_pane_transform {
+                let ts: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.sync_tone { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--tsync {}", ts.join(",")));
             }
         }
         if let Some((lo, hi)) = self.playback.loop_range {
