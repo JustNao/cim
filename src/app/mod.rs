@@ -1775,7 +1775,12 @@ impl eframe::App for CimApp {
                 .anchor(Align2::LEFT_TOP, Vec2::ZERO)
                 .show(ctx, |ui| {
                     frame.show(ui, |ui| {
-                        ui.set_min_width(full_w);
+                        // Pin to exactly the screen width (min *and* max): a bare
+                        // `min_width` lets a wide row (e.g. a large frame count in
+                        // the frame bar) expand the ui past the screen, which then
+                        // pushes the full-width scrubber — sized to `available_width`
+                        // — off the right edge.
+                        ui.set_width(full_w);
                         ui.add_space(4.0);
                         self.draw_toolbar(ui);
                         ui.add_space(0.5);
@@ -1792,7 +1797,7 @@ impl eframe::App for CimApp {
                     .anchor(Align2::LEFT_BOTTOM, Vec2::ZERO)
                     .show(ctx, |ui| {
                         frame.show(ui, |ui| {
-                            ui.set_min_width(full_w);
+                            ui.set_width(full_w); // pinned; see the toolbar note above
                             ui.add_space(4.0);
                             self.draw_frame_bar(ui);
                             ui.add_space(4.0);
