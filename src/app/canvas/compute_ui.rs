@@ -10,7 +10,13 @@ impl CimApp {
     /// **Compute** button that runs it); once computed, the result image shows
     /// with the **Refresh** / **Save** / **Auto refresh** controls instead.
     /// Edits are written back and a recompute / save is dispatched after.
-    pub(super) fn draw_compute_ui(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect) {
+    pub(super) fn draw_compute_ui(
+        &mut self,
+        ctx: &egui::Context,
+        idx: usize,
+        img_area: Rect,
+        header_bottom: f32,
+    ) {
         let pane_id = self.panes[idx].id;
         let (mut kind, mut source_id, mut source_b, computed, mut auto, mut saving, mut save_name, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
@@ -32,8 +38,13 @@ impl CimApp {
         egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
-            .constrain_to(img_area)
-            .fixed_pos(img_area.left_top() + Vec2::splat(6.0))
+            // Keep a small horizontal margin off the cell edges; the far-right
+            // `fixed_pos` then gets pulled in so the box is right-aligned
+            // regardless of its measured width.
+            .constrain_to(img_area.shrink2(Vec2::new(6.0, 0.0)))
+            // Below the header (clears the header bar) and at the top-right (clears
+            // the Transformations popup, which opens at the top-left).
+            .fixed_pos(Pos2::new(img_area.right(), header_bottom + 2.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);

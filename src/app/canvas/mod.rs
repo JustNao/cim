@@ -326,9 +326,11 @@ impl CimApp {
             self.line_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
         }
 
-        // Compute-pane controls (source / kind / recompute + inline save).
+        // Compute-pane controls (source / kind / recompute + inline save) —
+        // floated below the header at the cell's top-right so it clears both the
+        // header bar and the Transformations popup (which opens at the top-left).
         if self.panes[idx].compute.is_some() {
-            self.draw_compute_ui(ctx, idx, img_area);
+            self.draw_compute_ui(ctx, idx, img_area, header_strip.max.y);
         }
 
         // The header and footer bars, floating over the image's top/bottom
