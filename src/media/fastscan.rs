@@ -17,12 +17,12 @@
 //! handled; the width-dependent reads branch on `FastScan::big`.
 //!
 //! Used three ways: [`SeqReader`](super::SeqReader) consults a measured layout
-//! to make far probes/decodes O(1); the frame bar's **Load offsets fast** button
-//! calls [`fast_load_offsets`] to complete the whole timeline length by
-//! binary-searching each file's page count; and the frame readout calls
+//! to make far probes/decodes O(1); a sequence's whole length is discovered on
+//! open by [`scan_offset_counts`] (binary-searching each file's page count, run
+//! off the UI thread) + [`apply_offset_counts`]; and the frame readout calls
 //! [`fast_jump`] to validate + decode an arbitrary typed index directly (falling
 //! back to riding the frontier when the prediction can't be made).
-//! [`availability`] gates the button and rides the *Load offsets* hover text.
+//! [`availability`] rides the *Load offsets* hover text.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -659,6 +659,15 @@ mod tests {
         }
     }
 
+    /// Measure + apply a fast offset discovery in one call — the split that the
+    /// app runs across threads (`scan_offset_counts` off-thread, `apply_offset_counts`
+    /// on the UI thread), composed here so the tests read the end-to-end result.
+    fn load_offsets(media: &mut Media) -> Result<(), String> {
+        let paths = offset_paths(media).ok_or("not a fast-scannable sequence")?;
+        let counts = scan_offset_counts(&paths)?;
+        apply_offset_counts(media, &counts)
+    }
+
     #[test]
     fn stride_layout_measures_reads_and_counts() {
         let dir = fixture_dir("fastscan");
@@ -702,7 +711,7 @@ mod tests {
 
         // The whole feature works end to end on a BigTIFF.
         let mut media = load(&path).unwrap();
-        fast_load_offsets(&mut media).expect("regular BigTIFF");
+        load_offsets(&mut media).expect("regular BigTIFF");
         assert_eq!(media.frame_count(), 6);
         assert!(media.at_end());
     }
@@ -806,7 +815,7 @@ mod tests {
         let mut media = load(&path).unwrap();
         assert_eq!(media.frame_count(), 1);
         assert!(!media.at_end());
-        fast_load_offsets(&mut media).expect("regular layout");
+        load_offsets(&mut media).expect("regular layout");
         assert_eq!(media.frame_count(), 9);
         assert!(media.at_end());
         assert_eq!(media.resident_count(), 0); // offsets only — no page decoded
@@ -817,7 +826,7 @@ mod tests {
         write_multipage_tiff_u16(&a, &[[6, 5]; 2]);
         write_multipage_tiff_u16(&b, &[[6, 5]; 3]);
         let mut concat = load_sequence(&[a, b], "c".into()).unwrap();
-        fast_load_offsets(&mut concat).expect("regular concat");
+        load_offsets(&mut concat).expect("regular concat");
         assert_eq!(concat.frame_count(), 5);
         assert!(concat.at_end());
         let (_, map) = concat.concat_layout().unwrap();
