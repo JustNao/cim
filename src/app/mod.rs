@@ -47,7 +47,7 @@ const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 /// Hairline that separates a floating chrome bar (pane header/footer, global
 /// toolbar / frame bar) from the image it overlays — the panels used to draw
 /// their own separators; the overlays paint this instead.
-const CHROME_BORDER: Color32 = Color32::from_gray(40);
+const CHROME_BORDER: Color32 = Color32::from_gray(50);
 
 /// The single background gray shared by **every chrome bar**: the global toolbar
 /// and frame bar (via `visuals.panel_fill`, set in `new`) and each pane's header

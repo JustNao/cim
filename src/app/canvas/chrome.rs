@@ -9,7 +9,11 @@ impl CimApp {
         let hp = ui.painter_at(header);
         let focused = idx == self.current;
         hp.rect_filled(header, 0.0, if focused { ACCENT } else { BAR_FILL });
-
+        hp.vline(
+            header.max.x - 0.5,
+            header.y_range(),
+            Stroke::new(1.0_f32, CHROME_BORDER),
+        );
         // (The Transformations controls now live in the single global panel on the
         // toolbar, so the header no longer carries a per-pane button.)
 
@@ -293,6 +297,11 @@ impl CimApp {
         fp.hline(
             footer.x_range(),
             footer.min.y + 0.5,
+            Stroke::new(1.0_f32, CHROME_BORDER),
+        );
+        fp.vline(
+            footer.max.x - 0.5,
+            footer.y_range(),
             Stroke::new(1.0_f32, CHROME_BORDER),
         );
 
