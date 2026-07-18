@@ -35,16 +35,19 @@ impl CimApp {
         let mut recompute = false;
         let mut do_save = false;
 
+        // Right-align by an explicit left offset (an over-estimate of the box
+        // width) rather than clamping the right edge onto the clip boundary,
+        // which would clip off the frame's right border. `constrain_to` still
+        // keeps it inside a tiny cell.
+        const AREA_W: f32 = 254.0;
+        let left = (img_area.right() - AREA_W - 6.0).max(img_area.left() + 6.0);
         egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
-            // Keep a small horizontal margin off the cell edges; the far-right
-            // `fixed_pos` then gets pulled in so the box is right-aligned
-            // regardless of its measured width.
-            .constrain_to(img_area.shrink2(Vec2::new(6.0, 0.0)))
+            .constrain_to(img_area)
             // Below the header (clears the header bar) and at the top-right (clears
             // the Transformations popup, which opens at the top-left).
-            .fixed_pos(Pos2::new(img_area.right(), header_bottom + 2.0))
+            .fixed_pos(Pos2::new(left, header_bottom + 2.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);
