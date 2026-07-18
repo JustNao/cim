@@ -327,9 +327,10 @@ impl CimApp {
         }
 
         // Compute-pane controls (source / kind / recompute + inline save) —
-        // floated at the cell's bottom-left (above the footer). Gated on the
-        // pane's `show_opts` so the Toggle-visibility shortcut hides it too.
-        if self.panes[idx].compute.is_some() && self.panes[idx].show_opts {
+        // floated at the cell's bottom-left (above the footer). Gated on
+        // `show_chrome` so the show/hide-all-bars shortcut hides it too (kept
+        // separate from the Transformations popup's own toggle).
+        if self.panes[idx].compute.is_some() && self.show_chrome {
             self.draw_compute_ui(ctx, idx, img_area, footer_strip.min.y);
         }
 
