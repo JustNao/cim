@@ -101,8 +101,10 @@ pub struct ViewState {
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
     pub visible: Option<Vec<bool>>,
-    /// Per-pane Transformations-sync flags (`--tsync`), in pane order.
+    /// Per-pane Visualization-sync flags (`--tsync`), in pane order.
     pub tsync: Option<Vec<bool>>,
+    /// Per-pane Geometry-sync flags (`--gsync`, rotation), in pane order.
+    pub gsync: Option<Vec<bool>>,
     /// Per-pane display rotation in degrees (`--rotate`), in pane order.
     pub rotations: Option<Vec<f32>>,
     /// The Control media: the shared clip-bounds source, and — when it's a
@@ -199,6 +201,10 @@ pub fn parse(args: Vec<String>) -> Cli {
             }
             "--tsync" => {
                 view.tsync = next(i).and_then(parse_details);
+                i += 1;
+            }
+            "--gsync" => {
+                view.gsync = next(i).and_then(parse_details);
                 i += 1;
             }
             "--rotate" => {
@@ -345,7 +351,8 @@ VIEW STATE:
         --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
         --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
         --show <B,B,...>         Per-pane visibility / show-hide (1/0)
-        --tsync <B,B,...>        Per-pane Transformations-sync toggles (1/0)
+        --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)
+        --gsync <B,B,...>        Per-pane Geometry-sync toggles (rotation) (1/0)
         --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
         --control <N>            Control media: shared clip source (+ timeline if a sequence)
         --loop <LO,HI>           Inclusive playback loop range (0-based)
@@ -817,7 +824,7 @@ mod tests {
 
     #[test]
     fn parses_show_tsync_control() {
-        let args = "a.tif b.tif --show 1,0 --tsync 0,1 --control 1"
+        let args = "a.tif b.tif --show 1,0 --tsync 0,1 --gsync 1,0 --control 1"
             .split(' ')
             .map(String::from)
             .collect();
@@ -826,6 +833,7 @@ mod tests {
         };
         assert_eq!(view.visible, Some(vec![true, false]));
         assert_eq!(view.tsync, Some(vec![false, true]));
+        assert_eq!(view.gsync, Some(vec![true, false]));
         assert_eq!(view.control, Some(1));
     }
 

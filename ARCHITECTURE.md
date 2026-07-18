@@ -97,7 +97,7 @@ src/
       transform.rs   Rotation-aware image<->screen math + region selection +
                      angle/paint helpers.
       ab.rs          A/B wipe view.
-      options_popup.rs  The Transformations popup (draw_tone_options — the place
+      options_popup.rs  The global Transformations panel (draw_tone_options — the place
                      to add a tone knob).
       region_stats.rs   Right-drag stats region + panel.
       line_profile.rs   Shift+right-drag profile line overlay.
@@ -615,11 +615,12 @@ spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
 per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
 shows the shared position with **both** A and B values.
 
-The header is a **single row** (`header_h_for`): the
-**Transformations** button on the left, the title, then the **Auto-reload**
-toggle, **Reload** (re-reads this media from disk → `pending_reload`), **Hide**
-(sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on the
-right, matching styles (Close tints red on hover to flag that it removes the pane).
+The header is a **single row** (`header_h_for`): the title on the left, then the
+**Auto-reload** toggle, **Reload** (re-reads this media from disk → `pending_reload`),
+**Hide** (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on
+the right, matching styles (Close tints red on hover to flag that it removes the pane).
+(The Transformations controls are the global toolbar panel, not a per-pane header
+button.)
 
 **Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
 Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
@@ -639,13 +640,23 @@ focus to the nearest still-shown media (`reselect_if_hidden`), so `current` neve
 sits on a hidden pane while others are visible. egui window/popup **shadows are
 disabled** in `new` so nothing casts under panes or the Compute form.
 
-**Transformations popup** (`draw_options_popup`). The header's **Transformations**
-button (left, away from ×) toggles `Pane.show_opts`, opening a foreground `Area`
-under the header with: the tone `ContrastMode` + its mode-specific options
-(`draw_tone_options` — **the single place to add a tone knob**: grow the mode's
-`ToneOptions` sub-struct, add a row, read it in `stage`/`tone_sig`), the Details
-toggle, the mask **Overlay** picker, and this
-pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`, cached per pane).
+**Transformations panel** (`draw_transform_panel`). A **single global** floating
+window (not a per-pane popup), toggled by the **Transformations** toolbar button
+(between Media and Compute) or `Action::ToggleVis` (default `V`), and stored on
+`CimApp.show_transform`. Its contents **track the selected pane** (`current`) — the
+title shows that pane's name, and selecting another pane updates it live. It is split
+into two collapsible groups, each with its own **Sync** toggle:
+- **Visualization** (open by default): the tone `ContrastMode` + its mode-specific
+  options (`draw_tone_options` — **the single place to add a tone knob**: grow the
+  mode's `ToneOptions` sub-struct, add a row, read it in `stage`/`tone_sig`), the
+  Details (**RC**) toggle, and the **Overlay** picker. Its Sync toggle drives
+  `set_sync_tone`.
+- **Geometry** (collapsed by default): the **Rotate** control. Its Sync toggle drives
+  `set_sync_geometry`.
+Below the groups the pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`,
+cached per pane) is **always** shown. Flipping a group's Sync toggle skips that group's
+edit writeback that frame (`vis_sync_changed`/`geo_sync_changed`) so enabling sync makes
+the pane *adopt* the shared set rather than push its own values into it.
 A tone edit **does not null the texture**: it only changes the pane's `tone_sig`,
 so `stage` re-renders and the lock-step commit swaps in the fresh frame while the
 pane keeps showing its last committed `tex`. Nulling `tex` would blank a **heavy**
@@ -654,25 +665,29 @@ LUT refills synchronously the same update so its black is never seen, which is w
 only the operator tones flashed. (Only overlay edits drop `overlay_tex`; **reload** and a **newly loaded operator
 library** still null `tex` since the frame data, not the signature, changed — while a
 Compute **recompute** instead bumps `render_gen` so it keeps the last frame, §9.)
-`Action::ToggleVis` (default `V`) toggles the popup for the focused pane.
 
-**Transformations sync (`Pane.sync_tone`, default on).** Like the Pos/Time syncs, a
-pane can follow the shared set (`shared_contrast`/`shared_tone`/`shared_details`/
-`shared_rotation`/`shared_overlay`), toggled by the **Transf** checkbox in the manager's
-Sync column. `contrast_of`/`tone_of`/`details_of`/`rotation_of`/`overlay_of` return the
-effective value and are read by `stage`/`prepare_overlay`/`pane_theta`/`export_pane`/
-`view_command`; editing a synced pane's popup writes the shared set, and every
-synced pane re-renders on its own because its effective `tone_sig` changed (no
-texture nulling — see above). `set_sync_tone(false)` snapshots the
-shared values in so nothing jumps. The first opened media seeds the shared set
-(`add_pane`); a replayed `--tone`/`--detail`/`--rotate` is per-pane, so `apply_view_state`
-unsyncs the panes it sets.
+**Two sync groups.** The Transformations split into **two independent** sync groups,
+each a checkbox column in the manager's Sync row (and a Sync toggle in the matching
+panel group):
+- **Visualization (`Pane.sync_tone`, default on).** Follows `shared_contrast`/
+  `shared_tone`/`shared_details`/`shared_overlay`. `contrast_of`/`tone_of`/`details_of`/
+  `overlay_of` return the effective value (shared when synced), read by
+  `stage`/`prepare_overlay`/`export_pane`/`view_command`. `set_sync_tone(false)`
+  snapshots the shared tone/overlay in so nothing jumps.
+- **Geometry (`Pane.sync_geometry`, default on).** Follows `shared_rotation` only.
+  `rotation_of` returns the effective angle; `set_rotation` writes shared-or-own by it.
+  `set_sync_geometry(false)` snapshots the shared angle in.
+Editing a synced pane writes the shared set, and every synced pane re-renders on its
+own because its effective `tone_sig` changed (no texture nulling — see above). The
+first opened media seeds the shared set (`add_pane`); a replayed `--tone`/`--detail`
+is per-pane so it unsyncs Visualization, `--rotate` unsyncs Geometry, then `--tsync`
+(Visualization) / `--gsync` (Geometry) re-sync (`apply_view_state`).
 
 **Overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }` — **any
 single-channel media** (a boolean mask **or** a grayscale image/sequence) tinted over
 it. The source list (`overlay_source_size`, single-channel resident frame, excluding
-the pane itself) is offered in the popup's **Overlay** row. The spec is **config only**
-so it rides the Transformations sync; the tinted texture is cached separately per pane in
+the pane itself) is offered in the panel's **Overlay** row. The spec is **config only**
+so it rides the Visualization sync; the tinted texture is cached separately per pane in
 `overlay_tex`. `prepare_overlay` builds it from the source's shown frame (decoded on
 demand, so it works even when the source pane isn't drawn) and returns `None` on a mask
 pane itself; a **boolean mask** tints where true (`render_mask_rgba`), any **other
@@ -694,11 +709,11 @@ it. **"compute LUT from region"** pins every pane's tone to the region (§7); a 
 corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
 are **primary-button-only** so the right-drag isn't stolen.
 
-**Pane rotation (Alt + drag / Transformations slider).** Each pane carries a
-`rotation` (degrees, -180..180) that **rides the Transformations sync** like tone /
-details / overlay: `rotation_of(i)` returns the shared angle (`shared_rotation`) when the
-pane is tone-synced, else its own, and `set_rotation(i, °)` writes whichever applies — so
-editing one synced pane turns them all. **Alt + primary-drag** on a pane spins it to
+**Pane rotation (Alt + drag / Transformations panel Geometry slider).** Each pane
+carries a `rotation` (degrees, -180..180) that **rides the Geometry sync**
+(`sync_geometry`, independent of the Visualization/tone sync): `rotation_of(i)` returns
+the shared angle (`shared_rotation`) when the pane is geometry-synced, else its own, and
+`set_rotation(i, °)` writes whichever applies — so editing one synced pane turns them all. **Alt + primary-drag** on a pane spins it to
 follow the cursor's angle about the image centre (Photoshop-style, `rotate_drag` holding
 the grab pivot + start angle), **snapped to the nearest degree**; the Transformations popup
 also has a **Rotate** control: a **1°-step** drag bar plus a **typeable angle** field
@@ -894,8 +909,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
   at each pane's depth default), `--share-clip` (per-pane `1`/`0` — lock the pane's bounds
   to the Control media's), `--detail` (per-pane `1`/`0`),
-  `--show` (per-pane visibility), `--tsync` (per-pane Transformations-sync),
-  `--rotate` (per-pane display rotation in degrees, `-180..180`), `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
+  `--show` (per-pane visibility), `--tsync` (per-pane Visualization-sync),
+  `--gsync` (per-pane Geometry-sync — rotation), `--rotate` (per-pane display rotation
+  in degrees, `-180..180`), `--loop LO,HI`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
   button and a global **Ctrl+Shift+C** shortcut both route through `copy_view_command`
   (egui's `ctx.copy_text`, so it goes via eframe's clipboard backend on every platform).

@@ -44,7 +44,6 @@ use export_ui::ExportRun;
 const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
-const MODIFY_W: f32 = 108.0; // width of the header "Transformations" button
 /// Hairline that separates a floating chrome bar (pane header/footer, global
 /// toolbar / frame bar) from the image it overlays — the panels used to draw
 /// their own separators; the overlays paint this instead.
@@ -507,22 +506,24 @@ struct Pane {
     frame: usize,             // used only when !sync_temporal
     sync_spatial: bool,
     sync_temporal: bool,
-    /// Follow the shared "Transformations" (tone + options + details) instead of
-    /// this pane's own — synced across selected rows in the media manager.
+    /// Follow the shared **Visualization** Transformations (tone + options +
+    /// details + overlay) instead of this pane's own — the "Visualization" sync
+    /// group (media manager / Transformations panel).
     sync_tone: bool,
+    /// Follow the shared **Geometry** Transformations (rotation) — the separate
+    /// "Geometry" sync group, independent of `sync_tone`.
+    sync_geometry: bool,
     visible: bool,
     /// Per-pane tone-mapping mode (Linear or proprietary LUT_ALPHA).
     contrast: ContrastMode,
     /// Per-mode tone options (clip percentile, LUT_ALPHA knobs, …), edited in
-    /// the pane's "Modify" popup.
+    /// the Transformations panel.
     tone: ToneOptions,
-    /// The "Modify" options popup is open for this pane.
-    show_opts: bool,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
     /// Display rotation in **degrees** (-180..180), about the image centre.
     /// Applied at draw time (the texture stays unrotated) and to the export;
-    /// per-pane, independent of the Transformations sync.
+    /// rides the Geometry sync (`sync_geometry`).
     rotation: f32,
     /// Optional boolean-mask overlay drawn on top of this pane (config only;
     /// shared across synced panes via `overlay_of`).
@@ -608,13 +609,14 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
-    /// Shared "Transformations" (tone mode + options + details) that every pane
-    /// with `sync_tone` follows, so editing one synced pane's Transformations
-    /// popup updates them all.
+    /// Shared **Visualization** Transformations (tone mode + options + details)
+    /// that every `sync_tone` pane follows, so editing one synced pane updates
+    /// them all.
     shared_contrast: ContrastMode,
     shared_tone: ToneOptions,
     shared_details: bool,
-    /// Shared display rotation in degrees (rides the same `sync_tone`).
+    /// Shared display rotation in degrees — the **Geometry** sync group
+    /// (`sync_geometry`), independent of the Visualization sync.
     shared_rotation: f32,
     /// Shared mask overlay (rides the same `sync_tone` as the tone).
     shared_overlay: Option<OverlaySpec>,
@@ -646,6 +648,9 @@ pub struct CimApp {
 
     show_settings: bool,
     show_manager: bool,
+    /// The single global **Transformations** panel (toolbar button / `V`): its
+    /// contents track the currently selected pane (`current`).
+    show_transform: bool,
     /// The "View command" window: shows a `cim …` line that reopens the current
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
@@ -894,6 +899,7 @@ impl CimApp {
             playback: Playback::default(),
             show_settings: false,
             show_manager: false,
+            show_transform: false,
             show_viewcmd: false,
             rebinding: None,
             pending_recompute: None,
@@ -1050,10 +1056,10 @@ impl CimApp {
         }
     }
 
-    /// Effective display rotation (degrees) — the shared angle when tone-synced,
-    /// else the pane's own.
+    /// Effective display rotation (degrees) — the shared angle when
+    /// geometry-synced, else the pane's own.
     pub(super) fn rotation_of(&self, i: usize) -> f32 {
-        if self.panes[i].sync_tone {
+        if self.panes[i].sync_geometry {
             self.shared_rotation
         } else {
             self.panes[i].rotation
@@ -1061,9 +1067,9 @@ impl CimApp {
     }
 
     /// Set pane `i`'s effective rotation (degrees): writes the shared angle when
-    /// tone-synced (so every synced pane turns together), else the pane's own.
+    /// geometry-synced (so every synced pane turns together), else the pane's own.
     pub(super) fn set_rotation(&mut self, i: usize, deg: f32) {
-        if self.panes[i].sync_tone {
+        if self.panes[i].sync_geometry {
             self.shared_rotation = deg;
         } else {
             self.panes[i].rotation = deg;
@@ -1138,9 +1144,9 @@ impl CimApp {
         });
     }
 
-    /// Set a pane's tone-sync flag. Turning it **off** snapshots the shared
-    /// Transformations (tone + overlay) into the pane so nothing jumps; either
-    /// way the pane re-renders.
+    /// Set a pane's **Visualization** sync flag. Turning it **off** snapshots the
+    /// shared tone + overlay into the pane so nothing jumps; either way the pane
+    /// re-renders. (Rotation rides `sync_geometry`, handled by `set_sync_geometry`.)
     pub(super) fn set_sync_tone(&mut self, i: usize, on: bool) {
         if self.panes[i].sync_tone == on {
             return;
@@ -1149,7 +1155,6 @@ impl CimApp {
             self.panes[i].contrast = self.shared_contrast;
             self.panes[i].tone = self.shared_tone;
             self.panes[i].details = self.shared_details;
-            self.panes[i].rotation = self.shared_rotation;
             self.panes[i].overlay = self.shared_overlay;
         }
         self.panes[i].sync_tone = on;
@@ -1157,6 +1162,19 @@ impl CimApp {
         // holding its last committed `tex`; nulling it would flash black for a
         // heavy LUT_ALPHA/details render. Only the tinted overlay is dropped.
         self.panes[i].overlay_tex = None;
+    }
+
+    /// Set a pane's **Geometry** sync flag. Turning it **off** snapshots the
+    /// shared rotation into the pane so nothing jumps. Rotation is applied at
+    /// draw time, so no texture to invalidate.
+    pub(super) fn set_sync_geometry(&mut self, i: usize, on: bool) {
+        if self.panes[i].sync_geometry == on {
+            return;
+        }
+        if !on {
+            self.panes[i].rotation = self.shared_rotation;
+        }
+        self.panes[i].sync_geometry = on;
     }
 
     /// The pane that drives the shared timeline / loop: the **Control** pane
@@ -1727,6 +1745,9 @@ impl eframe::App for CimApp {
 
         if self.show_manager {
             self.draw_manager(ctx);
+        }
+        if self.show_transform {
+            self.draw_transform_panel(ctx);
         }
         // The Line profile tab shows only while a line exists; drawing one opens
         // it, clearing it (or "Clear line") closes it.

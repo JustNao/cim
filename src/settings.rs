@@ -88,7 +88,7 @@ impl Action {
             Action::OpenFiles => "Open files…".into(),
             Action::ToggleSettings => "Toggle settings".into(),
             Action::ToggleManager => "Toggle media manager".into(),
-            Action::ToggleVis => "Toggle Transformations popup (focused pane)".into(),
+            Action::ToggleVis => "Toggle Transformations panel".into(),
             Action::ToggleExport => "Toggle export panel".into(),
             Action::OpenCompute => "Add a Compute pane".into(),
             Action::PlayPause => "Play / pause sequences".into(),

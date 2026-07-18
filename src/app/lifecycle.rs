@@ -84,30 +84,42 @@ impl CimApp {
                 p.sync_tone = false;
             }
         }
-        // Per-pane rotation. Like --tone/--detail these are per-pane, so unsync
-        // the panes they set (otherwise a synced pane would ignore its own angle
-        // and follow the shared one); the following --tsync re-syncs and re-seeds.
+        // Per-pane rotation. Rotation rides the *Geometry* sync, so unsync the
+        // panes it sets (otherwise a synced pane would ignore its own angle and
+        // follow the shared one); the following --gsync re-syncs and re-seeds.
         if let Some(rots) = &vs.rotations {
             for (p, &r) in self.panes.iter_mut().zip(rots) {
                 p.rotation = wrap180(r);
-                p.sync_tone = false;
+                p.sync_geometry = false;
             }
         }
-        // Transformations sync flags, applied *after* per-pane tone/detail/rotation
-        // (which unsync the panes they set). Re-seed the shared set from the first
-        // synced pane so panes that follow it show the captured look.
+        // Visualization sync flags (`--tsync`), applied *after* the per-pane
+        // tone/detail flags (which unsync the panes they set). Re-seed the shared
+        // set from the first synced pane so panes that follow it show the look.
         if let Some(sync) = &vs.tsync {
             if let Some(k) = sync.iter().position(|&s| s) {
                 if let Some(p) = self.panes.get(k) {
                     self.shared_contrast = p.contrast;
                     self.shared_tone = p.tone;
                     self.shared_details = p.details;
-                    self.shared_rotation = p.rotation;
                 }
             }
             for (p, &s) in self.panes.iter_mut().zip(sync) {
                 p.sync_tone = s;
                 // Effective tone changed → re-renders via `tone_sig`; no nulling.
+            }
+        }
+        // Geometry sync flags (`--gsync`), applied *after* --rotate (which unsyncs
+        // the panes it sets). Re-seed the shared rotation from the first synced
+        // pane so panes that follow it show the captured angle.
+        if let Some(sync) = &vs.gsync {
+            if let Some(k) = sync.iter().position(|&s| s) {
+                if let Some(p) = self.panes.get(k) {
+                    self.shared_rotation = p.rotation;
+                }
+            }
+            for (p, &s) in self.panes.iter_mut().zip(sync) {
+                p.sync_geometry = s;
             }
         }
         if let Some(vis) = &vs.visible {
@@ -260,6 +272,9 @@ impl CimApp {
                 per_pane_transform = true;
             }
             // Per-pane effective rotation — omit when every pane is unrotated.
+            // Rotation rides the *Geometry* sync, so it forces `--gsync` (below),
+            // not `--tsync`.
+            let mut per_pane_geometry = false;
             if (0..n).any(|i| self.rotation_of(i) != 0.0) {
                 let rots: Vec<String> = (0..n)
                     .map(|i| {
@@ -268,7 +283,7 @@ impl CimApp {
                     })
                     .collect();
                 parts.push(format!("--rotate {}", rots.join(",")));
-                per_pane_transform = true;
+                per_pane_geometry = true;
             }
             // Visibility — omit when all visible (the default).
             if self.panes.iter().any(|p| !p.visible) {
@@ -279,9 +294,20 @@ impl CimApp {
                     .collect();
                 parts.push(format!("--show {}", show.join(",")));
             }
-            // Transformations-sync. Emit when any pane is unsynced *or* any of the
-            // per-pane transform flags above was emitted (they unsync on replay, so
-            // an all-synced session needs `--tsync 1,1,…` to re-sync — otherwise it
+            // Geometry-sync. Emit when any pane is unsynced *or* `--rotate` was
+            // emitted (it unsyncs geometry on replay, so an all-synced session
+            // needs `--gsync 1,1,…` to re-sync).
+            if self.panes.iter().any(|p| !p.sync_geometry) || per_pane_geometry {
+                let gs: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.sync_geometry { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--gsync {}", gs.join(",")));
+            }
+            // Visualization-sync. Emit when any pane is unsynced *or* any of the
+            // per-pane tone flags above was emitted (they unsync on replay, so an
+            // all-synced session needs `--tsync 1,1,…` to re-sync — otherwise it
             // would come back unsynced).
             if self.panes.iter().any(|p| !p.sync_tone) || per_pane_transform {
                 let ts: Vec<&str> = self
@@ -460,10 +486,10 @@ impl CimApp {
             sync_spatial: true,
             sync_temporal: true,
             sync_tone: true,
+            sync_geometry: true,
             visible: true,
             contrast,
             tone,
-            show_opts: false,
             details: false,
             rotation: 0.0,
             overlay: None,

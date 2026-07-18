@@ -57,6 +57,16 @@ impl CimApp {
                 self.show_manager = !self.show_manager;
             }
             if ui
+                .selectable_label(self.show_transform, "Transformations")
+                .on_hover_text(self.hover_for(
+                    Action::ToggleVis,
+                    "Tone / details / overlay / rotation for the selected pane",
+                ))
+                .clicked()
+            {
+                self.show_transform = !self.show_transform;
+            }
+            if ui
                 .selectable_label(false, "Compute")
                 .on_hover_text(
                     self.hover_for(Action::OpenCompute, "Add a Compute pane (mean / std / diff of other media)"),
@@ -614,6 +624,7 @@ impl CimApp {
         let shared_tone = self.shared_tone;
         let shared_details = self.shared_details;
         let shared_rotation = self.shared_rotation;
+        let shared_overlay = self.shared_overlay;
 
         // Row drag-to-reorder: rows collects each media row's (vec index, screen
         // y-band) so a drop can be mapped to a target; do_move carries the
@@ -652,8 +663,8 @@ impl CimApp {
                             ui.label("A / B");
                             ui.label("Synchronize")
                                 .on_hover_text(
-                                    "Pos / Time / Transformations sync (Transformations shares the \
-                                     per-pane Transformations popup) and the timeline Control",
+                                    "Pos / Time / Visualization (tone·details·overlay) / Geometry \
+                                     (rotation) sync, and the timeline Control",
                                 );
                             ui.label("");
                             ui.end_row();
@@ -696,12 +707,12 @@ impl CimApp {
                                             p.sync_temporal = all_time;
                                         }
                                     }
-                                    // Transformations sync: share the per-pane
-                                    // Transformations popup across all panes.
+                                    // Visualization sync: share tone / details /
+                                    // overlay across all panes.
                                     let mut all_ts = self.panes.iter().all(|p| p.sync_tone);
                                     if ui
-                                        .checkbox(&mut all_ts, "Transformations")
-                                        .on_hover_text("Synchronize the Transformations popup across all panes")
+                                        .checkbox(&mut all_ts, "Visu")
+                                        .on_hover_text("Synchronize the Visualization Transformations (tone·details·overlay) across all panes")
                                         .changed()
                                     {
                                         for p in &mut self.panes {
@@ -712,10 +723,27 @@ impl CimApp {
                                                 p.contrast = shared_contrast;
                                                 p.tone = shared_tone;
                                                 p.details = shared_details;
-                                                p.rotation = shared_rotation;
+                                                p.overlay = shared_overlay;
                                             }
                                             p.sync_tone = all_ts;
                                             p.overlay_tex = None; // tone re-renders via tone_sig
+                                        }
+                                    }
+                                    // Geometry sync: share rotation across all panes.
+                                    let mut all_geom = self.panes.iter().all(|p| p.sync_geometry);
+                                    if ui
+                                        .checkbox(&mut all_geom, "Geom")
+                                        .on_hover_text("Synchronize the Geometry Transformations (rotation) across all panes")
+                                        .changed()
+                                    {
+                                        for p in &mut self.panes {
+                                            if p.sync_geometry == all_geom {
+                                                continue;
+                                            }
+                                            if !all_geom {
+                                                p.rotation = shared_rotation;
+                                            }
+                                            p.sync_geometry = all_geom;
                                         }
                                     }
                                 });
@@ -804,18 +832,28 @@ impl CimApp {
                                         }
                                         self.panes[i].sync_temporal = st;
                                     }
-                                    // Transformations sync: this pane follows the
-                                    // shared Transformations (edited in any synced
-                                    // pane's popup). Toggling off keeps its look.
+                                    // Visualization sync: this pane follows the
+                                    // shared tone / details / overlay. Toggling off
+                                    // keeps its look.
                                     let mut ts = self.panes[i].sync_tone;
                                     if ui
-                                        .checkbox(&mut ts, "Transformations")
+                                        .checkbox(&mut ts, "Visu")
                                         .on_hover_text(
-                                            "Synchronize the Transformations popup with other Transf panes",
+                                            "Synchronize the Visualization Transformations (tone·details·overlay)",
                                         )
                                         .changed()
                                     {
                                         self.set_sync_tone(i, ts);
+                                    }
+                                    // Geometry sync: this pane follows the shared
+                                    // rotation. Toggling off keeps its angle.
+                                    let mut gs = self.panes[i].sync_geometry;
+                                    if ui
+                                        .checkbox(&mut gs, "Geom")
+                                        .on_hover_text("Synchronize the Geometry Transformations (rotation)")
+                                        .changed()
+                                    {
+                                        self.set_sync_geometry(i, gs);
                                     }
                                     // The Control pane is the shared clip-bounds
                                     // source (any media) and, when it's a sequence,
@@ -951,19 +989,26 @@ impl CimApp {
                 format!("{v:.4}")
             }
         };
-        ui.columns(3, |cols| {
-            cols[0].monospace(format!("min {}", fmt(data.min)));
-            if let Some(pv) = peak_val {
-                cols[1].vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("peak {}", fmt(pv)))
-                            .monospace()
-                            .color(Color32::from_rgb(240, 200, 80)),
-                    );
+        // Bound this row to one text line: `ui.columns` passes the full available
+        // height down to its children, and the centered layouts below would grab it
+        // — in a `scroll(false)` window (unbounded height) that inflates the content
+        // and pins the window to its maximum height. `allocate_ui` caps it.
+        let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+        ui.allocate_ui(Vec2::new(ui.available_width(), row_h), |ui| {
+            ui.columns(3, |cols| {
+                cols[0].monospace(format!("min {}", fmt(data.min)));
+                if let Some(pv) = peak_val {
+                    cols[1].vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("peak {}", fmt(pv)))
+                                .monospace()
+                                .color(Color32::from_rgb(240, 200, 80)),
+                        );
+                    });
+                }
+                cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(format!("max {}", fmt(data.max)));
                 });
-            }
-            cols[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.monospace(format!("max {}", fmt(data.max)));
             });
         });
     }

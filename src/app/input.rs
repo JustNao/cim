@@ -86,11 +86,9 @@ impl CimApp {
             Action::ToggleSettings => self.show_settings = !self.show_settings,
             Action::ToggleManager => self.show_manager = !self.show_manager,
             Action::ToggleVis => {
-                // The Visualise window folded into the per-pane Transformations
-                // popup; this now toggles it for the focused pane.
-                if let Some(p) = self.panes.get_mut(self.current) {
-                    p.show_opts = !p.show_opts;
-                }
+                // The single global Transformations panel (its contents track the
+                // selected pane).
+                self.show_transform = !self.show_transform;
             }
             Action::ToggleExport => self.toggle_export(),
             Action::OpenCompute => self.deferred.push(Deferred::CreateCompute),

@@ -335,13 +335,11 @@ impl CimApp {
         }
 
         // The header and footer bars, floating over the image's top/bottom
-        // strips. All chrome hides together (`Action::ToggleChrome`) — including
-        // the Transformations popup, whose open state survives the round trip.
+        // strips. All chrome hides together (`Action::ToggleChrome`). The
+        // Transformations controls are a single global panel (toolbar), not a
+        // per-pane popup, so nothing pane-anchored is drawn here.
         if self.show_chrome {
             self.draw_header(ui, idx, header_strip);
-            if self.panes[idx].show_opts {
-                self.draw_options_popup(ctx, idx, cell, header_strip.max.y);
-            }
             self.draw_footer(ui, idx, footer_strip);
         }
 

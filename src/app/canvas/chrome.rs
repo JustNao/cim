@@ -1,6 +1,6 @@
-//! Per-pane chrome: the header row (Transformations, auto-reload, reload,
-//! hide, close), the footer readout (size / format / cursor value), the
-//! centred error text, and the shared-cursor dot.
+//! Per-pane chrome: the header row (title, auto-reload, reload, hide, close),
+//! the footer readout (size / format / cursor value), the centred error text,
+//! and the shared-cursor dot.
 
 use crate::app::*;
 
@@ -18,34 +18,8 @@ impl CimApp {
             },
         );
 
-        // "Transformations" button on the LEFT of row 1 (away from the close ×
-        // so it's hard to mis-click), toggling this pane's options popup.
-        let modify = Rect::from_min_size(header.min, Vec2::new(MODIFY_W, HEADER_H));
-        let mod_resp = ui
-            .interact(modify, Id::new(("modify", idx)), Sense::click())
-            .on_hover_text(self.hover_for(Action::ToggleVis, ""));
-        let open = self.panes[idx].show_opts;
-        hp.rect_filled(
-            modify,
-            0.0,
-            if open {
-                Color32::from_rgb(70, 110, 160)
-            } else if mod_resp.hovered() {
-                Color32::from_gray(70)
-            } else {
-                Color32::from_gray(52)
-            },
-        );
-        hp.text(
-            modify.center(),
-            Align2::CENTER_CENTER,
-            "Transformations",
-            FontId::proportional(12.0),
-            Color32::from_gray(225),
-        );
-        if mod_resp.clicked() {
-            self.panes[idx].show_opts = !open;
-        }
+        // (The Transformations controls now live in the single global panel on the
+        // toolbar, so the header no longer carries a per-pane button.)
 
         // "Reload", "Hide" and "Close" buttons at the top-right (matching styles).
         // Reload re-reads from disk; Hide sets visible = false (keeps the pane);
@@ -108,10 +82,10 @@ impl CimApp {
             (format!("{idx_str}  {name}"), idx_str.clone())
         };
 
-        // Title after the Transformations button, up to the Hide button. When the
-        // full title (with the filename) doesn't fit that span, fall back to the
-        // name-less form so the index/frame info stays readable in small cells.
-        let title_x = header.min.x + MODIFY_W + 8.0;
+        // Title from the left edge, up to the Hide button. When the full title
+        // (with the filename) doesn't fit that span, fall back to the name-less
+        // form so the index/frame info stays readable in small cells.
+        let title_x = header.min.x + 8.0;
         let title_right = header.max.x - close_w - hide_w - reload_w - watch_w - 6.0;
         let font = FontId::proportional(13.0);
         let fits = |ui: &egui::Ui, s: &str| {
