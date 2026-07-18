@@ -61,6 +61,28 @@ const BAR_FILL: Color32 = Color32::from_gray(30);
 /// and the export-crop fill. Change this one value to retint all of them.
 const ACCENT: Color32 = Color32::from_rgb(56, 104, 162);
 
+/// The **hover** fill shared by every button: egui's toolbar / frame-bar /
+/// panel buttons (via `visuals.widgets.hovered`, set in `new`) and the
+/// hand-painted per-pane header buttons (Reload / Auto-reload / Hide / Close).
+/// Matches egui's default dark hover, so wiring it in is a no-op today — but it
+/// makes the one value the source of truth. `ACCENT` is the *activated* button
+/// fill (a toggle that's on); this is the transient on-hover fill.
+const BUTTON_HOVER_FILL: Color32 = Color32::from_gray(70);
+
+/// The four shared **text** tones, the foreground counterpart to `BAR_FILL` /
+/// `ACCENT`. Wired into `visuals.widgets.*.fg_stroke` and `selection.stroke`
+/// in `new`, so every egui label/button picks them up, and reused by the
+/// hand-painted chrome (pane header/footer titles, per-pane buttons) so all
+/// text shares one set. Change one value to retint that state everywhere.
+///
+/// `TEXT_DEFAULT` — plain readouts and labels (pane titles, footers, A/B tags).
+/// `TEXT_BUTTON` — a button/label at rest. `TEXT_BUTTON_HOVER` — hovered or
+/// pressed. `TEXT_BUTTON_ACTIVE` — a toggle that's on / a selected tab.
+const TEXT_DEFAULT: Color32 = Color32::from_gray(220);
+const TEXT_BUTTON: Color32 = TEXT_DEFAULT;
+const TEXT_BUTTON_HOVER: Color32 = Color32::from_gray(235);
+const TEXT_BUTTON_ACTIVE: Color32 = Color32::from_gray(230);
+
 /// How often to repaint while background decodes are pending (and we're not
 /// playing or exporting): often enough to pick up landed frames and keep the
 /// loading spinner turning, but far below monitor rate so we don't busy-spin —
@@ -846,6 +868,18 @@ impl CimApp {
         // all bars share one gray and every "activated" widget shares one blue.
         style.visuals.panel_fill = BAR_FILL;
         style.visuals.selection.bg_fill = ACCENT;
+        // Point every text state at the shared tones (the foreground counterpart
+        // to the fills above): plain labels use `noninteractive`, a button at rest
+        // uses `inactive`, hover/press use `hovered`/`active`, and a selected tab
+        // (selectable_label) takes `selection.stroke`. One place to retint text.
+        style.visuals.widgets.noninteractive.fg_stroke.color = TEXT_DEFAULT;
+        style.visuals.widgets.inactive.fg_stroke.color = TEXT_BUTTON;
+        style.visuals.widgets.hovered.fg_stroke.color = TEXT_BUTTON_HOVER;
+        style.visuals.widgets.active.fg_stroke.color = TEXT_BUTTON_HOVER;
+        style.visuals.selection.stroke.color = TEXT_BUTTON_ACTIVE;
+        // The on-hover button fill, shared with the hand-painted header buttons.
+        style.visuals.widgets.hovered.weak_bg_fill = BUTTON_HOVER_FILL;
+        style.visuals.widgets.hovered.bg_fill = BUTTON_HOVER_FILL;
         // Square corners everywhere: windows, menus, and every widget state.
         let sq = egui::Rounding::ZERO;
         style.visuals.window_rounding = sq;

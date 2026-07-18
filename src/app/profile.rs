@@ -144,7 +144,7 @@ impl CimApp {
 
         let grid = Color32::from_gray(40);
         let axis_col = Color32::from_gray(150);
-        let font = FontId::monospace(9.0);
+        let font = FontId::proportional(9.0);
 
         // Y ticks (values) — gridlines + right-aligned labels in the left margin.
         for v in nice_ticks(ymin, ymax, 6) {

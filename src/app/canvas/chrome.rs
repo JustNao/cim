@@ -106,7 +106,7 @@ impl CimApp {
             Align2::LEFT_CENTER,
             title,
             font,
-            Color32::from_gray(220),
+            TEXT_DEFAULT,
         );
 
         // A hover tooltip on the title reports the absolute path of the file the
@@ -151,7 +151,7 @@ impl CimApp {
             .interact(reload, Id::new(("reload", idx)), Sense::click())
             .on_hover_text(self.hover_for(Action::ReloadMedia, "Reload this media from disk"));
         if reload_resp.hovered() {
-            hp.rect_filled(reload, 0.0, Color32::from_gray(70));
+            hp.rect_filled(reload, 0.0, BUTTON_HOVER_FILL);
         }
         hp.text(
             reload.center(),
@@ -159,9 +159,9 @@ impl CimApp {
             "Reload",
             FontId::proportional(12.0),
             if reload_resp.hovered() {
-                Color32::from_gray(235)
+                TEXT_BUTTON_HOVER
             } else {
-                Color32::from_gray(170)
+                TEXT_BUTTON
             },
         );
         if reload_resp.clicked() {
@@ -187,7 +187,7 @@ impl CimApp {
             if watching {
                 hp.rect_filled(watch, 0.0, ACCENT);
             } else if watch_resp.hovered() {
-                hp.rect_filled(watch, 0.0, Color32::from_gray(70));
+                hp.rect_filled(watch, 0.0, BUTTON_HOVER_FILL);
             }
             hp.text(
                 watch.center(),
@@ -195,11 +195,11 @@ impl CimApp {
                 "Auto-reload",
                 FontId::proportional(12.0),
                 if watching {
-                    Color32::from_gray(230)
+                    TEXT_BUTTON_ACTIVE
                 } else if watch_resp.hovered() {
-                    Color32::from_gray(235)
+                    TEXT_BUTTON_HOVER
                 } else {
-                    Color32::from_gray(170)
+                    TEXT_BUTTON
                 },
             );
             if watch_resp.clicked() {
@@ -220,7 +220,7 @@ impl CimApp {
             .interact(hide, Id::new(("hide", idx)), Sense::click())
             .on_hover_text(self.hover_for(Action::HideMedia, ""));
         if hide_resp.hovered() {
-            hp.rect_filled(hide, 0.0, Color32::from_gray(70));
+            hp.rect_filled(hide, 0.0, BUTTON_HOVER_FILL);
         }
         hp.text(
             hide.center(),
@@ -228,9 +228,9 @@ impl CimApp {
             "Hide",
             FontId::proportional(12.0),
             if hide_resp.hovered() {
-                Color32::from_gray(235)
+                TEXT_BUTTON_HOVER
             } else {
-                Color32::from_gray(170)
+                TEXT_BUTTON
             },
         );
         if hide_resp.clicked() {
@@ -240,7 +240,7 @@ impl CimApp {
 
         let close_resp = ui.interact(close, Id::new(("close", idx)), Sense::click());
         if close_resp.hovered() {
-            hp.rect_filled(close, 0.0, Color32::from_gray(70));
+            hp.rect_filled(close, 0.0, BUTTON_HOVER_FILL);
         }
         hp.text(
             close.center(),
@@ -251,7 +251,7 @@ impl CimApp {
             if close_resp.hovered() {
                 Color32::from_rgb(230, 120, 120)
             } else {
-                Color32::from_gray(170)
+                TEXT_BUTTON
             },
         );
         if close_resp.clicked() {
@@ -311,7 +311,10 @@ impl CimApp {
         if let Some(ci) = self.cursor_img {
             let (x, y) = (ci.x.floor() as i64, ci.y.floor() as i64);
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                text = format!("{dims}    x {x}  y {y}    {}", self.value_string(idx, ci));
+                text = format!(
+                    "{dims}    row={y}  col={x}    {}",
+                    self.value_string(idx, ci)
+                );
             }
         }
 
@@ -319,8 +322,14 @@ impl CimApp {
             footer.left_center() + Vec2::new(8.0, 0.0),
             Align2::LEFT_CENTER,
             text,
-            FontId::monospace(12.0),
-            Color32::from_gray(200),
+            FontId::proportional(12.0),
+            TEXT_DEFAULT,
+        );
+
+        fp.hline(
+            footer.x_range(),
+            footer.max.y - 0.5,
+            Stroke::new(1.0_f32, CHROME_BORDER),
         );
     }
 

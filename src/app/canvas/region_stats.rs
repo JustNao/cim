@@ -193,7 +193,7 @@ impl CimApp {
 
         // Min / max labelled at the histogram's two ends, and the peak (mode)
         // value centred under it in the tick's amber (mono histograms only).
-        let axis_font = FontId::monospace(9.0);
+        let axis_font = FontId::proportional(9.0);
         let axis_col = Color32::from_gray(170);
         painter.text(
             Pos2::new(hist_rect.left(), hist_rect.bottom() + 2.0),
@@ -226,8 +226,8 @@ impl CimApp {
                 Pos2::new(panel.left() + pad, y),
                 Align2::LEFT_TOP,
                 row,
-                FontId::monospace(10.0),
-                Color32::from_gray(220),
+                FontId::proportional(10.0),
+                TEXT_DEFAULT,
             );
             y += line_h;
         }

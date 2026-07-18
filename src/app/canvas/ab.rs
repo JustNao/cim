@@ -184,7 +184,7 @@ impl CimApp {
             anchor.1,
             tag,
             FontId::proportional(13.0),
-            Color32::from_gray(230),
+            TEXT_DEFAULT,
         );
     }
 
@@ -214,8 +214,8 @@ impl CimApp {
             footer.left_center() + Vec2::new(8.0, 0.0),
             Align2::LEFT_CENTER,
             text,
-            FontId::monospace(12.0),
-            Color32::from_gray(200),
+            FontId::proportional(12.0),
+            TEXT_DEFAULT,
         );
     }
 }
