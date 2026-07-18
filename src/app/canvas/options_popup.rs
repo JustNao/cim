@@ -23,6 +23,8 @@ impl CimApp {
         if self.panes.is_empty() {
             egui::Window::new("Transformations")
                 .open(&mut open)
+                .default_pos(ctx.screen_rect().center())
+                .pivot(egui::Align2::CENTER_CENTER)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("No media open.");
@@ -86,6 +88,10 @@ impl CimApp {
 
         egui::Window::new("Transformations")
             .open(&mut open)
+            // Centered on first appearance each run (position then sticks for the
+            // session; not persisted across runs — see `persist_egui_memory`).
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             // `scroll(false)` + `resizable([true, false])` lets the window **shrink**
             // its height to the content — so collapsing a group actually makes the
             // panel shorter (the default Window scroll area would hold it open).

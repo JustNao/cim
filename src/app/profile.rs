@@ -53,6 +53,8 @@ impl CimApp {
     pub(super) fn draw_profile(&mut self, ctx: &egui::Context) {
         let Some(lp) = self.line_profile else { return };
         egui::Window::new("📈 Line profile")
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(560.0)
             .default_height(420.0)

@@ -623,6 +623,8 @@ impl CimApp {
 
         egui::Window::new("Export comparison")
             .open(&mut open)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(360.0)
             .show(ctx, |ui| {

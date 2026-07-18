@@ -1665,6 +1665,13 @@ impl CimApp {
 }
 
 impl eframe::App for CimApp {
+    /// Don't persist egui memory across runs: every launch starts from defaults
+    /// (panels centered, groups at their default open/closed state), while moves
+    /// still stick for the life of the process. Reopening resets to the defaults.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Whole-update CPU cost (CIM_DEBUG profiler); recorded at the end.
         let frame_start = crate::debug::enabled().then(std::time::Instant::now);

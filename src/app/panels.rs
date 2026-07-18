@@ -523,6 +523,8 @@ impl CimApp {
         let cmd = self.view_command();
         egui::Window::new("View command")
             .open(&mut open)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(560.0)
             .show(ctx, |ui| {
@@ -555,6 +557,8 @@ impl CimApp {
         let mut open = self.show_debug;
         egui::Window::new("Debug — pipeline timing")
             .open(&mut open)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
@@ -634,6 +638,8 @@ impl CimApp {
 
         egui::Window::new("☰ Media")
             .open(&mut open)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             // Width stays user-resizable, but let the height auto-size so the
             // window grows to include every media row (the inner ScrollArea only
             // kicks in once the list is taller than the screen).
@@ -1017,6 +1023,8 @@ impl CimApp {
         let mut open = self.show_settings;
         egui::Window::new("⚙ Settings")
             .open(&mut open)
+            .default_pos(ctx.screen_rect().center())
+            .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
