@@ -619,6 +619,13 @@ The header is a **single row** (`header_h_for`): the title on the left, then the
 **Auto-reload** toggle, **Reload** (re-reads this media from disk → `pending_reload`),
 **Hide** (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on
 the right, matching styles (Close tints red on hover to flag that it removes the pane).
+**Reload keeps the current frame:** the shown index is captured before the swap, then
+the fresh media (which starts length 1) is jumped back to it — a direct `media::fast_jump`
+(validate + decode the frame at its predicted offset, growing the known length through it
+in one step) when the layout is regular, else `seek_to` rides the frontier back with
+metadata-only probes (an unsynced pane sets its own `frame`; a synced loop driver
+re-`seek_to`s the shared timeline; other synced panes follow `shared_frame` via
+`catching_up`).
 (The Transformations controls are the global toolbar panel, not a per-pane header
 button.)
 

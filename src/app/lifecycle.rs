@@ -543,8 +543,9 @@ impl CimApp {
     }
 
     /// Re-open a pane's file from disk, picking up external changes while
-    /// keeping its current frame. Files are opened read-only with shared access,
-    /// so a persistent reader never blocks another program from writing them.
+    /// keeping its current frame (via a fastscan offset jump, else riding the
+    /// frontier). Files are opened read-only with shared access, so a persistent
+    /// reader never blocks another program from writing them.
     pub(super) fn reload(&mut self, i: usize) {
         if i >= self.panes.len() {
             return;
@@ -554,6 +555,9 @@ impl CimApp {
             self.recompute_pane(i);
             return;
         }
+        // The frame the user is viewing, captured before the media is swapped so
+        // we can land back on it below (the fresh media starts length 1).
+        let target = self.frame_disp(i);
         let loaded = match &self.panes[i].source {
             Source::File(p) => media::load(p),
             Source::Sequence { token, files } => media::load_sequence(files, token.clone()),
@@ -586,8 +590,33 @@ impl CimApp {
                         p.overlay_tex = None;
                     }
                 }
-                // Frame position is left untouched; frame_disp clamps it if the
-                // reloaded file is shorter.
+                // Land back on the frame the user was viewing. The fresh media
+                // only knows its first page, so first try a direct fastscan offset
+                // jump (validate + decode `target` at its predicted position,
+                // growing the known length through it in one step). If the offset
+                // no longer validates (irregular layout, or the file grew/shrank
+                // its stride), fall back below to riding the frontier with
+                // metadata-only probes.
+                if target > 0 {
+                    let clock = self.clock;
+                    if media::fast_jump(&mut self.panes[i].media, target).is_ok() {
+                        self.panes[i].media.touch(target, clock);
+                    }
+                }
+                if self.panes[i].sync_temporal {
+                    // This pane follows the shared timeline. When it drives the
+                    // loop, re-seek it to `target`: instant if the fast jump (or an
+                    // already-known length) covers it, else `seek_to` arms
+                    // `pending_seek` so `drive_seek` walks offsets back to it. A
+                    // synced pane that doesn't drive the loop follows `shared_frame`
+                    // anyway; `catching_up` grows its length to it if needed.
+                    if self.loop_control() == i {
+                        self.seek_to(target);
+                    }
+                } else {
+                    // Unsynced: this pane shows its own frame index directly.
+                    self.panes[i].frame = target;
+                }
                 // Re-baseline any file watch to the freshly-loaded contents so it
                 // doesn't immediately fire again on the change we just picked up.
                 self.panes[i].watch.loaded = Self::source_file_sig(&self.panes[i].source);
