@@ -80,12 +80,23 @@ const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 /// change resets the timer, so a burst of writes reloads once, after it stops.
 const WATCH_DEBOUNCE: f64 = 0.25;
 
-/// Identity of a source's on-disk contents for change detection: a hash of the
-/// file bytes and their total length. Content-based (not mtime-based) so an
-/// in-place, same-size overwrite is detected — mtime is unreliable for that,
-/// especially on Windows, where the last-write time isn't updated while the
-/// writing process keeps the file handle open.
+/// Identity of a source's on-disk contents for change detection: a hash folding
+/// each file's length, mtime, and a small strided **byte sample**, plus the total
+/// length. The byte sample makes an in-place same-size overwrite detectable even
+/// when the mtime doesn't move — e.g. a single multi-page TIFF written via
+/// `mmap`, whose mtime Linux may not bump until the dirty pages flush.
 type FileSig = (u64, u64);
+
+/// Source-file sampling for `source_file_sig`: total bytes read per file each
+/// poll, split into this many evenly-spaced windows. Bounded so a multi-GB TIFF
+/// is only touched a few KiB per poll (never bulk-read/hashed), while still
+/// catching an in-place overwrite the mtime hasn't reflected yet.
+const WATCH_SAMPLE_BYTES: u64 = 64 * 1024;
+const WATCH_SAMPLE_WINDOWS: u64 = 16;
+/// Only sample bytes when the source is at most this many files (the single- or
+/// few-file case). A long numbered run stays on the cheap length+mtime path — its
+/// per-frame files are written normally, so their mtime moves.
+const WATCH_SAMPLE_MAX_FILES: usize = 4;
 
 /// How many frames ahead of the shown one playback pre-decodes for each on-screen
 /// pane (`prefetch_playback`), so it overlaps decode with display instead of

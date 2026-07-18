@@ -624,24 +624,26 @@ button.)
 
 **Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
 Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
-`poll_watches` (run each `update`, before `refresh_textures`) reads the pane's
-source file(s) — `source_file_sig` = a **hash of the file bytes** + total length
-across `Source::File` / `Source::Sequence` — and reloads the pane once a change has
-**settled** (`WATCH_DEBOUNCE`, so a file still being written externally isn't read
-half-finished; each further change re-arms the timer). The signature is
-**content-based, not mtime-based**, on purpose: the common case is a tool
-overwriting an image **in place** with identical dimensions, so neither the byte
-length nor (on Windows, while the writer keeps the file handle open) the mtime moves
-— only the pixels do, and an mtime/size signature would miss it entirely. The
-watched files are single images / stills, page-cache-hot after the first read, so
-hashing them at the poll rate is cheap; only the (heavier) `reload` fires, and only
+`poll_watches` (run each `update`, before `refresh_textures`) signs the pane's
+source file(s) — `source_file_sig` folds each file's **length + mtime + a small
+strided byte sample** (`WATCH_SAMPLE_BYTES` in `WATCH_SAMPLE_WINDOWS` windows) into a
+hash, plus the total length — and reloads the pane once a change has **settled**
+(`WATCH_DEBOUNCE`, so a file still being written externally isn't read half-finished;
+each further change re-arms the timer). The **byte sample** is the point: the common
+case is a tool overwriting a **single multi-page TIFF in place** with identical
+dimensions (`tifffile.memmap`), so the length doesn't change and an `mmap` writer
+often doesn't bump the mtime until its dirty pages flush — an `(mtime, len)`
+signature would miss it entirely, but a `read()` sees the new bytes at once. The
+sample is **bounded** (a few KiB per file per poll regardless of file size, never a
+bulk read), and applied only for a **small** source (`WATCH_SAMPLE_MAX_FILES`); a
+long numbered run stays on the cheap length+mtime path, since its per-frame files are
+written normally and their mtime moves. Only the (heavier) `reload` fires, and only
 on quiescence. `watch_loaded` is the baseline signature (re-based after any reload
 and when the toggle is switched on, so enabling never triggers an immediate reload);
-an unreadable file (mid-rename, or held with no share-read) simply waits for the next
-poll. While any pane watches, an otherwise-idle app wakes every `WATCH_POLL` to
-re-hash — the one intentional break from "idle requests no repaint", kept moderate to
-stay VNC-friendly (a quiet wake changes no pixels, so a delta framebuffer sends
-~nothing) (§13/§15).
+an unreadable file (mid-rename) simply waits for the next poll. While any pane
+watches, an otherwise-idle app wakes every `WATCH_POLL` to re-sign — the one
+intentional break from "idle requests no repaint", kept moderate to stay VNC-friendly
+(a quiet wake changes no pixels, so a delta framebuffer sends ~nothing) (§13/§15).
 Hiding the **focused** pane (via the header button or the manager checkbox) moves
 focus to the nearest still-shown media (`reselect_if_hidden`), so `current` never
 sits on a hidden pane while others are visible. egui window/popup **shadows are

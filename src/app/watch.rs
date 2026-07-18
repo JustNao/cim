@@ -5,21 +5,26 @@
 use super::*;
 
 impl CimApp {
-    /// On-disk signature of a pane's source: a hash of the file bytes across its
-    /// file(s) plus their total length. `None` for a Compute pane (no file) or
-    /// when any file can't be read right now (e.g. mid-rename, or the writer holds
-    /// it with no share-read) — in which case the watch simply waits for the next
-    /// poll rather than acting on torn contents.
+    /// On-disk signature of a pane's source for change detection: the total byte
+    /// length and latest mtime across its file(s), **plus a small strided sample of
+    /// the file bytes**. `None` for a Compute pane (no file) or when any file can't
+    /// be read right now (e.g. mid-rename) — the watch then waits for the next poll
+    /// rather than acting on torn contents.
     ///
-    /// Content-based rather than mtime-based on purpose: the common case here is a
-    /// tool overwriting an image **in place** with the same dimensions, so neither
-    /// the byte length nor (on Windows, while the writer keeps the handle open) the
-    /// mtime moves — only the pixels do. Reading + hashing the bytes catches that.
-    /// The files being watched are single images / stills, page-cache-hot after the
-    /// first read, so hashing them a few times a second is cheap.
+    /// Why the content sample, not mtime alone: the common auto-reload case is a
+    /// tool overwriting a **single multi-page TIFF in place** with the same
+    /// dimensions (e.g. `tifffile.memmap`). The byte length doesn't change, and an
+    /// `mmap`'d writer often doesn't bump the mtime until its dirty pages flush, so
+    /// an `(mtime, len)` signature can stay identical while the pixels change. A
+    /// `read()` sees the new bytes immediately (same page cache), so sampling a few
+    /// windows catches it. The sample is **bounded** (`WATCH_SAMPLE_BYTES` per file,
+    /// spread across the file) so a huge TIFF is only touched a few KiB per poll,
+    /// never bulk-read. It's applied only when the source is **one or a few files**;
+    /// a long numbered run stays on the cheap metadata path (those frames are
+    /// written normally, so their mtime moves and length/mtime alone suffice).
     pub(super) fn source_file_sig(source: &Source) -> Option<FileSig> {
         use std::hash::Hasher;
-        use std::io::Read;
+        use std::io::{Read, Seek, SeekFrom};
         let paths: &[PathBuf] = match source {
             Source::File(p) => std::slice::from_ref(p),
             Source::Sequence { files, .. } => files.as_slice(),
@@ -27,16 +32,44 @@ impl CimApp {
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let mut total = 0u64;
-        let mut buf = [0u8; 64 * 1024];
+        // Only sample bytes for a small source (the single-TIFF case); a long run
+        // would cost one open+read per file each poll for no benefit.
+        let sample = paths.len() <= WATCH_SAMPLE_MAX_FILES;
+        let window = (WATCH_SAMPLE_BYTES / WATCH_SAMPLE_WINDOWS) as usize;
+        let mut buf = vec![0u8; window];
         for p in paths {
-            let mut f = std::fs::File::open(p).ok()?;
-            loop {
-                let n = f.read(&mut buf).ok()?;
-                if n == 0 {
-                    break;
+            let m = std::fs::metadata(p).ok()?;
+            let len = m.len();
+            total += len;
+            hasher.write_u64(len);
+            // mtime is a valid signal when the writer bumps it (buffered writes, or
+            // on close); fold it in, but don't rely on it (an mmap writer may lag).
+            if let Ok(d) = m.modified().and_then(|mt| {
+                mt.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            }) {
+                hasher.write_u128(d.as_nanos());
+            }
+            if sample && len > 0 {
+                let mut f = std::fs::File::open(p).ok()?;
+                if len <= WATCH_SAMPLE_BYTES {
+                    // Small file: fold the whole thing in (still <= the sample cap).
+                    loop {
+                        let n = f.read(&mut buf).ok()?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.write(&buf[..n]);
+                    }
+                } else {
+                    // Big file: hash a fixed number of windows spread across it.
+                    for k in 0..WATCH_SAMPLE_WINDOWS {
+                        let off = (len - window as u64) * k / (WATCH_SAMPLE_WINDOWS - 1);
+                        f.seek(SeekFrom::Start(off)).ok()?;
+                        f.read_exact(&mut buf).ok()?;
+                        hasher.write(&buf);
+                    }
                 }
-                hasher.write(&buf[..n]);
-                total += n as u64;
             }
         }
         Some((hasher.finish(), total))
