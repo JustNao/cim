@@ -15,7 +15,7 @@ impl CimApp {
         ctx: &egui::Context,
         idx: usize,
         img_area: Rect,
-        header_bottom: f32,
+        footer_top: f32,
     ) {
         let pane_id = self.panes[idx].id;
         let (mut kind, mut source_id, mut source_b, computed, mut auto, mut saving, mut save_name, status) = {
@@ -35,19 +35,15 @@ impl CimApp {
         let mut recompute = false;
         let mut do_save = false;
 
-        // Right-align by an explicit left offset (an over-estimate of the box
-        // width) rather than clamping the right edge onto the clip boundary,
-        // which would clip off the frame's right border. `constrain_to` still
-        // keeps it inside a tiny cell.
-        const AREA_W: f32 = 254.0;
-        let left = (img_area.right() - AREA_W - 6.0).max(img_area.left() + 6.0);
+        // Bottom-left of the cell: anchor within a clip rect that stops just
+        // above the footer strip, with a small inset offset so the frame's
+        // border doesn't land on (and get clipped by) the clip edge.
+        let clip = Rect::from_min_max(img_area.min, Pos2::new(img_area.right(), footer_top));
         egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
-            .constrain_to(img_area)
-            // Below the header (clears the header bar) and at the top-right (clears
-            // the Transformations popup, which opens at the top-left).
-            .fixed_pos(Pos2::new(left, header_bottom + 2.0))
+            .constrain_to(clip)
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(6.0, -6.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);

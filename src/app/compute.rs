@@ -57,6 +57,9 @@ impl CimApp {
         self.panes[i].contrast = ContrastMode::Linear;
         self.panes[i].tone.clip.enabled = false;
         self.panes[i].tone.share_clip = false;
+        // Show the compute controls on creation (they share `show_opts`, so the
+        // Toggle-visibility shortcut hides/shows them like the popup).
+        self.panes[i].show_opts = true;
         self.current = i;
         if was_empty {
             self.shared_view.needs_fit = true;
