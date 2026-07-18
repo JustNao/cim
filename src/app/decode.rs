@@ -802,6 +802,10 @@ impl CimApp {
             // Region-tone bounds move with the shared stats region.
             self.stats_gen.hash(&mut h);
         }
+        // A Compute recompute swaps in new frame data at the same index/tone; the
+        // generation makes `stage` re-render it (into `pending`, keeping the last
+        // `tex`) instead of treating the texture as still current.
+        self.panes[idx].render_gen.hash(&mut h);
         h.finish()
     }
 

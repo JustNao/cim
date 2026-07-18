@@ -21,6 +21,26 @@ impl CimApp {
         self.panes.iter().position(|p| p.id == id)
     }
 
+    /// Build the `@compute:<kind>:<srcs>[:auto]` view-command token for Compute
+    /// pane `p`, or `None` if a source is no longer open (a dangling index would
+    /// replay wrong). Sources are emitted as **pane indices** (0-based over the
+    /// whole pane list), matching the positional per-pane flags.
+    pub(super) fn compute_token(&self, p: &Pane) -> Option<String> {
+        let c = p.compute.as_ref()?;
+        let a = self.pane_idx(c.source_id?)?;
+        let srcs = if matches!(c.kind, Reduce::Diff) {
+            let b = self.pane_idx(c.source_b?)?;
+            format!("{a},{b}")
+        } else {
+            a.to_string()
+        };
+        let mut tok = format!("@compute:{}:{}", c.kind.token(), srcs);
+        if c.auto {
+            tok.push_str(":auto");
+        }
+        Some(tok)
+    }
+
     /// Add a new, *unconfigured* Compute pane (from the toolbar "Compute"
     /// button). It shows the in-pane config form (mode + source pickers + a
     /// Compute button); the result appears once that button computes it.
@@ -49,18 +69,46 @@ impl CimApp {
             save_name: "computed.tif".into(),
             status: String::new(),
         });
-        // A Compute result is its own thing (a derived still), so it doesn't
-        // follow the shared Transformations by default — it carries its own tone:
-        // a plain Linear LUT with no clip and no share clip. The user can still
-        // opt it into the synced group or dial in a clip afterward.
-        self.panes[i].sync_tone = false;
-        self.panes[i].contrast = ContrastMode::Linear;
-        self.panes[i].tone.clip.enabled = false;
-        self.panes[i].tone.share_clip = false;
+        self.set_compute_tone_defaults(i);
         self.current = i;
         if was_empty {
             self.shared_view.needs_fit = true;
         }
+    }
+
+    /// Recreate a Compute pane from a view command: a fresh Compute pane with the
+    /// given `kind` and auto-refresh flag, its sources left unset (the caller
+    /// wires them once every pane exists). Returns the new pane's index.
+    pub(super) fn add_configured_compute_pane(&mut self, kind: Reduce, auto: bool) -> usize {
+        self.add_pane(
+            media::Media::still("Compute".into(), media::placeholder_frame()),
+            Source::Computed,
+        );
+        let i = self.panes.len() - 1;
+        self.panes[i].compute = Some(Compute {
+            kind,
+            source_id: None,
+            source_b: None,
+            computed: false,
+            auto,
+            last_sig: 0,
+            saving: false,
+            save_name: "computed.tif".into(),
+            status: String::new(),
+        });
+        self.set_compute_tone_defaults(i);
+        i
+    }
+
+    /// A Compute result is its own thing (a derived still), so it doesn't follow
+    /// the shared Transformations by default — it carries its own tone: a plain
+    /// Linear LUT with no clip and no share clip. The user can still opt it into
+    /// the synced group or dial in a clip afterward.
+    fn set_compute_tone_defaults(&mut self, i: usize) {
+        self.panes[i].sync_tone = false;
+        self.panes[i].contrast = ContrastMode::Linear;
+        self.panes[i].tone.clip.enabled = false;
+        self.panes[i].tone.share_clip = false;
     }
 
     /// Mean/std reduction of a source's resident frames → (frame, name, status).
@@ -135,7 +183,12 @@ impl CimApp {
         match result {
             Ok((fr, name, status)) => {
                 self.panes[idx].media = media::Media::still(name, fr);
-                self.panes[idx].tex.clear();
+                // Bump the data generation rather than clearing `tex`: `stage`
+                // re-renders the new result into `pending` while the last frame
+                // keeps showing, so an auto-refreshing pane never flashes black
+                // (nulling `tex` would blank a large/off-thread render until it
+                // lands). The commit swaps in the fresh frame once it's ready.
+                self.panes[idx].render_gen = self.panes[idx].render_gen.wrapping_add(1);
                 self.panes[idx].hist = None; // recompute for the new result
 
                 if let Some(c) = self.panes[idx].compute.as_mut() {

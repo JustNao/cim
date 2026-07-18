@@ -444,6 +444,33 @@ enum Source {
     Computed,
 }
 
+/// One pane to create when committing an open batch — a loaded media, or a
+/// Compute pane recreated from a view command. Kept in one ordered list so
+/// panes are created in their original order (Compute sources reference other
+/// panes by index, resolved after all panes exist); Compute items carry no
+/// media, so they don't count toward the ">8 sequences" resource warning.
+// The `Media` variant is far larger than `Compute`, but it's the common one and
+// each item lives only briefly in the open batch, so boxing it (an allocation
+// per opened pane) isn't worth it.
+#[allow(clippy::large_enum_variant)]
+enum OpenItem {
+    Media(Media, Source),
+    Compute {
+        kind: Reduce,
+        a: usize,
+        b: Option<usize>,
+        auto: bool,
+    },
+}
+
+impl OpenItem {
+    /// Whether this item opens a sequence (counts toward the resource warning);
+    /// a Compute pane is a derived still, so never.
+    fn is_sequence(&self) -> bool {
+        matches!(self, OpenItem::Media(m, _) if m.is_sequence())
+    }
+}
+
 /// A Compute pane: derives a single displayed image from other panes — a
 /// mean/std reduction across one source's resident frames, or a per-pixel
 /// difference of two sources' current frames — with an inline Save.
@@ -514,6 +541,12 @@ struct Pane {
     hist: Option<HistCache>,
     /// Present iff this is a Compute pane (its media is a generated still).
     compute: Option<Compute>,
+    /// Bumped whenever this pane's frame *data* is replaced in place without its
+    /// frame index or tone changing — a Compute recompute. Folded into
+    /// `tone_sig` so `stage` re-renders the new data into `pending` while the
+    /// last committed `tex` keeps showing, so an auto-refreshing Compute pane
+    /// never flashes black (or shows a stale frame) while the new one renders.
+    render_gen: u64,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
     /// Background bulk-load mode for this pane (frame-bar / export buttons).
@@ -618,10 +651,12 @@ pub struct CimApp {
     show_viewcmd: bool,
     rebinding: Option<Action>,
     /// A Compute pane's in-pane **Compute** / **Refresh** button was clicked.
-    /// Deferred so the recompute (which nulls the pane's texture — its frame data
-    /// changed but its `(frame, sig)` identity didn't) runs at the *top* of the
-    /// next update, before `refresh_textures`, so the fresh result re-renders and
-    /// commits in the same lock-step group as the other panes — no black flash.
+    /// Deferred so the recompute runs at the *top* of the next update, before
+    /// `refresh_textures`, so the fresh result re-renders and commits in the same
+    /// lock-step group as the other panes. `recompute_pane` bumps `render_gen`
+    /// (its frame data changed but its `(frame, sig)` identity didn't) rather than
+    /// nulling `tex`, so the last frame keeps showing until the new one is ready —
+    /// no black flash.
     pending_recompute: Option<usize>,
 
     /// Draw the per-region stats panels (histogram + numbers + LUT button).
@@ -696,9 +731,9 @@ pub struct CimApp {
     /// Pane-lifecycle actions queued during the draw (buttons can't mutate
     /// `panes` mid-draw); drained in order by `apply_deferred` after drawing.
     deferred: Vec<Deferred>,
-    /// Media loaded but not yet added as panes, held while the ">8 sequences"
+    /// Panes loaded/described but not yet added, held while the ">8 sequences"
     /// resource warning is up. Confirmed → `commit_open`; declined → quit.
-    pending_open: Option<Vec<(Media, Source)>>,
+    pending_open: Option<Vec<OpenItem>>,
     /// View state deferred alongside `pending_open` (the startup CLI path), so
     /// `--frame`/`--mode`/… still apply once the user confirms the open.
     pending_view: Option<cli::ViewState>,
@@ -1486,10 +1521,10 @@ impl CimApp {
         self.poll_watches(ctx.input(|i| i.time));
 
         // Recompute Compute panes *before* staging textures: a compute button
-        // click (deferred to here) and any auto-refresh both null the pane's
-        // texture (its frame data changed), so doing it now lets the fresh result
-        // re-render and commit in the same lock-step group as the other panes
-        // below — the pane is never drawn black between the two.
+        // click (deferred to here) and any auto-refresh replace the pane's frame
+        // data, so doing it now lets the fresh result re-render and commit in the
+        // same lock-step group as the other panes below (`recompute_pane` keeps
+        // the last texture via `render_gen`, so the pane is never drawn black).
         if let Some(i) = self.pending_recompute.take() {
             if i < self.panes.len() {
                 self.recompute_pane(i);
@@ -1559,7 +1594,7 @@ impl CimApp {
             let opening = self
                 .pending_open
                 .as_ref()
-                .map(|b| b.iter().filter(|(m, _)| m.is_sequence()).count())
+                .map(|b| b.iter().filter(|it| it.is_sequence()).count())
                 .unwrap_or(0);
             let total = existing + opening;
             let mut decision: Option<bool> = None; // Some(true)=open, Some(false)=quit

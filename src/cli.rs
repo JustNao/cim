@@ -36,6 +36,16 @@ pub enum Input {
     /// A numbered still sequence: `token` is the original compact argument (so
     /// the view-command panel can round-trip it) and `files` are its frames.
     Sequence { token: String, files: Vec<PathBuf> },
+    /// A Compute pane recreated from a view command (`@compute:<kind>:<srcs>`).
+    /// Its sources are given as **pane indices** (0-based over the whole pane
+    /// list) — resolved to the newly created panes once they all exist. `Diff`
+    /// carries two indices, the reductions one. `auto` restores auto-refresh.
+    Compute {
+        kind: crate::media::Reduce,
+        a: usize,
+        b: Option<usize>,
+        auto: bool,
+    },
 }
 
 /// Which layout a `--mode` flag selects. Mirrors the app's `Mode` but lives here
@@ -304,6 +314,9 @@ ARGS:
         e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
         A directory (e.g. `cim folder`) opens every loadable file inside it,
         sorted alphabetically, concatenated into one pane.
+        A @compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
+        pane index, or A,B for diff) recreates a Compute pane; it is normally
+        generated for you by the \"View cmd\" panel, not typed by hand.
 
 OPTIONS:
     -h, --help                 Print this help and exit
@@ -353,6 +366,13 @@ SHELL COMPLETION:
 /// a sequence token naming two or more files becomes a single `Sequence`; a token
 /// that resolves to one file, or any plain path, becomes a `Single`.
 fn expand_arg(arg: &str, out: &mut Vec<Input>) {
+    // A `@compute:…` token recreates a Compute pane (emitted by the view
+    // command for a computed pane). Recognised before any filesystem probing so
+    // it's never mistaken for a path.
+    if let Some(input) = parse_compute_token(arg) {
+        out.push(input);
+        return;
+    }
     // A directory opens all the loadable files directly inside it, sorted
     // alphabetically, as one concatenated pane — the same downstream path as a
     // numbered token, but the frames come from a listing so any naming works.
@@ -422,6 +442,27 @@ fn list_dir_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// Parse a `@compute:<kind>:<srcs>[:auto]` token into an `Input::Compute`, or
+/// `None` when `arg` isn't such a token. `<kind>` is `mean`/`std`/`diff`;
+/// `<srcs>` is one pane index for the reductions or `A,B` for `diff`; a trailing
+/// `:auto` restores the auto-refresh toggle. Indices are 0-based over the pane
+/// list and resolved to panes once they all exist.
+fn parse_compute_token(arg: &str) -> Option<Input> {
+    let rest = arg.strip_prefix("@compute:")?;
+    let mut segs = rest.split(':');
+    let kind = crate::media::Reduce::from_token(segs.next()?)?;
+    let srcs = segs.next()?;
+    let auto = matches!(segs.next(), Some("auto"));
+    let (a, b) = match kind {
+        crate::media::Reduce::Diff => {
+            let (a, b) = srcs.split_once(',')?;
+            (a.trim().parse().ok()?, Some(b.trim().parse().ok()?))
+        }
+        _ => (srcs.trim().parse().ok()?, None),
+    };
+    Some(Input::Compute { kind, a, b, auto })
 }
 
 /// Expand a `PREFIX%0Xu SUFFIX,START,END` token into the files it stands for, or
@@ -784,6 +825,34 @@ mod tests {
         assert_eq!(view.visible, Some(vec![true, false]));
         assert_eq!(view.tsync, Some(vec![false, true]));
         assert_eq!(view.control, Some(1));
+    }
+
+    #[test]
+    fn parses_compute_tokens() {
+        use crate::media::Reduce;
+        let Cli::Run { inputs, .. } = parse(vec![
+            "a.tif".into(),
+            "b.tif".into(),
+            "@compute:diff:0,1:auto".into(),
+            "@compute:mean:0".into(),
+        ]) else {
+            panic!("expected Run");
+        };
+        assert_eq!(inputs.len(), 4);
+        assert!(matches!(
+            inputs[2],
+            Input::Compute { kind: Reduce::Diff, a: 0, b: Some(1), auto: true }
+        ));
+        assert!(matches!(
+            inputs[3],
+            Input::Compute { kind: Reduce::Mean, a: 0, b: None, auto: false }
+        ));
+        // A malformed token isn't silently turned into a phantom pane — it just
+        // falls through to a (non-existent) path Single, like any other arg.
+        let Cli::Run { inputs, .. } = parse(vec!["@compute:bogus:0".into()]) else {
+            panic!("expected Run");
+        };
+        assert!(matches!(inputs[0], Input::Single(_)));
     }
 
     #[test]

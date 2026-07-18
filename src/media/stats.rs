@@ -43,6 +43,26 @@ impl Reduce {
             Reduce::Diff => "Diff",
         }
     }
+
+    /// Lowercase token used to round-trip the mode through the view command
+    /// (`@compute:<token>:…`). Paired with [`Reduce::from_token`].
+    pub fn token(self) -> &'static str {
+        match self {
+            Reduce::Mean => "mean",
+            Reduce::Std => "std",
+            Reduce::Diff => "diff",
+        }
+    }
+
+    /// Parse a [`Reduce::token`] (case-insensitive); `None` if unrecognised.
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "mean" => Some(Reduce::Mean),
+            "std" => Some(Reduce::Std),
+            "diff" => Some(Reduce::Diff),
+            _ => None,
+        }
+    }
 }
 
 /// Reduce a stack of same-shape frames to a single frame, per pixel and per

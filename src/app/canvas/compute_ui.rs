@@ -109,8 +109,9 @@ impl CimApp {
         }
         if recompute {
             // Defer to the top of the next update (before `refresh_textures`) so
-            // the recompute — which nulls this pane's texture — re-renders in the
-            // same lock-step commit as the others, never drawing the pane black.
+            // the fresh result re-renders in the same lock-step commit as the
+            // others (`recompute_pane` bumps `render_gen` and keeps the last
+            // texture, so the pane never draws black).
             self.pending_recompute = Some(idx);
         }
         if do_save {

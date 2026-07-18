@@ -161,8 +161,16 @@ impl CimApp {
                 Source::Sequence { token, .. } => {
                     parts.push(quote_arg(&absolute_path(Path::new(token)).display().to_string()))
                 }
-                // A computed image isn't reproducible from a CLI path; skip it.
-                Source::Computed => {}
+                // A Compute pane: re-emit it as a `@compute` token referencing
+                // its sources by pane index, so a replay recreates it in place
+                // (keeping the positional per-pane flags below aligned). A pane
+                // whose source no longer exists is skipped rather than emitting a
+                // dangling index.
+                Source::Computed => {
+                    if let Some(tok) = self.compute_token(p) {
+                        parts.push(tok);
+                    }
+                }
             }
         }
         // Only emit a flag when it differs from the app's default, so the line
@@ -316,7 +324,7 @@ impl CimApp {
     /// resource-warning confirmation is shown instead of adding the panes now (see
     /// the popup in `update`). Otherwise they're added immediately.
     pub(super) fn open_inputs(&mut self, inputs: Vec<cli::Input>) {
-        let mut loaded: Vec<(Media, Source)> = Vec::new();
+        let mut loaded: Vec<OpenItem> = Vec::new();
         for input in inputs {
             let (res, source) = match input {
                 cli::Input::Single(p) => (media::load(&p), Source::File(p)),
@@ -324,9 +332,16 @@ impl CimApp {
                     media::load_sequence(&files, token.clone()),
                     Source::Sequence { token, files },
                 ),
+                // A Compute pane carries no media to load — keep it in order so it
+                // lands at its original pane index (its sources are wired up by
+                // `commit_open` once every pane exists).
+                cli::Input::Compute { kind, a, b, auto } => {
+                    loaded.push(OpenItem::Compute { kind, a, b, auto });
+                    continue;
+                }
             };
             match res {
-                Ok(m) => loaded.push((m, source)),
+                Ok(m) => loaded.push(OpenItem::Media(m, source)),
                 Err(e) => self.error_popup = Some(format!("Failed to open:\n{e}")),
             }
         }
@@ -339,9 +354,9 @@ impl CimApp {
         let waiting_seqs = self
             .pending_open
             .as_ref()
-            .map(|b| b.iter().filter(|(m, _)| m.is_sequence()).count())
+            .map(|b| b.iter().filter(|it| it.is_sequence()).count())
             .unwrap_or(0);
-        let opening = loaded.iter().filter(|(m, _)| m.is_sequence()).count();
+        let opening = loaded.iter().filter(|it| it.is_sequence()).count();
         if open_seqs + waiting_seqs + opening > SEQ_WARN_LIMIT {
             // Hold the load behind the warning; `commit_open` finishes it on
             // confirm. Merge with any batch already waiting (rapid drops).
@@ -357,9 +372,35 @@ impl CimApp {
     /// Add a batch of already-loaded media as panes and re-settle the view
     /// selectors. Shared by the immediate path and the confirmed ">8 sequences"
     /// path (`update`), so both run the same post-open fixups.
-    pub(super) fn commit_open(&mut self, loaded: Vec<(Media, Source)>) {
-        for (m, source) in loaded {
-            self.add_pane(m, source);
+    pub(super) fn commit_open(&mut self, loaded: Vec<OpenItem>) {
+        // Pane indices are 0-based over the whole (fresh) pane list, so record the
+        // offset in case we're appending to existing panes (a runtime drop never
+        // carries Compute items, but keep the arithmetic honest).
+        let base = self.panes.len();
+        // Pass 1: create every pane in order, so a Compute pane lands at its
+        // original index. Its sources (given as indices) are resolved in pass 2,
+        // once the panes they point at exist (they may appear *after* it).
+        let mut computes: Vec<(usize, usize, Option<usize>)> = Vec::new();
+        for item in loaded {
+            match item {
+                OpenItem::Media(m, source) => self.add_pane(m, source),
+                OpenItem::Compute { kind, a, b, auto } => {
+                    let i = self.add_configured_compute_pane(kind, auto);
+                    computes.push((i, a, b));
+                }
+            }
+        }
+        // Pass 2: wire each Compute pane's sources (pane index → stable id) and
+        // compute it best-effort (a source frame not yet resident just leaves a
+        // status; auto-refresh, if set, recomputes once frames land).
+        for (i, a, b) in computes {
+            let a_id = self.panes.get(base + a).map(|p| p.id);
+            let b_id = b.and_then(|b| self.panes.get(base + b)).map(|p| p.id);
+            if let Some(c) = self.panes[i].compute.as_mut() {
+                c.source_id = a_id;
+                c.source_b = b_id;
+            }
+            self.recompute_pane(i);
         }
         let n = self.panes.len();
         self.current = self.current.min(n.saturating_sub(1));
@@ -416,6 +457,7 @@ impl CimApp {
             stats: None,
             hist: None,
             compute: None,
+            render_gen: 0,
             error: None,
             eager: Eager::Off,
             watch: Watch::default(),

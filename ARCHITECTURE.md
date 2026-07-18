@@ -651,10 +651,10 @@ so `stage` re-renders and the lock-step commit swaps in the fresh frame while th
 pane keeps showing its last committed `tex`. Nulling `tex` would blank a **heavy**
 (async, off-thread) LUT_ALPHA/details render to **black** until it lands — a cheap
 LUT refills synchronously the same update so its black is never seen, which is why
-only the operator tones flashed. (Only overlay edits drop `overlay_tex`, and
-data-changing events — reload, recompute, newly loaded operator library — still
-null `tex` since the frame data, not the signature, changed.) `Action::ToggleVis`
-(default `V`) toggles the popup for the focused pane.
+only the operator tones flashed. (Only overlay edits drop `overlay_tex`; **reload** and a **newly loaded operator
+library** still null `tex` since the frame data, not the signature, changed — while a
+Compute **recompute** instead bumps `render_gen` so it keeps the last frame, §9.)
+`Action::ToggleVis` (default `V`) toggles the popup for the focused pane.
 
 **Transformations sync (`Pane.sync_tone`, default on).** Like the Pos/Time syncs, a
 pane can follow the shared set (`shared_contrast`/`shared_tone`/`shared_details`/
@@ -769,7 +769,26 @@ recomputes when inputs change: `refresh_auto_compute` compares `compute_sig` (sh
 frames for Diff, source resident-count for reductions) against `Compute.last_sig`
 each update. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
 (`media::save_frame`, `.tif` **32-bit float** or `.png`/`.jpg` 8-bit view, relative
-to the working dir). Skipped by `view_command`.
+to the working dir).
+
+**No black flash on recompute.** `recompute_pane` swaps in the new result media but
+does **not** null `tex`; instead it bumps a per-pane data generation
+(`Pane.render_gen`, folded into `tone_sig`). The stale front texture keeps showing
+while `stage` re-renders the new data into `pending` (off-thread for a large frame),
+and the lock-step commit swaps it in when ready — so an **auto-refreshing** Diff pane
+holds its last frame instead of blanking to black each time it recomputes (nulling
+`tex` would blank a large/off-thread render until it lands).
+
+**View-command round-trip.** A Compute pane re-emits in `view_command` as a
+`@compute:<kind>:<srcs>[:auto]` positional token (`compute_token`), its sources given
+as **pane indices** (0-based over the whole list) — so it keeps its slot and the
+positional per-pane flags (`--tone`/`--tsync`/…) stay aligned. `cli::parse_compute_token`
+turns it back into `cli::Input::Compute`; `commit_open` recreates the panes **in order**
+(`add_configured_compute_pane`), then a second pass wires each source index → pane id and
+recomputes (best-effort — a not-yet-resident source just leaves a status; `auto` recomputes
+once frames land). A pane whose source is gone is skipped rather than emitting a dangling
+index. Because the transformations-sync flag is per-pane positional (`--tsync`), it now
+round-trips for Compute panes too (they default un-synced).
 
 ---
 
@@ -882,6 +901,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   ≥2 files → `Sequence` opening as **one** pane (`.tif` run → `ConcatSeq`, else
   `FileSeq`). `token` is kept on the pane's `Source` so reload/round-trip work.
   Drag-and-drop / the file dialog only produce `Single`s.
+- A positional **`@compute:<kind>:<srcs>[:auto]`** token (kind = `mean|std|diff`;
+  `srcs` = one pane index for the reductions or `A,B` for `diff`; trailing `:auto`
+  restores auto-refresh) → `Input::Compute`, recreating a **Compute pane** from a
+  view command (`view_command` emits it for a `Source::Computed` pane; §9). Normally
+  generated for you, not typed by hand.
 - `--complete <word>` lists loadable completions (collapses numbered runs into the
   token); `--completions <bash|powershell>` prints a completer. `LOADABLE_EXTS =
   [tif,tiff,png,jpg,jpeg,bmp,webp]` is shared by the dialog and the filter.
