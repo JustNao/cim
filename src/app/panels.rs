@@ -58,37 +58,37 @@ impl CimApp {
             }
             if ui
                 .selectable_label(self.show_transform, "Transformations")
-                .on_hover_text(self.hover_for(
-                    Action::ToggleVis,
-                    "Tone / details / overlay / rotation for the selected pane",
-                ))
+                .on_hover_text(
+                    self.hover_for(Action::ToggleVis, "Transformations for the selected pane"),
+                )
                 .clicked()
             {
                 self.show_transform = !self.show_transform;
             }
             if ui
                 .selectable_label(false, "Compute")
-                .on_hover_text(self.hover_for(
-                    Action::OpenCompute,
-                    "Add a Compute pane (mean / std / diff of other media)",
-                ))
+                .on_hover_text(self.hover_for(Action::OpenCompute, "Add a Compute pane"))
                 .clicked()
             {
                 self.deferred.push(Deferred::CreateCompute);
             }
             if ui
                 .selectable_label(self.export.show, "Export")
-                .on_hover_text(self.hover_for(Action::ToggleExport, ""))
+                .on_hover_text("Export the current view with ffmpeg")
                 .clicked()
             {
                 self.toggle_export();
             }
-            if ui.selectable_label(self.show_viewcmd, "View cmd").clicked() {
+            if ui
+                .selectable_label(self.show_viewcmd, "View cmd")
+                .on_hover_text(self.hover_for(Action::ToggleExport, "Replicate the current view"))
+                .clicked()
+            {
                 self.show_viewcmd = !self.show_viewcmd;
             }
             if ui
                 .selectable_label(self.show_settings, "Settings")
-                .on_hover_text(self.hover_for(Action::ToggleSettings, ""))
+                .on_hover_text(self.hover_for(Action::ToggleSettings, "Open the settings"))
                 .clicked()
             {
                 self.show_settings = !self.show_settings;
@@ -97,7 +97,7 @@ impl CimApp {
             if crate::debug::enabled()
                 && ui
                     .selectable_label(self.show_debug, "Debug")
-                    .on_hover_text("Per-stage timing (read → display) to spot bottlenecks")
+                    .on_hover_text("Per-stage timing (read → display)")
                     .clicked()
             {
                 self.show_debug = !self.show_debug;
@@ -238,7 +238,7 @@ impl CimApp {
             if self.decoding_all {
                 if ui
                     .button("Stop")
-                    .on_hover_text("Stop the running Load all / Load offsets")
+                    .on_hover_text("Stop the running load")
                     .clicked()
                 {
                     self.stop_load();
@@ -271,44 +271,30 @@ impl CimApp {
                             .clone()
                     })
                     .unwrap_or_else(|| Err(String::new()));
-                if fast_avail.is_ok() {
-                    if ui
-                        .button("Load offsets (fast)")
-                        .on_hover_text(
-                            "Discover the whole length at once by binary-searching each \
-                             file's page count (pages are uniform and uncompressed, so a \
-                             page's position is predictable) — then any index is instantly \
-                             seekable in the readout",
-                        )
-                        .clicked()
-                    {
-                        self.load_offsets_fast();
-                    }
+
+                let reason = fast_avail.as_ref().err().map_or("", String::as_str);
+                let offsets_hover = if reason.is_empty() {
+                    "Discover the full sequence length via headers only (no pixel \
+                        decode, no cache pressure)"
+                        .to_string()
                 } else {
-                    let reason = fast_avail.as_ref().err().map_or("", String::as_str);
-                    let offsets_hover = if reason.is_empty() {
+                    format!(
                         "Discover the full sequence length via headers only (no pixel \
-                         decode, no cache pressure)"
-                            .to_string()
-                    } else {
-                        format!(
-                            "Discover the full sequence length via headers only (no pixel \
-                             decode, no cache pressure).\n\nFast offset discovery isn't \
-                             available here: {reason}"
-                        )
-                    };
-                    if ui
-                        .button("Load offset")
-                        .on_hover_text(offsets_hover)
-                        .clicked()
-                    {
-                        self.load_offsets();
-                    }
+                            decode, no cache pressure).\n\nFast offset discovery isn't \
+                            available here: {reason}"
+                    )
+                };
+                if ui
+                    .button("Load offset")
+                    .on_hover_text(offsets_hover)
+                    .clicked()
+                {
+                    self.load_offsets();
                 }
             }
             // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
             // between by header only. Affects Load all and playback. 1 = every frame.
-            ui.label("FF");
+            ui.label("Step");
             let mut ff = self.playback.fast_forward.max(1);
             if ui
                 .add(
@@ -322,7 +308,7 @@ impl CimApp {
                 self.playback.fast_forward = ff.max(1);
             }
             ui.separator();
-            ui.strong(ellipsize(&name, 40));
+            ui.strong(ellipsize(&name, 80));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // 0-based: current index over the last discovered index.
                 let last = len.saturating_sub(1);
@@ -412,7 +398,7 @@ impl CimApp {
                 _ => runs.push((k, k)),
             }
         }
-        let loaded = Color32::from_rgb(56, 104, 162);
+        let loaded = ACCENT;
         for (a, b) in runs {
             let xa = (x_of(a) - cell / 2.0).max(rect.left());
             let xb = (x_of(b) + cell / 2.0).min(rect.right());
@@ -935,7 +921,7 @@ impl CimApp {
                         ui.painter().rect_filled(
                             Rect::from_x_y_ranges(ui.max_rect().x_range(), band),
                             0.0,
-                            Color32::from_rgba_unmultiplied(56, 104, 162, 80),
+                            Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 80),
                         );
                     }
                     if let Some(to) = target {

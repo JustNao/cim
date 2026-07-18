@@ -19,8 +19,8 @@ mod source;
 mod stats;
 
 pub use fastscan::{
-    apply_offset_counts, availability as fast_jump_availability, fast_jump, fast_load_offsets,
-    offset_paths, scan_offset_counts,
+    apply_offset_counts, availability as fast_jump_availability, fast_jump, offset_paths,
+    scan_offset_counts,
 };
 pub use loader::{decode_file, load, load_sequence, SeqReader};
 pub use render::ToneLut;

@@ -192,7 +192,7 @@ impl CimApp {
     /// since the single strip stands in for both panes.
     fn draw_ab_footer(&self, ui: &egui::Ui, a: usize, b: usize, footer: Rect) {
         let fp = ui.painter_at(footer);
-        fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+        fp.rect_filled(footer, 0.0, BAR_FILL);
         // Top border, matching the per-pane footer (it floats over the image).
         fp.hline(
             footer.x_range(),

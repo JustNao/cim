@@ -8,15 +8,7 @@ impl CimApp {
     pub(super) fn draw_header(&mut self, ui: &mut egui::Ui, idx: usize, header: Rect) {
         let hp = ui.painter_at(header);
         let focused = idx == self.current;
-        hp.rect_filled(
-            header,
-            0.0,
-            if focused {
-                Color32::from_rgb(40, 70, 110)
-            } else {
-                Color32::from_gray(34)
-            },
-        );
+        hp.rect_filled(header, 0.0, if focused { ACCENT } else { BAR_FILL });
 
         // (The Transformations controls now live in the single global panel on the
         // toolbar, so the header no longer carries a per-pane button.)
@@ -193,7 +185,7 @@ impl CimApp {
                     "Auto-reload: watch the file and reload it when it changes on disk."
                 });
             if watching {
-                hp.rect_filled(watch, 0.0, Color32::from_rgb(70, 110, 160));
+                hp.rect_filled(watch, 0.0, ACCENT);
             } else if watch_resp.hovered() {
                 hp.rect_filled(watch, 0.0, Color32::from_gray(70));
             }
@@ -295,7 +287,7 @@ impl CimApp {
     /// pane's native value there.
     pub(super) fn draw_footer(&self, ui: &egui::Ui, idx: usize, footer: Rect) {
         let fp = ui.painter_at(footer);
-        fp.rect_filled(footer, 0.0, Color32::from_gray(28));
+        fp.rect_filled(footer, 0.0, BAR_FILL);
         // Top border: the footer floats over the image, so a hairline separates
         // it from the image above (matching the header's bottom border).
         fp.hline(

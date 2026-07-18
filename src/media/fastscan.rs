@@ -549,21 +549,6 @@ pub fn availability(media: &Media) -> Result<(), String> {
     }
 }
 
-/// "Load offsets fast": discover the sequence's **whole** length in one pass of
-/// binary searches (each file's exact page count in ~log₂(pages) header reads —
-/// [`FastScan::page_count`]) instead of probing every frame, then mark the
-/// timeline fully known so the frame readout can seek anywhere instantly. On
-/// `Err` **nothing changes** (the caller falls back to the ordinary
-/// metadata-only discovery). A `ConcatSeq` counts every file and builds the
-/// complete global map, verified against whatever prefix ordinary discovery had
-/// already built.
-pub fn fast_load_offsets(media: &mut Media) -> Result<(), String> {
-    let paths = offset_paths(media)
-        .ok_or("fast offset discovery only applies to multi-page TIFF sequences")?;
-    let counts = scan_offset_counts(&paths)?;
-    apply_offset_counts(media, &counts)
-}
-
 /// The file(s) an offset scan would measure — one path for a lone TIFF, every
 /// file for a concatenation — or `None` for media with no lazily-discovered
 /// length to complete (a still, or a numbered run whose length is already known).

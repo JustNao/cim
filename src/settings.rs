@@ -88,14 +88,14 @@ impl Action {
             Action::OpenFiles => "Open files…".into(),
             Action::ToggleSettings => "Toggle settings".into(),
             Action::ToggleManager => "Toggle media manager".into(),
-            Action::ToggleVis => "Toggle Transformations panel".into(),
+            Action::ToggleVis => "Toggle transformations panel".into(),
             Action::ToggleExport => "Toggle export panel".into(),
-            Action::OpenCompute => "Add a Compute pane".into(),
+            Action::OpenCompute => "Add a compute pane".into(),
             Action::PlayPause => "Play / pause sequences".into(),
             Action::ReloadMedia => "Reload focused media from disk".into(),
             Action::ReloadAll => "Reload all media from disk".into(),
             Action::HideMedia => "Hide focused media".into(),
-            Action::ToggleChrome => "Show/hide all UI bars (image-only view)".into(),
+            Action::ToggleChrome => "Show/hide all UI elements".into(),
             Action::SelectMedia(i) => format!("Select media {}", i + 1),
         }
     }
@@ -234,31 +234,31 @@ impl Default for Keybindings {
         set(Action::ViewAb, Key::B);
         set(Action::NextMedia, Key::ArrowRight);
         set(Action::PrevMedia, Key::ArrowLeft);
-        set(Action::NextFrame, Key::ArrowUp);
-        set(Action::PrevFrame, Key::ArrowDown);
-        set(Action::ResetView, Key::F);
-        set(Action::ActualSize, Key::Num0);
+        set(Action::NextFrame, Key::F);
+        set(Action::PrevFrame, Key::D);
+        set(Action::ResetView, Key::Z);
+        set(Action::ActualSize, Key::S);
         set(Action::ZoomIn, Key::Plus);
         set(Action::ZoomOut, Key::Minus);
-        set(Action::LoadAll, Key::L);
+        set(Action::LoadAll, Key::W);
         set(Action::OpenFiles, Key::O);
         set(Action::ToggleSettings, Key::S);
-        set(Action::ToggleManager, Key::M);
+        set(Action::ToggleManager, Key::Q);
         set(Action::ToggleVis, Key::V);
         set(Action::ToggleExport, Key::E);
         set(Action::OpenCompute, Key::C);
         set(Action::PlayPause, Key::Space);
         set(Action::ReloadMedia, Key::R);
-        set(Action::HideMedia, Key::H);
-        set(Action::ToggleChrome, Key::T);
+        set(Action::HideMedia, Key::T);
+        set(Action::ToggleChrome, Key::A);
         // Media 1..=9 -> digit keys; 10..12 left unbound by default (rebindable).
         let digits = [
             Key::Num1,
             Key::Num2,
             Key::Num3,
-            Key::Num4,
+            Key::Quote,
             Key::Num5,
-            Key::Num6,
+            Key::Minus,
             Key::Num7,
             Key::Num8,
             Key::Num9,

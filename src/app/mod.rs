@@ -49,6 +49,18 @@ const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 /// their own separators; the overlays paint this instead.
 const CHROME_BORDER: Color32 = Color32::from_gray(40);
 
+/// The single background gray shared by **every chrome bar**: the global toolbar
+/// and frame bar (via `visuals.panel_fill`, set in `new`) and each pane's header
+/// (unfocused) and footer. Change this one value to retint all bars at once.
+const BAR_FILL: Color32 = Color32::from_gray(30);
+
+/// The single **accent** ("activated") colour, shared by everything that lights
+/// up to mean active/selected: selectable toolbar buttons (via
+/// `visuals.selection.bg_fill`, set in `new`), the focused pane header, the
+/// Auto-reload toggle when on, the loaded-frame runs in the timeline scrubber,
+/// and the export-crop fill. Change this one value to retint all of them.
+const ACCENT: Color32 = Color32::from_rgb(56, 104, 162);
+
 /// How often to repaint while background decodes are pending (and we're not
 /// playing or exporting): often enough to pick up landed frames and keep the
 /// loading spinner turning, but far below monitor rate so we don't busy-spin —
@@ -828,6 +840,12 @@ impl CimApp {
     ) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
+        // The chrome bars (toolbar / frame bar) fill with `panel_fill`, and every
+        // selectable button/tab (mode tabs, Media/Transformations/Export/… toggles)
+        // highlights with `selection.bg_fill` — point both at the shared consts so
+        // all bars share one gray and every "activated" widget shares one blue.
+        style.visuals.panel_fill = BAR_FILL;
+        style.visuals.selection.bg_fill = ACCENT;
         // Square corners everywhere: windows, menus, and every widget state.
         let sq = egui::Rounding::ZERO;
         style.visuals.window_rounding = sq;
