@@ -189,7 +189,11 @@ impl CimApp {
                     "Auto-reload: watch the file and reload it when it changes on disk."
                 });
             if watching {
-                hp.rect_filled(watch, 0.0, ACCENT);
+                if focused {
+                    hp.rect_filled(watch, 0.0, BUTTON_HOVER_FILL);
+                } else {
+                    hp.rect_filled(watch, 0.0, ACCENT);
+                }
             } else if watch_resp.hovered() {
                 hp.rect_filled(watch, 0.0, BUTTON_HOVER_FILL);
             }

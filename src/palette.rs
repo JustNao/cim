@@ -13,24 +13,24 @@ use std::sync::OnceLock;
 /// so it rides the Transformations sync and the `--tone colormap:<name>` CLI.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Palette {
-    /// Perceptually uniform blue→green→yellow (matplotlib viridis). Default.
+    /// High-contrast rainbow (Google turbo) — more detail, less uniform. Default.
     #[default]
-    Viridis,
-    /// High-contrast rainbow (Google turbo) — more detail, less uniform.
     Turbo,
+    /// Perceptually uniform blue→green→yellow (matplotlib viridis).
+    Viridis,
     /// Diverging blue→white→red for signed data (zero at the white midpoint).
     Diverging,
 }
 
 impl Palette {
     /// The palettes in dropdown / CLI order.
-    pub const ORDER: [Palette; 3] = [Palette::Viridis, Palette::Turbo, Palette::Diverging];
+    pub const ORDER: [Palette; 3] = [Palette::Turbo, Palette::Viridis, Palette::Diverging];
 
     /// Human label for the picker.
     pub fn label(self) -> &'static str {
         match self {
-            Palette::Viridis => "Viridis",
             Palette::Turbo => "Turbo",
+            Palette::Viridis => "Viridis",
             Palette::Diverging => "Diverging",
         }
     }
@@ -38,8 +38,8 @@ impl Palette {
     /// Stable small id used to key the render cache (`ToneLut`).
     pub fn id(self) -> u8 {
         match self {
-            Palette::Viridis => 0,
-            Palette::Turbo => 1,
+            Palette::Turbo => 0,
+            Palette::Viridis => 1,
             Palette::Diverging => 2,
         }
     }
@@ -47,8 +47,8 @@ impl Palette {
     /// Lower-case token used in the `--tone colormap:<name>` view command.
     pub fn token(self) -> &'static str {
         match self {
-            Palette::Viridis => "viridis",
             Palette::Turbo => "turbo",
+            Palette::Viridis => "viridis",
             Palette::Diverging => "diverging",
         }
     }
@@ -56,8 +56,8 @@ impl Palette {
     /// Parse a `--tone colormap:<name>` palette token (case-insensitive).
     pub fn from_token(s: &str) -> Option<Palette> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "viridis" => Some(Palette::Viridis),
             "turbo" => Some(Palette::Turbo),
+            "viridis" => Some(Palette::Viridis),
             "diverging" | "diff" | "bwr" => Some(Palette::Diverging),
             _ => None,
         }
@@ -66,13 +66,13 @@ impl Palette {
     /// The 256-entry RGB look-up table, built once and cached.
     pub fn table(self) -> &'static [[u8; 3]; 256] {
         match self {
-            Palette::Viridis => {
-                static T: OnceLock<[[u8; 3]; 256]> = OnceLock::new();
-                T.get_or_init(|| build(VIRIDIS_STOPS))
-            }
             Palette::Turbo => {
                 static T: OnceLock<[[u8; 3]; 256]> = OnceLock::new();
                 T.get_or_init(|| build(TURBO_STOPS))
+            }
+            Palette::Viridis => {
+                static T: OnceLock<[[u8; 3]; 256]> = OnceLock::new();
+                T.get_or_init(|| build(VIRIDIS_STOPS))
             }
             Palette::Diverging => {
                 static T: OnceLock<[[u8; 3]; 256]> = OnceLock::new();

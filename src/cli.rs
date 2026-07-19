@@ -801,8 +801,8 @@ mod tests {
             view.tones.as_deref(),
             Some(
                 [
-                    Tone::Colormap(Palette::Viridis), // bare = default palette
                     Tone::Colormap(Palette::Turbo),
+                    Tone::Colormap(Palette::Viridis), // bare = default palette
                     Tone::LutAlpha,
                 ]
                 .as_slice()
