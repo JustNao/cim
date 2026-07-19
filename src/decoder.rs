@@ -18,7 +18,7 @@ use std::thread;
 
 use anyhow::Result;
 
-use crate::media::{self, DecodeReq, FrameData, SeqReader};
+use crate::media::{self, DecodeReq, FrameData, SeqReader, VideoReader};
 
 struct Job {
     id: u64,
@@ -56,11 +56,37 @@ pub enum Decoded {
     End,
 }
 
-/// Persistent readers, keyed by `(pane id, file index)`. A lone TIFF uses file
-/// index 0; a concatenation keeps one reader per file so each file's IFD offset
-/// cache stays warm. The outer mutex guards the map (held only briefly), the
-/// inner one serialises decodes of one file.
-type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Mutex<SeqReader>>>>>;
+/// Either persistent reader kind a pane's file can need: a TIFF's `SeqReader`
+/// (warm IFD offsets) or a video's `VideoReader` (a streaming ffmpeg child). A
+/// key only ever maps to one kind — reload/close call `forget` first.
+enum Reader {
+    Tiff(SeqReader),
+    Video(VideoReader),
+}
+
+/// Persistent readers, keyed by `(pane id, file index)`. A lone TIFF or a video
+/// uses file index 0; a concatenation keeps one reader per file so each file's
+/// IFD offset cache stays warm. The outer mutex guards the map (held only
+/// briefly), the inner one serialises decodes of one file.
+type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Mutex<Reader>>>>>;
+
+/// Get the persistent reader for `key`, opening (and caching) it with `open`
+/// on first use. The map lock is held only for the lookup/insert.
+fn get_reader(
+    readers: &Readers,
+    key: (u64, usize),
+    open: impl FnOnce() -> Result<Reader>,
+) -> Result<Arc<Mutex<Reader>>> {
+    let mut map = readers.lock().unwrap();
+    match map.get(&key) {
+        Some(r) => Ok(Arc::clone(r)),
+        None => open().map(|r| {
+            let r = Arc::new(Mutex::new(r));
+            map.insert(key, Arc::clone(&r));
+            r
+        }),
+    }
+}
 
 pub struct BackgroundDecoder {
     job_tx: mpsc::Sender<Job>,
@@ -116,36 +142,52 @@ impl BackgroundDecoder {
                         path,
                         probe,
                     } => {
-                        let key = (job.id, *file);
-                        let reader = {
-                            let mut map = readers.lock().unwrap();
-                            match map.get(&key) {
-                                Some(r) => Ok(Arc::clone(r)),
-                                None => SeqReader::open(path).map(|r| {
-                                    let r = Arc::new(Mutex::new(r));
-                                    map.insert(key, Arc::clone(&r));
-                                    r
-                                }),
-                            }
-                        };
+                        let reader = get_reader(&readers, (job.id, *file), || {
+                            SeqReader::open(path).map(Reader::Tiff)
+                        });
                         match reader {
-                            Ok(r) if *probe => r.lock().unwrap().probe(*page).map(|exists| {
-                                if exists {
-                                    Decoded::Exists
-                                } else {
-                                    Decoded::End
-                                }
-                            }),
                             Ok(r) => {
-                                let mut reader = r.lock().unwrap();
-                                reader.take_io(); // clear residue from prior probes
-                                let res = reader.decode(*page).map(|f| match f {
+                                let mut guard = r.lock().unwrap();
+                                match (&mut *guard, *probe) {
+                                    (Reader::Tiff(reader), true) => {
+                                        reader.probe(*page).map(|exists| {
+                                            if exists {
+                                                Decoded::Exists
+                                            } else {
+                                                Decoded::End
+                                            }
+                                        })
+                                    }
+                                    (Reader::Tiff(reader), false) => {
+                                        reader.take_io(); // clear residue from prior probes
+                                        let res = reader.decode(*page).map(|f| match f {
+                                            Some(f) => Decoded::Frame(Arc::new(f)),
+                                            None => Decoded::End,
+                                        });
+                                        io = reader.take_io(); // this decode's file-I/O share
+                                        res
+                                    }
+                                    _ => Err(anyhow::anyhow!("reader kind mismatch")),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    // Video frame: decode through the file's persistent
+                    // streaming ffmpeg reader (sequential requests read straight
+                    // off the pipe; a jump respawns the child with a seek).
+                    DecodeReq::Video { path, frame } => {
+                        let reader = get_reader(&readers, (job.id, 0), || {
+                            VideoReader::open(path).map(Reader::Video)
+                        });
+                        match reader {
+                            Ok(r) => match &mut *r.lock().unwrap() {
+                                Reader::Video(reader) => reader.decode(*frame).map(|f| match f {
                                     Some(f) => Decoded::Frame(Arc::new(f)),
                                     None => Decoded::End,
-                                });
-                                io = reader.take_io(); // this decode's file-I/O share
-                                res
-                            }
+                                }),
+                                _ => Err(anyhow::anyhow!("reader kind mismatch")),
+                            },
                             Err(e) => Err(e),
                         }
                     }

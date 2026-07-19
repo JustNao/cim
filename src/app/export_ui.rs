@@ -130,6 +130,7 @@ impl CimApp {
         } else {
             match p.media.decode_job(0) {
                 Some(media::DecodeReq::Tiff { path, .. }) => ExportSource::Seq { path },
+                Some(media::DecodeReq::Video { path, .. }) => ExportSource::Video { path },
                 // A numbered still sequence: hand export its frame file list.
                 Some(media::DecodeReq::File(_)) => match &p.source {
                     Source::Sequence { files, .. } => ExportSource::Files {

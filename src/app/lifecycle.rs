@@ -341,6 +341,7 @@ impl CimApp {
     pub(super) fn open_dialog(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
             .add_filter("Images & sequences", crate::cli::LOADABLE_EXTS)
+            .add_filter("Videos", crate::cli::VIDEO_EXTS)
             .add_filter("All files", &["*"])
             .pick_files()
         {
@@ -351,9 +352,10 @@ impl CimApp {
     // ---- loading ---------------------------------------------------------
     /// Open plain paths (from the file dialog or a drag-and-drop) — each file
     /// becomes its own pane, while a **dropped directory** opens as one
-    /// concatenated sequence of its loadable files (like `cim folder`).
+    /// concatenated sequence of its image files plus one pane per video
+    /// (like `cim folder`).
     pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>) {
-        self.open_inputs(paths.into_iter().map(cli::input_for_path).collect());
+        self.open_inputs(paths.into_iter().flat_map(cli::inputs_for_path).collect());
     }
 
     /// Open a list of CLI inputs: a `Single` becomes one media, a `Sequence`

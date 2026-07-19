@@ -7,9 +7,6 @@
 //! Decoding runs on the background pool (see `decoder.rs`), so the pieces that
 //! pool needs are exposed here: a stateless [`decode_tiff_page`] plus cache
 //! accessors ([`Media::resident`] / [`Media::insert`]).
-//!
-//! Video (mp4/avi) will slot in later as another `Media` variant behind the
-//! same interface.
 
 mod fastscan;
 mod loader;
@@ -17,6 +14,7 @@ mod percentile;
 mod render;
 mod source;
 mod stats;
+mod video;
 
 pub use fastscan::{
     apply_offset_counts, availability as fast_jump_availability, fast_jump, offset_paths,
@@ -26,6 +24,7 @@ pub use loader::{decode_file, load, load_sequence, SeqReader};
 pub use render::ToneLut;
 pub use source::{DecodeReq, Media};
 pub use stats::{diff_frames, reduce_frames, HistData, Reduce, RegionStats};
+pub use video::VideoReader;
 
 use std::fs::File;
 use std::path::Path;

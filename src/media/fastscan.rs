@@ -545,6 +545,7 @@ pub fn availability(media: &Media) -> Result<(), String> {
         Media::FileSeq(_) => {
             Err("a still run's length is already known — seek via the frame readout".into())
         }
+        Media::Video(_) => Err("a video's length is already known — seek freely".into()),
         Media::Still(_) => Err("not a multi-page sequence".into()),
     }
 }

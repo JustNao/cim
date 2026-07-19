@@ -1,7 +1,7 @@
 # cim — Architecture & Reference
 
 > **cim** ("Compare Images & Media") is a lossless side-by-side viewer for still
-> images and multi-page TIFF sequences, built with `egui`/`eframe`. It targets
+> images, multi-page TIFF sequences and videos, built with `egui`/`eframe`. It targets
 > pixel-accurate comparison: native bit depth is preserved, values are readable
 > under the cursor, and the same view/timeline can sync across panes. Keep this
 > doc in sync when subsystems change.
@@ -19,13 +19,16 @@
 - **Tests:** `cargo test` (inline in `media/*.rs`/`export.rs`/`cli.rs`/`renderer.rs`).
   Fixtures are **generated synthetically** at test time by `src/testutil.rs`
   (multi-page u16 TIFFs, PNG runs, a hand-written 1-bit bilevel-mask TIFF), so the
-  suite runs anywhere; only the MP4 encode test skips gracefully when `ffmpeg` is absent.
+  suite runs anywhere; the ffmpeg-dependent tests (MP4 encode, video decode —
+  the latter generate a tiny `testsrc` clip with ffmpeg itself) skip gracefully
+  when `ffmpeg` is absent.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
   `serde`/`serde_json`, `directories` 5, `anyhow`, `libloading` 0.8 (runtime load
   of the optional proprietary C++ operators — **no** C++ compiler needed to build
-  cim; see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**.
+  cim; see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**;
+  video (mp4/avi) loading shells out to **`ffprobe`/`ffmpeg`** the same way (§3).
 - **Embedded assets** (`assets/`, baked in via `include_bytes!`): `icon.png` (window
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
@@ -50,10 +53,13 @@ src/
   media/         Data model, split by concern (re-exported from mod.rs):
     mod.rs       FrameData/Samples core (accessors, crop), save_frame,
                  placeholder_frame.
-    source.rs    Media (Still|TiffSeq|FileSeq|ConcatSeq) + SeqCache + DecodeReq:
-                 the source kinds behind one interface, length discovery, LRU.
+    source.rs    Media (Still|TiffSeq|FileSeq|ConcatSeq|Video) + SeqCache +
+                 DecodeReq: the source kinds behind one interface, length
+                 discovery, LRU.
     loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
                  decoder), bilevel-mask bit handling.
+    video.rs     Video via the ffmpeg CLI: ffprobe metadata (probe_video) and
+                 VideoReader (persistent streaming ffmpeg child; §3).
     fastscan.rs  Fast scan (§4): measure a regular page stride from the first
                  two IFDs, then predict + validate + raw-decode page N in O(1)
                  (never trusted unvalidated; falls back to the chain walk).
@@ -141,7 +147,7 @@ being one level deeper). Many CimApp fields are grouped into sub-structs —
   and what `tifffile` writes for a bool array — the `tiff` decoder normalises
   those to intensity, flipping the bit), so a mask isn't shown inverted.
 
-### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq`
+### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq | Video`
 Unified interface: `name`, `size`, `frame_count`, `hi_depth`; `resident(idx)` /
 `insert(idx, frame)`; `decode_job(idx) -> Option<DecodeReq>` (how the pool decodes:
 `Tiff { file, page, path }` seeks in a persistent reader keyed by `(pane id,
@@ -162,6 +168,20 @@ file)`, `File(path)` decodes a standalone still); lazy length `at_end()` /
   into the next file when a file's pages run out). `map[global] = (file, page)`;
   the frontier probe walks `(disc_file, disc_page)`; `frontier_ended` rolls to the
   next file or, past the last, sets `at_end`. `concat_layout()` exposes it to export.
+- `Video` (`VideoSeq`, `media/video.rs`) — one **mp4/avi** file, decoded through
+  the **ffmpeg CLI** (like export encodes; no decode crate). `open_video` reads
+  length/size/fps with **ffprobe** up front (`probe_video` — `nb_frames`, else a
+  `-count_packets` pass, else duration×fps) and eagerly decodes frame 0, so like
+  a `FileSeq` it is always `at_end` and only ever decoded, never probed (no
+  offset scan, no fastscan). Frames come from a persistent **`VideoReader`**: a
+  long-lived `ffmpeg … -f rawvideo pipe:1` child; sequential decodes read the
+  next frame off the pipe, a non-sequential index respawns the child with an
+  accurate input-side `-ss` (`seek_seconds` — midpoint of the preceding frame
+  interval). Always **8-bit** (`rgb24`, or `gray` for grayscale sources — mono
+  keeps the Colormap tone usable; `hi_depth` false, never a mask); frame↔time
+  assumes **CFR** (avg rate), so a VFR file may land ±1 frame on seeks. Missing
+  ffmpeg/ffprobe → a clear open error / per-pane frame error, never a crash.
+  `DecodeReq::Video { path, frame }` decodes via the pool's per-pane reader.
 
 ### `SeqReader` — persistent per-sequence decoder
 `open(path)` holds one `tiff::Decoder`; `decode(idx)` returns `Ok(None)` past the
@@ -282,10 +302,14 @@ len)` grows length by one.
   re-request; persistent readers reopen on demand).
 - **Jobs addressed by stable pane `id`**, not Vec index, so results land after
   reorder/close.
-- **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Mutex<SeqReader>>>`.
-  A `Tiff` job locks the map to get/open the file's reader, then locks the reader
-  to decode. Different files decode in parallel; pages of one file serialise.
-  `forget(id)` drops all of a pane's readers. A `File` job has no persistent reader.
+- **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Mutex<Reader>>>`,
+  where `Reader = Tiff(SeqReader) | Video(VideoReader)` (a key only ever maps to
+  one kind — reload/close `forget` first). A `Tiff`/`Video` job locks the map to
+  get/open the file's reader, then locks the reader to decode. Different files
+  decode in parallel; pages/frames of one file serialise (a video's sequential
+  requests then read straight off the streaming pipe). `forget(id)` drops all of
+  a pane's readers (killing a video's ffmpeg child via `Drop`). A `File` job has
+  no persistent reader.
 - `request` enqueues; `drain()` collects finished `Done` non-blocking each update.
   `Done.result: Result<Decoded>` — `Decoded::Frame` a decoded frame, `Decoded::Exists`
   a **metadata-only** frontier probe hit (`DecodeReq::Tiff { probe: true }`, page exists
@@ -876,10 +900,13 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 (`.mp4`/`.png`/`.jpg`/`.jpeg`, or none → MP4); any other extension (e.g. a stray dot in
 `clip.v2`) is rejected instead of handed to ffmpeg with an unusable name.
 
-- `ExportPane` holds a snapshot view/clip/source plus its **own `SeqReader`** and a
-  1-frame decode+render cache. A pane's **mask overlay** is snapshotted too
+- `ExportPane` holds a snapshot view/clip/source plus its **own reader**
+  (`ExportReader = Tiff(SeqReader) | Video(VideoReader)`) and a 1-frame
+  decode+render cache. A pane's **mask overlay** is snapshotted too
   (`set_overlay` + `blend_overlay`), so overlays appear in the video. `ExportSource =
-  Still | Seq { path } | Files { paths } | Concat { files, map }`.
+  Still | Seq { path } | Files { paths } | Concat { files, map } | Video { path }`
+  (a video export walks the timeline forward, so the streaming reader's
+  sequential path dominates).
 - **Region-limited render pipeline.** `compose` runs in two phases: **(1) `decode`** every
   pane's source frame (so all sizes are known), then **(2) `render`** each pane on **only
   the cropped region**. With several panes both phases run the panes on **scoped threads
@@ -966,9 +993,17 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   restores auto-refresh) → `Input::Compute`, recreating a **Compute pane** from a
   view command (`view_command` emits it for a `Source::Computed` pane; §9). Normally
   generated for you, not typed by hand.
+- **Videos** (`VIDEO_EXTS = [mp4,avi]`) always open **one pane each** — a video
+  already is a timeline, so it is never grouped: a directory arg opens its
+  images as one concatenated sequence **plus** one `Single` per video
+  (`dir_inputs`, shared with drops/dialog via `inputs_for_path`), and a numbered
+  `%0Xu` token naming videos expands to one pane per file rather than a
+  `FileSeq`.
 - `--complete <word>` lists loadable completions (collapses numbered runs into the
-  token); `--completions <bash|powershell>` prints a completer. `LOADABLE_EXTS =
-  [tif,tiff,png,jpg,jpeg,bmp,webp]` is shared by the dialog and the filter.
+  token — videos are listed literally, never collapsed); `--completions
+  <bash|powershell>` prints a completer. `LOADABLE_EXTS =
+  [tif,tiff,png,jpg,jpeg,bmp,webp]` + `VIDEO_EXTS` is shared by the dialog and
+  the filter.
 
 ---
 
@@ -1151,8 +1186,11 @@ does after). The `⏱ Debug` window (`draw_debug`) tabulates them so the bottlen
 
 Inline `#[cfg(test)]`, run against **synthetic fixtures generated at test time**
 (`src/testutil.rs` — multi-page u16 TIFFs with varying page sizes, PNG runs, a
-hand-written 1-bit bilevel-mask TIFF); only the MP4 encode test skips when `ffmpeg`
-is absent. Coverage: `cli` token expansion/grouping; `media` lazy length / probe
+hand-written 1-bit bilevel-mask TIFF); the ffmpeg-dependent tests (MP4 encode,
+`media::video` probe/decode/seek against a generated `testsrc` clip) skip when
+`ffmpeg` is absent, while the ffprobe-output parsing and seek math test without
+it. Coverage: `cli` token expansion/grouping (incl. **video dir/token/completion
+exclusion**); `media` lazy length / probe
 discovery / eviction (incl. **LRU peek order + shown-frame protection**), **LUT render
 matches the float reference** bit-for-bit, **`ToneLut` reuse == uncached render** (and
 the decimated small-output arithmetic path), **Colormap maps through the palette**,
@@ -1176,5 +1214,6 @@ net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
 - **Build target:** Windows, debug, during development.
 - **Style:** match surrounding code (comment density, naming, `pub(super)` methods,
   free helpers in `app/mod.rs`).
-- **Future media:** video (mp4/avi) slots in as another `Media` variant behind the
-  same interface.
+- **Video limitations (§3):** frames are 8-bit (higher-depth sources tone-mapped
+  down by ffmpeg) and frame↔time assumes CFR — a VFR file may land ±1 frame on
+  seeks.

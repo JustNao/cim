@@ -16,7 +16,7 @@ use std::thread;
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
-use crate::media::{FrameData, SeqReader};
+use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
 use crate::view::ViewTransform;
 
@@ -37,6 +37,17 @@ pub enum ExportSource {
         files: Vec<std::path::PathBuf>,
         map: Vec<(usize, usize)>,
     },
+    /// A video file, decoded by a persistent streaming `VideoReader` (the
+    /// export walks the timeline forward, so the sequential path dominates).
+    Video {
+        path: std::path::PathBuf,
+    },
+}
+
+/// Either persistent reader kind an export pane/overlay can hold.
+enum ExportReader {
+    Tiff(SeqReader),
+    Video(VideoReader),
 }
 
 /// One pane, snapshotted for export, plus a small decode/render cache.
@@ -62,9 +73,10 @@ pub struct ExportPane {
     pub own_frame: usize,
     pub source: ExportSource,
 
-    /// Persistent reader for `Seq`/`Concat` sources, opened on first use, so a
-    /// long export doesn't re-walk the IFD chain for every frame.
-    reader: Option<SeqReader>,
+    /// Persistent reader for `Seq`/`Concat`/`Video` sources, opened on first
+    /// use, so a long export doesn't re-walk the IFD chain (or re-seek the
+    /// video stream) for every frame.
+    reader: Option<ExportReader>,
     /// Which concatenated file `reader` is currently open on (reopened when the
     /// timeline crosses into the next file).
     cur_file: Option<usize>,
@@ -103,7 +115,7 @@ struct ExportOverlay {
     own_frame: usize,
     color: [u8; 3],
     alpha: u8,
-    reader: Option<SeqReader>,
+    reader: Option<ExportReader>,
     cur_file: Option<usize>,
     cur_idx: Option<usize>,
     /// Rendered overlay RGBA (true → colour at `alpha`, false → transparent).
@@ -135,19 +147,25 @@ impl ExportOverlay {
 fn decode_source(
     source: &ExportSource,
     idx: usize,
-    reader: &mut Option<SeqReader>,
+    reader: &mut Option<ExportReader>,
     cur_file: &mut Option<usize>,
 ) -> Option<Arc<FrameData>> {
+    // The warm reader is always the kind its source opened (one source per
+    // pane/overlay), so a mismatch can't happen; `None` = decode miss.
+    let tiff_decode = |reader: &mut Option<ExportReader>, page: usize| match reader {
+        Some(ExportReader::Tiff(r)) => match r.decode(page) {
+            Ok(Some(f)) => Some(Arc::new(f)),
+            _ => None,
+        },
+        _ => None,
+    };
     match source {
         ExportSource::Still(f) => Some(f.clone()),
         ExportSource::Seq { path } => {
             if reader.is_none() {
-                *reader = Some(SeqReader::open(path).ok()?);
+                *reader = Some(ExportReader::Tiff(SeqReader::open(path).ok()?));
             }
-            match reader.as_mut().unwrap().decode(idx) {
-                Ok(Some(f)) => Some(Arc::new(f)),
-                _ => None,
-            }
+            tiff_decode(reader, idx)
         }
         ExportSource::Files { paths } => crate::media::decode_file(paths.get(idx)?)
             .ok()
@@ -155,11 +173,20 @@ fn decode_source(
         ExportSource::Concat { files, map } => {
             let &(file, page) = map.get(idx)?;
             if *cur_file != Some(file) {
-                *reader = Some(SeqReader::open(files.get(file)?).ok()?);
+                *reader = Some(ExportReader::Tiff(SeqReader::open(files.get(file)?).ok()?));
                 *cur_file = Some(file);
             }
-            match reader.as_mut().unwrap().decode(page) {
-                Ok(Some(f)) => Some(Arc::new(f)),
+            tiff_decode(reader, page)
+        }
+        ExportSource::Video { path } => {
+            if reader.is_none() {
+                *reader = Some(ExportReader::Video(VideoReader::open(path).ok()?));
+            }
+            match reader {
+                Some(ExportReader::Video(r)) => match r.decode(idx) {
+                    Ok(Some(f)) => Some(Arc::new(f)),
+                    _ => None,
+                },
                 _ => None,
             }
         }
@@ -1224,5 +1251,69 @@ mod tests {
         }
         enc.finish().expect("ffmpeg finish");
         assert!(out.metadata().map(|m| m.len() > 0).unwrap_or(false));
+    }
+
+    /// Composing from a video source decodes through the persistent
+    /// `VideoReader` and yields the source's own pixels. Skips without ffmpeg.
+    #[test]
+    fn export_composes_from_a_video_source() {
+        let dir = crate::testutil::fixture_dir("export_video");
+        let src = dir.join("clip.mp4");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=64x48:rate=10:duration=1")
+            .args(["-pix_fmt", "yuv420p"])
+            .arg(&src)
+            .stdin(Stdio::null())
+            .status();
+        if !status.map(|s| s.success()).unwrap_or(false) {
+            return; // ffmpeg not installed
+        }
+
+        // A 1:1 view of the whole frame: each output pixel is a source pixel.
+        let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(64.0, 48.0));
+        let mut view = ViewTransform::default();
+        view.fit([64, 48], area);
+        let pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            None,
+            10,
+            true,
+            0,
+            ExportSource::Video { path: src.clone() },
+        );
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, area),
+            region: area,
+            out_w: 64,
+            out_h: 48,
+            start: 0,
+            total: 3,
+        };
+
+        let mut composed = Vec::new();
+        for t in 0..plan.total {
+            let buf = plan.compose(t);
+            assert_eq!(buf.len(), 64 * 48 * 4);
+            composed.push(buf);
+        }
+        assert_ne!(composed[0], composed[2], "frames must differ (testsrc)");
+        // Frame 2's RGB must match the reader's own decode of frame 2 (an 8-bit
+        // frame renders 1:1 through the full-range LUT).
+        let mut reader = crate::media::VideoReader::open(&src).expect("open");
+        let f2 = reader.decode(2).expect("decode").expect("frame 2");
+        let crate::media::Samples::U8(raw) = &f2.samples else {
+            panic!("expected u8 samples");
+        };
+        for i in 0..64 * 48 {
+            assert_eq!(
+                composed[2][i * 4..i * 4 + 3],
+                raw[i * 3..i * 3 + 3],
+                "pixel {i}"
+            );
+        }
     }
 }

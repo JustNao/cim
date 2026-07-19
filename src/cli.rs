@@ -19,6 +19,11 @@ use std::path::{Path, PathBuf};
 /// file dialog and the completion filter so they never drift apart.
 pub const LOADABLE_EXTS: &[&str] = &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp"];
 
+/// Video containers, each opened as **one pane of its own** — never grouped
+/// into a numbered-run sequence or a directory concatenation (a video already
+/// is a timeline).
+pub const VIDEO_EXTS: &[&str] = &["mp4", "avi"];
+
 /// Outcome of parsing argv.
 pub enum Cli {
     /// Launch the GUI, opening these inputs at the initial view described by
@@ -318,11 +323,14 @@ USAGE:
 
 ARGS:
     <FILES|SEQUENCES|DIRS>...
-        Any number of images, sequences or directories to open ({exts}).
+        Any number of images, sequences, videos or directories to open
+        ({exts}).
         A numbered run may be given compactly as PREFIX%0Xu SUFFIX,START,END,
         e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
-        A directory (e.g. `cim folder`) opens every loadable file inside it,
-        sorted alphabetically, concatenated into one pane.
+        A directory (e.g. `cim folder`) opens every loadable image inside it,
+        sorted alphabetically, concatenated into one pane. Videos ({vexts};
+        decoded via the ffmpeg CLI, which must be on the PATH) always open as
+        one pane each — including those found in a directory.
         A compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
         pane index, or A,B for diff) recreates a Compute pane; it is normally
         generated for you by the \"View cmd\" panel, not typed by hand.
@@ -366,6 +374,7 @@ SHELL COMPLETION:
 ",
         ver = env!("CARGO_PKG_VERSION"),
         exts = LOADABLE_EXTS.join(", "),
+        vexts = VIDEO_EXTS.join(", "),
     )
 }
 
@@ -391,47 +400,59 @@ fn expand_arg(arg: &str, out: &mut Vec<Input>) {
     // The arg (not a normalised path) is kept as the token so the view command
     // round-trips `cim folder` verbatim.
     if Path::new(arg).is_dir() {
-        let mut files = list_dir_files(Path::new(arg));
-        match files.len() {
-            // Nothing loadable: fall through as a plain path so opening surfaces
-            // a clear "failed to open" error rather than silently doing nothing.
-            0 => out.push(Input::Single(PathBuf::from(arg))),
-            1 => out.push(Input::Single(files.pop().unwrap())),
-            _ => out.push(Input::Sequence {
-                token: arg.to_string(),
-                files,
-            }),
-        }
+        out.extend(dir_inputs(Path::new(arg), arg));
         return;
     }
     match expand_sequence_token(arg) {
-        Some(files) if files.len() >= 2 => out.push(Input::Sequence {
-            token: arg.to_string(),
-            files,
-        }),
+        // A numbered run of videos never becomes a sequence — each video is
+        // already a timeline of its own, so open one pane per file.
+        Some(files) if files.len() >= 2 && !is_video(&files[0].to_string_lossy()) => {
+            out.push(Input::Sequence {
+                token: arg.to_string(),
+                files,
+            })
+        }
+        Some(files) if files.len() >= 2 => out.extend(files.into_iter().map(Input::Single)),
         Some(mut files) => out.push(Input::Single(files.pop().unwrap_or_default())),
         None => out.push(Input::Single(PathBuf::from(arg))),
     }
 }
 
-/// Build the `Input` for one filesystem path (from a drag-and-drop or the file
-/// dialog): a **directory** expands to a concatenated sequence of its loadable
-/// files (alphabetical), everything else is a plain `Single`. Shares the folder
-/// listing with the CLI's `expand_arg`.
-pub fn input_for_path(path: PathBuf) -> Input {
-    if path.is_dir() {
-        let mut files = list_dir_files(&path);
-        if files.len() >= 2 {
-            return Input::Sequence {
-                token: path.to_string_lossy().into_owned(),
-                files,
-            };
-        }
-        if let Some(only) = files.pop() {
-            return Input::Single(only);
-        }
+/// Inputs for a directory argument: the **image** files inside it as one
+/// concatenated sequence (`token` names it, so the view command round-trips),
+/// plus one `Single` per **video** file (alphabetical, after the sequence).
+fn dir_inputs(dir: &Path, token: &str) -> Vec<Input> {
+    let (videos, mut images): (Vec<PathBuf>, Vec<PathBuf>) = list_dir_files(dir)
+        .into_iter()
+        .partition(|p| is_video(&p.to_string_lossy()));
+    let mut out = Vec::new();
+    match images.len() {
+        // Nothing loadable at all: fall through as a plain path so opening
+        // surfaces a clear "failed to open" error rather than silently doing
+        // nothing. (Any videos present still open below.)
+        0 if videos.is_empty() => out.push(Input::Single(dir.to_path_buf())),
+        0 => {}
+        1 => out.push(Input::Single(images.pop().unwrap())),
+        _ => out.push(Input::Sequence {
+            token: token.to_string(),
+            files: images,
+        }),
     }
-    Input::Single(path)
+    out.extend(videos.into_iter().map(Input::Single));
+    out
+}
+
+/// Build the `Input`s for one filesystem path (from a drag-and-drop or the file
+/// dialog): a **directory** expands to a concatenated sequence of its image
+/// files (alphabetical) plus one pane per video, everything else is a plain
+/// `Single`. Shares the folder expansion with the CLI's `expand_arg`.
+pub fn inputs_for_path(path: PathBuf) -> Vec<Input> {
+    if path.is_dir() {
+        let token = path.to_string_lossy().into_owned();
+        dir_inputs(&path, &token)
+    } else {
+        vec![Input::Single(path)]
+    }
 }
 
 /// List the loadable files directly inside `dir`, sorted **alphabetically** by
@@ -554,6 +575,7 @@ pub fn complete(word: &str) -> Vec<String> {
 
     let mut dirs = Vec::new();
     let mut files = Vec::new();
+    let mut videos = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !starts_with_ci(&name, partial) {
@@ -562,12 +584,17 @@ pub fn complete(word: &str) -> Vec<String> {
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             dirs.push(format!("{dir_disp}{name}{}", std::path::MAIN_SEPARATOR));
+        } else if is_video(&name) {
+            // Videos are never grouped into a `%0Xu` token (each is its own
+            // timeline), so list them literally.
+            videos.push(format!("{dir_disp}{name}"));
         } else if is_loadable(&name) {
             files.push(name);
         }
     }
 
     let mut out = group_files(&files, dir_disp);
+    out.append(&mut videos);
     out.append(&mut dirs);
     out.sort();
     out
@@ -650,8 +677,15 @@ fn is_loadable(name: &str) -> bool {
         .extension()
         .map(|e| {
             let e = e.to_string_lossy().to_lowercase();
-            LOADABLE_EXTS.contains(&e.as_str())
+            LOADABLE_EXTS.contains(&e.as_str()) || VIDEO_EXTS.contains(&e.as_str())
         })
+        .unwrap_or(false)
+}
+
+fn is_video(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .map(|e| VIDEO_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
         .unwrap_or(false)
 }
 
@@ -790,7 +824,7 @@ mod tests {
     #[test]
     fn parses_colormap_tone() {
         use crate::palette::Palette;
-        let args = "a.tif b.tif c.tif --tone colormap,colormap:turbo,lutalpha"
+        let args = "a.tif b.tif c.tif --tone colormap,colormap:viridis,lutalpha"
             .split(' ')
             .map(String::from)
             .collect();
@@ -801,8 +835,8 @@ mod tests {
             view.tones.as_deref(),
             Some(
                 [
-                    Tone::Colormap(Palette::Turbo),
-                    Tone::Colormap(Palette::Viridis), // bare = default palette
+                    Tone::Colormap(Palette::Turbo), // bare = default palette
+                    Tone::Colormap(Palette::Viridis),
                     Tone::LutAlpha,
                 ]
                 .as_slice()
@@ -998,6 +1032,66 @@ mod tests {
             Input::Single(p) => assert!(p.ends_with("only.tif")),
             _ => panic!("a one-file directory should open as a single image"),
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn directory_videos_open_one_pane_each() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("cim_dir_video_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a_001.tif"), b"").unwrap();
+        fs::write(dir.join("b_002.tif"), b"").unwrap();
+        fs::write(dir.join("clip.mp4"), b"").unwrap();
+        fs::write(dir.join("other.avi"), b"").unwrap();
+
+        let mut out = Vec::new();
+        expand_arg(dir.to_str().unwrap(), &mut out);
+        // The images concatenate into one sequence; each video is its own pane.
+        assert_eq!(out.len(), 3);
+        match &out[0] {
+            Input::Sequence { files, .. } => assert_eq!(files.len(), 2),
+            _ => panic!("images should open as one sequence"),
+        }
+        match (&out[1], &out[2]) {
+            (Input::Single(a), Input::Single(b)) => {
+                assert!(a.ends_with("clip.mp4"));
+                assert!(b.ends_with("other.avi"));
+            }
+            _ => panic!("videos should each open as a single"),
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn video_run_token_opens_one_pane_per_file() {
+        let mut out = Vec::new();
+        expand_arg("clip_%02u.mp4,0,2", &mut out);
+        assert_eq!(out.len(), 3);
+        for (i, input) in out.iter().enumerate() {
+            match input {
+                Input::Single(p) => assert!(p.ends_with(format!("clip_{i:02}.mp4"))),
+                _ => panic!("a video run must never become a sequence"),
+            }
+        }
+    }
+
+    #[test]
+    fn videos_complete_literally_never_as_tokens() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("cim_complete_video_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("clip_001.mp4"), b"").unwrap();
+        fs::write(dir.join("clip_002.mp4"), b"").unwrap();
+
+        let word = format!("{}{}cl", dir.to_str().unwrap(), std::path::MAIN_SEPARATOR);
+        let out = complete(&word);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out.iter().any(|c| c.ends_with("clip_001.mp4")));
+        assert!(out.iter().any(|c| c.ends_with("clip_002.mp4")));
+        assert!(out.iter().all(|c| !c.contains("%0")), "{out:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -29,6 +29,7 @@ pub fn load(path: &Path) -> Result<Media> {
 
     match ext.as_str() {
         "tif" | "tiff" => open_tiff(path, name),
+        "mp4" | "avi" => super::video::open_video(path, name),
         _ => open_still(path, name),
     }
 }

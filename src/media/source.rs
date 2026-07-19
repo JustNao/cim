@@ -14,6 +14,7 @@ pub enum Media {
     TiffSeq(TiffSeq),
     FileSeq(FileSeq),
     ConcatSeq(ConcatSeq),
+    Video(VideoSeq),
 }
 
 /// A concatenation's frame files and its discovered `frame → (file, page)` map.
@@ -38,6 +39,10 @@ pub enum DecodeReq {
     },
     /// Decode this standalone file — one frame of a numbered still sequence.
     File(PathBuf),
+    /// Decode frame `frame` of the video at `path`, via the persistent per-pane
+    /// `VideoReader` (keyed (pane id, 0)). A video's length is known up front,
+    /// so it is only ever decoded, never probed.
+    Video { path: PathBuf, frame: usize },
 }
 
 pub struct Still {
@@ -173,6 +178,20 @@ impl SeqCache {
     }
 }
 
+/// A video file (mp4/avi), decoded frame-by-frame through the ffmpeg CLI (see
+/// `media/video.rs`). Its length is probed up front with ffprobe, so like a
+/// `FileSeq` there is no lazy discovery and it is always "at end".
+pub struct VideoSeq {
+    pub(super) name: String,
+    pub(super) path: PathBuf,
+    pub(super) size: [usize; 2],
+    /// Native frame rate (CFR assumption); kept for the seek math and a
+    /// possible future "seed playback fps" feature.
+    #[allow(dead_code)]
+    pub(super) fps: f64,
+    pub(super) frames: SeqCache,
+}
+
 pub struct TiffSeq {
     pub(super) name: String,
     pub(super) path: PathBuf,
@@ -243,6 +262,7 @@ impl Media {
             Media::TiffSeq(t) => &t.name,
             Media::FileSeq(f) => &f.name,
             Media::ConcatSeq(c) => &c.name,
+            Media::Video(v) => &v.name,
         }
     }
 
@@ -252,6 +272,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.len(),
             Media::FileSeq(f) => f.frames.len(),
             Media::ConcatSeq(c) => c.frames.len(),
+            Media::Video(v) => v.frames.len(),
         }
     }
 
@@ -268,6 +289,7 @@ impl Media {
             Media::TiffSeq(t) => t.size,
             Media::FileSeq(f) => f.size,
             Media::ConcatSeq(c) => c.size,
+            Media::Video(v) => v.size,
         }
     }
 
@@ -296,6 +318,8 @@ impl Media {
             Media::TiffSeq(t) => t.hi_depth,
             Media::FileSeq(f) => f.hi_depth,
             Media::ConcatSeq(c) => c.hi_depth,
+            // Video frames are always decoded to 8-bit (rgb24/gray).
+            Media::Video(_) => false,
         }
     }
 
@@ -311,6 +335,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.resident(idx),
             Media::FileSeq(f) => f.frames.resident(idx),
             Media::ConcatSeq(c) => c.frames.resident(idx),
+            Media::Video(v) => v.frames.resident(idx),
         }
     }
 
@@ -344,6 +369,12 @@ impl Media {
             Media::FileSeq(f) if !probe => f.paths.get(idx).cloned().map(DecodeReq::File),
             Media::FileSeq(_) => None,
             Media::ConcatSeq(c) => c.job(idx, probe),
+            // A video's length is known up front too: decode only, never probe.
+            Media::Video(v) if !probe && idx < v.frames.len() => Some(DecodeReq::Video {
+                path: v.path.clone(),
+                frame: idx,
+            }),
+            Media::Video(_) => None,
         }
     }
 
@@ -353,6 +384,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.insert(idx, frame),
             Media::FileSeq(f) => f.frames.insert(idx, frame),
             Media::ConcatSeq(c) => c.insert(idx, frame),
+            Media::Video(v) => v.frames.insert(idx, frame),
         }
     }
 
@@ -363,6 +395,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.touch(idx, clock),
             Media::FileSeq(f) => f.frames.touch(idx, clock),
             Media::ConcatSeq(c) => c.frames.touch(idx, clock),
+            Media::Video(v) => v.frames.touch(idx, clock),
         }
     }
 
@@ -374,6 +407,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.evict(idx),
             Media::FileSeq(f) => f.frames.evict(idx),
             Media::ConcatSeq(c) => c.frames.evict(idx),
+            Media::Video(v) => v.frames.evict(idx),
         }
     }
 
@@ -384,6 +418,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.resident_bytes,
             Media::FileSeq(f) => f.frames.resident_bytes,
             Media::ConcatSeq(c) => c.frames.resident_bytes,
+            Media::Video(v) => v.frames.resident_bytes,
         }
     }
 
@@ -395,6 +430,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.resident_frames(),
             Media::FileSeq(f) => f.frames.resident_frames(),
             Media::ConcatSeq(c) => c.frames.resident_frames(),
+            Media::Video(v) => v.frames.resident_frames(),
         }
     }
 
@@ -408,6 +444,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.lru_evictable(protect),
             Media::FileSeq(f) => f.frames.lru_evictable(protect),
             Media::ConcatSeq(c) => c.frames.lru_evictable(protect),
+            Media::Video(v) => v.frames.lru_evictable(protect),
         }
     }
 
@@ -416,7 +453,7 @@ impl Media {
     /// discovered lazily for a TIFF or a concatenation.
     pub fn at_end(&self) -> bool {
         match self {
-            Media::Still(_) | Media::FileSeq(_) => true,
+            Media::Still(_) | Media::FileSeq(_) | Media::Video(_) => true,
             Media::TiffSeq(t) => t.at_end,
             Media::ConcatSeq(c) => c.at_end,
         }
@@ -451,6 +488,7 @@ impl Media {
             Media::TiffSeq(t) => t.frames.resident_count(),
             Media::FileSeq(f) => f.frames.resident_count(),
             Media::ConcatSeq(c) => c.frames.resident_count(),
+            Media::Video(v) => v.frames.resident_count(),
         }
     }
 
