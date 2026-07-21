@@ -958,6 +958,29 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   encode of `t` and the export runs at the slower stage's pace, not their sum. On any
   early exit the receiver is dropped before the join so a composer blocked in `send`
   can't deadlock. A still skips all that and saves synchronously.
+- **Media names burnt into the output ("Add names").** The panel's toggle
+  (`Export.labels_on`) draws one text label per media in every layout and both formats.
+  The text is per media, keyed by **pane id** (`Export.labels: HashMap<u64, String>`, so it
+  survives reorder/close), edited in a list of fields under the toggle and defaulting to the
+  media's own name (`label_text`); colour, size, optional background box, 9-way position
+  (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. All
+  export state is runtime-only (not persisted in the config).
+  Labels are **rasterized once at plan time** on the UI thread (`export_ui::rasterize_label`)
+  through **egui's own font atlas** — laying the text out adds its glyphs to the atlas, then
+  `Fonts::image()` gives the coverage bitmap the glyph `uv_rect`s index into — producing a
+  `LabelBitmap` (plain alpha). Asking for a font size of `size_px / pixels_per_point`
+  *points* makes the atlas glyphs exactly `size_px` **pixels** tall, so the blit is 1:1.
+  Only the finished bitmaps ride into the `ExportPlan` (`labels`, index-aligned with
+  `panes`), so no egui font type crosses to the worker thread.
+  `ExportPlan::draw_labels` blends them at the **end of `compose`**, in **output-pixel**
+  space (after the resample — so text is crisp and its size is independent of zoom, output
+  height and composition scale), into the rect `label_rects` gives each pane: its grid slot,
+  the single image area, or its half of the A/B wipe. Labelled pixels are forced **opaque**
+  so a still's `crop_to_content` never trims a label off. Because this lives in `compose`,
+  MP4, still, and all three layouts get it with no per-path code.
+  The panel also shows a **preview**: the chosen media's live texture with the label drawn by
+  the ordinary egui painter using the same anchor/margin/padding maths scaled by the
+  preview's share of the output height — a faithful mock, not a re-run of the compositor.
 
 ---
 

@@ -25,7 +25,7 @@ mod input;
 mod panels;
 mod profile;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
@@ -35,7 +35,10 @@ use eframe::egui::{
 
 use crate::cli;
 use crate::decoder::{BackgroundDecoder, Decoded};
-use crate::export::{self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell};
+use crate::export::{
+    self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell, LabelAnchor,
+    LabelBitmap, LabelStyle,
+};
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
 use crate::view::ViewTransform;
@@ -345,6 +348,17 @@ struct Export {
     run: Option<ExportRun>,
     cancel: bool,
     status: String,
+    /// Burn each media's name into the output ("Add names").
+    labels_on: bool,
+    /// Custom name per media, keyed by **pane id** (stable across reorder/close)
+    /// so the text follows its media. A missing / blank entry falls back to the
+    /// media's own name.
+    labels: HashMap<u64, String>,
+    /// One style shared by every label (colour, background, size, position).
+    label_style: LabelStyle,
+    /// Which media the panel's label preview shows (pane id); falls back to the
+    /// first exported pane when it's gone.
+    label_preview: Option<u64>,
 }
 
 impl Default for Export {
@@ -365,6 +379,10 @@ impl Default for Export {
             run: None,
             cancel: false,
             status: String::new(),
+            labels_on: false,
+            labels: HashMap::new(),
+            label_style: LabelStyle::default(),
+            label_preview: None,
         }
     }
 }

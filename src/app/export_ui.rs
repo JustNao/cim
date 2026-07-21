@@ -91,6 +91,115 @@ fn run_export(
     outcome
 }
 
+/// Rasterize one label to a coverage bitmap through **egui's own font atlas**, so
+/// the burnt-in text matches the UI font exactly.
+///
+/// The atlas is rasterized at `pixels_per_point`, so asking for a font size of
+/// `size_px / ppp` *points* puts glyphs in the atlas at exactly `size_px` pixels
+/// — the blit is then 1:1, with no resampling of the glyph coverage. Laying the
+/// text out is what adds its glyphs to the atlas, hence the image is fetched
+/// after (a second `ctx.fonts` call: the first still holds the lock).
+fn rasterize_label(ctx: &egui::Context, text: &str, size_px: f32) -> Option<LabelBitmap> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let ppp = ctx.pixels_per_point().max(0.1);
+    let size = size_px.clamp(LabelStyle::MIN_SIZE, LabelStyle::MAX_SIZE) / ppp;
+    let galley = ctx.fonts(|f| {
+        f.layout_no_wrap(
+            text.to_owned(),
+            FontId::proportional(size),
+            Color32::WHITE, // colour is applied when blending, not here
+        )
+    });
+    let atlas = ctx.fonts(|f| f.image());
+    let (aw, ah) = (atlas.size[0], atlas.size[1]);
+    let (w, h) = (
+        (galley.size().x * ppp).ceil() as usize + 2,
+        (galley.size().y * ppp).ceil() as usize + 2,
+    );
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut alpha = vec![0u8; w * h];
+    for row in &galley.rows {
+        for g in &row.glyphs {
+            let uv = g.uv_rect;
+            if uv.is_nothing() {
+                continue; // whitespace
+            }
+            let dx = ((g.pos.x + uv.offset.x) * ppp).round() as i64;
+            let dy = ((g.pos.y + uv.offset.y) * ppp).round() as i64;
+            let (sw, sh) = (
+                (uv.max[0] - uv.min[0]) as usize,
+                (uv.max[1] - uv.min[1]) as usize,
+            );
+            for sy in 0..sh {
+                let ay = uv.min[1] as usize + sy;
+                let ty = dy + sy as i64;
+                if ay >= ah || ty < 0 || ty >= h as i64 {
+                    continue;
+                }
+                for sx in 0..sw {
+                    let ax = uv.min[0] as usize + sx;
+                    let tx = dx + sx as i64;
+                    if ax >= aw || tx < 0 || tx >= w as i64 {
+                        continue;
+                    }
+                    let cov = (atlas.pixels[ay * aw + ax].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    // Glyph boxes can touch; keep the strongest coverage.
+                    let d = &mut alpha[ty as usize * w + tx as usize];
+                    *d = (*d).max(cov);
+                }
+            }
+        }
+    }
+    Some(LabelBitmap { w, h, alpha })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label rasterizer really pulls glyph coverage out of egui's font
+    /// atlas: non-empty ink, and a bitmap about the requested pixel height.
+    #[test]
+    fn rasterizes_text_from_the_font_atlas() {
+        let ctx = egui::Context::default();
+        // One frame so the fonts exist (they're built on the first pass).
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let lb = rasterize_label(&ctx, "Reference", 32.0).expect("no bitmap");
+        assert!(lb.w > 0 && lb.h > 0);
+        assert_eq!(lb.alpha.len(), lb.w * lb.h);
+        let ink = lb.alpha.iter().filter(|&&a| a > 0).count();
+        assert!(ink > 0, "rasterized label has no ink");
+        // The glyph box is a line height tall — near the requested 32 px.
+        assert!(
+            (16..=64).contains(&lb.h),
+            "unexpected label height {}",
+            lb.h
+        );
+        // Blank text draws nothing at all.
+        assert!(rasterize_label(&ctx, "   ", 32.0).is_none());
+    }
+}
+
+/// Human-readable name of a label position (the 3×3 selector's hover text).
+fn anchor_name(a: LabelAnchor) -> &'static str {
+    match a {
+        LabelAnchor::TopLeft => "Top left",
+        LabelAnchor::TopCenter => "Top centre",
+        LabelAnchor::TopRight => "Top right",
+        LabelAnchor::MidLeft => "Middle left",
+        LabelAnchor::Center => "Centre",
+        LabelAnchor::MidRight => "Middle right",
+        LabelAnchor::BottomLeft => "Bottom left",
+        LabelAnchor::BottomCenter => "Bottom centre",
+        LabelAnchor::BottomRight => "Bottom right",
+    }
+}
+
 impl CimApp {
     pub(super) fn toggle_export(&mut self) {
         self.export.show = !self.export.show;
@@ -362,7 +471,25 @@ impl CimApp {
         (s, e.clamp(s, tl - 1))
     }
 
-    pub(super) fn build_export_plan(&self) -> Result<ExportPlan, String> {
+    /// The name burnt in for pane `idx`: the user's custom text, falling back to
+    /// the media's own name when unset or blank.
+    pub(super) fn label_text(&self, idx: usize) -> String {
+        let p = &self.panes[idx];
+        match self.export.labels.get(&p.id).map(|s| s.trim()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => p.media.name().to_string(),
+        }
+    }
+
+    /// The rasterized label for pane `idx`, or `None` when names are off.
+    fn export_label(&self, ctx: &egui::Context, idx: usize) -> Option<LabelBitmap> {
+        if !self.export.labels_on {
+            return None;
+        }
+        rasterize_label(ctx, &self.label_text(idx), self.export.label_style.size_px)
+    }
+
+    pub(super) fn build_export_plan(&self, ctx: &egui::Context) -> Result<ExportPlan, String> {
         if self.panes.is_empty() {
             return Err("No media to export".into());
         }
@@ -377,6 +504,9 @@ impl CimApp {
         let total = end - start + 1;
 
         let mut panes = Vec::new();
+        // Labels are pushed alongside `panes` in every arm below, so the two
+        // vectors stay index-aligned by construction.
+        let mut labels: Vec<Option<LabelBitmap>> = Vec::new();
         let layout = match self.export.mode {
             Mode::Grid => {
                 let vis = self.visible_indices();
@@ -397,6 +527,7 @@ impl CimApp {
                         let mut pane = self.export_pane(idx);
                         pane.view = region_view(reg);
                         panes.push(pane);
+                        labels.push(self.export_label(ctx, idx));
                         // Crop already fills the cell 1:1: place = area = content.
                         v.push(GridCell {
                             pane: k,
@@ -413,6 +544,7 @@ impl CimApp {
                         .ok_or("No visible media (enable some in ☰ Media)")?;
                     for (k, mut cell) in packed.into_iter().enumerate() {
                         panes.push(self.export_pane(cell.pane));
+                        labels.push(self.export_label(ctx, cell.pane));
                         cell.pane = k; // remap media index → plan-pane index
                         v.push(cell);
                     }
@@ -430,6 +562,7 @@ impl CimApp {
                     None => area,
                 };
                 panes.push(pane);
+                labels.push(self.export_label(ctx, idx));
                 ExportLayout::Single(0, cell)
             }
             Mode::Ab => {
@@ -448,6 +581,8 @@ impl CimApp {
                 };
                 panes.push(pa);
                 panes.push(pb);
+                labels.push(self.export_label(ctx, a));
+                labels.push(self.export_label(ctx, b));
                 let split_x = img.min.x + self.ab_split.clamp(0.02, 0.98) * img.width();
                 ExportLayout::Ab {
                     a: 0,
@@ -462,6 +597,8 @@ impl CimApp {
             panes,
             layout,
             region,
+            labels,
+            label_style: self.export.label_style,
             out_w,
             out_h,
             start,
@@ -484,7 +621,7 @@ impl CimApp {
         }
     }
 
-    pub(super) fn start_export(&mut self) {
+    pub(super) fn start_export(&mut self, ctx: &egui::Context) {
         let name = self.export.name.trim();
         if name.is_empty() {
             self.export.status = "Enter an output file name first".into();
@@ -521,10 +658,10 @@ impl CimApp {
             }
         }
         if self.export_format() == ExportFormat::Image {
-            self.export_still_image(path);
+            self.export_still_image(ctx, path);
             return;
         }
-        let plan = match self.build_export_plan() {
+        let plan = match self.build_export_plan(ctx) {
             Ok(p) => p,
             Err(e) => {
                 self.export.status = e;
@@ -558,8 +695,8 @@ impl CimApp {
     /// Export a single composited still (PNG/JPEG) — the same layout, region,
     /// tone and overlays as the MP4 path, but one frame (the one on screen) and
     /// no ffmpeg. Fast enough to run inline on the UI thread.
-    fn export_still_image(&mut self, path: PathBuf) {
-        let mut plan = match self.build_export_plan() {
+    fn export_still_image(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let mut plan = match self.build_export_plan(ctx) {
             Ok(p) => p,
             Err(e) => {
                 self.export.status = e;
@@ -611,6 +748,177 @@ impl CimApp {
             ExportOutcome::Cancelled => "Export cancelled".into(),
             ExportOutcome::Failed(e) => e,
         };
+    }
+
+    /// The "Add names" section: one text field per exported media, the shared
+    /// style controls, and the preview. Drawn under the export grid when the
+    /// toggle is on.
+    fn draw_label_options(&mut self, ui: &mut egui::Ui) {
+        // Only the media that actually end up in the output, in output order.
+        let participants = self.export_participants();
+        // Snapshot (id, fallback name) so the map can be borrowed mutably below.
+        let rows: Vec<(usize, u64, String)> = participants
+            .iter()
+            .map(|&i| (i, self.panes[i].id, self.panes[i].media.name().to_string()))
+            .collect();
+
+        ui.add_space(4.0);
+        for (_, id, fallback) in &rows {
+            ui.horizontal(|ui| {
+                let text = self
+                    .export
+                    .labels
+                    .entry(*id)
+                    .or_insert_with(|| fallback.clone());
+                ui.add(egui::TextEdit::singleline(text).desired_width(220.0));
+                ui.label(egui::RichText::new(ellipsize(fallback, 22)).weak().small());
+            });
+        }
+        if rows.is_empty() {
+            ui.label(egui::RichText::new("No media in this layout").weak());
+        }
+
+        ui.add_space(4.0);
+        let st = &mut self.export.label_style;
+        ui.horizontal(|ui| {
+            ui.label("Text");
+            ui.color_edit_button_srgba(&mut st.color);
+            ui.add(
+                egui::DragValue::new(&mut st.size_px)
+                    .range(LabelStyle::MIN_SIZE..=LabelStyle::MAX_SIZE)
+                    .suffix(" px"),
+            )
+            .on_hover_text("Text height in output pixels (independent of zoom)");
+            ui.separator();
+            ui.checkbox(&mut st.background, "Background");
+            ui.add_enabled_ui(st.background, |ui| {
+                ui.color_edit_button_srgba(&mut st.bg_color);
+            });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            // A 3×3 block of squares mirroring where the label sits in
+            // each media's cell.
+            ui.vertical(|ui| {
+                for row in 0..3 {
+                    ui.horizontal(|ui| {
+                        for col in 0..3 {
+                            let a = LabelAnchor::ALL[row * 3 + col];
+                            let sel = st.anchor == a;
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::new(22.0, 16.0), Sense::click());
+                            // The cells carry no text, so each needs a fill of
+                            // its own — otherwise the unselected positions are
+                            // invisible and the grid can't be read.
+                            let fill = if sel {
+                                ui.visuals().selection.bg_fill
+                            } else if resp.hovered() {
+                                Color32::from_gray(110)
+                            } else {
+                                Color32::from_gray(70)
+                            };
+                            ui.painter().rect_filled(rect, 2.0, fill);
+                            if resp.on_hover_text(anchor_name(a)).clicked() {
+                                st.anchor = a;
+                            }
+                        }
+                    });
+                }
+            });
+            ui.add(
+                egui::DragValue::new(&mut st.margin)
+                    .range(0.0..=200.0)
+                    .prefix("Margin ")
+                    .suffix(" px"),
+            );
+        });
+
+        ui.add_space(4.0);
+        self.draw_label_preview(ui, &rows);
+    }
+
+    /// A small mock of one exported cell: the media's own image with the label
+    /// drawn over it, using the same anchor / margin / padding maths as
+    /// `ExportPlan::draw_labels`, scaled to the preview. Not a re-run of the
+    /// compositor — just enough to see where the text lands and how it reads.
+    fn draw_label_preview(&mut self, ui: &mut egui::Ui, rows: &[(usize, u64, String)]) {
+        if rows.is_empty() {
+            return;
+        }
+        // Which media to preview (defaults to the first exported one).
+        let mut idx = rows
+            .iter()
+            .find(|(_, id, _)| Some(*id) == self.export.label_preview)
+            .map_or(rows[0].0, |(i, _, _)| *i);
+        if rows.len() > 1 {
+            ui.horizontal(|ui| {
+                ui.label("Preview");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("exp_label_preview")
+                    .selected_text(ellipsize(self.panes[idx].media.name(), 24))
+                    .show_ui(ui, |ui| {
+                        for (i, _, name) in rows {
+                            if ui
+                                .selectable_label(*i == idx, ellipsize(name, 30))
+                                .clicked()
+                            {
+                                idx = *i;
+                            }
+                        }
+                    });
+            });
+            self.export.label_preview = Some(self.panes[idx].id);
+        }
+
+        // Preview box, in the exported cell's aspect so the placement is honest.
+        let region = self.export_canvas();
+        let (_, out_h) = export::out_dims(region, self.export.out_height);
+        let aspect =
+            (self.disp_size(idx)[0] as f32 / self.disp_size(idx)[1].max(1) as f32).clamp(0.25, 4.0);
+        let w = ui.available_width().clamp(80.0, 300.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / aspect), Sense::hover());
+        let painter = ui.painter_at(rect);
+        match self.pane_texture(idx) {
+            Some(tex) => painter.add(egui::Shape::image(
+                tex,
+                rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            )),
+            // No committed texture yet (still decoding): a flat plate still shows
+            // where the label lands.
+            None => painter.rect_filled(rect, 0.0, Color32::from_gray(60)),
+        };
+
+        // Same geometry as the export, scaled by the preview's share of the
+        // output height, so the label keeps its true relative size.
+        let st = self.export.label_style;
+        let scale = rect.height() / out_h.max(1) as f32;
+        let font = FontId::proportional((st.size_px * scale).max(4.0));
+        let text = self.label_text(idx);
+        let galley = painter.layout_no_wrap(text, font, st.color);
+        let pad = if st.background {
+            st.bg_pad() * scale
+        } else {
+            0.0
+        };
+        let margin = st.margin * scale;
+        let (bw, bh) = (galley.size().x + 2.0 * pad, galley.size().y + 2.0 * pad);
+        let (fx, fy) = st.anchor.fractions();
+        let free = Vec2::new(
+            (rect.width() - bw - 2.0 * margin).max(0.0),
+            (rect.height() - bh - 2.0 * margin).max(0.0),
+        );
+        let box_min = rect.min + Vec2::new(margin + free.x * fx, margin + free.y * fy);
+        if st.background {
+            painter.rect_filled(
+                Rect::from_min_size(box_min, Vec2::new(bw, bh)),
+                0.0,
+                st.bg_color,
+            );
+        }
+        painter.galley(box_min + Vec2::splat(pad), galley, st.color);
     }
 
     pub(super) fn draw_export(&mut self, ctx: &egui::Context) {
@@ -760,7 +1068,16 @@ impl CimApp {
                             ui.label("FPS");
                             ui.add(egui::DragValue::new(&mut self.export.fps).range(1.0..=60.0));
                             ui.end_row();
+
+                            ui.label("Add labels");
+                            ui.checkbox(&mut self.export.labels_on, "").on_hover_text(
+                                "Burn a text label into each media's cell of the output",
+                            );
+                            ui.end_row();
                         });
+                    if self.export.labels_on {
+                        self.draw_label_options(ui);
+                    }
                 });
 
                 // Sequence lengths are discovered lazily, so warn when the chosen
@@ -851,7 +1168,7 @@ impl CimApp {
                         "Export MP4"
                     };
                     if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                        self.start_export();
+                        self.start_export(ctx);
                     }
                 }
 

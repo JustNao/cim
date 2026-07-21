@@ -14,7 +14,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use eframe::egui::{Pos2, Rect, Vec2};
+use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
@@ -466,6 +466,102 @@ impl ExportPane {
     }
 }
 
+/// Where a media's name label sits inside its cell of the output.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum LabelAnchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    MidLeft,
+    Center,
+    MidRight,
+    #[default]
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl LabelAnchor {
+    /// The 3×3 grid, row-major (top → bottom, left → right) — the order the
+    /// panel's selector draws.
+    pub const ALL: [Self; 9] = [
+        Self::TopLeft,
+        Self::TopCenter,
+        Self::TopRight,
+        Self::MidLeft,
+        Self::Center,
+        Self::MidRight,
+        Self::BottomLeft,
+        Self::BottomCenter,
+        Self::BottomRight,
+    ];
+
+    /// Horizontal / vertical placement fractions (0 = min edge, 1 = max edge),
+    /// applied to the free space left over after the label and its margin.
+    pub fn fractions(self) -> (f32, f32) {
+        let x = match self {
+            Self::TopLeft | Self::MidLeft | Self::BottomLeft => 0.0,
+            Self::TopCenter | Self::Center | Self::BottomCenter => 0.5,
+            Self::TopRight | Self::MidRight | Self::BottomRight => 1.0,
+        };
+        let y = match self {
+            Self::TopLeft | Self::TopCenter | Self::TopRight => 0.0,
+            Self::MidLeft | Self::Center | Self::MidRight => 0.5,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => 1.0,
+        };
+        (x, y)
+    }
+}
+
+/// How every exported media name is drawn (one global style for all labels).
+/// Sizes are in **output pixels**, so a label is the same size whatever the
+/// zoom or the composition scale.
+#[derive(Clone, Copy, PartialEq)]
+pub struct LabelStyle {
+    pub size_px: f32,
+    pub color: Color32,
+    pub background: bool,
+    pub bg_color: Color32,
+    pub anchor: LabelAnchor,
+    /// Gap between the label (or its background box) and the cell edge.
+    pub margin: f32,
+}
+
+impl LabelStyle {
+    /// Text sizes outside this range are refused: the label is rasterized
+    /// through egui's font atlas, and an absurd size would blow it up.
+    pub const MIN_SIZE: f32 = 8.0;
+    pub const MAX_SIZE: f32 = 200.0;
+
+    /// Padding around the text inside the background box.
+    pub fn bg_pad(&self) -> f32 {
+        (self.size_px * 0.35).round()
+    }
+}
+
+impl Default for LabelStyle {
+    fn default() -> Self {
+        Self {
+            size_px: 28.0,
+            color: Color32::WHITE,
+            background: true,
+            bg_color: Color32::from_black_alpha(153),
+            anchor: LabelAnchor::default(),
+            margin: 8.0,
+        }
+    }
+}
+
+/// One label rasterized to a coverage bitmap (the text's antialiased alpha),
+/// built once per export from egui's font atlas so the exported text matches the
+/// UI font exactly — and so no egui font type has to cross to the worker thread.
+pub struct LabelBitmap {
+    pub w: usize,
+    pub h: usize,
+    /// `w * h` coverage values, row-major.
+    pub alpha: Vec<u8>,
+}
+
 /// One cell of a grid export. `place` is the slot in composition space; `area`
 /// is the screen rect the pane's `view` was calibrated to; `content` is the
 /// sub-rect of `area` that `place` shows. Decoupling `place` from `area` lets the
@@ -528,6 +624,10 @@ pub struct ExportPlan {
     pub panes: Vec<ExportPane>,
     pub layout: ExportLayout,
     pub region: Rect,
+    /// Per-pane name label (same order as `panes`; `None` = no label for that
+    /// pane, e.g. the whole feature is off). Rasterized once at plan time.
+    pub labels: Vec<Option<LabelBitmap>>,
+    pub label_style: LabelStyle,
     pub out_w: usize,
     pub out_h: usize,
     /// First timeline frame to export; frame `t` of the output shows timeline
@@ -594,7 +694,117 @@ impl ExportPlan {
                 out[o..o + 4].copy_from_slice(&col);
             }
         }
+        // Names are burned in **after** the resample, in output pixels: the text
+        // is then crisp and exactly `size_px` tall whatever the zoom or output
+        // height — and every layout / both formats get it, since the still path
+        // composes through here too.
+        self.draw_labels(&mut out);
         out
+    }
+
+    /// The composition-space rect each pane's label is placed in: its grid slot,
+    /// the single image area, or its half of the A/B wipe. `None` when the pane
+    /// isn't in the exported region at all.
+    fn label_rects(&self) -> Vec<Option<Rect>> {
+        // Indexed by label, which is index-aligned with `panes` by construction.
+        let mut rects: Vec<Option<Rect>> = vec![None; self.labels.len()];
+        let mut put = |pane: usize, r: Rect| {
+            let Some(slot) = rects.get_mut(pane) else {
+                return;
+            };
+            let r = self.region.intersect(r);
+            if r.width() > 0.0 && r.height() > 0.0 {
+                *slot = Some(r);
+            }
+        };
+        match &self.layout {
+            ExportLayout::Grid(cells) => {
+                for g in cells {
+                    put(g.pane, g.place);
+                }
+            }
+            ExportLayout::Single(i, r) => put(*i, *r),
+            ExportLayout::Ab { a, b, img, split_x } => {
+                let mid = split_x.clamp(img.min.x, img.max.x);
+                put(*a, Rect::from_min_max(img.min, Pos2::new(mid, img.max.y)));
+                put(*b, Rect::from_min_max(Pos2::new(mid, img.min.y), img.max));
+            }
+        }
+        rects
+    }
+
+    /// Blend every pane's name label into the composited output buffer (RGBA,
+    /// `out_w × out_h`). Labelled pixels are forced opaque so a still's
+    /// `crop_to_content` keeps them and never trims a label off.
+    fn draw_labels(&self, out: &mut [u8]) {
+        if self.labels.iter().all(|l| l.is_none()) {
+            return;
+        }
+        let st = &self.label_style;
+        let (w, h) = (self.out_w, self.out_h);
+        let (rw, rh) = (
+            self.region.width().max(1e-6),
+            self.region.height().max(1e-6),
+        );
+        let to_out = |p: Pos2| {
+            Pos2::new(
+                (p.x - self.region.min.x) / rw * w as f32,
+                (p.y - self.region.min.y) / rh * h as f32,
+            )
+        };
+        for (cell, label) in self.label_rects().into_iter().zip(&self.labels) {
+            let (Some(cell), Some(lb)) = (cell, label.as_ref()) else {
+                continue;
+            };
+            if lb.w == 0 || lb.h == 0 {
+                continue;
+            }
+            let cell = Rect::from_min_max(to_out(cell.min), to_out(cell.max));
+            // The box the label occupies (text plus its background padding); the
+            // anchor distributes whatever space is left after the margin.
+            let pad = if st.background { st.bg_pad() } else { 0.0 };
+            let (bw, bh) = (lb.w as f32 + 2.0 * pad, lb.h as f32 + 2.0 * pad);
+            let (fx, fy) = st.anchor.fractions();
+            let free_x = (cell.width() - bw - 2.0 * st.margin).max(0.0);
+            let free_y = (cell.height() - bh - 2.0 * st.margin).max(0.0);
+            let bx = cell.min.x + st.margin + free_x * fx;
+            let by = cell.min.y + st.margin + free_y * fy;
+
+            if st.background {
+                let a = st.bg_color.a() as f32 / 255.0;
+                if a > 0.0 {
+                    blend_rect(
+                        out,
+                        w,
+                        h,
+                        Rect::from_min_size(Pos2::new(bx, by), Vec2::new(bw, bh)),
+                        |dst| blend_px(dst, st.bg_color.to_array(), a),
+                    );
+                }
+            }
+            // The glyph coverage, tinted with the text colour.
+            let (tx, ty) = ((bx + pad).round() as i64, (by + pad).round() as i64);
+            let col = st.color.to_array();
+            let col_a = st.color.a() as f32 / 255.0;
+            for gy in 0..lb.h {
+                let oy = ty + gy as i64;
+                if oy < 0 || oy >= h as i64 {
+                    continue;
+                }
+                for gx in 0..lb.w {
+                    let ox = tx + gx as i64;
+                    if ox < 0 || ox >= w as i64 {
+                        continue;
+                    }
+                    let cov = lb.alpha[gy * lb.w + gx] as f32 / 255.0 * col_a;
+                    if cov <= 0.0 {
+                        continue;
+                    }
+                    let o = (oy as usize * w + ox as usize) * 4;
+                    blend_px(&mut out[o..o + 4], col, cov);
+                }
+            }
+        }
     }
 
     /// Per-pane source-image crop box `[x0, y0, w, h]` (or `None` when a pane is
@@ -691,6 +901,38 @@ impl ExportPlan {
                 (ix1 > ix0 && iy1 > iy0).then_some([ix0, iy0, ix1 - ix0, iy1 - iy0])
             })
             .collect()
+    }
+}
+
+/// Blend `col` at coverage `a` over one RGBA pixel, forcing it opaque: a label
+/// pixel is content, so a still's `crop_to_content` must keep it even when it
+/// falls on the transparent background.
+fn blend_px(dst: &mut [u8], col: [u8; 4], a: f32) {
+    // An uncovered (alpha-0) pixel holds the background colour but isn't really
+    // there — blend against `BG` explicitly, so a label hanging over the gutter
+    // fades into the same dark background the video shows.
+    let base = if dst[3] == 0 {
+        BG
+    } else {
+        [dst[0], dst[1], dst[2], 255]
+    };
+    for k in 0..3 {
+        dst[k] = (base[k] as f32 * (1.0 - a) + col[k] as f32 * a).round() as u8;
+    }
+    dst[3] = 255;
+}
+
+/// Apply `f` to every output pixel inside `r` (clipped to the `w × h` buffer).
+fn blend_rect(out: &mut [u8], w: usize, h: usize, r: Rect, f: impl Fn(&mut [u8])) {
+    let x0 = (r.min.x.round() as i64).clamp(0, w as i64) as usize;
+    let y0 = (r.min.y.round() as i64).clamp(0, h as i64) as usize;
+    let x1 = (r.max.x.round() as i64).clamp(0, w as i64) as usize;
+    let y1 = (r.max.y.round() as i64).clamp(0, h as i64) as usize;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let o = (y * w + x) * 4;
+            f(&mut out[o..o + 4]);
+        }
     }
 }
 
@@ -850,6 +1092,103 @@ mod tests {
     use super::*;
     use crate::media::Samples;
 
+    /// A label lands in the corner its anchor names, in **output** pixels, and
+    /// paints opaque (so a still's `crop_to_content` keeps it). Uses a synthetic
+    /// bitmap, so no egui font atlas is needed.
+    #[test]
+    fn label_lands_at_its_anchor() {
+        let (w, h) = (40usize, 20usize);
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32));
+        let bitmap = || LabelBitmap {
+            w: 3,
+            h: 3,
+            alpha: vec![255; 9],
+        };
+        // Top-left vs bottom-right of the same cell, no background box and no
+        // margin, so the label sits exactly in the corner.
+        let corner = |anchor: LabelAnchor| {
+            let plan = ExportPlan {
+                panes: Vec::new(),
+                layout: ExportLayout::Single(0, cell),
+                region: cell,
+                labels: vec![Some(bitmap())],
+                label_style: LabelStyle {
+                    background: false,
+                    margin: 0.0,
+                    color: Color32::WHITE,
+                    anchor,
+                    ..LabelStyle::default()
+                },
+                out_w: w,
+                out_h: h,
+                start: 0,
+                total: 1,
+            };
+            let mut out = vec![0u8; w * h * 4];
+            plan.draw_labels(&mut out);
+            // Bounding box of the opaque (labelled) pixels.
+            let mut bb: Option<(usize, usize, usize, usize)> = None;
+            for y in 0..h {
+                for x in 0..w {
+                    if out[(y * w + x) * 4 + 3] == 255 {
+                        bb = Some(match bb {
+                            None => (x, y, x, y),
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        });
+                    }
+                }
+            }
+            bb.expect("label drew nothing")
+        };
+        assert_eq!(corner(LabelAnchor::TopLeft), (0, 0, 2, 2));
+        assert_eq!(
+            corner(LabelAnchor::BottomRight),
+            (w - 3, h - 3, w - 1, h - 1)
+        );
+    }
+
+    /// The `labels` vector is index-aligned with `panes`, so a labelled A/B
+    /// export puts each name on its own side of the wipe.
+    #[test]
+    fn ab_labels_land_on_their_own_side() {
+        let (w, h) = (40usize, 20usize);
+        let img = Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32));
+        let plan = ExportPlan {
+            panes: Vec::new(),
+            layout: ExportLayout::Ab {
+                a: 0,
+                b: 1,
+                img,
+                split_x: w as f32 / 2.0,
+            },
+            region: img,
+            labels: (0..2)
+                .map(|_| {
+                    Some(LabelBitmap {
+                        w: 3,
+                        h: 3,
+                        alpha: vec![255; 9],
+                    })
+                })
+                .collect(),
+            label_style: LabelStyle {
+                background: false,
+                margin: 0.0,
+                anchor: LabelAnchor::TopLeft,
+                ..LabelStyle::default()
+            },
+            out_w: w,
+            out_h: h,
+            start: 0,
+            total: 1,
+        };
+        let mut out = vec![0u8; w * h * 4];
+        plan.draw_labels(&mut out);
+        // A's label at the left edge, B's at the split — one per side.
+        assert_eq!(out[3], 255, "A label missing at the left edge");
+        assert_eq!(out[(w / 2) * 4 + 3], 255, "B label missing at the split");
+    }
+
     /// An image-space crop exported 1:1 must reproduce exactly the region's
     /// pixels: cell of the crop's size + view (zoom 1, centred on the crop).
     #[test]
@@ -880,6 +1219,8 @@ mod tests {
             region: cell,
             out_w: 4,
             out_h: 2,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -923,6 +1264,8 @@ mod tests {
             region: cell,
             out_w: 4,
             out_h: 2,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -983,6 +1326,8 @@ mod tests {
             region: Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 4.0)),
             out_w: 8,
             out_h: 4,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -1036,6 +1381,8 @@ mod tests {
             region: cell,
             out_w: 8,
             out_h: 8,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -1081,6 +1428,8 @@ mod tests {
             region: cell,
             out_w: 8,
             out_h: 8,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -1123,6 +1472,8 @@ mod tests {
             region: content,
             out_w: 4,
             out_h: 4,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -1186,6 +1537,8 @@ mod tests {
             region: cell,
             out_w: 16,
             out_h: 8,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 1,
         };
@@ -1235,6 +1588,8 @@ mod tests {
             region: area,
             out_w: 160,
             out_h: 120,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 4,
         };
@@ -1290,6 +1645,8 @@ mod tests {
             region: area,
             out_w: 64,
             out_h: 48,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
             start: 0,
             total: 3,
         };
