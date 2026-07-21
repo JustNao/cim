@@ -712,10 +712,8 @@ const BASH_COMPLETION: &str = r#"_cim() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local IFS=$'\n'
     COMPREPLY=( $(cim --complete "$cur") )
-    # cim ends a directory candidate with a path separator. When that's the sole
-    # completion, suppress bash's default trailing space so the user can keep
-    # typing into the sub-folder instead of having to erase the space first.
-    if [[ ${#COMPREPLY[@]} -eq 1 && "${COMPREPLY[0]}" == *[/\\] ]]; then
+    compopt -o filenames
+    if [[ ${#COMPREPLY[@]} -eq 1 && "${COMPREPLY[0]}" == *\\ ]]; then
         compopt -o nospace
     fi
 }
@@ -725,11 +723,15 @@ complete -F _cim cim
 const POWERSHELL_COMPLETION: &str = r#"Register-ArgumentCompleter -Native -CommandName cim -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     cim --complete "$wordToComplete" | ForEach-Object {
-        # cim ends a directory candidate with a path separator. Mark those as a
-        # container (not a plain value) so PowerShell omits the trailing space and
-        # the user can descend straight into sub-folders.
-        $type = if ($_ -match '[\\/]$') { 'ProviderContainer' } else { 'ParameterValue' }
-        [System.Management.Automation.CompletionResult]::new($_, $_, $type, $_)
+        $full = $_
+        $leaf = $full.TrimEnd('\', '/') -replace '.*[\\/]', ''
+        if ($full -match '[\\/]$') {
+            $leaf = "$leaf/"
+            $type = 'ProviderContainer'
+        } else {
+            $type = 'ParameterValue'
+        }
+        [System.Management.Automation.CompletionResult]::new($full, $leaf, $type, $full)
     }
 }
 "#;
