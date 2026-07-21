@@ -374,7 +374,7 @@ impl CimApp {
         let (xlo, xhi) = (x_of(lo), x_of(hi));
 
         // Base track = "not loaded".
-        painter.rect_filled(rect, 0.0, Color32::from_gray(28));
+        painter.rect_filled(rect, 0.0, Color32::from_gray(50));
 
         // Frames resident in memory, in the accent colour. Merge contiguous
         // runs so a long cached span is one rect (cheap, and reads as solid).
