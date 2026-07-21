@@ -762,16 +762,16 @@ impl CimApp {
             .map(|&i| (i, self.panes[i].id, self.panes[i].media.name().to_string()))
             .collect();
 
-        ui.add_space(4.0);
-        for (_, id, fallback) in &rows {
+        // ui.add_space(4.0);
+        for (idx, id, fallback) in &rows {
             ui.horizontal(|ui| {
                 let text = self
                     .export
                     .labels
                     .entry(*id)
                     .or_insert_with(|| fallback.clone());
-                ui.add(egui::TextEdit::singleline(text).desired_width(220.0));
-                ui.label(egui::RichText::new(ellipsize(fallback, 22)).weak().small());
+                ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                ui.label(egui::RichText::new((idx + 1).to_string()).weak().small());
             });
         }
         if rows.is_empty() {
@@ -796,6 +796,7 @@ impl CimApp {
             });
         });
 
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Position");
             // A 3×3 block of squares mirroring where the label sits in
@@ -818,7 +819,7 @@ impl CimApp {
                             } else {
                                 Color32::from_gray(70)
                             };
-                            ui.painter().rect_filled(rect, 2.0, fill);
+                            ui.painter().rect_filled(rect, 0.0, fill);
                             if resp.on_hover_text(anchor_name(a)).clicked() {
                                 st.anchor = a;
                             }
@@ -935,7 +936,7 @@ impl CimApp {
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
-            .default_width(360.0)
+            .default_width(240.0)
             .show(ctx, |ui| {
                 ui.add_enabled_ui(!running, |ui| {
                     egui::Grid::new("export_grid")

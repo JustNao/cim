@@ -475,8 +475,8 @@ pub enum LabelAnchor {
     MidLeft,
     Center,
     MidRight,
-    #[default]
     BottomLeft,
+    #[default]
     BottomCenter,
     BottomRight,
 }
@@ -542,9 +542,9 @@ impl LabelStyle {
 impl Default for LabelStyle {
     fn default() -> Self {
         Self {
-            size_px: 28.0,
+            size_px: 40.0,
             color: Color32::WHITE,
-            background: true,
+            background: false,
             bg_color: Color32::from_black_alpha(153),
             anchor: LabelAnchor::default(),
             margin: 8.0,
