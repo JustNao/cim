@@ -873,20 +873,32 @@ impl CimApp {
         }
 
         // Preview box, in the exported cell's aspect so the placement is honest.
+        // With a crop selected it mirrors the region: the box takes the crop's
+        // aspect and only the cropped sub-rect of the texture is shown (UVs), so
+        // the preview matches what actually gets exported.
         let region = self.export_canvas();
         let (_, out_h) = export::out_dims(region, self.export.out_height);
-        let aspect =
-            (self.disp_size(idx)[0] as f32 / self.disp_size(idx)[1].max(1) as f32).clamp(0.25, 4.0);
+        let dsz = self.disp_size(idx);
+        let (aspect, uv) = match self.export.region {
+            Some(reg) => {
+                let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
+                let uv = Rect::from_min_max(
+                    Pos2::new((reg.min.x / iw).clamp(0.0, 1.0), (reg.min.y / ih).clamp(0.0, 1.0)),
+                    Pos2::new((reg.max.x / iw).clamp(0.0, 1.0), (reg.max.y / ih).clamp(0.0, 1.0)),
+                );
+                (reg.width() / reg.height().max(1.0), uv)
+            }
+            None => (
+                dsz[0] as f32 / dsz[1].max(1) as f32,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            ),
+        };
+        let aspect = aspect.clamp(0.25, 4.0);
         let w = ui.available_width().clamp(80.0, 300.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / aspect), Sense::hover());
         let painter = ui.painter_at(rect);
         match self.pane_texture(idx) {
-            Some(tex) => painter.add(egui::Shape::image(
-                tex,
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            )),
+            Some(tex) => painter.add(egui::Shape::image(tex, rect, uv, Color32::WHITE)),
             // No committed texture yet (still decoding): a flat plate still shows
             // where the label lands.
             None => painter.rect_filled(rect, 0.0, Color32::from_gray(60)),
