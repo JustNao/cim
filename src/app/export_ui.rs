@@ -281,14 +281,14 @@ impl CimApp {
             p.frame,
             self.export_source(idx),
         );
-        // "Share clip" locks the bounds to the Control media's; snapshot them as
-        // an explicit window override for any non-LUT_ALPHA tone so the exported
-        // frame matches the live view. (Falls back to the pane's own bounds when
-        // the Control frame isn't resident.)
+        // "Share clip" locks the bounds to the Control media's. Rather than
+        // freeze a single snapshot, flag the pane so `ExportPlan::compose`
+        // recomputes the shared window from the Control's frame every exported
+        // frame (matching the live view). The plan attaches the Control source.
         {
             let t = self.tone_of(idx);
             if self.contrast_of(idx) != ContrastMode::LutAlpha && t.share_clip {
-                pane.window = self.control_clip_bounds();
+                pane.share_clip = true;
             }
             if self.contrast_of(idx) == ContrastMode::Colormap {
                 pane.palette = Some(t.palette);
@@ -593,9 +593,11 @@ impl CimApp {
             }
         };
 
-        Ok(ExportPlan {
+        let has_share_clip = panes.iter().any(|p| p.share_clip);
+        let mut plan = ExportPlan {
             panes,
             layout,
+            control: None,
             region,
             labels,
             label_style: self.export.label_style,
@@ -603,7 +605,53 @@ impl CimApp {
             out_h,
             start,
             total,
-        })
+        };
+        // Attach the Control media so its "Share clip" bounds are recomputed per
+        // exported frame (the live view does this every frame via `tone_sig`).
+        if has_share_clip {
+            if let Some((source, count, sync, own, clip, region)) = self.export_control_snapshot() {
+                plan.set_share_clip_control(source, count, sync, own, clip, region);
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Snapshot the Control media's tone inputs for the export's per-frame
+    /// Share-clip window: its source, temporal sync/frame, and the clip percentile
+    /// + region that reproduce `own_tone_bounds`. `None` only when there are no
+    /// panes.
+    fn export_control_snapshot(
+        &self,
+    ) -> Option<(ExportSource, usize, bool, usize, Option<f32>, Option<Rect>)> {
+        if self.panes.is_empty() {
+            return None;
+        }
+        let c = self.control.min(self.panes.len() - 1);
+        let p = &self.panes[c];
+        let contrast = self.contrast_of(c);
+        let tone = self.tone_of(c);
+        // Clip percentile, or None = full range (also for LUT_ALPHA's own contrast).
+        let clip = (contrast != ContrastMode::LutAlpha && tone.clip.enabled).then_some(tone.clip.percent);
+        // Region the Control's bounds are computed over, mirroring the precedence
+        // in `own_tone_bounds`: the export crop while the panel is open, else its
+        // stats region when region-tone is on; never for LUT_ALPHA.
+        let region = if contrast == ContrastMode::LutAlpha {
+            None
+        } else if self.export.show && self.export.region.is_some() {
+            self.export.region
+        } else if p.region_tone {
+            self.stats_region
+        } else {
+            None
+        };
+        Some((
+            self.export_source(c),
+            p.media.frame_count(),
+            p.sync_temporal,
+            p.frame,
+            clip,
+            region,
+        ))
     }
 
     /// Format an export produces, decided by the output file's extension
@@ -888,10 +936,30 @@ impl CimApp {
                 );
                 (reg.width() / reg.height().max(1.0), uv)
             }
-            None => (
-                dsz[0] as f32 / dsz[1].max(1) as f32,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            ),
+            None => {
+                // No crop: the export composites only the on-screen **content**
+                // (the image clipped to the visible view — `content_region` /
+                // `pane_content_in`), so the preview must show that same sub-rect
+                // honouring the live view's zoom/pan, not the whole image.
+                let area = self.last_area;
+                let vt = self.view_ref(idx);
+                let content = vt.image_rect(dsz, area).intersect(area);
+                if content.is_positive() {
+                    let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
+                    let a = vt.screen_to_img(content.min, area);
+                    let b = vt.screen_to_img(content.max, area);
+                    let uv = Rect::from_min_max(
+                        Pos2::new((a.x / iw).clamp(0.0, 1.0), (a.y / ih).clamp(0.0, 1.0)),
+                        Pos2::new((b.x / iw).clamp(0.0, 1.0), (b.y / ih).clamp(0.0, 1.0)),
+                    );
+                    (content.width() / content.height().max(1.0), uv)
+                } else {
+                    (
+                        dsz[0] as f32 / dsz[1].max(1) as f32,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    )
+                }
+            }
         };
         let aspect = aspect.clamp(0.25, 4.0);
         let w = ui.available_width().clamp(80.0, 300.0);
@@ -1097,7 +1165,11 @@ impl CimApp {
                 // range isn't fully discovered yet — but not when it already is
                 // (e.g. a loop sub-range whose frames are all known).
                 if self.export_range_incomplete() {
-                    ui.horizontal(|ui| {
+                    ui.scope(|ui| {
+                        // Keep the warning (text + button) from stretching the
+                        // window wider than the preview: cap it and let the label
+                        // wrap onto as many lines as it needs.
+                        ui.set_max_width(300.0);
                         ui.colored_label(
                             Color32::from_rgb(240, 200, 120),
                             "⚠ Some media aren't fully loaded — frame counts may be incomplete.",
@@ -1106,27 +1178,15 @@ impl CimApp {
                             if ui.button("Stop").clicked() {
                                 self.stop_load();
                             }
-                        } else {
-                            if ui
-                                .button("Load all")
-                                .on_hover_text(
-                                    "Decode every frame; warns if the cache is too small",
-                                )
-                                .clicked()
-                            {
-                                self.load_all();
-                                self.export_load_pending = true; // arm the cache-too-small modal
-                            }
-                            if ui
-                                .button("Load offsets")
-                                .on_hover_text(
-                                    "Discover the full length via headers only — enough for the \
-                                     export range, with no cache pressure",
-                                )
-                                .clicked()
-                            {
-                                self.load_offsets();
-                            }
+                        } else if ui
+                            .button("Load frames")
+                            .on_hover_text(
+                                "Discover the full length via headers only — enough for the \
+                                 export range, with no cache pressure",
+                            )
+                            .clicked()
+                        {
+                            self.load_offsets();
                         }
                     });
                 }

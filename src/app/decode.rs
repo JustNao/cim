@@ -849,6 +849,17 @@ impl CimApp {
             // Region-tone bounds move with the shared stats region.
             self.stats_gen.hash(&mut h);
         }
+        // An export crop (Export panel open) restricts every non-LUT_ALPHA pane's
+        // LUT to that region (`own_tone_bounds`), so fold it in to re-render when
+        // the crop changes or clears — and, transitively, for Share-clip panes
+        // whose Control adopts it.
+        if self.export.show && self.contrast_of(idx) != ContrastMode::LutAlpha {
+            if let Some(reg) = self.export.region {
+                for v in [reg.min.x, reg.min.y, reg.max.x, reg.max.y] {
+                    v.to_bits().hash(&mut h);
+                }
+            }
+        }
         // A Compute recompute swaps in new frame data at the same index/tone; the
         // generation makes `stage` re-render it (into `pending`, keeping the last
         // `tex`) instead of treating the texture as still current.
@@ -892,10 +903,22 @@ impl CimApp {
                 frame.display_bounds(false)
             }
         };
+        let region_bounds = |reg: Rect| {
+            pixel_bounds(reg, frame.size)
+                .map(|(x0, y0, x1, y1)| frame.region_display_bounds(x0, y0, x1, y1, clip, pct))
+        };
+        // An export crop (while the Export panel is open) restricts every
+        // non-LUT_ALPHA pane's LUT to the selected region, so the live tone
+        // matches what the export composites. Takes precedence over the stats
+        // region. LUT_ALPHA keeps its own full-range contrast.
+        if contrast != ContrastMode::LutAlpha && self.export.show {
+            if let Some(b) = self.export.region.and_then(region_bounds) {
+                return b;
+            }
+        }
         if self.panes[idx].region_tone {
             self.stats_region
-                .and_then(|reg| pixel_bounds(reg, frame.size))
-                .map(|(x0, y0, x1, y1)| frame.region_display_bounds(x0, y0, x1, y1, clip, pct))
+                .and_then(region_bounds)
                 .unwrap_or_else(|| base(clip))
         } else {
             base(clip)

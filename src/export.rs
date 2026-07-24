@@ -60,9 +60,14 @@ pub struct ExportPane {
     /// always `None` — it takes the full range and does its own contrast).
     pub clip: Option<f32>,
     /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
-    /// `Some` (the "Share clip" snapshot of the Control media's bounds; `None`
-    /// for LUT_ALPHA / off).
+    /// `Some`. For a "Share clip" pane (`share_clip`) this is refreshed **per
+    /// exported frame** by `ExportPlan::compose` from the Control media's bounds
+    /// (so an animated Control is tracked, matching the live view); otherwise it
+    /// stays `None`.
     pub window: Option<(f32, f32)>,
+    /// Whether this pane follows the Control media's "Share clip" bounds. When
+    /// set, `compose` rewrites `window` from `ExportPlan::control` each frame.
+    pub share_clip: bool,
     /// Colormap palette when the pane's tone is `Colormap` (else `None`).
     pub palette: Option<crate::palette::Palette>,
     /// Display rotation in **radians**, about the image centre (0 = none). Applied
@@ -193,6 +198,78 @@ fn decode_source(
     }
 }
 
+/// The Control media, snapshotted so the export can recompute the shared "Share
+/// clip" window **per exported frame** (mirroring the live `control_clip_bounds`,
+/// which re-derives the Control's bounds every frame). Holds its own persistent
+/// decoder plus the tone parameters needed to reproduce `own_tone_bounds`.
+pub(crate) struct ControlBounds {
+    source: ExportSource,
+    count: usize,
+    sync_temporal: bool,
+    own_frame: usize,
+    /// `Some(pct)` clips that percentile off each tail; `None` maps the full
+    /// range (also when the Control is LUT_ALPHA — full range, own contrast).
+    clip: Option<f32>,
+    /// Region (image space) the Control's bounds are computed over — the export
+    /// crop or its stats region — or `None` for the whole frame.
+    region: Option<Rect>,
+    reader: Option<ExportReader>,
+    cur_file: Option<usize>,
+    /// The last computed `(idx, bounds)` so an unchanged source frame is reused.
+    cur_idx: Option<usize>,
+    cur_bounds: Option<(f32, f32)>,
+}
+
+impl ControlBounds {
+    /// The Control's display bounds `[lo, hi]` for timeline position `t`,
+    /// recomputed only when its source frame changes; `None` if it can't be
+    /// decoded (the Share-clip panes then fall back to their own `clip`).
+    fn bounds_at(&mut self, t: usize) -> Option<(f32, f32)> {
+        let idx = src_index(t, self.count, self.sync_temporal, self.own_frame);
+        if self.cur_idx == Some(idx) {
+            return self.cur_bounds;
+        }
+        let frame = decode_source(&self.source, idx, &mut self.reader, &mut self.cur_file)?;
+        let b = frame_bounds(&frame, self.clip, self.region);
+        self.cur_idx = Some(idx);
+        self.cur_bounds = Some(b);
+        Some(b)
+    }
+}
+
+/// Display bounds `[lo, hi]` for `frame` — the export-side mirror of the live
+/// `own_tone_bounds`: a region (min/max, or its per-tail percentile when `clip`),
+/// else the whole-frame clip / full-range map.
+fn frame_bounds(frame: &FrameData, clip: Option<f32>, region: Option<Rect>) -> (f32, f32) {
+    if let Some(reg) = region {
+        if let Some((x0, y0, x1, y1)) = pixel_bounds(reg, frame.size) {
+            return frame.region_display_bounds(
+                x0,
+                y0,
+                x1,
+                y1,
+                clip.is_some(),
+                clip.unwrap_or(0.01),
+            );
+        }
+    }
+    match clip {
+        Some(pct) => frame.clip_bounds(pct),
+        None => frame.display_bounds(false),
+    }
+}
+
+/// Convert an image-space region rect to integer pixel bounds `(x0, y0, x1, y1)`
+/// clamped to `size`, or `None` when empty. Mirrors `app::pixel_bounds`.
+fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usize)> {
+    let (w, h) = (size[0], size[1]);
+    let x0 = (reg.min.x.floor().max(0.0) as usize).min(w);
+    let y0 = (reg.min.y.floor().max(0.0) as usize).min(h);
+    let x1 = (reg.max.x.ceil().max(0.0) as usize).min(w);
+    let y1 = (reg.max.y.ceil().max(0.0) as usize).min(h);
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+}
+
 impl ExportPane {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -211,6 +288,7 @@ impl ExportPane {
             details,
             clip,
             window: None,
+            share_clip: false,
             palette: None,
             rotation: 0.0,
             count,
@@ -623,6 +701,9 @@ impl ExportLayout {
 pub struct ExportPlan {
     pub panes: Vec<ExportPane>,
     pub layout: ExportLayout,
+    /// The Control media, present only when some pane has "Share clip" on — used
+    /// to recompute the shared window per exported frame. `None` otherwise.
+    pub(crate) control: Option<ControlBounds>,
     pub region: Rect,
     /// Per-pane name label (same order as `panes`; `None` = no label for that
     /// pane, e.g. the whole feature is off). Rasterized once at plan time.
@@ -637,6 +718,33 @@ pub struct ExportPlan {
 }
 
 impl ExportPlan {
+    /// Attach the Control media so `compose` recomputes the shared "Share clip"
+    /// window from its frame each exported frame. Call once, only when some pane
+    /// has share_clip on; `clip`/`region` snapshot the Control's own tone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_share_clip_control(
+        &mut self,
+        source: ExportSource,
+        count: usize,
+        sync_temporal: bool,
+        own_frame: usize,
+        clip: Option<f32>,
+        region: Option<Rect>,
+    ) {
+        self.control = Some(ControlBounds {
+            source,
+            count,
+            sync_temporal,
+            own_frame,
+            clip,
+            region,
+            reader: None,
+            cur_file: None,
+            cur_idx: None,
+            cur_bounds: None,
+        });
+    }
+
     /// Composite output frame `t` (of `total`) into an RGBA buffer.
     pub fn compose(&mut self, t: usize) -> Vec<u8> {
         // Decode every pane's source frame first (so their sizes are known), then
@@ -651,6 +759,19 @@ impl ExportPlan {
         // needs every pane's decoded size, hence two joins. A single pane skips
         // the spawn overhead and runs inline.
         let start = self.start;
+        // "Share clip" panes lock to the Control media's bounds. Recompute those
+        // bounds from the Control's frame for THIS timeline position (as the live
+        // view does every frame), then push the one shared window onto every
+        // share_clip pane so they stay identical. `None` (Control undecodable)
+        // leaves each pane to fall back to its own `clip`.
+        if let Some(ctrl) = self.control.as_mut() {
+            let win = ctrl.bounds_at(start + t);
+            for p in &mut self.panes {
+                if p.share_clip {
+                    p.window = win;
+                }
+            }
+        }
         if self.panes.len() == 1 {
             self.panes[0].decode(start + t);
         } else {
@@ -1110,6 +1231,7 @@ mod tests {
             let plan = ExportPlan {
                 panes: Vec::new(),
                 layout: ExportLayout::Single(0, cell),
+                control: None,
                 region: cell,
                 labels: vec![Some(bitmap())],
                 label_style: LabelStyle {
@@ -1161,6 +1283,7 @@ mod tests {
                 img,
                 split_x: w as f32 / 2.0,
             },
+            control: None,
             region: img,
             labels: (0..2)
                 .map(|_| {
@@ -1216,6 +1339,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
+            control: None,
             region: cell,
             out_w: 4,
             out_h: 2,
@@ -1261,6 +1385,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
+            control: None,
             region: cell,
             out_w: 4,
             out_h: 2,
@@ -1323,6 +1448,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![mk(a), mk(b)],
             layout: ExportLayout::Grid(cells),
+            control: None,
             region: Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 4.0)),
             out_w: 8,
             out_h: 4,
@@ -1378,6 +1504,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
+            control: None,
             region: cell,
             out_w: 8,
             out_h: 8,
@@ -1425,6 +1552,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
+            control: None,
             region: cell,
             out_w: 8,
             out_h: 8,
@@ -1469,6 +1597,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, area),
+            control: None,
             region: content,
             out_w: 4,
             out_h: 4,
@@ -1534,6 +1663,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, cell),
+            control: None,
             region: cell,
             out_w: 16,
             out_h: 8,
@@ -1585,6 +1715,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, area),
+            control: None,
             region: area,
             out_w: 160,
             out_h: 120,
@@ -1642,6 +1773,7 @@ mod tests {
         let mut plan = ExportPlan {
             panes: vec![pane],
             layout: ExportLayout::Single(0, area),
+            control: None,
             region: area,
             out_w: 64,
             out_h: 48,
@@ -1672,5 +1804,86 @@ mod tests {
                 "pixel {i}"
             );
         }
+    }
+
+    /// A "Share clip" pane's window is recomputed from the Control media **per
+    /// exported frame** (not frozen once), so an animated Control is tracked — and
+    /// the window equals the Control frame's own clip bounds each time. The two
+    /// Control pages have different value ranges, so the two windows must differ.
+    #[test]
+    fn share_clip_window_tracks_control_per_frame() {
+        let dir = crate::testutil::fixture_dir("export_share_clip");
+        let ctrl_path = dir.join("control.tif");
+        // Two pages with distinct data (page k offset by k*1000), so their clip
+        // bounds differ frame to frame.
+        crate::testutil::write_multipage_tiff_u16(&ctrl_path, &[[16, 8]; 2]);
+
+        // The share_clip pane's own frame is irrelevant to the window (the Control
+        // supplies it); a small still is enough to compose.
+        let frame = Arc::new(FrameData::new([4, 4], 1, Samples::U16(vec![500u16; 16])));
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(4.0, 4.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(2.0, 2.0),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            None, // no own clip — the Control's window drives it
+            1,
+            true,
+            0,
+            ExportSource::Still(frame),
+        );
+        pane.share_clip = true;
+
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            control: None,
+            region: cell,
+            out_w: 4,
+            out_h: 4,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
+            start: 0,
+            total: 2,
+        };
+        // Control: the 2-page sequence, temporally synced, clip on (non-default
+        // percentile so it computes fresh), whole frame.
+        plan.set_share_clip_control(
+            ExportSource::Seq {
+                path: ctrl_path.clone(),
+            },
+            2,
+            true,
+            0,
+            Some(0.5),
+            None,
+        );
+
+        // Expected per-frame windows = each Control page's own clip bounds.
+        let mut reader = SeqReader::open(&ctrl_path).expect("open control");
+        let want0 = reader
+            .decode(0)
+            .expect("dec0")
+            .expect("page0")
+            .clip_bounds(0.5);
+        let want1 = reader
+            .decode(1)
+            .expect("dec1")
+            .expect("page1")
+            .clip_bounds(0.5);
+        assert_ne!(
+            want0, want1,
+            "control pages must differ so the test is meaningful"
+        );
+
+        plan.compose(0);
+        assert_eq!(plan.panes[0].window, Some(want0), "frame 0 window");
+        plan.compose(1);
+        assert_eq!(plan.panes[0].window, Some(want1), "frame 1 window recomputed");
     }
 }

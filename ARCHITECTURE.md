@@ -458,8 +458,13 @@ bounds) and the Share-clip path (which reads the Control's `own_tone_bounds`, so
 recurse); the effective bounds move with the Control pane's frame/clip, so `tone_sig` folds
 in the Control frame's identity (`control_frame_key` — pane index + frame `Arc` pointer)
 plus its clip/region inputs (cheap — never the computed percentile). Edited in the popup's
-**Share clip** row (greys out the clip when on); snapshotted for export (`ExportPane.window`
-= the Control's bounds at plan time), and round-tripped via `--share-clip`.
+**Share clip** row (greys out the clip when on), and round-tripped via `--share-clip`. For
+export the bounds are **recomputed per exported frame** (not frozen): a share-clip
+`ExportPane` carries a `share_clip` flag, and the plan holds one `ExportPlan::control`
+(`ControlBounds` — the Control media's source + its clip/region snapshot); `compose(t)`
+decodes the Control's frame for `t`, computes its bounds (`frame_bounds`, the export mirror
+of `own_tone_bounds`), and pushes that one shared window onto every share-clip pane — so an
+animated Control is tracked exactly as the live view tracks it.
 
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
@@ -546,7 +551,11 @@ bounds come from the shared stats region via `region_display_bounds` — the reg
 min/max (clip off) or its per-tail-percentile clip (clip on). Pixels outside the
 region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA still
 runs over the whole image. Recomputed on each texture rebuild; replicates to all
-panes.
+panes. **An export crop drives the same thing:** while the Export panel is open and a
+crop is set, `own_tone_bounds` derives every non-LUT_ALPHA pane's bounds from
+`export.region` (taking precedence over `stats_region`), so the live view previews the
+region-restricted tone the export composites; `tone_sig` folds the crop rect in so panes
+re-render when it changes/clears.
 
 **Texture filtering:** always **nearest**, at every zoom, both magnification and
 minification (`TextureOptions::NEAREST`). The tool is pixel-accurate — an on-screen
@@ -941,13 +950,12 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   A warning appears only when the **selected range** isn't fully discovered yet
   (`export_range_incomplete` — an explicit sub-range whose frames every participating
   sequence has already found needs no loading, so no warning even if some tail is still
-  undiscovered), with **Load all** / **Load offsets** (the latter — headers only — is
-  enough here, since export only needs the length, not resident frames) and a **Stop**
-  while running.
-  An export **Load all** arms `export_load_pending`: if it can't fully load because
-  the frame cache is too small (`load_cache_exhausted`), a modal (`warn_popup`) on
-  completion tells the user the whole sequence isn't resident — the length was still
-  fully discovered, so the range is right and the encoder reads the rest from disk (§6).
+  undiscovered). The warning (width-capped so it never widens the window past the
+  preview) offers a single **Load frames** button (`load_offsets` — headers only, which is
+  all export needs: the length, not resident frames) and a **Stop** while running. (The
+  frame bar keeps the full **Load all** / **Load offsets** pair; the export panel doesn't
+  need "Load all" since the encoder reads pixels from disk itself — `export_load_pending`
+  and its cache-too-small `warn_popup` remain wired to the frame-bar path.)
 - Output filename typed in the panel, written to the **cwd**. For video `start_export`
   spawns `run_export` on a **worker thread**, sharing an `AtomicUsize` progress +
   `AtomicBool` cancel; `export_tick` just polls it each update, relaying cancel and
@@ -981,6 +989,10 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   The panel also shows a **preview**: the chosen media's live texture with the label drawn by
   the ordinary egui painter using the same anchor/margin/padding maths scaled by the
   preview's share of the output height — a faithful mock, not a re-run of the compositor.
+  The preview's UV sub-rect mirrors what will actually be exported: a crop shows just that
+  region, and with **no crop** it shows the pane's on-screen **content** sub-rect (honouring
+  the live view's zoom/pan, via `view_ref`/`image_rect`/`screen_to_img` like
+  `pane_content_in`), not the whole image.
 
 ---
 
@@ -1151,8 +1163,9 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 - Files are opened **read-only with shared access**; `forget(id)` on reload picks up
   new contents.
 - Export decodes independently of the display cache; export length = the **known**
-  timeline at build time (press "Load all" or "Load offsets" first for a full export —
-  offsets suffices, since export only needs the discovered length).
+  timeline at build time (press the export panel's **Load frames**, or a frame-bar
+  "Load all" / "Load offsets", first for a full export — offsets suffices, since export
+  only needs the discovered length).
 - **Never time anything with `i.stable_dt`.** egui only reports the real elapsed
   time when the previous frame requested an *immediate* repaint; on a frame woken
   by `request_repaint_after` — i.e. every paced wake in this app — it substitutes
