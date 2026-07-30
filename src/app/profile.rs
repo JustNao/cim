@@ -198,14 +198,6 @@ impl CimApp {
             font.clone(),
             axis_col,
         );
-        painter.text(
-            Pos2::new(rect.left() + 2.0, rect.top() + 1.0),
-            Align2::LEFT_TOP,
-            "intensity",
-            font.clone(),
-            axis_col,
-        );
-
         // Plot border.
         painter.rect_stroke(plot, 0.0, Stroke::new(1.0_f32, Color32::from_gray(70)));
 

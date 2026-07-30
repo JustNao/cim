@@ -10,12 +10,15 @@ impl CimApp {
     /// **Compute** button that runs it); once computed, the result image shows
     /// with the **Refresh** / **Save** / **Auto refresh** controls instead.
     /// Edits are written back and a recompute / save is dispatched after.
+    /// `header_bottom` is the header strip's bottom edge relative to the cell's
+    /// top (its height *plus* any chrome inset above it), so the panel clears
+    /// the header in the top row as well.
     pub(super) fn draw_compute_ui(
         &mut self,
         ctx: &egui::Context,
         idx: usize,
         img_area: Rect,
-        header_height: f32,
+        header_bottom: f32,
     ) {
         let pane_id = self.panes[idx].id;
         let (
@@ -44,14 +47,13 @@ impl CimApp {
         let mut recompute = false;
         let mut do_save = false;
 
-        // Bottom-left of the cell: anchor within a clip rect that stops just
-        // above the footer strip, with a small inset offset so the frame's
-        // border doesn't land on (and get clipped by) the clip edge.
+        // Top-left of the cell, just under the header strip, constrained to the
+        // cell so it can't spill into a neighbour.
         egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
             .constrain_to(img_area)
-            .anchor(egui::Align2::LEFT_TOP, Vec2::new(6.0, header_height + 6.0))
+            .anchor(egui::Align2::LEFT_TOP, Vec2::new(6.0, header_bottom + 6.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(240.0);

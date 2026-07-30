@@ -344,7 +344,10 @@ impl CimApp {
         // `show_chrome` so the show/hide-all-bars shortcut hides it too (kept
         // separate from the Transformations popup's own toggle).
         if self.panes[idx].compute.is_some() && self.show_chrome {
-            self.draw_compute_ui(ctx, idx, img_area, header_strip.height());
+            // Clear the header by its *bottom* edge, not just its height: a
+            // top-row header is pushed down by the toolbar inset, so the height
+            // alone would leave the panel under it.
+            self.draw_compute_ui(ctx, idx, img_area, header_strip.bottom() - cell.top());
         }
 
         // The header and footer bars, floating over the image's top/bottom
