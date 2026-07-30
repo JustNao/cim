@@ -106,7 +106,8 @@ impl CimApp {
         painter.rect_filled(rect, 0.0, Color32::from_gray(16));
 
         // Inner plot rect, leaving room for axis labels (left = y, bottom = x).
-        let ml = 52.0;
+        // The left margin also has to fit the "min …"/"max …" end labels.
+        let ml = 62.0;
         let mb = 22.0;
         let mt = 6.0;
         let mr = 8.0;
@@ -147,11 +148,16 @@ impl CimApp {
         let font = FontId::proportional(9.0);
 
         // Y ticks (values) — gridlines + right-aligned labels in the left margin.
+        // The two ends carry the *exact* data min/max (see below), so drop any
+        // rounded tick that would land on top of them.
         for v in nice_ticks(ymin, ymax, 6) {
             if v < ymin - 1e-4 || v > ymax + 1e-4 {
                 continue;
             }
             let y = sy(v);
+            if (y - plot.bottom()).abs() < 10.0 || (y - plot.top()).abs() < 10.0 {
+                continue;
+            }
             painter.line_segment(
                 [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
                 Stroke::new(1.0_f32, grid),
@@ -203,6 +209,24 @@ impl CimApp {
         // Plot border.
         painter.rect_stroke(plot, 0.0, Stroke::new(1.0_f32, Color32::from_gray(70)));
 
+        // The y axis spans the data exactly, so its two ends *are* the overall
+        // min and max: label them there (amber, like the region histogram's) so
+        // the real extremes are readable and not just the rounded ticks.
+        let ext_col = Color32::from_rgb(240, 200, 80);
+        for (tag, v, y) in [("min", ymin, plot.bottom()), ("max", ymax, plot.top())] {
+            painter.line_segment(
+                [Pos2::new(plot.left() - 3.0, y), Pos2::new(plot.left(), y)],
+                Stroke::new(1.0_f32, ext_col),
+            );
+            painter.text(
+                Pos2::new(plot.left() - 5.0, y),
+                Align2::RIGHT_CENTER,
+                format!("{tag} {}", fmt_tick(v)),
+                font.clone(),
+                ext_col,
+            );
+        }
+
         // Each media's curve, breaking at NaN gaps so out-of-frame stretches
         // don't draw a false connecting segment.
         for (_, color, vals) in series {
@@ -232,7 +256,7 @@ fn draw_profile_legend(ui: &mut egui::Ui, series: &[(String, Color32, Vec<f32>)]
         for (name, color, _) in series {
             let (swatch, _) = ui.allocate_exact_size(Vec2::new(14.0, 3.0), Sense::hover());
             ui.painter().rect_filled(swatch, 0.0, *color);
-            ui.label(ellipsize(name, 24));
+            ui.label(name);
             ui.add_space(8.0);
         }
     });

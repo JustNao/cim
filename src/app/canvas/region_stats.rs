@@ -76,7 +76,12 @@ impl CimApp {
         }
         // Shift + right-drag is the intensity-profile line, not a stats region;
         // leave the pointer to `line_input` unless a stats drag is already going.
-        if self.region_sel.pane.is_none() && ctx.input(|i| i.modifiers.shift) {
+        // A profile drag in flight keeps the pointer even if shift is let go
+        // mid-drag — otherwise releasing shift before the button would start a
+        // region right on top of the line being drawn.
+        if self.region_sel.pane.is_none()
+            && (ctx.input(|i| i.modifiers.shift) || self.line_sel.grab.is_some())
+        {
             return;
         }
         let down = ctx.input(|i| i.pointer.secondary_down());

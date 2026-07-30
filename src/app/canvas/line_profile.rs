@@ -43,7 +43,10 @@ impl CimApp {
 
     /// Track the shift+right drag: on press, decide whether it grabs an endpoint,
     /// the body, or draws a new line; follow while held; finalize on release
-    /// (a near-zero *new* line is discarded).
+    /// (a near-zero *new* line is discarded). Shift is only needed to *start* a
+    /// drag — once one is in flight it runs to the button release, so letting go
+    /// of shift early still finishes the line (and `region_input` stays out of
+    /// the way for as long as `grab` is set).
     fn line_input(
         &mut self,
         ctx: &egui::Context,
