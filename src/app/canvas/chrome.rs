@@ -212,15 +212,11 @@ impl CimApp {
             );
             if watch_resp.clicked() {
                 let on = !watching;
-                self.panes[idx].watch.on = on;
-                self.panes[idx].watch.seen = None;
                 // Baseline to the current on-disk state when enabling, so turning
-                // the watch on never triggers an immediate reload.
-                self.panes[idx].watch.loaded = if on {
-                    Self::source_file_sig(&self.panes[idx].source)
-                } else {
-                    None
-                };
+                // the watch on never triggers an immediate reload. The baseline is
+                // the first signature the watcher thread reports back.
+                self.rebaseline_watch(idx);
+                self.panes[idx].watch.on = on;
             }
         }
 

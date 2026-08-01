@@ -104,11 +104,12 @@ const ASYNC_RENDER_PIXELS: usize = 1 << 20;
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
 
-/// How often a **watched** pane's source file(s) are read + hashed for changes
-/// (also the idle wake-up interval while any pane is watching). Kept moderate to
-/// stay friendly to the paced-repaint model over VNC while still feeling
-/// reactive; the actual pixels don't change on a quiet wake, so a delta-based
-/// remote framebuffer sends ~nothing.
+/// How often a **watched** pane's source file(s) are signed for changes (also the
+/// idle wake-up interval while any pane is watching). Kept moderate to stay
+/// friendly to the paced-repaint model over VNC while still feeling reactive; the
+/// actual pixels don't change on a quiet wake, so a delta-based remote framebuffer
+/// sends ~nothing. `poll_watches` enforces it as a real rate limit — repaints come
+/// far faster than this while the user is interacting.
 const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A watched file's contents must stay unchanged for this long after a change
@@ -117,23 +118,9 @@ const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 /// change resets the timer, so a burst of writes reloads once, after it stops.
 const WATCH_DEBOUNCE: f64 = 0.25;
 
-/// Identity of a source's on-disk contents for change detection: a hash folding
-/// each file's length, mtime, and a small strided **byte sample**, plus the total
-/// length. The byte sample makes an in-place same-size overwrite detectable even
-/// when the mtime doesn't move — e.g. a single multi-page TIFF written via
-/// `mmap`, whose mtime Linux may not bump until the dirty pages flush.
-type FileSig = (u64, u64);
-
-/// Source-file sampling for `source_file_sig`: total bytes read per file each
-/// poll, split into this many evenly-spaced windows. Bounded so a multi-GB TIFF
-/// is only touched a few KiB per poll (never bulk-read/hashed), while still
-/// catching an in-place overwrite the mtime hasn't reflected yet.
-const WATCH_SAMPLE_BYTES: u64 = 64 * 1024;
-const WATCH_SAMPLE_WINDOWS: u64 = 16;
-/// Only sample bytes when the source is at most this many files (the single- or
-/// few-file case). A long numbered run stays on the cheap length+mtime path — its
-/// per-frame files are written normally, so their mtime moves.
-const WATCH_SAMPLE_MAX_FILES: usize = 4;
+/// Identity of a source's on-disk contents for change detection — computed on the
+/// watcher thread; see [`crate::watcher::sign_paths`].
+use crate::watcher::FileSig;
 
 /// How many frames ahead of the shown one playback pre-decodes for each on-screen
 /// pane (`prefetch_playback`), so it overlaps decode with display instead of
@@ -655,6 +642,11 @@ struct Watch {
     /// `WATCH_DEBOUNCE` quiescence check; reset each time the signature changes
     /// again (i.e. while the file is still being written).
     seen: Option<(FileSig, f64)>,
+    /// Generation of the signature currently being computed on the watcher thread
+    /// (`None` = none in flight). A landing result whose generation no longer
+    /// matches — because a reload or the toggle re-baselined the watch meanwhile —
+    /// is discarded, since it measured contents that are no longer the baseline.
+    inflight: Option<u64>,
 }
 
 /// A pane's background bulk-load mode.
@@ -848,6 +840,14 @@ pub struct CimApp {
     /// are stable across reload) is recognised as stale and discarded.
     scanner: crate::offsets::OffsetScanner,
     offset_gen: u64,
+    /// Off-UI-thread source-file signer for the auto-reload watch: signing is file
+    /// I/O, so it never runs inline (it used to, on every repaint — see
+    /// `poll_watches`). `watch_gen` tags each request so a signature landing after
+    /// a reload / toggle is recognised as stale, and `watch_polled_at` rate-limits
+    /// requests to one per `WATCH_POLL` regardless of the repaint rate.
+    watcher: crate::watcher::FileWatcher,
+    watch_gen: u64,
+    watch_polled_at: f64,
     /// Pipeline timing profiler and its window toggle — only populated / shown
     /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
     metrics: crate::debug::Metrics,
@@ -1052,6 +1052,9 @@ impl CimApp {
             render_inflight: HashSet::new(),
             scanner: crate::offsets::OffsetScanner::new(cc.egui_ctx.clone()),
             offset_gen: 0,
+            watcher: crate::watcher::FileWatcher::new(cc.egui_ctx.clone()),
+            watch_gen: 0,
+            watch_polled_at: f64::NEG_INFINITY,
             metrics: crate::debug::Metrics::default(),
             decode_ema_secs: 0.0,
             show_debug: false,

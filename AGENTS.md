@@ -78,6 +78,8 @@ src/
                  sequence's page counts on open/reload (§4) without hitching paint.
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
                  PaneOps::render_display) for heavy panes so the UI never blocks.
+  watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
+                 (sign_paths / FileWatcher, §9) — file I/O off the paint path.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   palette.rs     Colour palettes (viridis/turbo/diverging) for the Colormap tone.
@@ -92,7 +94,8 @@ src/
                  apply_deferred).
     lifecycle.rs Open/add/remove/reload media; view-state replay + "View cmd".
     compute.rs   Compute panes: reduce/diff/recompute/auto-refresh/save.
-    watch.rs     Auto-reload file watching (source_file_sig / poll_watches).
+    watch.rs     Auto-reload file watching (poll_watches / rebaseline_watch):
+                 rate-limited requests + the debounce, signing done off-thread.
     decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
                  staging/commit (refresh_textures/stage/pane_texture).
     input.rs     apply_action (keybindings), advance_playback, handle_input.
@@ -686,8 +689,8 @@ button.)
 **Auto-reload (file watch).** The **Auto-reload** toggle (fills blue while on, left of
 Reload; hidden for a Compute pane, which has its own Auto-refresh) sets `Pane.watch`.
 `poll_watches` (run each `update`, before `refresh_textures`) signs the pane's
-source file(s) — `source_file_sig` folds each file's **length + mtime + a small
-strided byte sample** (`WATCH_SAMPLE_BYTES` in `WATCH_SAMPLE_WINDOWS` windows) into a
+source file(s) — `watcher::sign_paths` folds each file's **length + mtime + a small
+strided byte sample** (`SAMPLE_BYTES` in `SAMPLE_WINDOWS` windows) into a
 hash, plus the total length — and reloads the pane once a change has **settled**
 (`WATCH_DEBOUNCE`, so a file still being written externally isn't read half-finished;
 each further change re-arms the timer). The **byte sample** is the point: the common
@@ -696,12 +699,28 @@ dimensions (`tifffile.memmap`), so the length doesn't change and an `mmap` write
 often doesn't bump the mtime until its dirty pages flush — an `(mtime, len)`
 signature would miss it entirely, but a `read()` sees the new bytes at once. The
 sample is **bounded** (a few KiB per file per poll regardless of file size, never a
-bulk read), and applied only for a **small** source (`WATCH_SAMPLE_MAX_FILES`); a
+bulk read), and applied only for a **small** source (`SAMPLE_MAX_FILES`); a
 long numbered run stays on the cheap length+mtime path, since its per-frame files are
 written normally and their mtime moves. Only the (heavier) `reload` fires, and only
-on quiescence. `watch_loaded` is the baseline signature (re-based after any reload
-and when the toggle is switched on, so enabling never triggers an immediate reload);
-an unreadable file (mid-rename) simply waits for the next poll. While any pane
+on quiescence. `Watch.loaded` is the baseline signature (re-based via
+`rebaseline_watch` after any reload and when the toggle is switched on, so enabling
+never triggers an immediate reload); an unreadable file (mid-rename) simply waits for
+the next poll.
+
+**Signing is off the UI thread and rate-limited** — signing is real file I/O (tens of
+ms on a network share), and both halves of that used to be wrong: it ran *inline* in
+`update`, on *every* repaint (`WATCH_POLL` only paced the idle wake-up, so panning or
+zooming signed the source 60–140×/s and hitched the paint). Now `poll_watches`
+(a) **requests** a signature at most once per `WATCH_POLL` (`CimApp.watch_polled_at`),
+one per pane in flight at a time, and (b) hands the work to
+`crate::watcher::FileWatcher` — a single worker thread mirroring
+`offsets::OffsetScanner`: it is given only the **paths** (never the pane's `Media` /
+`Source`), signs them, posts a `SignDone` back and `request_repaint`s; the UI thread
+only compares hashes and runs the debounce. Results are keyed by pane `id` **and a
+generation** (`CimApp.watch_gen`, `Watch.inflight`): ids are stable across reload, so a
+signature in flight when the watch is re-baselined measured contents that are no longer
+the baseline and is dropped. Baselining is likewise asynchronous — `loaded = None`
+means "adopt the next signature". While any pane
 watches, an otherwise-idle app wakes every `WATCH_POLL` to re-sign — the one
 intentional break from "idle requests no repaint", kept moderate to stay VNC-friendly
 (a quiet wake changes no pixels, so a delta framebuffer sends ~nothing) (§13/§15).
@@ -1204,7 +1223,9 @@ times itself on `i.time` deltas rather than the paced-repaint-poisoned `stable_d
 (§14), so render-gated playback holds the requested fps instead of collapsing to a
 fraction of it), **off-thread big plain-LUT renders** (§7 — `ASYNC_RENDER_PIXELS`, so a
 playback step's tens-of-ms LUT render doesn't block an update and hitch a concurrent
-pan), and a **configurable decode-thread count** (§5 — cap the pool per instance on a
+pan), an **off-thread, rate-limited auto-reload watch** (§9 — the signature I/O used to
+run inline on every repaint, so panning/zooming with Auto-reload on stalled the frame
+60–140×/s), and a **configurable decode-thread count** (§5 — cap the pool per instance on a
 shared host). For shared multi-user servers there's also a **">8 sequences" resource warning**
 (§13) before opening a heavy number of sequences at once. Remaining candidates: minor
 per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /

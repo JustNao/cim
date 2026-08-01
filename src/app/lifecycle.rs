@@ -624,8 +624,10 @@ impl CimApp {
                 }
                 // Re-baseline any file watch to the freshly-loaded contents so it
                 // doesn't immediately fire again on the change we just picked up.
-                self.panes[i].watch.loaded = Self::source_file_sig(&self.panes[i].source);
-                self.panes[i].watch.seen = None;
+                // The new baseline is whatever the *next* background signature
+                // reports; this also supersedes one still in flight against the
+                // contents we just replaced.
+                self.rebaseline_watch(i);
                 // Re-complete the (fresh, length-1) media's offsets in the
                 // background under a new generation — this also supersedes any
                 // scan still in flight against the old contents.

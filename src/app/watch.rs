@@ -1,95 +1,61 @@
-//! Auto-reload file watching (the header's "Auto-reload" toggle): stat the pane's source
-//! file(s) each update and reload once a change has settled, so a file still
-//! being written externally isn't read half-finished.
+//! Auto-reload file watching (the header's "Auto-reload" toggle): sign the pane's
+//! source file(s) in the background and reload once a change has settled, so a
+//! file still being written externally isn't read half-finished.
+//!
+//! Two rules keep the watch off the interactive path:
+//! - the signing itself runs on the [`crate::watcher::FileWatcher`] worker thread,
+//!   never inline (a signature is real file I/O — tens of ms on a network share);
+//! - a new signature is only *requested* every `WATCH_POLL`, not every repaint.
+//!   The two were previously conflated: `WATCH_POLL` only paced the idle wake-up,
+//!   so as soon as the user panned or zoomed (input-driven repaints at display
+//!   rate) the watch signed its source 60–140 times a second, on the UI thread.
 
 use super::*;
 
 impl CimApp {
-    /// On-disk signature of a pane's source for change detection: the total byte
-    /// length and latest mtime across its file(s), **plus a small strided sample of
-    /// the file bytes**. `None` for a Compute pane (no file) or when any file can't
-    /// be read right now (e.g. mid-rename) — the watch then waits for the next poll
-    /// rather than acting on torn contents.
-    ///
-    /// Why the content sample, not mtime alone: the common auto-reload case is a
-    /// tool overwriting a **single multi-page TIFF in place** with the same
-    /// dimensions (e.g. `tifffile.memmap`). The byte length doesn't change, and an
-    /// `mmap`'d writer often doesn't bump the mtime until its dirty pages flush, so
-    /// an `(mtime, len)` signature can stay identical while the pixels change. A
-    /// `read()` sees the new bytes immediately (same page cache), so sampling a few
-    /// windows catches it. The sample is **bounded** (`WATCH_SAMPLE_BYTES` per file,
-    /// spread across the file) so a huge TIFF is only touched a few KiB per poll,
-    /// never bulk-read. It's applied only when the source is **one or a few files**;
-    /// a long numbered run stays on the cheap metadata path (those frames are
-    /// written normally, so their mtime moves and length/mtime alone suffice).
-    pub(super) fn source_file_sig(source: &Source) -> Option<FileSig> {
-        use std::hash::Hasher;
-        use std::io::{Read, Seek, SeekFrom};
-        let paths: &[PathBuf] = match source {
-            Source::File(p) => std::slice::from_ref(p),
-            Source::Sequence { files, .. } => files.as_slice(),
-            Source::Computed => return None,
-        };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut total = 0u64;
-        // Only sample bytes for a small source (the single-TIFF case); a long run
-        // would cost one open+read per file each poll for no benefit.
-        let sample = paths.len() <= WATCH_SAMPLE_MAX_FILES;
-        let window = (WATCH_SAMPLE_BYTES / WATCH_SAMPLE_WINDOWS) as usize;
-        let mut buf = vec![0u8; window];
-        for p in paths {
-            let m = std::fs::metadata(p).ok()?;
-            let len = m.len();
-            total += len;
-            hasher.write_u64(len);
-            // mtime is a valid signal when the writer bumps it (buffered writes, or
-            // on close); fold it in, but don't rely on it (an mmap writer may lag).
-            if let Ok(d) = m.modified().and_then(|mt| {
-                mt.duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }) {
-                hasher.write_u128(d.as_nanos());
-            }
-            if sample && len > 0 {
-                let mut f = std::fs::File::open(p).ok()?;
-                if len <= WATCH_SAMPLE_BYTES {
-                    // Small file: fold the whole thing in (still <= the sample cap).
-                    loop {
-                        let n = f.read(&mut buf).ok()?;
-                        if n == 0 {
-                            break;
-                        }
-                        hasher.write(&buf[..n]);
-                    }
-                } else {
-                    // Big file: hash a fixed number of windows spread across it.
-                    for k in 0..WATCH_SAMPLE_WINDOWS {
-                        let off = (len - window as u64) * k / (WATCH_SAMPLE_WINDOWS - 1);
-                        f.seek(SeekFrom::Start(off)).ok()?;
-                        f.read_exact(&mut buf).ok()?;
-                        hasher.write(&buf);
-                    }
-                }
-            }
+    /// The file(s) a pane's source is made of, for the watcher to sign. `None` for
+    /// a Compute pane (no file — it uses its own Auto-refresh).
+    fn watch_paths(source: &Source) -> Option<Vec<PathBuf>> {
+        match source {
+            Source::File(p) => Some(vec![p.clone()]),
+            Source::Sequence { files, .. } => Some(files.clone()),
+            Source::Computed => None,
         }
-        Some((hasher.finish(), total))
     }
 
-    /// Poll every watched pane's source file(s) and reload those whose contents
-    /// have changed and then settled (unchanged for `WATCH_DEBOUNCE`). Runs before
-    /// `refresh_textures`, so the reloaded frame re-renders and commits in step
-    /// with the other panes instead of flashing. Cheap: one `stat` per file, and
-    /// only fires the (heavier) reload once a change has quiesced.
+    /// Re-baseline pane `i`'s watch to whatever is on disk *now*, discarding any
+    /// signature already in flight (which measured the previous contents). Used
+    /// when the watch is switched on and after a reload, so neither event makes
+    /// the watch immediately fire again. The baseline is established
+    /// asynchronously: `loaded = None` means "adopt the next signature", and
+    /// bumping the generation rejects the in-flight one.
+    pub(super) fn rebaseline_watch(&mut self, i: usize) {
+        self.watch_gen += 1;
+        let w = &mut self.panes[i].watch;
+        w.loaded = None;
+        w.seen = None;
+        w.inflight = None;
+    }
+
+    /// Apply any signature the watcher has finished, then (at most every
+    /// `WATCH_POLL`) request a fresh one for each watching pane. A pane whose
+    /// contents changed and then stayed unchanged for `WATCH_DEBOUNCE` is
+    /// reloaded. Runs before `refresh_textures`, so a reloaded frame re-renders
+    /// and commits in step with the other panes instead of flashing.
     pub(super) fn poll_watches(&mut self, now: f64) {
         let mut to_reload: Vec<usize> = Vec::new();
-        for i in 0..self.panes.len() {
-            if !self.panes[i].watch.on {
-                continue;
+        for done in self.watcher.drain() {
+            let Some(i) = self.panes.iter().position(|p| p.id == done.id) else {
+                continue; // pane closed while the signature was in flight
+            };
+            if self.panes[i].watch.inflight != Some(done.gen) {
+                continue; // superseded by a reload / toggle: measured stale contents
             }
-            let Some(sig) = Self::source_file_sig(&self.panes[i].source) else {
+            self.panes[i].watch.inflight = None;
+            let Some(sig) = done.sig else {
                 continue; // unreadable this tick (mid-write/rename) — try again later
             };
-            // Establish the baseline on the first successful stat.
+            // Establish the baseline on the first successful signature.
             let Some(loaded) = self.panes[i].watch.loaded else {
                 self.panes[i].watch.loaded = Some(sig);
                 self.panes[i].watch.seen = None;
@@ -112,7 +78,26 @@ impl CimApp {
             }
         }
         for i in to_reload {
-            self.reload(i); // re-baselines watch_loaded to the fresh contents
+            self.reload(i); // re-baselines the watch to the fresh contents
+        }
+
+        // Rate-limit the requests themselves. One signature per pane in flight at
+        // a time, so a slow share can never queue up a backlog.
+        if now - self.watch_polled_at < WATCH_POLL.as_secs_f64() {
+            return;
+        }
+        self.watch_polled_at = now;
+        for i in 0..self.panes.len() {
+            if !self.panes[i].watch.on || self.panes[i].watch.inflight.is_some() {
+                continue;
+            }
+            let Some(paths) = Self::watch_paths(&self.panes[i].source) else {
+                continue;
+            };
+            self.watch_gen += 1;
+            let gen = self.watch_gen;
+            self.panes[i].watch.inflight = Some(gen);
+            self.watcher.request(self.panes[i].id, gen, paths);
         }
     }
 }

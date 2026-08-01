@@ -14,6 +14,7 @@ mod settings;
 #[cfg(test)]
 mod testutil;
 mod view;
+mod watcher;
 
 use eframe::egui;
 
