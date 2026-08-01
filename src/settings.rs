@@ -5,7 +5,29 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use eframe::egui::{self, Key};
+use rust_i18n::t;
 use serde::{Deserialize, Serialize};
+
+/// The UI languages cim ships with: the locale code stored in the config (and
+/// naming `locales/<code>.yml`) plus the name shown in the Settings picker —
+/// each in *its own* language, the convention for a language menu. French is the
+/// default; English is the `i18n!` fallback, so a key missing from `fr.yml`
+/// shows English rather than the bare key.
+pub const LANGUAGES: [(&str, &str); 2] = [("fr", "Français"), ("en", "English")];
+
+/// The default UI language.
+pub const DEFAULT_LANGUAGE: &str = "fr";
+
+/// Point rust-i18n at `code`, falling back to the default for anything we don't
+/// ship (a hand-edited config, or a locale dropped from a later build).
+pub fn apply_locale(code: &str) {
+    let code = if LANGUAGES.iter().any(|(c, _)| *c == code) {
+        code
+    } else {
+        DEFAULT_LANGUAGE
+    };
+    rust_i18n::set_locale(code);
+}
 
 /// Everything a key can be bound to. `SelectMedia(i)` jumps straight to media i.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,34 +91,13 @@ impl Action {
         }
     }
 
-    /// Human label for the settings UI.
+    /// Human label for the settings UI, in the current UI language. The action's
+    /// own [`Self::id`] doubles as the translation key stem, so a new action
+    /// needs no second table here — just an `action.<id>` entry per locale.
     pub fn label(&self) -> String {
         match self {
-            Action::ToggleView => "Toggle grid / single / A-B view".into(),
-            Action::ViewGrid => "Switch to grid view".into(),
-            Action::ViewSingle => "Switch to single view".into(),
-            Action::ViewAb => "Switch to A/B view".into(),
-            Action::NextMedia => "Next media".into(),
-            Action::PrevMedia => "Previous media".into(),
-            Action::NextFrame => "Next frame".into(),
-            Action::PrevFrame => "Previous frame".into(),
-            Action::ResetView => "Fit to view".into(),
-            Action::ActualSize => "Actual size (100%)".into(),
-            Action::ZoomIn => "Zoom in".into(),
-            Action::ZoomOut => "Zoom out".into(),
-            Action::LoadAll => "Load all frames into memory".into(),
-            Action::OpenFiles => "Open files…".into(),
-            Action::ToggleSettings => "Toggle settings".into(),
-            Action::ToggleManager => "Toggle media manager".into(),
-            Action::ToggleVis => "Toggle transformations panel".into(),
-            Action::ToggleExport => "Toggle export panel".into(),
-            Action::OpenCompute => "Add a compute pane".into(),
-            Action::PlayPause => "Play / pause sequences".into(),
-            Action::ReloadMedia => "Reload focused media from disk".into(),
-            Action::ReloadAll => "Reload all media from disk".into(),
-            Action::HideMedia => "Hide focused media".into(),
-            Action::ToggleChrome => "Show/hide all UI elements".into(),
-            Action::SelectMedia(i) => format!("Select media {}", i + 1),
+            Action::SelectMedia(i) => t!("action.select_media", n = i + 1).into_owned(),
+            _ => t!(format!("action.{}", self.id())).into_owned(),
         }
     }
 
@@ -336,12 +337,13 @@ impl ContrastMode {
         ContrastMode::Colormap,
     ];
 
-    /// Short label for the media-manager dropdown.
-    pub fn label(self) -> &'static str {
+    /// Short label for the media-manager dropdown. LUT_ALPHA is the operator's
+    /// own name, so it reads the same in every language.
+    pub fn label(self) -> String {
         match self {
-            ContrastMode::Linear => "Linear",
-            ContrastMode::LutAlpha => "LUT_ALPHA",
-            ContrastMode::Colormap => "Colormap",
+            ContrastMode::Linear => t!("tone.linear").into_owned(),
+            ContrastMode::LutAlpha => "LUT_ALPHA".to_owned(),
+            ContrastMode::Colormap => t!("tone.colormap").into_owned(),
         }
     }
 }
@@ -388,6 +390,11 @@ pub struct ToneOptions {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
+    /// UI language: one of the codes in [`LANGUAGES`], naming `locales/<code>.yml`.
+    /// Applied through [`apply_locale`] at startup (before the CLI even parses, so
+    /// `--help` is localised too) and whenever the Settings picker changes it.
+    #[serde(default = "default_language")]
+    pub language: String,
     pub max_columns: usize,
     /// Global UI zoom factor for buttons/text (egui zoom_factor).
     #[serde(default = "default_ui_scale")]
@@ -413,6 +420,10 @@ pub struct Config {
     pub keybindings: Keybindings,
 }
 
+fn default_language() -> String {
+    DEFAULT_LANGUAGE.to_owned()
+}
+
 fn default_ui_scale() -> f32 {
     1.0
 }
@@ -432,6 +443,7 @@ fn default_decode_threads() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            language: default_language(),
             max_columns: 3,
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
@@ -477,6 +489,124 @@ impl Config {
         }
         if let Ok(s) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, s);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Top-level keys of a version-1 locale file, in file order. The format is
+    /// one flat `key: value` per entry, so the keys are exactly the lines that
+    /// start at column 0 with an identifier — no YAML parser needed (and none in
+    /// the dependency tree).
+    fn keys_of(src: &str) -> Vec<String> {
+        src.lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with(char::is_whitespace))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, _)| k.trim().to_owned())
+            .filter(|k| k != "_version")
+            .collect()
+    }
+
+    const EN: &str = include_str!("../locales/en.yml");
+    const FR: &str = include_str!("../locales/fr.yml");
+
+    /// Every locale carries the same keys. English is only the *fallback*, so a
+    /// key missing from `fr.yml` degrades silently to English in the French UI —
+    /// exactly the kind of gap that survives review, hence the test.
+    #[test]
+    fn locales_have_the_same_keys() {
+        let (en, fr) = (keys_of(EN), keys_of(FR));
+        let missing: Vec<_> = en.iter().filter(|k| !fr.contains(k)).collect();
+        let extra: Vec<_> = fr.iter().filter(|k| !en.contains(k)).collect();
+        assert!(missing.is_empty(), "missing from fr.yml: {missing:?}");
+        assert!(extra.is_empty(), "not in en.yml (typo?): {extra:?}");
+        // Duplicate keys are worse than missing ones: YAML keeps the *last*, so
+        // an accidental repeat silently overrides an earlier translation.
+        let mut sorted = en.clone();
+        sorted.sort();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "duplicate key in en.yml");
+    }
+
+    /// Every `t!("literal")` key in the source exists in the locales. Catches a
+    /// typo or a forgotten entry, which `t!` would otherwise surface only at
+    /// runtime — as the raw key in the UI.
+    #[test]
+    fn every_literal_key_is_translated() {
+        let keys = keys_of(EN);
+        let mut missing = Vec::new();
+        for path in rust_sources(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) {
+            let src = std::fs::read_to_string(&path).unwrap();
+            for used in literal_keys(&src) {
+                if !keys.contains(&used) {
+                    missing.push(format!("{} ({})", used, path.display()));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "keys used but not defined: {missing:#?}"
+        );
+    }
+
+    /// Every `t!("…")` key literal in one source file. (Dynamic keys — the
+    /// `action.<id>` and `compute.reduce_<token>` families — are built from an
+    /// id at runtime and so can't be checked this way; their tables are covered
+    /// by `every_action_has_a_label` below.)
+    fn literal_keys(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = src;
+        while let Some(i) = rest.find("t!(") {
+            rest = &rest[i + 3..];
+            let after = rest.trim_start();
+            let Some(body) = after.strip_prefix('"') else {
+                continue;
+            };
+            if let Some(end) = body.find('"') {
+                let key = &body[..end];
+                if key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_')
+                    && key.contains('.')
+                {
+                    out.push(key.to_owned());
+                }
+            }
+        }
+        out
+    }
+
+    fn rust_sources(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return out;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(rust_sources(p));
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// The dynamic `action.<id>` family: every bindable action must have a label
+    /// entry, since `Action::label` builds the key from the id.
+    #[test]
+    fn every_action_has_a_label() {
+        let keys = keys_of(EN);
+        for a in Action::all() {
+            let key = match a {
+                Action::SelectMedia(_) => "action.select_media".to_owned(),
+                _ => format!("action.{}", a.id()),
+            };
+            assert!(keys.contains(&key), "no locale entry for {key}");
         }
     }
 }

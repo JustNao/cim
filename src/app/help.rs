@@ -47,15 +47,13 @@ pub(super) fn load() -> Result<String, String> {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    Err(format!(
-        "Could not read {HELP_FILE}. Looked for it here:\n{tried}"
-    ))
+    Err(t!("help.not_found", file = HELP_FILE, paths = tried).into_owned())
 }
 
 impl CimApp {
     pub(super) fn draw_help(&mut self, ctx: &egui::Context) {
         let mut open = self.show_help;
-        egui::Window::new("❓ Help")
+        egui::Window::new(format!("❓ {}", t!("help.title")))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
@@ -65,14 +63,14 @@ impl CimApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .button("Reload")
-                        .on_hover_text("Re-read help.md from disk")
+                        .button(t!("help.reload"))
+                        .on_hover_text(t!("help.reload_hover"))
                         .clicked()
                     {
                         self.help_doc = Some(load());
                     }
                     ui.label(
-                        egui::RichText::new(format!("from {HELP_FILE}"))
+                        egui::RichText::new(t!("help.source", file = HELP_FILE))
                             .weak()
                             .small(),
                     );
@@ -86,7 +84,7 @@ impl CimApp {
                             ui.colored_label(Color32::from_rgb(230, 120, 120), e);
                         }
                         None => {
-                            ui.weak("Not loaded.");
+                            ui.weak(t!("help.not_loaded"));
                         }
                     });
             });

@@ -26,12 +26,14 @@ impl Palette {
     /// The palettes in dropdown / CLI order.
     pub const ORDER: [Palette; 3] = [Palette::Turbo, Palette::Viridis, Palette::Diverging];
 
-    /// Human label for the picker.
-    pub fn label(self) -> &'static str {
+    /// Human label for the picker. Turbo and Viridis are the palettes' own
+    /// names (they read the same in every language); only "diverging" — a
+    /// description rather than a name — is translated.
+    pub fn label(self) -> String {
         match self {
-            Palette::Turbo => "Turbo",
-            Palette::Viridis => "Viridis",
-            Palette::Diverging => "Diverging",
+            Palette::Turbo => "Turbo".to_owned(),
+            Palette::Viridis => "Viridis".to_owned(),
+            Palette::Diverging => rust_i18n::t!("palette.diverging").into_owned(),
         }
     }
 

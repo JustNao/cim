@@ -61,7 +61,7 @@ impl CimApp {
                 }
                 Err(e) => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
-                        p.error = Some(format!("Frame {}: {e}", d.frame + 1));
+                        p.error = Some(t!("error.frame", n = d.frame + 1, err = e).into_owned());
                     }
                 }
             }
@@ -137,8 +137,7 @@ impl CimApp {
         }
         self.load_cache_exhausted = false;
         self.export_load_pending = false; // only the export button sets this
-        self.status
-            .set("Queued all frames for background decoding…");
+        self.status.set_load(t!("status.load_all_queued"));
         self.decoding_all = true;
     }
 
@@ -152,8 +151,7 @@ impl CimApp {
                 p.eager = Eager::Offsets;
             }
         }
-        self.status
-            .set("Discovering sequence length (headers only)…");
+        self.status.set_load(t!("status.discovering_length"));
         self.decoding_all = true;
     }
 
@@ -217,7 +215,7 @@ impl CimApp {
         // frames the user actually views re-request cleanly.
         self.decoder.cancel_pending();
         self.inflight.clear();
-        self.status.set("Stopped loading");
+        self.status.set(t!("status.load_stopped"));
     }
 
     /// Drive the active bulk loads each update. A **Full** pane requests every
@@ -488,8 +486,7 @@ impl CimApp {
                 }
             }
             self.load_cache_exhausted = true;
-            self.status
-                .set("Frame cache full — continuing with offsets only (headers) for the rest");
+            self.status.set_load(t!("status.cache_full"));
         }
 
         // Evict the globally least-recently-used resident frame (never a pane's
@@ -523,25 +520,11 @@ impl CimApp {
         if self.decoding_all && !active && self.inflight.is_empty() {
             self.decoding_all = false;
             // Clear only our own transient load notes (don't clobber a newer one).
-            if self.status.text() == "Queued all frames for background decoding…"
-                || self
-                    .status
-                    .text()
-                    .starts_with("Discovering sequence length")
-                || self.status.text().starts_with("Frame cache full")
-            {
+            if self.status.is_load_note() {
                 self.status.clear();
             }
             if std::mem::take(&mut self.export_load_pending) && self.load_cache_exhausted {
-                self.warn_popup = Some(
-                    "The whole sequence couldn't be loaded into memory — the frame \
-                     cache is too small to hold every frame at once.\n\nThe length \
-                     was fully discovered (headers only), so the export frame range \
-                     is correct and the encoder still reads the remaining frames \
-                     from disk as it runs. To keep more frames resident, raise the \
-                     Frame cache budget in Settings."
-                        .into(),
-                );
+                self.warn_popup = Some(t!("warn.cache_too_small").into_owned());
             }
         }
     }

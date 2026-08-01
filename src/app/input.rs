@@ -219,7 +219,7 @@ impl CimApp {
             return;
         }
         ctx.copy_text(self.view_command());
-        self.status.set("View command copied to clipboard");
+        self.status.set(t!("status.view_command_copied"));
     }
 
     // ---- input -----------------------------------------------------------

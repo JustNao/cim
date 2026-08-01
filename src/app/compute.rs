@@ -123,16 +123,16 @@ impl CimApp {
             .panes
             .iter()
             .find(|p| p.id == src_id)
-            .ok_or_else(|| "Source no longer available".to_string())?;
+            .ok_or_else(|| t!("compute.err_source_gone").into_owned())?;
         let base = src.media.name().to_string();
         let cnt = src.media.frame_count();
         let frames: Vec<std::sync::Arc<media::FrameData>> =
             (0..cnt).filter_map(|f| src.media.resident(f)).collect();
         let used = frames.len();
         let fr = media::reduce_frames(&frames, kind)
-            .ok_or_else(|| "No source frames in memory".to_string())?;
+            .ok_or_else(|| t!("compute.err_no_frames").into_owned())?;
         let name = format!("{} · {}", kind.label(), base);
-        let status = format!("{} of {used} frame(s) in memory", kind.label());
+        let status = t!("compute.status_reduce", kind = kind.label(), n = used).into_owned();
         Ok((fr, name, status))
     }
 
@@ -143,31 +143,32 @@ impl CimApp {
         a_id: Option<u64>,
         b_id: Option<u64>,
     ) -> Result<(media::FrameData, String, String), String> {
-        let a_id = a_id.ok_or_else(|| "Pick source A".to_string())?;
-        let b_id = b_id.ok_or_else(|| "Pick source B".to_string())?;
+        let a_id = a_id.ok_or_else(|| t!("compute.err_pick", slot = "A").into_owned())?;
+        let b_id = b_id.ok_or_else(|| t!("compute.err_pick", slot = "B").into_owned())?;
         let ia = self
             .pane_idx(a_id)
-            .ok_or_else(|| "Source A no longer available".to_string())?;
+            .ok_or_else(|| t!("compute.err_slot_gone", slot = "A").into_owned())?;
         let ib = self
             .pane_idx(b_id)
-            .ok_or_else(|| "Source B no longer available".to_string())?;
+            .ok_or_else(|| t!("compute.err_slot_gone", slot = "B").into_owned())?;
         let (fa, fb) = (self.frame_disp(ia), self.frame_disp(ib));
         let a = self.panes[ia]
             .media
             .resident(fa)
-            .ok_or_else(|| "A's current frame not in memory".to_string())?;
+            .ok_or_else(|| t!("compute.err_frame_missing", slot = "A").into_owned())?;
         let b = self.panes[ib]
             .media
             .resident(fb)
-            .ok_or_else(|| "B's current frame not in memory".to_string())?;
+            .ok_or_else(|| t!("compute.err_frame_missing", slot = "B").into_owned())?;
         let fr = media::diff_frames(&a, &b)
-            .ok_or_else(|| "A and B differ in size / channels".to_string())?;
+            .ok_or_else(|| t!("compute.err_shape_mismatch").into_owned())?;
         let name = format!(
-            "Diff · {} − {}",
+            "{} · {} − {}",
+            Reduce::Diff.label(),
             self.panes[ia].media.name(),
             self.panes[ib].media.name()
         );
-        let status = format!("Diff of frame {} − {}", fa + 1, fb + 1);
+        let status = t!("compute.status_diff", a = fa + 1, b = fb + 1).into_owned();
         Ok((fr, name, status))
     }
 
@@ -252,7 +253,7 @@ impl CimApp {
             return;
         }
         let Some(frame) = self.panes[idx].media.resident(0) else {
-            self.set_compute_status(idx, "Nothing computed to save".into());
+            self.set_compute_status(idx, t!("compute.nothing_to_save").into_owned());
             return;
         };
         match media::save_frame(&frame, Path::new(name)) {
@@ -260,9 +261,9 @@ impl CimApp {
                 if let Some(c) = self.panes[idx].compute.as_mut() {
                     c.saving = false;
                 }
-                self.set_compute_status(idx, format!("Saved {name}"));
+                self.set_compute_status(idx, t!("compute.saved", name = name).into_owned());
             }
-            Err(e) => self.set_compute_status(idx, format!("Save failed: {e}")),
+            Err(e) => self.set_compute_status(idx, t!("compute.save_failed", err = e).into_owned()),
         }
     }
 

@@ -1,0 +1,497 @@
+_version: 1
+
+# Texte de l'interface en français — la langue par défaut de cim.
+# `en.yml` est la locale de repli : une clé absente d'ici s'affiche en anglais
+# plutôt qu'en clé brute. L'interpolation utilise les %{noms} de rust-i18n,
+# identiques aux arguments nommés passés à `t!`.
+
+# ---- barre d'outils --------------------------------------------------------
+toolbar.open: Ouvrir
+toolbar.grid: Grille
+toolbar.single: Unique
+toolbar.ab: A/B
+toolbar.fit: Ajuster
+toolbar.media: Médias
+toolbar.transformations: Transformations
+toolbar.transformations_hover: Transformations du panneau sélectionné
+toolbar.compute: Calcul
+toolbar.compute_hover: Ajouter un panneau de calcul
+toolbar.export: Export
+toolbar.export_hover: Exporter la vue courante avec ffmpeg
+toolbar.view_cmd: Cmd vue
+toolbar.view_cmd_hover: Reproduire la vue courante
+toolbar.settings: Réglages
+toolbar.settings_hover: Ouvrir les réglages
+toolbar.help: Aide
+toolbar.help_hover: Commandes souris et modificateurs (lit help.md)
+toolbar.debug: Débogage
+toolbar.debug_hover: Temps par étape (lecture → affichage)
+
+# ---- barre de lecture (bas) ------------------------------------------------
+frame_bar.play: Lire
+frame_bar.pause: Pause
+frame_bar.prev: Préc.
+frame_bar.next: Suiv.
+frame_bar.loop: Boucle
+frame_bar.loop_hover: Reboucler la lecture à la fin de la fenêtre
+frame_bar.full: Tout
+frame_bar.full_hover: Rétablir la plage de boucle sur toute la séquence
+frame_bar.stop: Arrêter
+frame_bar.stop_load_hover: Arrêter le chargement en cours
+frame_bar.stop_seek_hover: Arrêter la recherche de l'image saisie
+frame_bar.load_all: Tout charger
+frame_bar.load_all_hover: >-
+  Décoder toutes les images (dans la limite du cache ; le reste se poursuit en
+  en-têtes/offsets seulement)
+frame_bar.load_offsets: Charger offsets
+frame_bar.load_offsets_hover: >-
+  Découvrir la longueur complète de la séquence par les en-têtes seuls (aucun
+  décodage de pixels, aucune pression sur le cache)
+frame_bar.load_offsets_slow: "La découverte rapide des offsets n'est pas possible ici : %{reason}"
+frame_bar.step: Pas
+frame_bar.step_hover: Pas d'avance rapide
+frame_bar.frame: image
+
+# ---- zone centrale ---------------------------------------------------------
+canvas.empty: Ouvrez des images ou déposez des fichiers ici
+canvas.all_hidden: Tous les médias sont masqués — réactivez-en dans ☰ Médias
+
+# ---- en-tête / pied de panneau ---------------------------------------------
+pane.reload: Recharger
+pane.reload_hover: Recharger ce média depuis le disque
+pane.auto_reload: Auto-rechargement
+pane.auto_reload_on_hover: >-
+  Auto-rechargement actif : recharge quand le fichier change sur le disque.
+  Cliquez pour arrêter.
+pane.auto_reload_off_hover: >-
+  Auto-rechargement : surveiller le fichier et le recharger quand il change sur
+  le disque.
+pane.hide: Masquer
+pane.close: Fermer
+pane.sync_pos: pos
+pane.sync_time: temps
+pane.in_memory: "%{n} en mém."
+pane.page_in_file: page %{page} dans ce fichier
+pane.row: lig
+pane.col: col
+
+# ---- gestionnaire de médias ------------------------------------------------
+manager.title: Médias
+manager.empty: Aucun média ouvert. Utilisez Ouvrir ou déposez des fichiers sur la fenêtre.
+manager.col_show: Afficher
+manager.col_name: Nom
+manager.col_frames: Images
+manager.col_single: Unique
+manager.col_ab: A / B
+manager.col_sync: Synchroniser
+manager.col_sync_hover: >-
+  Synchronisation Pos / Temps / Visualisation (LUT·détails·superposition) /
+  Géométrie (rotation), et le média Contrôle de la timeline
+manager.show_all_hover: Tout afficher / masquer
+manager.all: tous
+manager.still: fixe
+manager.sync_pos: Pos
+manager.sync_time: Temps
+manager.sync_visu: Visu
+manager.sync_visu_hover: >-
+  Synchroniser les transformations de Visualisation
+  (LUT·détails·superposition)
+manager.sync_visu_all_hover: >-
+  Synchroniser les transformations de Visualisation (LUT·détails·superposition)
+  sur tous les panneaux
+manager.sync_geom: Géom
+manager.sync_geom_hover: Synchroniser les transformations de Géométrie (rotation)
+manager.sync_geom_all_hover: >-
+  Synchroniser les transformations de Géométrie (rotation) sur tous les
+  panneaux
+manager.control: Contrôle
+manager.control_hover: >-
+  Ce média est la source de bornes partagée ; une séquence pilote aussi la
+  timeline et la lecture
+manager.reload: Recharger
+manager.reload_hover: Recharger ce média depuis le disque
+manager.reload_all_hover: Tout recharger depuis le disque
+manager.single_hover: Afficher seul en vue Unique
+manager.drag_hover: Glisser pour réordonner
+
+# ---- panneau Transformations -----------------------------------------------
+transform.title: Transformations
+transform.no_media: Aucun média ouvert.
+transform.visualization: Visualisation
+transform.geometry: Géométrie
+transform.sync: Sync
+transform.sync_visu_hover: >-
+  Ajouter ce panneau au groupe de synchronisation Visualisation
+  (LUT·détails·superposition)
+transform.sync_geom_hover: Ajouter ce panneau au groupe de synchronisation Géométrie (rotation)
+transform.lut: LUT
+transform.rc: RC
+transform.rc_hover: Rehaussement / netteté
+transform.op_missing_lib: "Bibliothèque de l'opérateur %{lib} introuvable"
+transform.op_needs_u16: Disponible uniquement pour les images 16 bits monocanal (uint16)
+transform.overlay: Superposition
+transform.overlay_none: Aucune
+transform.overlay_none_available: aucun média monocanal
+transform.palette: Palette
+transform.clip: Écrêtage
+transform.clip_hover: Écrêter un percentile de chaque extrémité avant l'étirement
+transform.clip_percent_hover: Percentile écrêté à chaque extrémité avant l'étirement
+transform.clip_reset_hover: Rétablir la valeur par défaut (%{pct} %)
+transform.share_clip: Bornes partagées
+transform.share_clip_hover: >-
+  Appliquer la LUT exacte (lo/hi) du média Contrôle à tous les panneaux —
+  écrêtage et échelle identiques
+transform.rotate: Rotation
+transform.rotate_hover: Faire pivoter l'image (Alt + glisser sur le panneau)
+transform.rotate_reset_hover: Remettre à 0°
+transform.reset: Réinit.
+transform.histogram: Histogramme
+transform.frame_not_loaded: image non chargée
+
+# ---- modes de rendu & palettes ---------------------------------------------
+tone.linear: Linéaire
+tone.colormap: Fausses couleurs
+palette.diverging: Divergente
+
+# ---- statistiques de région ------------------------------------------------
+stats.mean: moy
+stats.std: éca
+stats.min: min
+stats.max: max
+stats.peak: pic
+stats.lut_from_region: LUT depuis la région
+stats.hide: Masquer les stats
+stats.show: Stats
+stats.show_hover: Afficher les statistiques de la région
+
+# ---- profil de ligne -------------------------------------------------------
+profile.title: Profil de ligne
+profile.clear_line: Effacer la ligne
+profile.position_axis: position (px)
+
+# ---- panneaux de calcul ----------------------------------------------------
+compute.new: Nouveau calcul
+compute.mode: Mode
+compute.source: Source
+compute.compute: Calculer
+compute.refresh: Actualiser
+compute.save: Enregistrer
+compute.cancel: Annuler
+compute.save_hint: nom.tif
+compute.auto_refresh: Actualisation auto
+compute.reduce_mean: Moyenne
+compute.reduce_std: Écart-type
+compute.reduce_diff: Différence
+compute.status_reduce: "%{kind} de %{n} image(s) en mémoire"
+compute.status_diff: Différence des images %{a} − %{b}
+compute.saved: "%{name} enregistré"
+compute.save_failed: "Échec de l'enregistrement : %{err}"
+compute.nothing_to_save: Aucun calcul à enregistrer
+compute.err_source_gone: Source indisponible
+compute.err_no_frames: Aucune image source en mémoire
+compute.err_pick: Choisissez la source %{slot}
+compute.err_slot_gone: Source %{slot} indisponible
+compute.err_frame_missing: "L'image courante de %{slot} n'est pas en mémoire"
+compute.err_shape_mismatch: A et B diffèrent en taille / nombre de canaux
+
+# ---- panneau d'export ------------------------------------------------------
+export.title: Exporter la comparaison
+export.layout: Disposition
+export.layout_grid: Côte à côte
+export.layout_ab: Volet A / B
+export.region: Région
+export.region_full: totale
+export.select: Sélectionner…
+export.select_hover: >-
+  Glissez avec le bouton droit pour définir le recadrage sur une image (le
+  bouton gauche déplace, la molette zoome) ; il s'applique ensuite à tous les
+  panneaux de la comparaison
+export.full_view: Vue entière
+export.frames: Images
+export.frames_all: toutes
+export.frames_from: de
+export.frames_to: à
+export.use_loop: Utiliser la boucle
+export.use_loop_hover: >-
+  Caler la plage d'images sur la fenêtre de boucle (fin exclue : [20, 40] →
+  images 20–39)
+export.out_height: Hauteur de sortie
+export.out_height_view: = vue
+export.compression: Compression
+export.add_labels: Ajouter des libellés
+export.add_labels_hover: Incruster un libellé dans la case de chaque média
+export.labels_no_media: Aucun média dans cette disposition
+export.label_text: Texte
+export.label_size_hover: Hauteur du texte en pixels de sortie (indépendante du zoom)
+export.label_background: Fond
+export.label_position: Position
+export.label_margin: Marge
+export.label_preview: Aperçu
+export.anchor_top_left: En haut à gauche
+export.anchor_top_center: En haut au centre
+export.anchor_top_right: En haut à droite
+export.anchor_mid_left: Au milieu à gauche
+export.anchor_center: Au centre
+export.anchor_mid_right: Au milieu à droite
+export.anchor_bottom_left: En bas à gauche
+export.anchor_bottom_center: En bas au centre
+export.anchor_bottom_right: En bas à droite
+export.warn_incomplete: >-
+  ⚠ Certains médias ne sont pas entièrement chargés — le nombre d'images peut
+  être incomplet.
+export.load_frames: Charger les images
+export.load_frames_hover: >-
+  Découvrir la longueur complète par les en-têtes seuls — suffisant pour la
+  plage d'export, sans pression sur le cache
+export.summary_image: 1 image fixe (l'image courante)
+export.summary_video: "%{n} images · %{secs} s"
+export.save_as: Enregistrer sous
+export.save_as_hover: >-
+  L'extension choisit le format : .mp4 (vidéo), ou .png / .jpg pour une image
+  fixe
+export.run_image: Exporter l'image
+export.run_video: Exporter en MP4
+export.running: Export de %{n} images…
+export.cancelling: Annulation…
+export.cancelled: Export annulé
+export.done_image: Image exportée (%{w}x%{h}) %{path}
+export.done_video: "%{n} images exportées dans %{path}"
+export.failed: "Échec de l'export : %{err}"
+export.err_no_media: Aucun média à exporter
+export.err_view_not_ready: Vue pas encore prête
+export.err_no_visible: Aucun média visible (réactivez-en dans ☰ Médias)
+export.err_no_name: Saisissez d'abord un nom de fichier de sortie
+export.err_all_background: Rien à exporter (tout est en arrière-plan)
+export.err_panicked: Le fil d'export a échoué
+
+# ---- fenêtres Commande de vue / Débogage / Aide ----------------------------
+viewcmd.title: Commande de vue
+viewcmd.intro: "Rouvrez les fichiers courants sur cette vue exacte en lançant :"
+viewcmd.copy: Copier dans le presse-papiers
+viewcmd.copy_hover: Ou appuyez sur Ctrl+Maj+C n'importe où
+debug.title: Débogage — temps du pipeline
+debug.intro: Temps passé par image dans chaque étape avant l'affichage.
+debug.col_stage: étape
+debug.col_last: dern.
+debug.col_avg: moy.
+debug.col_min: min
+debug.col_max: max
+debug.col_n: "n"
+debug.stage_read: Lecture
+debug.stage_decode: Décodage
+debug.stage_render: Rendu
+debug.stage_operators: Opérateurs externes
+debug.stage_upload: Envoi de la texture
+debug.stage_update: Mise à jour globale
+help.title: Aide
+help.reload: Recharger
+help.reload_hover: Relire help.md depuis le disque
+help.source: depuis %{file}
+help.not_loaded: Non chargé.
+help.not_found: "Impossible de lire %{file}. Chemins essayés :\n%{paths}"
+
+# ---- réglages --------------------------------------------------------------
+settings.title: Réglages
+settings.general: Général
+settings.language: Langue
+settings.max_columns: Colonnes max
+settings.ui_scale: Échelle de l'interface
+settings.frame_cache: Cache d'images
+settings.frame_cache_hover: >-
+  Plafond mémoire des images décodées gardées en mémoire pour toutes les
+  séquences ; au-delà, les plus anciennes non affichées sont libérées.
+settings.frame_cache_frames: ≈ %{n} images
+settings.frame_cache_frames_hover: >-
+  Nombre de positions de la timeline qui tiennent, en comptant une image de
+  chacun des %{media} médias ouverts (%{size} chacune). Les images libérées ici
+  sont relues depuis le disque à leur prochain affichage — bien plus lent sur
+  un montage réseau que de les garder en mémoire.
+settings.decode_threads: Fils de décodage
+settings.decode_threads_auto: auto
+settings.decode_threads_hover: >-
+  Fils de décodage d'images partagés par toutes les séquences. 0 = auto (suit
+  le nombre de cœurs, plafonné). Réduisez-le pour laisser du CPU aux autres
+  utilisateurs quand plusieurs instances partagent un serveur / hôte VNC.
+  Appliqué immédiatement.
+settings.cursor_dot: Point du curseur sur les autres panneaux
+settings.cursor_dot_hover: >-
+  Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour
+  comparer le même endroit d'un panneau à l'autre.
+settings.operators: Opérateurs d'image (C++)
+settings.library_folder: Dossier des bibliothèques
+settings.library_folder_hover: >-
+  Dossier contenant les bibliothèques d'opérateurs propriétaires (LUT_ALPHA /
+  Details). Laissez vide pour utiliser le dossier LIBS situé à côté de
+  l'exécutable cim. Les bibliothèques se chargent automatiquement quand ce
+  dossier change.
+settings.library_folder_hint: (utilise <cim>/LIBS)
+settings.browse: 📂 Parcourir…
+settings.libs_both: Les deux bibliothèques d'opérateurs ont été trouvées
+settings.libs_none: Aucune bibliothèque d'opérateur trouvée dans ce dossier
+settings.libs_one: Seule la bibliothèque %{lib} a été trouvée
+settings.libs_loaded: "chargées : %{libs}"
+settings.libs_loaded_none: "chargées : aucune"
+settings.shortcuts: Raccourcis clavier
+settings.shortcuts_help: >-
+  Cliquez sur Réassigner, puis appuyez sur une touche — maintenez Ctrl / Maj /
+  Alt pour un accord (par ex. Ctrl+R). Échap annule.
+settings.press_key: appuyez sur une touche ou un accord…
+settings.rebind: Réassigner
+settings.clear: Effacer
+settings.reset: Valeurs par défaut
+settings.reset_hover: >-
+  Rétablir tous les réglages ci-dessus — raccourcis clavier compris — à leur
+  valeur par défaut.
+settings.autosave_note: Les modifications sont enregistrées automatiquement.
+
+# ---- actions assignables (clé = action.<id>) -------------------------------
+action.toggle_view: Basculer entre les vues grille / unique / A-B
+action.view_grid: Passer en vue grille
+action.view_single: Passer en vue unique
+action.view_ab: Passer en vue A/B
+action.next_media: Média suivant
+action.prev_media: Média précédent
+action.next_frame: Image suivante
+action.prev_frame: Image précédente
+action.reset_view: Ajuster à la vue
+action.actual_size: Taille réelle (100 %)
+action.zoom_in: Zoom avant
+action.zoom_out: Zoom arrière
+action.load_all: Charger toutes les images en mémoire
+action.open_files: Ouvrir des fichiers…
+action.toggle_settings: Afficher / masquer les réglages
+action.toggle_manager: Afficher / masquer le gestionnaire de médias
+action.toggle_vis: Afficher / masquer le panneau Transformations
+action.toggle_export: Afficher / masquer le panneau d'export
+action.open_compute: Ajouter un panneau de calcul
+action.play_pause: Lecture / pause des séquences
+action.reload_media: Recharger le média sélectionné depuis le disque
+action.reload_all: Recharger tous les médias depuis le disque
+action.hide_media: Masquer le média sélectionné
+action.toggle_chrome: Afficher / masquer toute l'interface
+action.select_media: Sélectionner le média %{n}
+
+# ---- notifications & fenêtres modales --------------------------------------
+status.load_all_queued: Toutes les images ont été mises en file de décodage…
+status.discovering_length: Découverte de la longueur de la séquence (en-têtes seuls)…
+status.load_stopped: Chargement arrêté
+status.cache_full: >-
+  Cache d'images plein — la suite se poursuit en offsets (en-têtes) seulement
+status.view_command_copied: Commande de vue copiée dans le presse-papiers
+status.settings_reset: Réglages rétablis par défaut
+modal.error: Erreur
+modal.warning: Avertissement
+modal.many_sequences: Nombreuses séquences
+modal.many_sequences_body: >-
+  Ceci va ouvrir %{n} séquences d'un coup.
+
+
+  Décoder et lire de nombreuses séquences en parallèle sollicite fortement le
+  processeur et la mémoire, et peut dégrader les performances — en particulier
+  via une session distante (VNC) sur une machine partagée.
+modal.open_anyway: Ouvrir quand même
+modal.quit: Quitter
+warn.cache_too_small: >-
+  La séquence entière n'a pas pu être chargée en mémoire — le cache d'images
+  est trop petit pour toutes les contenir en même temps.
+
+
+  La longueur a bien été découverte en entier (en-têtes seuls) : la plage
+  d'export est donc correcte, et l'encodeur lit les images restantes depuis le
+  disque au fil de l'export. Pour garder plus d'images en mémoire, augmentez le
+  cache d'images dans les Réglages.
+
+# ---- erreurs ---------------------------------------------------------------
+error.open_failed: "Échec de l'ouverture :\n%{err}"
+error.reload_failed: "Échec du rechargement : %{err}"
+error.frame: "Image %{n} : %{err}"
+error.overlay_size: >-
+  Taille de superposition incompatible
+
+
+  Cette image fait %{bw}×%{bh} alors que la superposition « %{name} » fait
+  %{ow}×%{oh}.
+
+  Une superposition doit avoir les mêmes dimensions que l'image.
+error.empty_sequence: séquence d'images vide
+error.short_tiff: "tampon TIFF trop court : %{got} < %{expected}"
+error.tiff_color_type: "type de couleur TIFF non pris en charge : %{kind}"
+error.tiff_sample_format: "format d'échantillon TIFF non pris en charge : %{kind}"
+error.save_extension: "format « .%{ext} » non pris en charge — utilisez %{exts}"
+error.ffmpeg_hint: >-
+  La lecture de vidéos nécessite les outils en ligne de commande ffmpeg
+  (ffmpeg.org) accessibles dans le PATH
+error.tool_not_found: "%{tool} introuvable. %{hint}"
+error.tool_failed: "échec du lancement de %{tool} : %{err}"
+error.ffprobe_failed: "échec de ffprobe sur %{path} : %{err}"
+error.ffmpeg_failed: "échec de ffmpeg : %{err}"
+error.no_frame_count: impossible de déterminer le nombre d'images de %{path}
+error.ffmpeg_stopped: ffmpeg s'est arrêté à l'image %{n} de %{path}%{status}
+error.ffmpeg_read: "échec de la lecture de l'image %{n} de %{path} : %{err}"
+
+# ---- ligne de commande -----------------------------------------------------
+cli.unknown_shell: "cim : shell « %{shell} » inconnu (essayez : bash, powershell)"
+cli.help: |
+  cim %{ver} — Comparer images et séquences
+
+  Visionneuse sans perte, côte à côte, pour images et séquences.
+
+  UTILISATION :
+      cim [OPTIONS] [FICHIERS|SÉQUENCES]...
+
+  ARGUMENTS :
+      <FICHIERS|SÉQUENCES|DOSSIERS>...
+          Autant d'images, de séquences, de vidéos ou de dossiers que voulu
+          (%{exts}).
+          Une suite numérotée peut s'écrire de façon compacte
+          PRÉFIXE%0Xu SUFFIXE,DÉBUT,FIN — par ex. frame_%05u.tif,0,12 donne
+          frame_00000.tif .. frame_00012.tif.
+          Un dossier (par ex. `cim dossier`) ouvre toutes les images qu'il
+          contient, triées alphabétiquement, concaténées en un seul panneau.
+          Les vidéos (%{vexts} ; décodées par la CLI ffmpeg, qui doit être dans
+          le PATH) ouvrent toujours un panneau chacune — y compris celles
+          trouvées dans un dossier.
+          Un jeton compute:<type>:<sources>[:auto] (type = mean|std|diff ;
+          sources = un indice de panneau, ou A,B pour diff) recrée un panneau de
+          calcul ; il est normalement généré par le panneau « Cmd vue », pas
+          saisi à la main.
+
+  OPTIONS :
+      -h, --help                 Afficher cette aide et quitter
+      -V, --version              Afficher la version et quitter
+          --complete <MOT>       Lister les complétions pour MOT, une par ligne
+                                 (utilisé par les compléteurs ci-dessous ; les
+                                 fichiers numérotés consécutifs sont regroupés
+                                 sous la forme PRÉFIXE%0Xu SUFFIXE,DÉBUT,FIN)
+          --completions <SHELL>  Afficher un script de complétion pour SHELL
+                                 (bash | powershell)
+
+  ÉTAT DE LA VUE :
+      Ces options reproduisent une vue enregistrée et sont normalement générées
+      par le panneau « Cmd vue » de l'application (⧉ Copier). Tous les indices
+      commencent à 0.
+
+          --mode <grid|single|ab>  Disposition initiale
+          --cols <N>               Colonnes de la grille
+          --zoom <F>               Zoom partagé (px écran par px image)
+          --center <X,Y>           Centre de la vue partagée, en pixels image
+          --frame <N>              Image de la timeline à afficher
+          --pane <N>               Panneau sélectionné
+          --ab <A,B,SPLIT>         Opérandes A/B et position 0..1 du séparateur
+          --tone <T,T,...>         Rendu par panneau : linear | lutalpha |
+                                 colormap[:viridis|turbo|diverging]
+          --clip <C,C,...>         Écrêtage linéaire par panneau : off | POURCENT
+          --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)
+          --detail <B,B,...>       Bascules DETAILS_ENHANCED par panneau (1/0)
+          --show <B,B,...>         Visibilité par panneau (1/0)
+          --tsync <B,B,...>        Sync Visualisation par panneau (1/0)
+          --gsync <B,B,...>        Sync Géométrie (rotation) par panneau (1/0)
+          --rotate <D,D,...>       Rotation d'affichage par panneau, en degrés
+                                 (-180..180)
+          --control <N>            Média Contrôle : source des bornes partagées
+                                 (+ timeline si c'est une séquence)
+          --loop <LO,HI>           Plage de boucle inclusive (à partir de 0)
+
+  COMPLÉTION SHELL :
+      bash         eval "$(cim --completions bash)"
+      PowerShell   cim --completions powershell | Out-String | Invoke-Expression

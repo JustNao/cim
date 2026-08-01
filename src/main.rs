@@ -18,7 +18,16 @@ mod watcher;
 
 use eframe::egui;
 
+// UI translations, baked in from `locales/*.yml` (rust-i18n **version 1** format:
+// one flat file per locale). French is the default; English is the fallback, so a
+// key missing from `fr.yml` shows its English text rather than the raw key.
+rust_i18n::i18n!("locales", fallback = "en");
+
 fn main() -> eframe::Result<()> {
+    // Pick the UI language before anything prints or draws: `--help` and the
+    // completion output are localised too, and they never reach the window.
+    settings::apply_locale(&settings::Config::load().language);
+
     // Handle CLI-only requests (--help, completion) and expand sequence tokens
     // before we ever open a window.
     let args: Vec<String> = std::env::args_os()

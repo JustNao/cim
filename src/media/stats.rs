@@ -35,12 +35,11 @@ pub enum Reduce {
 }
 
 impl Reduce {
-    pub fn label(self) -> &'static str {
-        match self {
-            Reduce::Mean => "Mean",
-            Reduce::Std => "Std",
-            Reduce::Diff => "Diff",
-        }
+    /// Human label for the Compute pickers, in the current UI language. The
+    /// [`Self::token`] below is the *stable* form — it round-trips through view
+    /// commands and must never be translated.
+    pub fn label(self) -> String {
+        rust_i18n::t!(format!("compute.reduce_{}", self.token())).into_owned()
     }
 
     /// Lowercase token used to round-trip the mode through the view command

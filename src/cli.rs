@@ -15,6 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
+use rust_i18n::t;
+
 /// File extensions the app can open (stills + multi-page TIFF). Shared by the
 /// file dialog and the completion filter so they never drift apart.
 pub const LOADABLE_EXTS: &[&str] = &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp"];
@@ -157,7 +159,7 @@ pub fn parse(args: Vec<String>) -> Cli {
                         return Cli::Exit(0);
                     }
                     None => {
-                        eprintln!("cim: unknown shell '{shell}' (try: bash, powershell)");
+                        eprintln!("{}", t!("cli.unknown_shell", shell = shell));
                         return Cli::Exit(2);
                     }
                 }
@@ -314,71 +316,17 @@ fn parse_details(s: &str) -> Option<Vec<bool>> {
     )
 }
 
+/// The `--help` page, translated. The body lives in `locales/*.yml` under
+/// `cli.help` (one multi-line entry per language) so it stays with the rest of
+/// the UI text; only the values it interpolates are computed here.
 fn help_text() -> String {
-    format!(
-        "\
-cim {ver} — Compare Images & Sequences
-
-Lossless side-by-side viewer for images and sequences.
-
-USAGE:
-    cim [OPTIONS] [FILES|SEQUENCES]...
-
-ARGS:
-    <FILES|SEQUENCES|DIRS>...
-        Any number of images, sequences, videos or directories to open
-        ({exts}).
-        A numbered run may be given compactly as PREFIX%0Xu SUFFIX,START,END,
-        e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
-        A directory (e.g. `cim folder`) opens every loadable image inside it,
-        sorted alphabetically, concatenated into one pane. Videos ({vexts};
-        decoded via the ffmpeg CLI, which must be on the PATH) always open as
-        one pane each — including those found in a directory.
-        A compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
-        pane index, or A,B for diff) recreates a Compute pane; it is normally
-        generated for you by the \"View cmd\" panel, not typed by hand.
-
-OPTIONS:
-    -h, --help                 Print this help and exit
-    -V, --version              Print version and exit
-        --complete <WORD>      List loadable completions for WORD, one per line
-                               (used by the shell completers below; consecutive
-                               numbered files collapse into the compact
-                               PREFIX%0Xu SUFFIX,START,END form)
-        --completions <SHELL>  Print a completion script for SHELL to stdout
-                               (bash | powershell)
-
-VIEW STATE:
-    These reproduce a saved viewpoint and are normally generated for you by the
-    in-app \"View cmd\" panel (⧉ Copy). All indices are 0-based.
-
-        --mode <grid|single|ab>  Initial layout
-        --cols <N>               Grid columns
-        --zoom <F>               Shared zoom (screen px per image px)
-        --center <X,Y>           Shared view centre, in image pixels
-        --frame <N>              Timeline frame to show
-        --pane <N>               Focused pane
-        --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
-        --tone <T,T,...>         Per-pane tone: linear | lutalpha |
-                               colormap[:viridis|turbo|diverging]
-        --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
-        --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
-        --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
-        --show <B,B,...>         Per-pane visibility / show-hide (1/0)
-        --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)
-        --gsync <B,B,...>        Per-pane Geometry-sync toggles (rotation) (1/0)
-        --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
-        --control <N>            Control media: shared clip source (+ timeline if a sequence)
-        --loop <LO,HI>           Inclusive playback loop range (0-based)
-
-SHELL COMPLETION:
-    bash         eval \"$(cim --completions bash)\"
-    PowerShell   cim --completions powershell | Out-String | Invoke-Expression
-",
+    t!(
+        "cli.help",
         ver = env!("CARGO_PKG_VERSION"),
         exts = LOADABLE_EXTS.join(", "),
-        vexts = VIDEO_EXTS.join(", "),
+        vexts = VIDEO_EXTS.join(", ")
     )
+    .into_owned()
 }
 
 // ---- sequence-token expansion -------------------------------------------

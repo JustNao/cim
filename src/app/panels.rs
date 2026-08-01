@@ -7,7 +7,7 @@ impl CimApp {
     pub(super) fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button("Open")
+                .button(t!("toolbar.open"))
                 .on_hover_text(self.hover_for(Action::OpenFiles, ""))
                 .clicked()
             {
@@ -15,9 +15,9 @@ impl CimApp {
             }
             ui.separator();
             for (mode, label, action) in [
-                (Mode::Grid, "Grid", Action::ViewGrid),
-                (Mode::Single, "Single", Action::ViewSingle),
-                (Mode::Ab, "A/B", Action::ViewAb),
+                (Mode::Grid, t!("toolbar.grid"), Action::ViewGrid),
+                (Mode::Single, t!("toolbar.single"), Action::ViewSingle),
+                (Mode::Ab, t!("toolbar.ab"), Action::ViewAb),
             ] {
                 if ui
                     .selectable_label(self.mode == mode, label)
@@ -29,7 +29,7 @@ impl CimApp {
             }
             ui.separator();
             if ui
-                .button("Fit")
+                .button(t!("toolbar.fit"))
                 .on_hover_text(self.hover_for(Action::ResetView, ""))
                 .clicked()
             {
@@ -50,52 +50,54 @@ impl CimApp {
 
             ui.separator();
             if ui
-                .selectable_label(self.show_manager, "Media")
+                .selectable_label(self.show_manager, t!("toolbar.media"))
                 .on_hover_text(self.hover_for(Action::ToggleManager, ""))
                 .clicked()
             {
                 self.show_manager = !self.show_manager;
             }
             if ui
-                .selectable_label(self.show_transform, "Transformations")
+                .selectable_label(self.show_transform, t!("toolbar.transformations"))
                 .on_hover_text(
-                    self.hover_for(Action::ToggleVis, "Transformations for the selected pane"),
+                    self.hover_for(Action::ToggleVis, &t!("toolbar.transformations_hover")),
                 )
                 .clicked()
             {
                 self.show_transform = !self.show_transform;
             }
             if ui
-                .selectable_label(false, "Compute")
-                .on_hover_text(self.hover_for(Action::OpenCompute, "Add a Compute pane"))
+                .selectable_label(false, t!("toolbar.compute"))
+                .on_hover_text(self.hover_for(Action::OpenCompute, &t!("toolbar.compute_hover")))
                 .clicked()
             {
                 self.deferred.push(Deferred::CreateCompute);
             }
             if ui
-                .selectable_label(self.export.show, "Export")
-                .on_hover_text("Export the current view with ffmpeg")
+                .selectable_label(self.export.show, t!("toolbar.export"))
+                .on_hover_text(t!("toolbar.export_hover"))
                 .clicked()
             {
                 self.toggle_export();
             }
             if ui
-                .selectable_label(self.show_viewcmd, "View cmd")
-                .on_hover_text(self.hover_for(Action::ToggleExport, "Replicate the current view"))
+                .selectable_label(self.show_viewcmd, t!("toolbar.view_cmd"))
+                .on_hover_text(self.hover_for(Action::ToggleExport, &t!("toolbar.view_cmd_hover")))
                 .clicked()
             {
                 self.show_viewcmd = !self.show_viewcmd;
             }
             if ui
-                .selectable_label(self.show_settings, "Settings")
-                .on_hover_text(self.hover_for(Action::ToggleSettings, "Open the settings"))
+                .selectable_label(self.show_settings, t!("toolbar.settings"))
+                .on_hover_text(
+                    self.hover_for(Action::ToggleSettings, &t!("toolbar.settings_hover")),
+                )
                 .clicked()
             {
                 self.show_settings = !self.show_settings;
             }
             if ui
-                .selectable_label(self.show_help, "Help")
-                .on_hover_text("Mouse and modifier commands (reads help.md)")
+                .selectable_label(self.show_help, t!("toolbar.help"))
+                .on_hover_text(t!("toolbar.help_hover"))
                 .clicked()
             {
                 self.show_help = !self.show_help;
@@ -108,8 +110,8 @@ impl CimApp {
             // Pipeline profiler — only offered when launched with CIM_DEBUG=1.
             if crate::debug::enabled()
                 && ui
-                    .selectable_label(self.show_debug, "Debug")
-                    .on_hover_text("Per-stage timing (read → display)")
+                    .selectable_label(self.show_debug, t!("toolbar.debug"))
+                    .on_hover_text(t!("toolbar.debug_hover"))
                     .clicked()
             {
                 self.show_debug = !self.show_debug;
@@ -175,9 +177,9 @@ impl CimApp {
         ui.horizontal(|ui| {
             // --- transport group ---
             let play = if self.playback.playing {
-                "Pause"
+                t!("frame_bar.pause")
             } else {
-                "Play"
+                t!("frame_bar.play")
             };
             if ui
                 .button(play)
@@ -189,15 +191,15 @@ impl CimApp {
             // Step through `apply_action` so these obey the active loop window
             // exactly like the keyboard / Ctrl+wheel controls.
             if ui
-                .button("Prev")
-                .on_hover_text(self.hover_for(Action::PrevFrame, "Previous frame"))
+                .button(t!("frame_bar.prev"))
+                .on_hover_text(self.hover_for(Action::PrevFrame, &t!("action.prev_frame")))
                 .clicked()
             {
                 self.apply_action(Action::PrevFrame, ui.ctx());
             }
             if ui
-                .button("Next")
-                .on_hover_text(self.hover_for(Action::NextFrame, "Next frame"))
+                .button(t!("frame_bar.next"))
+                .on_hover_text(self.hover_for(Action::NextFrame, &t!("action.next_frame")))
                 .clicked()
             {
                 self.apply_action(Action::NextFrame, ui.ctx());
@@ -206,8 +208,8 @@ impl CimApp {
 
             // --- loop group: enable, reset-to-full, and start/end fields ---
             if ui
-                .selectable_label(self.playback.loop_playback, "Loop")
-                .on_hover_text("Loop playback when it reaches the window end")
+                .selectable_label(self.playback.loop_playback, t!("frame_bar.loop"))
+                .on_hover_text(t!("frame_bar.loop_hover"))
                 .clicked()
             {
                 self.playback.loop_playback = !self.playback.loop_playback;
@@ -215,9 +217,9 @@ impl CimApp {
             if ui
                 .add_enabled(
                     self.playback.loop_range.is_some(),
-                    egui::Button::new("Full"),
+                    egui::Button::new(t!("frame_bar.full")),
                 )
-                .on_hover_text("Reset the loop range to the whole sequence")
+                .on_hover_text(t!("frame_bar.full_hover"))
                 .clicked()
             {
                 self.playback.loop_range = None;
@@ -249,20 +251,16 @@ impl CimApp {
             // While a bulk load runs, offer Stop; otherwise Load all / Load offsets.
             if self.decoding_all {
                 if ui
-                    .button("Stop")
-                    .on_hover_text("Stop the running load")
+                    .button(t!("frame_bar.stop"))
+                    .on_hover_text(t!("frame_bar.stop_load_hover"))
                     .clicked()
                 {
                     self.stop_load();
                 }
             } else {
                 if ui
-                    .button("Load all")
-                    .on_hover_text(self.hover_for(
-                        Action::LoadAll,
-                        "Decode every frame (up to the frame-cache budget; the rest \
-                         continue as offsets/headers only)",
-                    ))
+                    .button(t!("frame_bar.load_all"))
+                    .on_hover_text(self.hover_for(Action::LoadAll, &t!("frame_bar.load_all_hover")))
                     .clicked()
                 {
                     self.load_all();
@@ -286,18 +284,16 @@ impl CimApp {
 
                 let reason = fast_avail.as_ref().err().map_or("", String::as_str);
                 let offsets_hover = if reason.is_empty() {
-                    "Discover the full sequence length via headers only (no pixel \
-                        decode, no cache pressure)"
-                        .to_string()
+                    t!("frame_bar.load_offsets_hover").into_owned()
                 } else {
                     format!(
-                        "Discover the full sequence length via headers only (no pixel \
-                            decode, no cache pressure).\n\nFast offset discovery isn't \
-                            available here: {reason}"
+                        "{}\n\n{}",
+                        t!("frame_bar.load_offsets_hover"),
+                        t!("frame_bar.load_offsets_slow", reason = reason)
                     )
                 };
                 if ui
-                    .button("Load offset")
+                    .button(t!("frame_bar.load_offsets"))
                     .on_hover_text(offsets_hover)
                     .clicked()
                 {
@@ -306,7 +302,7 @@ impl CimApp {
             }
             // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
             // between by header only. Affects Load all and playback. 1 = every frame.
-            ui.label("Step");
+            ui.label(t!("frame_bar.step"));
             let mut ff = self.playback.fast_forward.max(1);
             if ui
                 .add(
@@ -314,7 +310,7 @@ impl CimApp {
                         .range(1..=1_000_000)
                         .speed(0.1),
                 )
-                .on_hover_text("Fast-forward stride")
+                .on_hover_text(t!("frame_bar.step_hover"))
                 .changed()
             {
                 self.playback.fast_forward = ff.max(1);
@@ -351,14 +347,14 @@ impl CimApp {
                     // Keep the buffer showing the live frame while not editing.
                     self.frame_edit = self.shared_frame.to_string();
                 }
-                ui.monospace("frame");
+                ui.monospace(t!("frame_bar.frame"));
                 // While a typed seek is riding the frontier (target past the
                 // discovered end), offer a Stop to abandon the look-ahead so the
                 // timeline stays where it is instead of chasing the frontier.
                 if self.pending_seek.is_some()
                     && ui
-                        .button("Stop")
-                        .on_hover_text("Stop seeking to the typed frame")
+                        .button(t!("frame_bar.stop"))
+                        .on_hover_text(t!("frame_bar.stop_seek_hover"))
                         .clicked()
                 {
                     self.pending_seek = None;
@@ -535,14 +531,14 @@ impl CimApp {
     pub(super) fn draw_viewcmd(&mut self, ctx: &egui::Context) {
         let mut open = self.show_viewcmd;
         let cmd = self.view_command();
-        egui::Window::new("View command")
+        egui::Window::new(t!("viewcmd.title"))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(560.0)
             .show(ctx, |ui| {
-                ui.label("Reopen the current files at this exact view by running:");
+                ui.label(t!("viewcmd.intro"));
                 ui.add_space(4.0);
                 let mut text = cmd.clone();
                 ui.add(
@@ -553,8 +549,8 @@ impl CimApp {
                 );
                 ui.add_space(6.0);
                 if ui
-                    .button("Copy to clipboard")
-                    .on_hover_text("Or press Ctrl+Shift+C anywhere")
+                    .button(t!("viewcmd.copy"))
+                    .on_hover_text(t!("viewcmd.copy_hover"))
                     .clicked()
                 {
                     self.copy_view_command(ui.ctx());
@@ -569,19 +565,19 @@ impl CimApp {
     pub(super) fn draw_debug(&mut self, ctx: &egui::Context) {
         use crate::debug::Stage;
         let mut open = self.show_debug;
-        egui::Window::new("Debug — pipeline timing")
+        egui::Window::new(t!("debug.title"))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
-                ui.label("Time each frame spends per stage on its way to the screen.");
+                ui.label(t!("debug.intro"));
                 ui.add_space(6.0);
 
                 let ms =
                     |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into());
-                let row = |ui: &mut egui::Ui, name: &str, s: &Stage| {
+                let row = |ui: &mut egui::Ui, name: std::borrow::Cow<'_, str>, s: &Stage| {
                     ui.label(name);
                     ui.monospace(ms(s.last()));
                     ui.monospace(ms(s.avg()));
@@ -596,21 +592,21 @@ impl CimApp {
                     .striped(true)
                     .spacing([14.0, 6.0])
                     .show(ui, |ui| {
-                        ui.strong("stage");
-                        ui.strong("last");
-                        ui.strong("avg");
-                        ui.strong("min");
-                        ui.strong("max");
-                        ui.strong("n");
+                        ui.strong(t!("debug.col_stage"));
+                        ui.strong(t!("debug.col_last"));
+                        ui.strong(t!("debug.col_avg"));
+                        ui.strong(t!("debug.col_min"));
+                        ui.strong(t!("debug.col_max"));
+                        ui.strong(t!("debug.col_n"));
                         ui.end_row();
 
                         let m = &self.metrics;
-                        row(ui, "Read", &m.read);
-                        row(ui, "Decode", &m.decode);
-                        row(ui, "Render", &m.lut);
-                        row(ui, "Custom operators", &m.operators);
-                        row(ui, "Texture upload", &m.upload);
-                        row(ui, "Global update", &m.frame);
+                        row(ui, t!("debug.stage_read"), &m.read);
+                        row(ui, t!("debug.stage_decode"), &m.decode);
+                        row(ui, t!("debug.stage_render"), &m.lut);
+                        row(ui, t!("debug.stage_operators"), &m.operators);
+                        row(ui, t!("debug.stage_upload"), &m.upload);
+                        row(ui, t!("debug.stage_update"), &m.frame);
                     });
             });
         self.show_debug = open;
@@ -649,7 +645,7 @@ impl CimApp {
         let mut rows: Vec<(usize, egui::Rangef)> = Vec::new();
         let mut do_move: Option<(usize, usize)> = None;
 
-        egui::Window::new("☰ Media")
+        egui::Window::new(format!("☰ {}", t!("manager.title")))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
@@ -660,7 +656,7 @@ impl CimApp {
             .default_width(560.0)
             .show(ctx, |ui| {
                 if self.panes.is_empty() {
-                    ui.label("No media open. Use Open or drop files onto the window.");
+                    ui.label(t!("manager.empty"));
                     return;
                 }
 
@@ -668,258 +664,269 @@ impl CimApp {
                 // off-screen; below that the ScrollArea shrinks to content so every
                 // row shows without scrolling.
                 let max_h = ctx.screen_rect().height() * 0.85;
-                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
-                    egui::Grid::new("media_table")
-                        .num_columns(8)
-                        .striped(true)
-                        .spacing([10.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("Show");
-                            ui.label("#");
-                            ui.label("Name");
-                            ui.label("Frames");
-                            ui.label("Single");
-                            ui.label("A / B");
-                            ui.label("Synchronize")
-                                .on_hover_text(
-                                    "Pos / Time / Visualization (tone·details·overlay) / Geometry \
-                                     (rotation) sync, and the timeline Control",
-                                );
-                            ui.label("");
-                            ui.end_row();
-
-                            // Aggregate row: each toggle here drives the matching
-                            // column for every media below it. Single / A / B are
-                            // single-target selectors, so they get no aggregate.
-                            {
-                                let mut all_vis = self.panes.iter().all(|p| p.visible);
-                                if ui
-                                    .checkbox(&mut all_vis, "")
-                                    .on_hover_text("Show / hide all")
-                                    .changed()
-                                {
-                                    for p in &mut self.panes {
-                                        p.visible = all_vis;
-                                    }
-                                }
+                egui::ScrollArea::vertical()
+                    .max_height(max_h)
+                    .show(ui, |ui| {
+                        egui::Grid::new("media_table")
+                            .num_columns(8)
+                            .striped(true)
+                            .spacing([10.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label(t!("manager.col_show"));
+                                ui.label("#");
+                                ui.label(t!("manager.col_name"));
+                                ui.label(t!("manager.col_frames"));
+                                ui.label(t!("manager.col_single"));
+                                ui.label(t!("manager.col_ab"));
+                                ui.label(t!("manager.col_sync"))
+                                    .on_hover_text(t!("manager.col_sync_hover"));
                                 ui.label("");
-                                ui.strong("all");
-                                ui.label("");
-                                ui.label(""); // Single
-                                ui.label(""); // A / B
-                                ui.horizontal(|ui| {
-                                    let mut all_pos = self.panes.iter().all(|p| p.sync_spatial);
-                                    if ui.checkbox(&mut all_pos, "Pos").changed() {
-                                        for p in &mut self.panes {
-                                            if !all_pos && p.sync_spatial {
-                                                p.transform = shared_view;
-                                            }
-                                            p.sync_spatial = all_pos;
-                                        }
-                                    }
-                                    let mut all_time = self.panes.iter().all(|p| p.sync_temporal);
-                                    if ui.checkbox(&mut all_time, "Time").changed() {
-                                        for p in &mut self.panes {
-                                            if !all_time && p.sync_temporal {
-                                                p.frame = shared_frame;
-                                            }
-                                            p.sync_temporal = all_time;
-                                        }
-                                    }
-                                    // Visualization sync: share tone / details /
-                                    // overlay across all panes.
-                                    let mut all_ts = self.panes.iter().all(|p| p.sync_tone);
-                                    if ui
-                                        .checkbox(&mut all_ts, "Visu")
-                                        .on_hover_text("Synchronize the Visualization Transformations (tone·details·overlay) across all panes")
-                                        .changed()
-                                    {
-                                        for p in &mut self.panes {
-                                            if p.sync_tone == all_ts {
-                                                continue;
-                                            }
-                                            if !all_ts {
-                                                p.contrast = shared_contrast;
-                                                p.tone = shared_tone;
-                                                p.details = shared_details;
-                                                p.overlay = shared_overlay;
-                                            }
-                                            p.sync_tone = all_ts;
-                                            p.overlay_tex = None; // tone re-renders via tone_sig
-                                        }
-                                    }
-                                    // Geometry sync: share rotation across all panes.
-                                    let mut all_geom = self.panes.iter().all(|p| p.sync_geometry);
-                                    if ui
-                                        .checkbox(&mut all_geom, "Geom")
-                                        .on_hover_text("Synchronize the Geometry Transformations (rotation) across all panes")
-                                        .changed()
-                                    {
-                                        for p in &mut self.panes {
-                                            if p.sync_geometry == all_geom {
-                                                continue;
-                                            }
-                                            if !all_geom {
-                                                p.rotation = shared_rotation;
-                                            }
-                                            p.sync_geometry = all_geom;
-                                        }
-                                    }
-                                });
-                                if ui
-                                    .small_button("⟳")
-                                    .on_hover_text(self.hover_for(Action::ReloadAll, "Reload all from disk"))
-                                    .clicked()
-                                {
-                                    self.deferred.push(Deferred::ReloadAll);
-                                }
                                 ui.end_row();
-                            }
 
-                            let mut to_remove = None;
-                            let mut to_reload = None;
-                            for i in 0..self.panes.len() {
-                                let count = self.panes[i].media.frame_count();
-                                let resident = self.panes[i].media.resident_count();
-
-                                if ui.checkbox(&mut self.panes[i].visible, "").changed()
-                                    && !self.panes[i].visible
+                                // Aggregate row: each toggle here drives the matching
+                                // column for every media below it. Single / A / B are
+                                // single-target selectors, so they get no aggregate.
                                 {
-                                    self.reselect_if_hidden();
-                                }
-
-                                // The index doubles as a drag handle: grab the
-                                // ⠿ grip to reorder the media list.
-                                let handle = ui
-                                    .add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!("⠿ {}", i + 1)).monospace(),
-                                        )
-                                        .selectable(false) // drag it, don't select the text
-                                        .sense(Sense::drag()),
-                                    )
-                                    .on_hover_text("Drag to reorder");
-                                if handle.hovered() || self.manager_drag == Some(i) {
-                                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
-                                }
-                                if handle.drag_started() {
-                                    self.manager_drag = Some(i);
-                                }
-                                rows.push((i, handle.rect.y_range()));
-
-                                let name = self.panes[i].media.name().to_string();
-                                ui.label(name);
-
-                                if count > 1 {
-                                    ui.monospace(format!("{count}  ({resident}◈)"));
-                                } else {
-                                    ui.monospace("still");
-                                }
-
-                                if ui
-                                    .selectable_label(self.current == i, "▢")
-                                    .on_hover_text(
-                                        self.hover_for(Action::SelectMedia(i), "Show alone in Single view"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.current = i;
-                                    self.mode = Mode::Single;
-                                }
-
-                                ui.horizontal(|ui| {
-                                    if ui.selectable_label(self.slot_a == i, "A").clicked() {
-                                        self.slot_a = i;
-                                    }
-                                    if ui.selectable_label(self.slot_b == i, "B").clicked() {
-                                        self.slot_b = i;
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    let mut ss = self.panes[i].sync_spatial;
-                                    if ui.checkbox(&mut ss, "Pos").changed() {
-                                        if !ss {
-                                            self.panes[i].transform = shared_view;
-                                        }
-                                        self.panes[i].sync_spatial = ss;
-                                    }
-                                    let mut st = self.panes[i].sync_temporal;
-                                    if ui.checkbox(&mut st, "Time").changed() {
-                                        if !st {
-                                            self.panes[i].frame = shared_frame;
-                                        }
-                                        self.panes[i].sync_temporal = st;
-                                    }
-                                    // Visualization sync: this pane follows the
-                                    // shared tone / details / overlay. Toggling off
-                                    // keeps its look.
-                                    let mut ts = self.panes[i].sync_tone;
+                                    let mut all_vis = self.panes.iter().all(|p| p.visible);
                                     if ui
-                                        .checkbox(&mut ts, "Visu")
-                                        .on_hover_text(
-                                            "Synchronize the Visualization Transformations (tone·details·overlay)",
-                                        )
+                                        .checkbox(&mut all_vis, "")
+                                        .on_hover_text(t!("manager.show_all_hover"))
                                         .changed()
                                     {
-                                        self.set_sync_tone(i, ts);
-                                    }
-                                    // Geometry sync: this pane follows the shared
-                                    // rotation. Toggling off keeps its angle.
-                                    let mut gs = self.panes[i].sync_geometry;
-                                    if ui
-                                        .checkbox(&mut gs, "Geom")
-                                        .on_hover_text("Synchronize the Geometry Transformations (rotation)")
-                                        .changed()
-                                    {
-                                        self.set_sync_geometry(i, gs);
-                                    }
-                                    // The Control pane is the shared clip-bounds
-                                    // source (any media) and, when it's a sequence,
-                                    // also drives the timeline / loop.
-                                    if ui
-                                        .selectable_label(self.control == i, "Control")
-                                        .on_hover_text(
-                                            "This media is the shared clip source; a sequence also drives the timeline & playback",
-                                        )
-                                        .clicked()
-                                        && self.control != i
-                                    {
-                                        let old_loop = self.loop_control();
-                                        self.control = i;
-                                        // A loop sub-range belongs to a specific
-                                        // sequence; drop it only if the loop-driving
-                                        // sequence actually changed (picking a still
-                                        // as Control leaves the loop untouched).
-                                        if self.loop_control() != old_loop {
-                                            self.playback.loop_range = None;
+                                        for p in &mut self.panes {
+                                            p.visible = all_vis;
                                         }
                                     }
-                                });
-
-                                ui.horizontal(|ui| {
+                                    ui.label("");
+                                    ui.strong(t!("manager.all"));
+                                    ui.label("");
+                                    ui.label(""); // Single
+                                    ui.label(""); // A / B
+                                    ui.horizontal(|ui| {
+                                        let mut all_pos = self.panes.iter().all(|p| p.sync_spatial);
+                                        if ui
+                                            .checkbox(&mut all_pos, t!("manager.sync_pos"))
+                                            .changed()
+                                        {
+                                            for p in &mut self.panes {
+                                                if !all_pos && p.sync_spatial {
+                                                    p.transform = shared_view;
+                                                }
+                                                p.sync_spatial = all_pos;
+                                            }
+                                        }
+                                        let mut all_time =
+                                            self.panes.iter().all(|p| p.sync_temporal);
+                                        if ui
+                                            .checkbox(&mut all_time, t!("manager.sync_time"))
+                                            .changed()
+                                        {
+                                            for p in &mut self.panes {
+                                                if !all_time && p.sync_temporal {
+                                                    p.frame = shared_frame;
+                                                }
+                                                p.sync_temporal = all_time;
+                                            }
+                                        }
+                                        // Visualization sync: share tone / details /
+                                        // overlay across all panes.
+                                        let mut all_ts = self.panes.iter().all(|p| p.sync_tone);
+                                        if ui
+                                            .checkbox(&mut all_ts, t!("manager.sync_visu"))
+                                            .on_hover_text(t!("manager.sync_visu_all_hover"))
+                                            .changed()
+                                        {
+                                            for p in &mut self.panes {
+                                                if p.sync_tone == all_ts {
+                                                    continue;
+                                                }
+                                                if !all_ts {
+                                                    p.contrast = shared_contrast;
+                                                    p.tone = shared_tone;
+                                                    p.details = shared_details;
+                                                    p.overlay = shared_overlay;
+                                                }
+                                                p.sync_tone = all_ts;
+                                                p.overlay_tex = None; // tone re-renders via tone_sig
+                                            }
+                                        }
+                                        // Geometry sync: share rotation across all panes.
+                                        let mut all_geom =
+                                            self.panes.iter().all(|p| p.sync_geometry);
+                                        if ui
+                                            .checkbox(&mut all_geom, t!("manager.sync_geom"))
+                                            .on_hover_text(t!("manager.sync_geom_all_hover"))
+                                            .changed()
+                                        {
+                                            for p in &mut self.panes {
+                                                if p.sync_geometry == all_geom {
+                                                    continue;
+                                                }
+                                                if !all_geom {
+                                                    p.rotation = shared_rotation;
+                                                }
+                                                p.sync_geometry = all_geom;
+                                            }
+                                        }
+                                    });
                                     if ui
-                                        .small_button("Reload")
-                                        .on_hover_text("Reload this media from disk")
+                                        .small_button("⟳")
+                                        .on_hover_text(self.hover_for(
+                                            Action::ReloadAll,
+                                            &t!("manager.reload_all_hover"),
+                                        ))
                                         .clicked()
                                     {
-                                        to_reload = Some(i);
+                                        self.deferred.push(Deferred::ReloadAll);
                                     }
-                                    if ui.small_button("×").clicked() {
-                                        to_remove = Some(i);
-                                    }
-                                });
-                                ui.end_row();
-                            }
+                                    ui.end_row();
+                                }
 
-                            if let Some(i) = to_remove {
-                                self.deferred.push(Deferred::Remove(i));
-                            }
-                            if let Some(i) = to_reload {
-                                self.deferred.push(Deferred::Reload(i));
-                            }
-                        });
-                });
+                                let mut to_remove = None;
+                                let mut to_reload = None;
+                                for i in 0..self.panes.len() {
+                                    let count = self.panes[i].media.frame_count();
+                                    let resident = self.panes[i].media.resident_count();
+
+                                    if ui.checkbox(&mut self.panes[i].visible, "").changed()
+                                        && !self.panes[i].visible
+                                    {
+                                        self.reselect_if_hidden();
+                                    }
+
+                                    // The index doubles as a drag handle: grab the
+                                    // ⠿ grip to reorder the media list.
+                                    let handle = ui
+                                        .add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!("⠿ {}", i + 1))
+                                                    .monospace(),
+                                            )
+                                            .selectable(false) // drag it, don't select the text
+                                            .sense(Sense::drag()),
+                                        )
+                                        .on_hover_text(t!("manager.drag_hover"));
+                                    if handle.hovered() || self.manager_drag == Some(i) {
+                                        ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                                    }
+                                    if handle.drag_started() {
+                                        self.manager_drag = Some(i);
+                                    }
+                                    rows.push((i, handle.rect.y_range()));
+
+                                    let name = self.panes[i].media.name().to_string();
+                                    ui.label(name);
+
+                                    if count > 1 {
+                                        ui.monospace(format!("{count}  ({resident}◈)"));
+                                    } else {
+                                        ui.monospace(t!("manager.still"));
+                                    }
+
+                                    if ui
+                                        .selectable_label(self.current == i, "▢")
+                                        .on_hover_text(self.hover_for(
+                                            Action::SelectMedia(i),
+                                            &t!("manager.single_hover"),
+                                        ))
+                                        .clicked()
+                                    {
+                                        self.current = i;
+                                        self.mode = Mode::Single;
+                                    }
+
+                                    ui.horizontal(|ui| {
+                                        if ui.selectable_label(self.slot_a == i, "A").clicked() {
+                                            self.slot_a = i;
+                                        }
+                                        if ui.selectable_label(self.slot_b == i, "B").clicked() {
+                                            self.slot_b = i;
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        let mut ss = self.panes[i].sync_spatial;
+                                        if ui.checkbox(&mut ss, t!("manager.sync_pos")).changed() {
+                                            if !ss {
+                                                self.panes[i].transform = shared_view;
+                                            }
+                                            self.panes[i].sync_spatial = ss;
+                                        }
+                                        let mut st = self.panes[i].sync_temporal;
+                                        if ui.checkbox(&mut st, t!("manager.sync_time")).changed() {
+                                            if !st {
+                                                self.panes[i].frame = shared_frame;
+                                            }
+                                            self.panes[i].sync_temporal = st;
+                                        }
+                                        // Visualization sync: this pane follows the
+                                        // shared tone / details / overlay. Toggling off
+                                        // keeps its look.
+                                        let mut ts = self.panes[i].sync_tone;
+                                        if ui
+                                            .checkbox(&mut ts, t!("manager.sync_visu"))
+                                            .on_hover_text(t!("manager.sync_visu_hover"))
+                                            .changed()
+                                        {
+                                            self.set_sync_tone(i, ts);
+                                        }
+                                        // Geometry sync: this pane follows the shared
+                                        // rotation. Toggling off keeps its angle.
+                                        let mut gs = self.panes[i].sync_geometry;
+                                        if ui
+                                            .checkbox(&mut gs, t!("manager.sync_geom"))
+                                            .on_hover_text(t!("manager.sync_geom_hover"))
+                                            .changed()
+                                        {
+                                            self.set_sync_geometry(i, gs);
+                                        }
+                                        // The Control pane is the shared clip-bounds
+                                        // source (any media) and, when it's a sequence,
+                                        // also drives the timeline / loop.
+                                        if ui
+                                            .selectable_label(
+                                                self.control == i,
+                                                t!("manager.control"),
+                                            )
+                                            .on_hover_text(t!("manager.control_hover"))
+                                            .clicked()
+                                            && self.control != i
+                                        {
+                                            let old_loop = self.loop_control();
+                                            self.control = i;
+                                            // A loop sub-range belongs to a specific
+                                            // sequence; drop it only if the loop-driving
+                                            // sequence actually changed (picking a still
+                                            // as Control leaves the loop untouched).
+                                            if self.loop_control() != old_loop {
+                                                self.playback.loop_range = None;
+                                            }
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button(t!("manager.reload"))
+                                            .on_hover_text(t!("manager.reload_hover"))
+                                            .clicked()
+                                        {
+                                            to_reload = Some(i);
+                                        }
+                                        if ui.small_button("×").clicked() {
+                                            to_remove = Some(i);
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
+                                if let Some(i) = to_remove {
+                                    self.deferred.push(Deferred::Remove(i));
+                                }
+                                if let Some(i) = to_reload {
+                                    self.deferred.push(Deferred::Reload(i));
+                                }
+                            });
+                    });
 
                 // Drag-reorder feedback + drop resolution. While a ⠿ handle is
                 // held, draw an amber insertion marker on the target row; on
@@ -1034,20 +1041,44 @@ impl CimApp {
 
     pub(super) fn draw_settings(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
-        egui::Window::new("⚙ Settings")
+        egui::Window::new(format!("⚙ {}", t!("settings.title")))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
-                ui.heading("Layout");
+                ui.heading(t!("settings.general"));
                 ui.horizontal(|ui| {
-                    ui.label("Max columns");
+                    ui.label(t!("settings.language"));
+                    // The picker lists every language in its own name; changing it
+                    // re-points rust-i18n immediately, so the window under the
+                    // cursor redraws translated on the very next frame.
+                    let cur = crate::settings::LANGUAGES
+                        .iter()
+                        .find(|(code, _)| *code == self.config.language)
+                        .map(|(_, name)| *name)
+                        .unwrap_or(crate::settings::DEFAULT_LANGUAGE);
+                    egui::ComboBox::from_id_salt("language")
+                        .selected_text(cur)
+                        .show_ui(ui, |ui| {
+                            for (code, name) in crate::settings::LANGUAGES {
+                                if ui
+                                    .selectable_label(self.config.language == code, name)
+                                    .clicked()
+                                {
+                                    self.config.language = code.to_owned();
+                                    crate::settings::apply_locale(code);
+                                }
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t!("settings.max_columns"));
                     ui.add(egui::Slider::new(&mut self.config.max_columns, 1..=8));
                 });
                 ui.horizontal(|ui| {
-                    ui.label("UI scale");
+                    ui.label(t!("settings.ui_scale"));
                     ui.add(
                         egui::Slider::new(&mut self.config.ui_scale, 0.6..=2.0)
                             .suffix("×")
@@ -1055,72 +1086,56 @@ impl CimApp {
                     );
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Frame cache");
+                    ui.label(t!("settings.frame_cache"));
                     ui.add(
                         egui::Slider::new(&mut self.config.cache_budget_mb, 128..=32768)
                             .suffix(" MiB")
                             .logarithmic(true),
                     )
-                    .on_hover_text(
-                        "Memory ceiling for decoded frames kept resident across all \
-                         sequences; oldest unshown frames are evicted beyond it.",
-                    );
+                    .on_hover_text(t!("settings.frame_cache_hover"));
                     // The budget means nothing in the abstract — what matters is
                     // how far along the timeline it reaches with what's open.
                     if let Some(frames) = self.cache_budget_frames() {
                         let media = self.panes.len();
-                        ui.weak(format!("≈ {frames} frames")).on_hover_text(format!(
-                            "How many timeline positions fit, counting one frame from each \
-                             of the {media} open media ({} each). Frames evicted here are \
-                             re-read from disk when shown again — much slower over a \
-                             network mount than keeping them resident.",
-                            self.frame_size_label()
-                        ));
+                        ui.weak(t!("settings.frame_cache_frames", n = frames))
+                            .on_hover_text(t!(
+                                "settings.frame_cache_frames_hover",
+                                media = media,
+                                size = self.frame_size_label()
+                            ));
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Decode threads");
+                    ui.label(t!("settings.decode_threads"));
                     ui.add(
                         egui::Slider::new(&mut self.config.decode_threads, 0..=16)
                             .custom_formatter(|n, _| {
                                 if n == 0.0 {
-                                    "auto".to_owned()
+                                    t!("settings.decode_threads_auto").into_owned()
                                 } else {
                                     format!("{n}")
                                 }
                             }),
                     )
-                    .on_hover_text(
-                        "Background image-decoding worker threads shared by all sequences. \
-                         0 = auto (scales with CPU cores, capped). Lower it to leave CPU \
-                         for other users when several instances share one server / VNC host. \
-                         Applies immediately.",
-                    );
+                    .on_hover_text(t!("settings.decode_threads_hover"));
                 });
-                ui.checkbox(&mut self.config.cursor_dot, "Cursor dot on other panes")
-                    .on_hover_text(
-                        "Mark the hovered pixel on every other pane with a red dot, so \
-                         the same location is easy to compare across panes.",
-                    );
+                ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
+                    .on_hover_text(t!("settings.cursor_dot_hover"));
                 ui.add_space(8.0);
                 ui.separator();
-                ui.heading("Image operators (C++)");
+                ui.heading(t!("settings.operators"));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Library folder").on_hover_text(
-                        "Folder holding the proprietary operator libraries \
-                             (LUT_ALPHA / Details). Leave empty to use the LIBS \
-                             folder next to the cim executable. Libraries load \
-                             automatically when this folder changes.",
-                    );
-                    if ui.button("📂 Browse…").clicked() {
+                    ui.label(t!("settings.library_folder"))
+                        .on_hover_text(t!("settings.library_folder_hover"));
+                    if ui.button(t!("settings.browse")).clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             self.config.cpp_lib_dir = dir.to_string_lossy().into_owned();
                         }
                     }
                     ui.add(
                         egui::TextEdit::singleline(&mut self.config.cpp_lib_dir)
-                            .hint_text("(uses <cim>/LIBS)")
+                            .hint_text(t!("settings.library_folder_hint"))
                             .desired_width(f32::INFINITY),
                     );
                 });
@@ -1134,20 +1149,21 @@ impl CimApp {
                         (true, true) => (
                             "✔",
                             Color32::from_rgb(120, 210, 120),
-                            "Both operator libraries found".to_owned(),
+                            t!("settings.libs_both").into_owned(),
                         ),
                         (false, false) => (
                             "✖",
                             Color32::from_rgb(230, 120, 120),
-                            "No operator libraries found in this folder".to_owned(),
+                            t!("settings.libs_none").into_owned(),
                         ),
                         _ => (
                             "✔",
                             Color32::from_rgb(240, 180, 90),
-                            format!(
-                                "Only the {} library found",
-                                if lut_ok { "LUT_ALPHA" } else { "Details" }
-                            ),
+                            t!(
+                                "settings.libs_one",
+                                lib = if lut_ok { "LUT_ALPHA" } else { "Details" }
+                            )
+                            .into_owned(),
                         ),
                     };
                     ui.colored_label(color, egui::RichText::new(icon).strong());
@@ -1160,23 +1176,20 @@ impl CimApp {
                 let lut_loaded = crate::imageproc::lut_alpha_available();
                 let details_loaded = crate::imageproc::details_available();
                 let loaded = match (lut_loaded, details_loaded) {
-                    (true, true) => "loaded: LUT_ALPHA, Details".to_owned(),
-                    (true, false) => "loaded: LUT_ALPHA".to_owned(),
-                    (false, true) => "loaded: Details".to_owned(),
-                    (false, false) => "loaded: none".to_owned(),
+                    (true, true) => t!("settings.libs_loaded", libs = "LUT_ALPHA, Details"),
+                    (true, false) => t!("settings.libs_loaded", libs = "LUT_ALPHA"),
+                    (false, true) => t!("settings.libs_loaded", libs = "Details"),
+                    (false, false) => t!("settings.libs_loaded_none"),
                 };
                 ui.label(egui::RichText::new(loaded).weak());
 
                 ui.add_space(8.0);
                 ui.separator();
-                ui.heading("Keyboard shortcuts");
+                ui.heading(t!("settings.shortcuts"));
                 ui.label(
-                    egui::RichText::new(
-                        "Rebind, then press a key — hold Ctrl / Shift / Alt for a chord \
-                         (e.g. Ctrl+R). Esc cancels.",
-                    )
-                    .weak()
-                    .small(),
+                    egui::RichText::new(t!("settings.shortcuts_help"))
+                        .weak()
+                        .small(),
                 );
                 ui.add_space(4.0);
 
@@ -1199,16 +1212,16 @@ impl CimApp {
                                     if self.rebinding == Some(action) {
                                         ui.colored_label(
                                             Color32::from_rgb(240, 200, 120),
-                                            "press a key or chord…",
+                                            t!("settings.press_key"),
                                         );
                                     } else {
                                         ui.monospace(key_txt);
                                     }
                                     ui.horizontal(|ui| {
-                                        if ui.small_button("Rebind").clicked() {
+                                        if ui.small_button(t!("settings.rebind")).clicked() {
                                             self.rebinding = Some(action);
                                         }
-                                        if ui.small_button("Clear").clicked() {
+                                        if ui.small_button(t!("settings.clear")).clicked() {
                                             self.config.keybindings.clear(action);
                                         }
                                     });
@@ -1224,18 +1237,16 @@ impl CimApp {
                 // back to the shipped defaults, which is saved the same way.
                 ui.horizontal(|ui| {
                     if ui
-                        .button("Reset to defaults")
-                        .on_hover_text(
-                            "Restore every setting above — including the keyboard \
-                             shortcuts — to its default.",
-                        )
+                        .button(t!("settings.reset"))
+                        .on_hover_text(t!("settings.reset_hover"))
                         .clicked()
                     {
                         self.config = Config::default();
-                        self.status.set("Settings reset to defaults");
+                        crate::settings::apply_locale(&self.config.language);
+                        self.status.set(t!("status.settings_reset"));
                     }
                     ui.label(
-                        egui::RichText::new("Changes are saved automatically.")
+                        egui::RichText::new(t!("settings.autosave_note"))
                             .weak()
                             .small(),
                     );

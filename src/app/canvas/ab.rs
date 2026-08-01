@@ -202,8 +202,10 @@ impl CimApp {
         let [w, h] = self.disp_size(a);
         let text = match self.cursor_img {
             Some(ci) => format!(
-                "{h}×{w}    x {}  y {}    A {}   B {}",
+                "{h}×{w}    {} {}  {} {}    A {}   B {}",
+                t!("pane.col"),
                 ci.x.floor() as i64,
+                t!("pane.row"),
                 ci.y.floor() as i64,
                 self.value_string(a, ci),
                 self.value_string(b, ci),

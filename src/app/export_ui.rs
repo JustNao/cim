@@ -80,7 +80,7 @@ fn run_export(
             }
             if let Err(e) = enc.write_frame(&buf) {
                 enc.kill();
-                return ExportOutcome::Failed(format!("Export failed: {e}"));
+                return ExportOutcome::Failed(t!("export.failed", err = e).into_owned());
             }
             progress.store(t + 1, Ordering::Relaxed);
         }
@@ -164,18 +164,19 @@ fn rasterize_label(ctx: &egui::Context, text: &str, size_px: f32) -> Option<Labe
 }
 
 /// Human-readable name of a label position (the 3×3 selector's hover text).
-fn anchor_name(a: LabelAnchor) -> &'static str {
+fn anchor_name(a: LabelAnchor) -> String {
     match a {
-        LabelAnchor::TopLeft => "Top left",
-        LabelAnchor::TopCenter => "Top centre",
-        LabelAnchor::TopRight => "Top right",
-        LabelAnchor::MidLeft => "Middle left",
-        LabelAnchor::Center => "Centre",
-        LabelAnchor::MidRight => "Middle right",
-        LabelAnchor::BottomLeft => "Bottom left",
-        LabelAnchor::BottomCenter => "Bottom centre",
-        LabelAnchor::BottomRight => "Bottom right",
+        LabelAnchor::TopLeft => t!("export.anchor_top_left"),
+        LabelAnchor::TopCenter => t!("export.anchor_top_center"),
+        LabelAnchor::TopRight => t!("export.anchor_top_right"),
+        LabelAnchor::MidLeft => t!("export.anchor_mid_left"),
+        LabelAnchor::Center => t!("export.anchor_center"),
+        LabelAnchor::MidRight => t!("export.anchor_mid_right"),
+        LabelAnchor::BottomLeft => t!("export.anchor_bottom_left"),
+        LabelAnchor::BottomCenter => t!("export.anchor_bottom_center"),
+        LabelAnchor::BottomRight => t!("export.anchor_bottom_right"),
     }
+    .into_owned()
 }
 
 impl CimApp {
@@ -469,11 +470,11 @@ impl CimApp {
 
     pub(super) fn build_export_plan(&self, ctx: &egui::Context) -> Result<ExportPlan, String> {
         if self.panes.is_empty() {
-            return Err("No media to export".into());
+            return Err(t!("export.err_no_media").into_owned());
         }
         let area = self.last_area;
         if self.export.region.is_none() && area.width() < 2.0 {
-            return Err("View not ready yet".into());
+            return Err(t!("export.err_view_not_ready").into_owned());
         }
         let crop = self.export.region;
         let region = self.export_canvas();
@@ -489,7 +490,7 @@ impl CimApp {
             Mode::Grid => {
                 let vis = self.visible_indices();
                 if vis.is_empty() {
-                    return Err("No visible media (enable some in ☰ Media)".into());
+                    return Err(t!("export.err_no_visible").into_owned());
                 }
                 let mut v = Vec::new();
                 if let Some(reg) = crop {
@@ -519,7 +520,7 @@ impl CimApp {
                     // export has no background around or between the images.
                     let (_, packed) = self
                         .packed_grid()
-                        .ok_or("No visible media (enable some in ☰ Media)")?;
+                        .ok_or_else(|| t!("export.err_no_visible").into_owned())?;
                     for (k, mut cell) in packed.into_iter().enumerate() {
                         panes.push(self.export_pane(cell.pane));
                         labels.push(self.export_label(ctx, cell.pane));
@@ -649,7 +650,7 @@ impl CimApp {
     pub(super) fn start_export(&mut self, ctx: &egui::Context) {
         let name = self.export.name.trim();
         if name.is_empty() {
-            self.export.status = "Enter an output file name first".into();
+            self.export.status = t!("export.err_no_name").into_owned();
             return;
         }
         // Resolve the output format from the extension. A bare name defaults to
@@ -707,7 +708,7 @@ impl CimApp {
         let cancel = Arc::new(AtomicBool::new(false));
         let (pc, cc) = (progress.clone(), cancel.clone());
         let handle = thread::spawn(move || run_export(enc, plan, total, pc, cc));
-        self.export.status = format!("Exporting {total} frames…");
+        self.export.status = t!("export.running", n = total).into_owned();
         self.export.run = Some(ExportRun {
             handle: Some(handle),
             progress,
@@ -735,12 +736,12 @@ impl CimApp {
         let rgba = plan.compose(0);
         // Cut the background off: crop to the actual image content.
         let Some((cw, ch, cropped)) = export::crop_to_content(&rgba, w, h) else {
-            self.export.status = "Nothing to export (all background)".into();
+            self.export.status = t!("export.err_all_background").into_owned();
             return;
         };
         self.export.status = match export::save_image(&path, cw, ch, &cropped) {
-            Ok(()) => format!("Exported image ({cw}x{ch}) {}", path.display()),
-            Err(e) => format!("Export failed: {e}"),
+            Ok(()) => t!("export.done_image", w = cw, h = ch, path = path.display()).into_owned(),
+            Err(e) => t!("export.failed", err = e).into_owned(),
         };
     }
 
@@ -754,7 +755,7 @@ impl CimApp {
         if self.export.cancel {
             self.export.cancel = false;
             run.cancel.store(true, Ordering::Relaxed);
-            self.export.status = "Cancelling…".into();
+            self.export.status = t!("export.cancelling").into_owned();
         }
         // Still encoding? leave the run in place and poll again next update.
         if !run.handle.as_ref().is_some_and(|h| h.is_finished()) {
@@ -765,12 +766,12 @@ impl CimApp {
             .take()
             .unwrap()
             .join()
-            .unwrap_or_else(|_| ExportOutcome::Failed("Export thread panicked".into()));
+            .unwrap_or_else(|_| ExportOutcome::Failed(t!("export.err_panicked").into_owned()));
         let path = std::mem::take(&mut run.path);
         self.export.run = None;
         self.export.status = match outcome {
-            ExportOutcome::Done(n) => format!("Exported {n} frames at {path}"),
-            ExportOutcome::Cancelled => "Export cancelled".into(),
+            ExportOutcome::Done(n) => t!("export.done_video", n = n, path = path).into_owned(),
+            ExportOutcome::Cancelled => t!("export.cancelled").into_owned(),
             ExportOutcome::Failed(e) => e,
         };
     }
@@ -800,22 +801,22 @@ impl CimApp {
             });
         }
         if rows.is_empty() {
-            ui.label(egui::RichText::new("No media in this layout").weak());
+            ui.label(egui::RichText::new(t!("export.labels_no_media")).weak());
         }
 
         ui.add_space(4.0);
         let st = &mut self.export.label_style;
         ui.horizontal(|ui| {
-            ui.label("Text");
+            ui.label(t!("export.label_text"));
             ui.color_edit_button_srgba(&mut st.color);
             ui.add(
                 egui::DragValue::new(&mut st.size_px)
                     .range(LabelStyle::MIN_SIZE..=LabelStyle::MAX_SIZE)
                     .suffix(" px"),
             )
-            .on_hover_text("Text height in output pixels (independent of zoom)");
+            .on_hover_text(t!("export.label_size_hover"));
             ui.separator();
-            ui.checkbox(&mut st.background, "Background");
+            ui.checkbox(&mut st.background, t!("export.label_background"));
             ui.add_enabled_ui(st.background, |ui| {
                 ui.color_edit_button_srgba(&mut st.bg_color);
             });
@@ -823,7 +824,7 @@ impl CimApp {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("Position");
+            ui.label(t!("export.label_position"));
             // A 3×3 block of squares mirroring where the label sits in
             // each media's cell.
             ui.vertical(|ui| {
@@ -855,7 +856,7 @@ impl CimApp {
             ui.add(
                 egui::DragValue::new(&mut st.margin)
                     .range(0.0..=200.0)
-                    .prefix("Margin ")
+                    .prefix(format!("{} ", t!("export.label_margin")))
                     .suffix(" px"),
             );
         });
@@ -879,7 +880,7 @@ impl CimApp {
             .map_or(rows[0].0, |(i, _, _)| *i);
         if rows.len() > 1 {
             ui.horizontal(|ui| {
-                ui.label("Preview");
+                ui.label(t!("export.label_preview"));
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("exp_label_preview")
                     .selected_text(ellipsize(self.panes[idx].media.name(), 24))
@@ -994,7 +995,7 @@ impl CimApp {
         let (start, end) = self.export_frames();
         let total = end - start + 1;
 
-        egui::Window::new("Export comparison")
+        egui::Window::new(t!("export.title"))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
@@ -1006,41 +1007,37 @@ impl CimApp {
                         .num_columns(2)
                         .spacing([12.0, 8.0])
                         .show(ui, |ui| {
-                            ui.label("Layout");
+                            ui.label(t!("export.layout"));
                             egui::ComboBox::from_id_salt("exp_layout")
                                 .selected_text(match self.export.mode {
-                                    Mode::Grid => "Side by side",
-                                    Mode::Single => "Single",
-                                    Mode::Ab => "A / B wipe",
+                                    Mode::Grid => t!("export.layout_grid"),
+                                    Mode::Single => t!("toolbar.single"),
+                                    Mode::Ab => t!("export.layout_ab"),
                                 })
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
                                         &mut self.export.mode,
                                         Mode::Grid,
-                                        "Side by side",
+                                        t!("export.layout_grid"),
                                     );
                                     ui.selectable_value(
                                         &mut self.export.mode,
                                         Mode::Single,
-                                        "Single",
+                                        t!("toolbar.single"),
                                     );
                                     ui.selectable_value(
                                         &mut self.export.mode,
                                         Mode::Ab,
-                                        "A / B wipe",
+                                        t!("export.layout_ab"),
                                     );
                                 });
                             ui.end_row();
 
-                            ui.label("Region");
+                            ui.label(t!("export.region"));
                             ui.horizontal(|ui| {
                                 if ui
-                                    .button("Select…")
-                                    .on_hover_text(
-                                        "Right-drag the crop on a single image (left-drag pans, \
-                                         wheel zooms); it then applies to every pane of the \
-                                         comparison",
-                                    )
+                                    .button(t!("export.select"))
+                                    .on_hover_text(t!("export.select_hover"))
                                     .clicked()
                                 {
                                     // Pick the crop on one image: force Single
@@ -1053,7 +1050,7 @@ impl CimApp {
                                 }
                                 let has = self.export.region.is_some();
                                 if ui
-                                    .add_enabled(has, egui::Button::new("Full view"))
+                                    .add_enabled(has, egui::Button::new(t!("export.full_view")))
                                     .clicked()
                                 {
                                     self.export.region = None;
@@ -1064,27 +1061,29 @@ impl CimApp {
                                         r.width().round() as u32,
                                         r.height().round() as u32
                                     )),
-                                    None => ui.label("full"),
+                                    None => ui.label(t!("export.region_full")),
                                 };
                             });
                             ui.end_row();
 
-                            ui.label("Frames");
+                            ui.label(t!("export.frames"));
                             ui.horizontal(|ui| {
                                 let mut all = self.export.range.is_none();
-                                if ui.checkbox(&mut all, "all").changed() {
+                                if ui.checkbox(&mut all, t!("export.frames_all")).changed() {
                                     self.export.range = if all { None } else { Some((0, tl - 1)) };
                                 }
                                 if let Some((s, e)) = self.export.range {
                                     // 0-based inclusive (matches the transport bar).
                                     let (mut s0, mut e0) = (s, e);
                                     ui.add(
-                                        egui::DragValue::new(&mut s0).range(0..=e0).prefix("from "),
+                                        egui::DragValue::new(&mut s0)
+                                            .range(0..=e0)
+                                            .prefix(format!("{} ", t!("export.frames_from"))),
                                     );
                                     ui.add(
                                         egui::DragValue::new(&mut e0)
                                             .range(s0..=(tl - 1))
-                                            .prefix("to "),
+                                            .prefix(format!("{} ", t!("export.frames_to"))),
                                     );
                                     self.export.range = Some((s0, e0));
                                 }
@@ -1095,12 +1094,9 @@ impl CimApp {
                                 if ui
                                     .add_enabled(
                                         self.playback.loop_range.is_some(),
-                                        egui::Button::new("Use loop range"),
+                                        egui::Button::new(t!("export.use_loop")),
                                     )
-                                    .on_hover_text(
-                                        "Set the frame range to the playback loop window \
-                                         (end exclusive: [20, 40] → frames 20–39)",
-                                    )
+                                    .on_hover_text(t!("export.use_loop_hover"))
                                     .clicked()
                                 {
                                     self.export.range = Some((llo, lhi.saturating_sub(1).max(llo)));
@@ -1108,20 +1104,20 @@ impl CimApp {
                             });
                             ui.end_row();
 
-                            ui.label("Output height");
+                            ui.label(t!("export.out_height"));
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::DragValue::new(&mut self.export.out_height)
                                         .range(120..=2160),
                                 );
-                                if ui.button("= view").clicked() {
+                                if ui.button(t!("export.out_height_view")).clicked() {
                                     self.export.out_height = region.height().round() as u32;
                                 }
                                 ui.monospace(format!("→ {out_w}×{out_h}"));
                             });
                             ui.end_row();
 
-                            ui.label("Compression");
+                            ui.label(t!("export.compression"));
                             ui.add(
                                 egui::Slider::new(&mut self.export.crf, 0..=51)
                                     .text("CRF")
@@ -1133,10 +1129,9 @@ impl CimApp {
                             ui.add(egui::DragValue::new(&mut self.export.fps).range(1.0..=60.0));
                             ui.end_row();
 
-                            ui.label("Add labels");
-                            ui.checkbox(&mut self.export.labels_on, "").on_hover_text(
-                                "Burn a text label into each media's cell of the output",
-                            );
+                            ui.label(t!("export.add_labels"));
+                            ui.checkbox(&mut self.export.labels_on, "")
+                                .on_hover_text(t!("export.add_labels_hover"));
                             ui.end_row();
                         });
                     if self.export.labels_on {
@@ -1155,18 +1150,15 @@ impl CimApp {
                         ui.set_max_width(300.0);
                         ui.colored_label(
                             Color32::from_rgb(240, 200, 120),
-                            "⚠ Some media aren't fully loaded — frame counts may be incomplete.",
+                            t!("export.warn_incomplete"),
                         );
                         if self.decoding_all {
-                            if ui.button("Stop").clicked() {
+                            if ui.button(t!("frame_bar.stop")).clicked() {
                                 self.stop_load();
                             }
                         } else if ui
-                            .button("Load frames")
-                            .on_hover_text(
-                                "Discover the full length via headers only — enough for the \
-                                 export range, with no cache pressure",
-                            )
+                            .button(t!("export.load_frames"))
+                            .on_hover_text(t!("export.load_frames_hover"))
                             .clicked()
                         {
                             self.load_offsets();
@@ -1176,23 +1168,22 @@ impl CimApp {
 
                 let is_image = self.export_format() == ExportFormat::Image;
                 if is_image {
-                    ui.label("1 still image (the current frame)");
+                    ui.label(t!("export.summary_image"));
                 } else {
-                    ui.label(format!(
-                        "{total} frames · {:.1}s",
-                        total as f32 / self.export.fps.max(1.0),
+                    ui.label(t!(
+                        "export.summary_video",
+                        n = total,
+                        secs = format!("{:.1}", total as f32 / self.export.fps.max(1.0))
                     ));
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("Save as");
+                    ui.label(t!("export.save_as"));
                     ui.add_enabled(
                         !running,
                         egui::TextEdit::singleline(&mut self.export.name).desired_width(180.0),
                     )
-                    .on_hover_text(
-                        "Extension picks the format: .mp4 (video), or .png / .jpg for a still",
-                    );
+                    .on_hover_text(t!("export.save_as_hover"));
                 });
                 ui.label(
                     egui::RichText::new(
@@ -1212,15 +1203,15 @@ impl CimApp {
                         egui::ProgressBar::new(done as f32 / run.total.max(1) as f32)
                             .text(format!("{}/{}", done, run.total)),
                     );
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t!("compute.cancel")).clicked() {
                         self.export.cancel = true;
                     }
                 } else {
                     let ready = !self.export.name.trim().is_empty();
                     let label = if self.export_format() == ExportFormat::Image {
-                        "Export image"
+                        t!("export.run_image")
                     } else {
-                        "Export MP4"
+                        t!("export.run_video")
                     };
                     if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                         self.start_export(ctx);

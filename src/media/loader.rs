@@ -2,6 +2,7 @@
 //! into [`Media`], the stateless still decoders, and the persistent
 //! [`SeqReader`] (plus the TIFF bilevel-mask bit handling).
 
+use rust_i18n::t;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -74,7 +75,7 @@ fn open_tiff(path: &Path, name: String) -> Result<Media> {
 pub fn load_sequence(files: &[PathBuf], name: String) -> Result<Media> {
     let first = files
         .first()
-        .ok_or_else(|| anyhow!("empty image sequence"))?;
+        .ok_or_else(|| anyhow!(t!("error.empty_sequence").into_owned()))?;
     let is_tiff = first
         .extension()
         .map(|e| {
@@ -294,7 +295,13 @@ fn decode_current<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<FrameData> {
         ColorType::Gray(_) => 1,
         ColorType::RGB(_) => 3,
         ColorType::RGBA(_) => 4,
-        other => return Err(anyhow!("unsupported TIFF color type: {:?}", other)),
+        other => {
+            return Err(anyhow!(t!(
+                "error.tiff_color_type",
+                kind = format!("{other:?}")
+            )
+            .into_owned()))
+        }
     };
 
     let samples = match dec.read_image()? {
@@ -308,10 +315,11 @@ fn decode_current<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<FrameData> {
         DecodingResult::I16(b) => Samples::F32(b.into_iter().map(|x| x as f32).collect()),
         DecodingResult::I32(b) => Samples::F32(b.into_iter().map(|x| x as f32).collect()),
         other => {
-            return Err(anyhow!(
-                "unsupported TIFF sample format: {:?}",
-                std::mem::discriminant(&other)
-            ))
+            return Err(anyhow!(t!(
+                "error.tiff_sample_format",
+                kind = format!("{:?}", std::mem::discriminant(&other))
+            )
+            .into_owned()))
         }
     };
 
@@ -348,7 +356,12 @@ fn decode_current<R: Read + Seek>(dec: &mut Decoder<R>) -> Result<FrameData> {
         Samples::F32(v) => v.len(),
     };
     if got < expected {
-        return Err(anyhow!("short TIFF buffer: {got} < {expected}"));
+        return Err(anyhow!(t!(
+            "error.short_tiff",
+            got = got,
+            expected = expected
+        )
+        .into_owned()));
     }
 
     if is_mask {

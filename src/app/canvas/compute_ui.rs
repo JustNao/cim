@@ -59,7 +59,7 @@ impl CimApp {
                     ui.set_max_width(240.0);
                     if !computed {
                         // Config form: pick the mode + source(s), then Compute.
-                        ui.label(egui::RichText::new("New compute").strong());
+                        ui.label(egui::RichText::new(t!("compute.new")).strong());
                         compute_config_rows(
                             ui,
                             pane_id,
@@ -71,7 +71,7 @@ impl CimApp {
                         let ready = source_id.is_some()
                             && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
                         if ui
-                            .add_enabled(ready, egui::Button::new("Compute"))
+                            .add_enabled(ready, egui::Button::new(t!("compute.compute")))
                             .clicked()
                         {
                             recompute = true;
@@ -79,26 +79,26 @@ impl CimApp {
                     } else {
                         // Result controls (the form is replaced by the output).
                         ui.horizontal(|ui| {
-                            if ui.button("Refresh").clicked() {
+                            if ui.button(t!("compute.refresh")).clicked() {
                                 recompute = true;
                             }
-                            if !saving && ui.button("Save").clicked() {
+                            if !saving && ui.button(t!("compute.save")).clicked() {
                                 saving = true;
                             }
-                            ui.checkbox(&mut auto, "Auto refresh");
+                            ui.checkbox(&mut auto, t!("compute.auto_refresh"));
                         });
                         // Inline save: a name field (relative to the working dir).
                         if saving {
                             ui.add(
                                 egui::TextEdit::singleline(&mut save_name)
                                     .desired_width(220.0)
-                                    .hint_text("name.tif"),
+                                    .hint_text(t!("compute.save_hint")),
                             );
                             ui.horizontal(|ui| {
-                                if ui.button("Save").clicked() {
+                                if ui.button(t!("compute.save")).clicked() {
                                     do_save = true;
                                 }
-                                if ui.button("Cancel").clicked() {
+                                if ui.button(t!("compute.cancel")).clicked() {
                                     saving = false;
                                 }
                             });
@@ -148,7 +148,7 @@ fn compute_config_rows(
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label("Mode");
+        ui.label(t!("compute.mode"));
         egui::ComboBox::from_id_salt(("ckind", salt))
             .selected_text(kind.label())
             .show_ui(ui, |ui| {
@@ -181,7 +181,16 @@ fn compute_config_rows(
                 });
         });
     };
-    pick(ui, if diff { "A " } else { "Source " }, "csrc", source_id);
+    pick(
+        ui,
+        &if diff {
+            "A ".to_owned()
+        } else {
+            format!("{} ", t!("compute.source"))
+        },
+        "csrc",
+        source_id,
+    );
     if diff {
         pick(ui, "B ", "csrcb", source_b);
     }

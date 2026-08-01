@@ -34,6 +34,10 @@ use eframe::egui::{
     TextureHandle, TextureId, TextureOptions, Vec2,
 };
 
+// UI text lives in `locales/*.yml`, not in the source: reached through `t!`
+// here and — via this module's `use super::*` — in every `app` submodule.
+use rust_i18n::t;
+
 use crate::cli;
 use crate::decoder::{BackgroundDecoder, Decoded};
 use crate::export::{
@@ -461,11 +465,26 @@ struct StatusLine {
     /// Last value `tick` saw, to detect a fresh message without a separate flag.
     shadow: String,
     at: f64,
+    /// Set by [`Self::set_load`]: this message is a bulk-load note, so
+    /// `poll_decoding_all` may clear it when the load finishes. A marker rather
+    /// than matching on the text — the text is translated, so comparing it would
+    /// silently stop matching in another language.
+    load_note: bool,
 }
 
 impl StatusLine {
     fn set(&mut self, msg: impl Into<String>) {
         self.text = msg.into();
+        self.load_note = false;
+    }
+    /// Post a bulk-load note (see [`Self::load_note`]).
+    fn set_load(&mut self, msg: impl Into<String>) {
+        self.text = msg.into();
+        self.load_note = true;
+    }
+    /// Whether the message showing is one of ours to clear when a load ends.
+    fn is_load_note(&self) -> bool {
+        self.load_note && !self.text.is_empty()
     }
     fn text(&self) -> &str {
         &self.text
@@ -476,6 +495,7 @@ impl StatusLine {
     fn clear(&mut self) {
         self.text.clear();
         self.shadow.clear();
+        self.load_note = false;
     }
     /// Note a fresh message (stamp `at`) and expire after `ttl`. Returns the
     /// seconds still to show (so the caller can schedule a wake-up), or `None`
@@ -1843,7 +1863,7 @@ impl CimApp {
         if self.error_popup.is_some() {
             let msg = self.error_popup.clone().unwrap();
             let mut dismiss = false;
-            egui::Window::new("⚠ Error")
+            egui::Window::new(format!("⚠ {}", t!("modal.error")))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1864,7 +1884,7 @@ impl CimApp {
         if self.warn_popup.is_some() {
             let msg = self.warn_popup.clone().unwrap();
             let mut dismiss = false;
-            egui::Window::new("⚠ Warning")
+            egui::Window::new(format!("⚠ {}", t!("modal.warning")))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1894,23 +1914,18 @@ impl CimApp {
                 .unwrap_or(0);
             let total = existing + opening;
             let mut decision: Option<bool> = None; // Some(true)=open, Some(false)=quit
-            egui::Window::new("⚠ Many sequences")
+            egui::Window::new(format!("⚠ {}", t!("modal.many_sequences")))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "This will open {total} sequences at once.\n\nDecoding and \
-                         playing many sequences in parallel is heavy on CPU and memory \
-                         and can degrade performance — especially over a remote (VNC) \
-                         session on a machine shared with other users."
-                    ));
+                    ui.label(t!("modal.many_sequences_body", n = total));
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Open anyway").clicked() {
+                        if ui.button(t!("modal.open_anyway")).clicked() {
                             decision = Some(true);
                         }
-                        if ui.button("Quit").clicked() {
+                        if ui.button(t!("modal.quit")).clicked() {
                             decision = Some(false);
                         }
                     });

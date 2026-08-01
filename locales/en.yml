@@ -1,0 +1,470 @@
+_version: 1
+
+# English UI text. This is the `i18n!` fallback locale: a key missing from
+# another locale shows the text here rather than the bare key, so en.yml is the
+# reference — add a key here first, then translate it.
+#
+# Interpolation uses rust-i18n's %{name} placeholders, matching the named
+# arguments passed to `t!`.
+
+# ---- toolbar ---------------------------------------------------------------
+toolbar.open: Open
+toolbar.grid: Grid
+toolbar.single: Single
+toolbar.ab: A/B
+toolbar.fit: Fit
+toolbar.media: Media
+toolbar.transformations: Transformations
+toolbar.transformations_hover: Transformations for the selected pane
+toolbar.compute: Compute
+toolbar.compute_hover: Add a Compute pane
+toolbar.export: Export
+toolbar.export_hover: Export the current view with ffmpeg
+toolbar.view_cmd: View cmd
+toolbar.view_cmd_hover: Replicate the current view
+toolbar.settings: Settings
+toolbar.settings_hover: Open the settings
+toolbar.help: Help
+toolbar.help_hover: Mouse and modifier commands (reads help.md)
+toolbar.debug: Debug
+toolbar.debug_hover: Per-stage timing (read → display)
+
+# ---- bottom frame bar ------------------------------------------------------
+frame_bar.play: Play
+frame_bar.pause: Pause
+frame_bar.prev: Prev
+frame_bar.next: Next
+frame_bar.loop: Loop
+frame_bar.loop_hover: Loop playback when it reaches the window end
+frame_bar.full: Full
+frame_bar.full_hover: Reset the loop range to the whole sequence
+frame_bar.stop: Stop
+frame_bar.stop_load_hover: Stop the running load
+frame_bar.stop_seek_hover: Stop seeking to the typed frame
+frame_bar.load_all: Load all
+frame_bar.load_all_hover: >-
+  Decode every frame (up to the frame-cache budget; the rest continue as
+  offsets/headers only)
+frame_bar.load_offsets: Load offset
+frame_bar.load_offsets_hover: >-
+  Discover the full sequence length via headers only (no pixel decode, no cache
+  pressure)
+frame_bar.load_offsets_slow: "Fast offset discovery isn't available here: %{reason}"
+frame_bar.step: Step
+frame_bar.step_hover: Fast-forward stride
+frame_bar.frame: frame
+
+# ---- central canvas --------------------------------------------------------
+canvas.empty: Open images or drop files here
+canvas.all_hidden: All media hidden — enable some in ☰ Media
+
+# ---- pane header / footer --------------------------------------------------
+pane.reload: Reload
+pane.reload_hover: Reload this media from disk
+pane.auto_reload: Auto-reload
+pane.auto_reload_on_hover: "Auto-reload on: reloads when the file changes on disk. Click to stop."
+pane.auto_reload_off_hover: "Auto-reload: watch the file and reload it when it changes on disk."
+pane.hide: Hide
+pane.close: Close
+pane.sync_pos: pos
+pane.sync_time: time
+pane.in_memory: "%{n} in mem"
+pane.page_in_file: page %{page} in this file
+pane.row: row
+pane.col: col
+
+# ---- media manager ---------------------------------------------------------
+manager.title: Media
+manager.empty: No media open. Use Open or drop files onto the window.
+manager.col_show: Show
+manager.col_name: Name
+manager.col_frames: Frames
+manager.col_single: Single
+manager.col_ab: A / B
+manager.col_sync: Synchronize
+manager.col_sync_hover: >-
+  Pos / Time / Visualization (tone·details·overlay) / Geometry (rotation) sync,
+  and the timeline Control
+manager.show_all_hover: Show / hide all
+manager.all: all
+manager.still: still
+manager.sync_pos: Pos
+manager.sync_time: Time
+manager.sync_visu: Visu
+manager.sync_visu_hover: Synchronize the Visualization Transformations (tone·details·overlay)
+manager.sync_visu_all_hover: >-
+  Synchronize the Visualization Transformations (tone·details·overlay) across
+  all panes
+manager.sync_geom: Geom
+manager.sync_geom_hover: Synchronize the Geometry Transformations (rotation)
+manager.sync_geom_all_hover: Synchronize the Geometry Transformations (rotation) across all panes
+manager.control: Control
+manager.control_hover: >-
+  This media is the shared clip source; a sequence also drives the timeline &
+  playback
+manager.reload: Reload
+manager.reload_hover: Reload this media from disk
+manager.reload_all_hover: Reload all from disk
+manager.single_hover: Show alone in Single view
+manager.drag_hover: Drag to reorder
+
+# ---- Transformations panel -------------------------------------------------
+transform.title: Transformations
+transform.no_media: No media open.
+transform.visualization: Visualization
+transform.geometry: Geometry
+transform.sync: Sync
+transform.sync_visu_hover: Add this pane to the Visualization sync group (tone·details·overlay)
+transform.sync_geom_hover: Add this pane to the Geometry sync group (rotation)
+transform.lut: LUT
+transform.rc: RC
+transform.rc_hover: Enhancement / sharpening
+transform.op_missing_lib: "%{lib} operator library not found"
+transform.op_needs_u16: Only available for single-channel 16-bit (uint16) images
+transform.overlay: Overlay
+transform.overlay_none: None
+transform.overlay_none_available: no single-channel media
+transform.palette: Palette
+transform.clip: Clip
+transform.clip_hover: Clip a percentile off each tail before the stretch
+transform.clip_percent_hover: Percentile clipped at each tail before the stretch
+transform.clip_reset_hover: Reset to the default (%{pct} %)
+transform.share_clip: Share clip
+transform.share_clip_hover: >-
+  Apply the Control media's exact LUT (lo/hi) to every pane — identical
+  clamp/scaling
+transform.rotate: Rotate
+transform.rotate_hover: Rotate the image (Alt + drag on the pane)
+transform.rotate_reset_hover: Reset to 0°
+transform.reset: Reset
+transform.histogram: Histogram
+transform.frame_not_loaded: frame not loaded
+
+# ---- tone modes & palettes -------------------------------------------------
+tone.linear: Linear
+tone.colormap: Colormap
+palette.diverging: Diverging
+
+# ---- region statistics -----------------------------------------------------
+stats.mean: mean
+stats.std: std
+stats.min: min
+stats.max: max
+stats.peak: peak
+stats.lut_from_region: LUT from region
+stats.hide: Hide stats
+stats.show: Stats
+stats.show_hover: Show region stats
+
+# ---- line profile ----------------------------------------------------------
+profile.title: Line profile
+profile.clear_line: Clear line
+profile.position_axis: position (px)
+
+# ---- Compute panes ---------------------------------------------------------
+compute.new: New compute
+compute.mode: Mode
+compute.source: Source
+compute.compute: Compute
+compute.refresh: Refresh
+compute.save: Save
+compute.cancel: Cancel
+compute.save_hint: name.tif
+compute.auto_refresh: Auto refresh
+compute.reduce_mean: Mean
+compute.reduce_std: Std
+compute.reduce_diff: Diff
+compute.status_reduce: "%{kind} of %{n} frame(s) in memory"
+compute.status_diff: Diff of frame %{a} − %{b}
+compute.saved: Saved %{name}
+compute.save_failed: "Save failed: %{err}"
+compute.nothing_to_save: Nothing computed to save
+compute.err_source_gone: Source no longer available
+compute.err_no_frames: No source frames in memory
+compute.err_pick: Pick source %{slot}
+compute.err_slot_gone: Source %{slot} no longer available
+compute.err_frame_missing: "%{slot}'s current frame not in memory"
+compute.err_shape_mismatch: A and B differ in size / channels
+
+# ---- export panel ----------------------------------------------------------
+export.title: Export comparison
+export.layout: Layout
+export.layout_grid: Side by side
+export.layout_ab: A / B wipe
+export.region: Region
+export.region_full: full
+export.select: Select…
+export.select_hover: >-
+  Right-drag the crop on a single image (left-drag pans, wheel zooms); it then
+  applies to every pane of the comparison
+export.full_view: Full view
+export.frames: Frames
+export.frames_all: all
+export.frames_from: from
+export.frames_to: to
+export.use_loop: Use loop range
+export.use_loop_hover: >-
+  Set the frame range to the playback loop window (end exclusive: [20, 40] →
+  frames 20–39)
+export.out_height: Output height
+export.out_height_view: = view
+export.compression: Compression
+export.add_labels: Add labels
+export.add_labels_hover: Burn a text label into each media's cell of the output
+export.labels_no_media: No media in this layout
+export.label_text: Text
+export.label_size_hover: Text height in output pixels (independent of zoom)
+export.label_background: Background
+export.label_position: Position
+export.label_margin: Margin
+export.label_preview: Preview
+export.anchor_top_left: Top left
+export.anchor_top_center: Top centre
+export.anchor_top_right: Top right
+export.anchor_mid_left: Middle left
+export.anchor_center: Centre
+export.anchor_mid_right: Middle right
+export.anchor_bottom_left: Bottom left
+export.anchor_bottom_center: Bottom centre
+export.anchor_bottom_right: Bottom right
+export.warn_incomplete: "⚠ Some media aren't fully loaded — frame counts may be incomplete."
+export.load_frames: Load frames
+export.load_frames_hover: >-
+  Discover the full length via headers only — enough for the export range, with
+  no cache pressure
+export.summary_image: 1 still image (the current frame)
+export.summary_video: "%{n} frames · %{secs}s"
+export.save_as: Save as
+export.save_as_hover: "Extension picks the format: .mp4 (video), or .png / .jpg for a still"
+export.run_image: Export image
+export.run_video: Export MP4
+export.running: Exporting %{n} frames…
+export.cancelling: Cancelling…
+export.cancelled: Export cancelled
+export.done_image: Exported image (%{w}x%{h}) %{path}
+export.done_video: Exported %{n} frames at %{path}
+export.failed: "Export failed: %{err}"
+export.err_no_media: No media to export
+export.err_view_not_ready: View not ready yet
+export.err_no_visible: No visible media (enable some in ☰ Media)
+export.err_no_name: Enter an output file name first
+export.err_all_background: Nothing to export (all background)
+export.err_panicked: Export thread panicked
+
+# ---- view command / debug / help windows -----------------------------------
+viewcmd.title: View command
+viewcmd.intro: "Reopen the current files at this exact view by running:"
+viewcmd.copy: Copy to clipboard
+viewcmd.copy_hover: Or press Ctrl+Shift+C anywhere
+debug.title: Debug — pipeline timing
+debug.intro: Time each frame spends per stage on its way to the screen.
+debug.col_stage: stage
+debug.col_last: last
+debug.col_avg: avg
+debug.col_min: min
+debug.col_max: max
+debug.col_n: "n"
+debug.stage_read: Read
+debug.stage_decode: Decode
+debug.stage_render: Render
+debug.stage_operators: Custom operators
+debug.stage_upload: Texture upload
+debug.stage_update: Global update
+help.title: Help
+help.reload: Reload
+help.reload_hover: Re-read help.md from disk
+help.source: from %{file}
+help.not_loaded: Not loaded.
+help.not_found: "Could not read %{file}. Looked for it here:\n%{paths}"
+
+# ---- settings --------------------------------------------------------------
+settings.title: Settings
+settings.general: General
+settings.language: Language
+settings.max_columns: Max columns
+settings.ui_scale: UI scale
+settings.frame_cache: Frame cache
+settings.frame_cache_hover: >-
+  Memory ceiling for decoded frames kept resident across all sequences; oldest
+  unshown frames are evicted beyond it.
+settings.frame_cache_frames: ≈ %{n} frames
+settings.frame_cache_frames_hover: >-
+  How many timeline positions fit, counting one frame from each of the %{media}
+  open media (%{size} each). Frames evicted here are re-read from disk when
+  shown again — much slower over a network mount than keeping them resident.
+settings.decode_threads: Decode threads
+settings.decode_threads_auto: auto
+settings.decode_threads_hover: >-
+  Background image-decoding worker threads shared by all sequences. 0 = auto
+  (scales with CPU cores, capped). Lower it to leave CPU for other users when
+  several instances share one server / VNC host. Applies immediately.
+settings.cursor_dot: Cursor dot on other panes
+settings.cursor_dot_hover: >-
+  Mark the hovered pixel on every other pane with a red dot, so the same
+  location is easy to compare across panes.
+settings.operators: Image operators (C++)
+settings.library_folder: Library folder
+settings.library_folder_hover: >-
+  Folder holding the proprietary operator libraries (LUT_ALPHA / Details).
+  Leave empty to use the LIBS folder next to the cim executable. Libraries load
+  automatically when this folder changes.
+settings.library_folder_hint: (uses <cim>/LIBS)
+settings.browse: 📂 Browse…
+settings.libs_both: Both operator libraries found
+settings.libs_none: No operator libraries found in this folder
+settings.libs_one: Only the %{lib} library found
+settings.libs_loaded: "loaded: %{libs}"
+settings.libs_loaded_none: "loaded: none"
+settings.shortcuts: Keyboard shortcuts
+settings.shortcuts_help: >-
+  Rebind, then press a key — hold Ctrl / Shift / Alt for a chord (e.g. Ctrl+R).
+  Esc cancels.
+settings.press_key: press a key or chord…
+settings.rebind: Rebind
+settings.clear: Clear
+settings.reset: Reset to defaults
+settings.reset_hover: Restore every setting above — including the keyboard shortcuts — to its default.
+settings.autosave_note: Changes are saved automatically.
+
+# ---- bindable actions (key = action.<id>) ----------------------------------
+action.toggle_view: Toggle grid / single / A-B view
+action.view_grid: Switch to grid view
+action.view_single: Switch to single view
+action.view_ab: Switch to A/B view
+action.next_media: Next media
+action.prev_media: Previous media
+action.next_frame: Next frame
+action.prev_frame: Previous frame
+action.reset_view: Fit to view
+action.actual_size: Actual size (100%)
+action.zoom_in: Zoom in
+action.zoom_out: Zoom out
+action.load_all: Load all frames into memory
+action.open_files: Open files…
+action.toggle_settings: Toggle settings
+action.toggle_manager: Toggle media manager
+action.toggle_vis: Toggle transformations panel
+action.toggle_export: Toggle export panel
+action.open_compute: Add a compute pane
+action.play_pause: Play / pause sequences
+action.reload_media: Reload focused media from disk
+action.reload_all: Reload all media from disk
+action.hide_media: Hide focused media
+action.toggle_chrome: Show/hide all UI elements
+action.select_media: Select media %{n}
+
+# ---- transient status line & modals ----------------------------------------
+status.load_all_queued: Queued all frames for background decoding…
+status.discovering_length: Discovering sequence length (headers only)…
+status.load_stopped: Stopped loading
+status.cache_full: Frame cache full — continuing with offsets only (headers) for the rest
+status.view_command_copied: View command copied to clipboard
+status.settings_reset: Settings reset to defaults
+modal.error: Error
+modal.warning: Warning
+modal.many_sequences: Many sequences
+modal.many_sequences_body: >-
+  This will open %{n} sequences at once.
+
+
+  Decoding and playing many sequences in parallel is heavy on CPU and memory
+  and can degrade performance — especially over a remote (VNC) session on a
+  machine shared with other users.
+modal.open_anyway: Open anyway
+modal.quit: Quit
+warn.cache_too_small: >-
+  The whole sequence couldn't be loaded into memory — the frame cache is too
+  small to hold every frame at once.
+
+
+  The length was fully discovered (headers only), so the export frame range is
+  correct and the encoder still reads the remaining frames from disk as it
+  runs. To keep more frames resident, raise the Frame cache budget in Settings.
+
+# ---- errors ----------------------------------------------------------------
+error.open_failed: "Failed to open:\n%{err}"
+error.reload_failed: "Reload failed: %{err}"
+error.frame: "Frame %{n}: %{err}"
+error.overlay_size: >-
+  Overlay size mismatch
+
+
+  This image is %{bw}×%{bh} but the overlay “%{name}” is %{ow}×%{oh}.
+
+  An overlay must match the image dimensions.
+error.empty_sequence: empty image sequence
+error.short_tiff: "short TIFF buffer: %{got} < %{expected}"
+error.tiff_color_type: "unsupported TIFF color type: %{kind}"
+error.tiff_sample_format: "unsupported TIFF sample format: %{kind}"
+error.save_extension: "unsupported format '.%{ext}' — use %{exts}"
+error.ffmpeg_hint: >-
+  Video loading requires the ffmpeg command line tools (ffmpeg.org) available
+  on the PATH
+error.tool_not_found: "%{tool} not found. %{hint}"
+error.tool_failed: "failed to run %{tool}: %{err}"
+error.ffprobe_failed: "ffprobe failed on %{path}: %{err}"
+error.ffmpeg_failed: "ffmpeg failed: %{err}"
+error.no_frame_count: could not determine frame count of %{path}
+error.ffmpeg_stopped: ffmpeg stopped at frame %{n} of %{path}%{status}
+error.ffmpeg_read: "ffmpeg frame read failed at frame %{n} of %{path}: %{err}"
+
+# ---- command line ----------------------------------------------------------
+cli.unknown_shell: "cim: unknown shell '%{shell}' (try: bash, powershell)"
+cli.help: |
+  cim %{ver} — Compare Images & Sequences
+
+  Lossless side-by-side viewer for images and sequences.
+
+  USAGE:
+      cim [OPTIONS] [FILES|SEQUENCES]...
+
+  ARGS:
+      <FILES|SEQUENCES|DIRS>...
+          Any number of images, sequences, videos or directories to open
+          (%{exts}).
+          A numbered run may be given compactly as PREFIX%0Xu SUFFIX,START,END,
+          e.g. frame_%05u.tif,0,12 expands to frame_00000.tif .. frame_00012.tif.
+          A directory (e.g. `cim folder`) opens every loadable image inside it,
+          sorted alphabetically, concatenated into one pane. Videos (%{vexts};
+          decoded via the ffmpeg CLI, which must be on the PATH) always open as
+          one pane each — including those found in a directory.
+          A compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
+          pane index, or A,B for diff) recreates a Compute pane; it is normally
+          generated for you by the "View cmd" panel, not typed by hand.
+
+  OPTIONS:
+      -h, --help                 Print this help and exit
+      -V, --version              Print version and exit
+          --complete <WORD>      List loadable completions for WORD, one per line
+                                 (used by the shell completers below; consecutive
+                                 numbered files collapse into the compact
+                                 PREFIX%0Xu SUFFIX,START,END form)
+          --completions <SHELL>  Print a completion script for SHELL to stdout
+                                 (bash | powershell)
+
+  VIEW STATE:
+      These reproduce a saved viewpoint and are normally generated for you by the
+      in-app "View cmd" panel (⧉ Copy). All indices are 0-based.
+
+          --mode <grid|single|ab>  Initial layout
+          --cols <N>               Grid columns
+          --zoom <F>               Shared zoom (screen px per image px)
+          --center <X,Y>           Shared view centre, in image pixels
+          --frame <N>              Timeline frame to show
+          --pane <N>               Focused pane
+          --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
+          --tone <T,T,...>         Per-pane tone: linear | lutalpha |
+                                 colormap[:viridis|turbo|diverging]
+          --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
+          --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
+          --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
+          --show <B,B,...>         Per-pane visibility / show-hide (1/0)
+          --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)
+          --gsync <B,B,...>        Per-pane Geometry-sync toggles (rotation) (1/0)
+          --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
+          --control <N>            Control media: shared clip source (+ timeline if a sequence)
+          --loop <LO,HI>           Inclusive playback loop range (0-based)
+
+  SHELL COMPLETION:
+      bash         eval "$(cim --completions bash)"
+      PowerShell   cim --completions powershell | Out-String | Invoke-Expression

@@ -26,7 +26,7 @@ impl CimApp {
             ui.painter().text(
                 area.center(),
                 Align2::CENTER_CENTER,
-                "Open images or drop files here",
+                t!("canvas.empty"),
                 FontId::proportional(18.0),
                 TEXT_DEFAULT,
             );
@@ -47,7 +47,7 @@ impl CimApp {
                     ui.painter().text(
                         area.center(),
                         Align2::CENTER_CENTER,
-                        "All media hidden — enable some in ☰ Media",
+                        t!("canvas.all_hidden"),
                         FontId::proportional(16.0),
                         TEXT_DEFAULT,
                     );

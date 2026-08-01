@@ -59,7 +59,7 @@ impl CimApp {
         // The window's ✕ (like the Media / Transformations panels') clears the
         // line, which is what closes this window in the first place.
         let mut open = true;
-        egui::Window::new("📈 Line profile")
+        egui::Window::new(format!("📈 {}", t!("profile.title")))
             .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
@@ -92,7 +92,7 @@ impl CimApp {
                 draw_profile_legend(ui, &series);
 
                 ui.add_space(4.0);
-                if ui.button("Clear line").clicked() {
+                if ui.button(t!("profile.clear_line")).clicked() {
                     self.line_profile = None;
                 }
             });
@@ -214,7 +214,7 @@ impl CimApp {
         painter.text(
             Pos2::new(plot.center().x, rect.bottom() - 1.0),
             Align2::CENTER_BOTTOM,
-            "position (px)",
+            t!("profile.position_axis"),
             font.clone(),
             axis_col,
         );
@@ -225,7 +225,10 @@ impl CimApp {
         // min and max: label them there (amber, like the region histogram's) so
         // the real extremes are readable and not just the rounded ticks.
         let ext_col = Color32::from_rgb(240, 200, 80);
-        for (tag, v, y) in [("min", ymin, plot.bottom()), ("max", ymax, plot.top())] {
+        for (tag, v, y) in [
+            (t!("stats.min"), ymin, plot.bottom()),
+            (t!("stats.max"), ymax, plot.top()),
+        ] {
             painter.line_segment(
                 [Pos2::new(plot.left() - 3.0, y), Pos2::new(plot.left(), y)],
                 Stroke::new(1.0_f32, ext_col),

@@ -27,12 +27,15 @@
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
   `serde`/`serde_json`, `directories` 5, `anyhow`, `libloading` 0.8 (runtime load
   of the optional proprietary C++ operators — **no** C++ compiler needed to build
-  cim; see `INTEGRATION_CPP.md`). Export shells out to the **`ffmpeg` CLI**;
-  video (mp4/avi) loading shells out to **`ffprobe`/`ffmpeg`** the same way (§3).
+  cim; see `INTEGRATION_CPP.md`), `rust-i18n` 4 (UI translations, §12). Export
+  shells out to the **`ffmpeg` CLI**; video (mp4/avi) loading shells out to
+  **`ffprobe`/`ffmpeg`** the same way (§3).
 - **Embedded assets** (`assets/`, baked in via `include_bytes!`): `icon.png` (window
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
   drag-handle grip — render instead of tofu).
+- **Translations** (`locales/en.yml`, `locales/fr.yml`) are baked in by the
+  `rust_i18n::i18n!` macro in `main.rs` — nothing to ship beside the executable (§12).
 - **`help.md` is *not* embedded** — the toolbar's **Help** window reads it from disk
   (beside the executable, else the working dir) so it can be edited or replaced per
   deployment without a rebuild; CI ships it next to the binaries (§12).
@@ -1172,8 +1175,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { max_columns, ui_scale, cache_budget_mb, decode_threads, cursor_dot,
-cpp_lib_dir, keybindings }` (`cpp_lib_dir` = the folder holding the proprietary
+`Config { language, max_columns, ui_scale, cache_budget_mb, decode_threads, cursor_dot,
+cpp_lib_dir, keybindings }` (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
 — §7 — with a Browse/paste field plus found/not-found and loaded indicators in
 Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `decode_threads` = the background decode pool size, `0` =
@@ -1188,6 +1191,40 @@ notices a change by comparing against `seen_config`, arms `autosave_at` for
 frame, and the comparisons need `PartialEq`. It requests a repaint at the deadline so an
 otherwise-idle app still writes. Settings' footer offers only **Reset to defaults**
 (`Config::default()`, keybindings included), which is then saved the same way.
+
+### 12.1 Localisation (`locales/*.yml`, `rust-i18n`)
+
+**Every user-visible string is a translation key** — nothing user-facing is a literal in
+the source. Two locales ship: **French (the default)** and English. The tables live in
+`locales/fr.yml` / `locales/en.yml` in rust-i18n's **version 1** format (one *flat* file
+per locale, `_version: 1` then `area.key: text`), baked into the binary by
+`rust_i18n::i18n!("locales", fallback = "en")` in `main.rs`.
+
+- **Reaching it:** `t!("area.key")` (→ `Cow<'static, str>`, which egui's `WidgetText`
+  takes directly, so `ui.label(t!(…))` needs no conversion); `t!("k", name = v)` fills a
+  `%{name}` placeholder. `app/mod.rs` does `use rust_i18n::t;`, so every `app` submodule
+  gets it through its `use super::*`.
+- **Dynamic keys** are used where an enum already has a stable id: `Action::label` →
+  `action.<id>` and `Reduce::label` → `compute.reduce_<token>`, so adding an action or a
+  reduction needs no second table — just a locale entry. The *ids and tokens themselves
+  are never translated*: they key the config JSON and round-trip through view commands.
+- **`fallback = "en"`** means a key missing from `fr.yml` shows English, not the raw key
+  — which is silent, hence the tests (§16) that the two files carry identical key sets
+  and that every literal `t!` key in the source exists.
+- **Scope:** the toolbar/panels/manager/export/settings/modals, pane chrome, status
+  notes, error and warning messages (including the ffmpeg/TIFF ones that surface as a
+  pane error), **and the CLI `--help` page** (`cli.help`, one multi-line entry per
+  locale). `main` therefore calls `settings::apply_locale` *before* `cli::parse`, since
+  `--help` never reaches the window. **`help.md` is deliberately excluded** — it stays an
+  external document the deployment owns (§12, below).
+- **Changing language** (Settings → Language, listing each language in its own name)
+  calls `apply_locale` immediately, so the UI is translated on the next frame — no
+  restart. The choice is `config.language`, persisted by the ordinary autosave.
+- **Not translated on purpose:** proper names (LUT_ALPHA, Details, Turbo, Viridis, MP4,
+  fps), the A/B slot letters, and anything that is an identifier rather than prose.
+- **Text-sized chrome:** the pane header buttons are hand-painted at a measured width, so
+  `draw_header` measures each *translated* label (`text_w`) instead of assuming the
+  English one — a longer French word would otherwise clip.
 
 **Help window** (`app/help.rs`, toolbar **Help** button, no keybinding). Renders an
 **external `help.md`** — looked for beside the executable first (how a release is laid
@@ -1426,7 +1463,10 @@ anchor survives an in-place rewrite and is refused by a reshaped file, which the
 `app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
 results can't truncate a sequence** (a batch's misses delivered before the hits ahead of
 them — the ordering `probe_ahead` can genuinely produce); `app::help` inline-span parsing (every character of a line survives, an
-unterminated marker stays literal); `palette` endpoints /
+unterminated marker stays literal); **localisation** (§12.1 — `en.yml` and `fr.yml`
+carry identical, duplicate-free key sets; every literal `t!` key in the source is
+defined; every bindable `Action` has an `action.<id>` entry — the three gaps that
+otherwise show up only as English text or a raw key at runtime); `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated),
@@ -1460,6 +1500,10 @@ of the prefix, each make the relevant test fail.
 - **Build target:** Windows, debug, during development.
 - **Style:** match surrounding code (comment density, naming, `pub(super)` methods,
   free helpers in `app/mod.rs`).
+- **No user-facing string literals.** Any new label, tooltip, status note or error the
+  user can read goes in `locales/en.yml` **and** `locales/fr.yml` and is reached through
+  `t!` (§12.1); the tests fail on a key defined in only one of them. Comments and doc
+  comments stay in English.
 - **Video limitations (§3):** frames are 8-bit (higher-depth sources tone-mapped
   down by ffmpeg) and frame↔time assumes CFR — a VFR file may land ±1 frame on
   seeks.

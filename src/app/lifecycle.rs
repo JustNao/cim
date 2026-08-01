@@ -385,7 +385,7 @@ impl CimApp {
             };
             match res {
                 Ok(m) => loaded.push(OpenItem::Media(m, source)),
-                Err(e) => self.error_popup = Some(format!("Failed to open:\n{e}")),
+                Err(e) => self.error_popup = Some(t!("error.open_failed", err = e).into_owned()),
             }
         }
 
@@ -650,7 +650,7 @@ impl CimApp {
                 // scan still in flight against the old contents.
                 self.request_offset_scan(i);
             }
-            Err(e) => self.panes[i].error = Some(format!("Reload failed: {e}")),
+            Err(e) => self.panes[i].error = Some(t!("error.reload_failed", err = e).into_owned()),
         }
     }
 

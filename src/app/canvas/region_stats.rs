@@ -151,8 +151,8 @@ impl CimApp {
             |v: &[f32]| -> String { v.iter().map(|x| fmt(*x)).collect::<Vec<_>>().join(" / ") };
         // One result per row (mean / std / n), aligned labels.
         let rows = [
-            format!("{:<4} = {}", "mean", vals(&data.mean)),
-            format!("{:<4} = {}", "std", vals(&data.std)),
+            format!("{:<4} = {}", t!("stats.mean"), vals(&data.mean)),
+            format!("{:<4} = {}", t!("stats.std"), vals(&data.std)),
             format!("{:<4} = {}", "n", data.count),
         ];
 
@@ -203,7 +203,7 @@ impl CimApp {
         painter.text(
             Pos2::new(hist_rect.left(), hist_rect.bottom() + 2.0),
             Align2::LEFT_TOP,
-            format!("min = {}", fmt(data.hist.min)),
+            format!("{} = {}", t!("stats.min"), fmt(data.hist.min)),
             axis_font.clone(),
             axis_col,
         );
@@ -211,7 +211,7 @@ impl CimApp {
             painter.text(
                 Pos2::new(hist_rect.center().x, hist_rect.bottom() + 2.0),
                 Align2::CENTER_TOP,
-                format!("peak = {}", fmt(pv)),
+                format!("{} = {}", t!("stats.peak"), fmt(pv)),
                 axis_font.clone(),
                 Color32::from_rgb(240, 200, 80),
             );
@@ -219,7 +219,7 @@ impl CimApp {
         painter.text(
             Pos2::new(hist_rect.right(), hist_rect.bottom() + 2.0),
             Align2::RIGHT_TOP,
-            format!("max = {}", fmt(data.hist.max)),
+            format!("{} = {}", t!("stats.max"), fmt(data.hist.max)),
             axis_font,
             axis_col,
         );
@@ -243,7 +243,10 @@ impl CimApp {
             Pos2::new(panel.right() - pad, panel.bottom() - pad),
         );
         let on = self.panes[idx].region_tone;
-        let resp = ui.put(btn_rect, egui::SelectableLabel::new(on, "LUT from region"));
+        let resp = ui.put(
+            btn_rect,
+            egui::SelectableLabel::new(on, t!("stats.lut_from_region")),
+        );
         if resp.clicked() {
             self.apply_region_tone(!on);
         }
@@ -254,7 +257,7 @@ impl CimApp {
             Rect::from_min_size(panel.min + Vec2::splat(3.0), Vec2::new(16.0, head_h - 3.0));
         if ui
             .put(hide_rect, egui::Button::new("–"))
-            .on_hover_text("Hide stats")
+            .on_hover_text(t!("stats.hide"))
             .clicked()
         {
             self.show_stats = false;
@@ -275,8 +278,8 @@ impl CimApp {
             .clamp(clip.left(), (clip.right() - size.x).max(clip.left()));
         let btn_rect = Rect::from_min_size(Pos2::new(left, top), size);
         if ui
-            .put(btn_rect, egui::Button::new("Stats"))
-            .on_hover_text("Show region stats")
+            .put(btn_rect, egui::Button::new(t!("stats.show")))
+            .on_hover_text(t!("stats.show_hover"))
             .clicked()
         {
             self.show_stats = true;

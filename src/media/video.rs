@@ -11,6 +11,7 @@
 //! the stream's average rate), so a variable-frame-rate file may land ±1 frame
 //! on seeks — a documented limitation.
 
+use rust_i18n::t;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -44,8 +45,11 @@ struct PartialMeta {
     duration: Option<f64>,
 }
 
-const FFMPEG_HINT: &str =
-    "Video loading requires the ffmpeg command line tools (ffmpeg.org) available on the PATH";
+/// Hint appended to a "tool not found" error; built per call so it follows the
+/// UI language (a `const` would freeze it at compile time).
+fn ffmpeg_hint() -> String {
+    t!("error.ffmpeg_hint").into_owned()
+}
 
 fn ffprobe_stream(path: &Path, entries: &str) -> Result<String> {
     let out = Command::new("ffprobe")
@@ -56,16 +60,22 @@ fn ffprobe_stream(path: &Path, entries: &str) -> Result<String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => anyhow!("ffprobe not found. {FFMPEG_HINT}"),
-            _ => anyhow!("failed to run ffprobe: {e}"),
+            std::io::ErrorKind::NotFound => anyhow!(t!(
+                "error.tool_not_found",
+                tool = "ffprobe",
+                hint = ffmpeg_hint()
+            )
+            .into_owned()),
+            _ => anyhow!(t!("error.tool_failed", tool = "ffprobe", err = e).into_owned()),
         })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow!(
-            "ffprobe failed on {}: {}",
-            path.display(),
-            err.trim()
-        ));
+        return Err(anyhow!(t!(
+            "error.ffprobe_failed",
+            path = path.display(),
+            err = err.trim()
+        )
+        .into_owned()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -87,7 +97,9 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta> {
         None => count_packets(path)
             .or_else(|| meta.duration.map(|d| (d * meta.fps).round() as usize))
             .filter(|&n| n > 0)
-            .ok_or_else(|| anyhow!("could not determine frame count of {}", path.display()))?,
+            .ok_or_else(|| {
+                anyhow!(t!("error.no_frame_count", path = path.display()).into_owned())
+            })?,
     };
     Ok(VideoMeta {
         size: meta.size,
@@ -213,8 +225,13 @@ impl VideoReader {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => anyhow!("ffmpeg not found. {FFMPEG_HINT}"),
-            _ => anyhow!("failed to run ffmpeg: {e}"),
+            std::io::ErrorKind::NotFound => anyhow!(t!(
+                "error.tool_not_found",
+                tool = "ffmpeg",
+                hint = ffmpeg_hint()
+            )
+            .into_owned()),
+            _ => anyhow!(t!("error.tool_failed", tool = "ffmpeg", err = e).into_owned()),
         })?;
         self.stdout = child.stdout.take();
         self.child = Some(child);
@@ -246,19 +263,24 @@ impl VideoReader {
                 self.kill_child();
                 match status {
                     Some(s) if s.success() => Ok(None),
-                    s => Err(anyhow!(
-                        "ffmpeg stopped at frame {idx} of {}{}",
-                        self.path.display(),
-                        s.map(|s| format!(" ({s})")).unwrap_or_default()
-                    )),
+                    s => Err(anyhow!(t!(
+                        "error.ffmpeg_stopped",
+                        n = idx,
+                        path = self.path.display(),
+                        status = s.map(|s| format!(" ({s})")).unwrap_or_default()
+                    )
+                    .into_owned())),
                 }
             }
             Err(e) => {
                 self.kill_child();
-                Err(anyhow!(
-                    "ffmpeg frame read failed at frame {idx} of {}: {e}",
-                    self.path.display()
-                ))
+                Err(anyhow!(t!(
+                    "error.ffmpeg_read",
+                    n = idx,
+                    path = self.path.display(),
+                    err = e
+                )
+                .into_owned()))
             }
         }
     }

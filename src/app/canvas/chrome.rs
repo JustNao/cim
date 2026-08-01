@@ -20,18 +20,29 @@ impl CimApp {
         // "Reload", "Hide" and "Close" buttons at the top-right (matching styles).
         // Reload re-reads from disk; Hide sets visible = false (keeps the pane);
         // Close removes it.
-        let close_w = 44.0;
-        let hide_w = 34.0;
+        let text_w = |ui: &egui::Ui, s: &str| {
+            ui.fonts(|f| {
+                f.layout_no_wrap(s.to_owned(), FontId::proportional(12.0), Color32::WHITE)
+                    .rect
+                    .width()
+            }) + 14.0
+        };
         // "Reload" as a labelled button; size it to its text so it never clips.
+        let reload_label = t!("pane.reload").into_owned();
+        let watch_label = t!("pane.auto_reload").into_owned();
+        let hide_label = t!("pane.hide").into_owned();
+        let close_label = t!("pane.close").into_owned();
         let reload_w = ui.fonts(|f| {
             f.layout_no_wrap(
-                "Reload".to_owned(),
+                reload_label.clone(),
                 FontId::proportional(12.0),
                 Color32::WHITE,
             )
             .rect
             .width()
         }) + 14.0;
+        let close_w = text_w(ui, &close_label).max(44.0);
+        let hide_w = text_w(ui, &hide_label).max(34.0);
         // The Auto-reload (watch) toggle sits left of Reload, but only for panes
         // backed by a file — a Compute pane has its own Auto-refresh instead. It's
         // a labelled "Auto-reload" button; size it to its text so it never clips.
@@ -39,7 +50,7 @@ impl CimApp {
         let watch_w = if watchable {
             let w = ui.fonts(|f| {
                 f.layout_no_wrap(
-                    "Auto-reload".to_owned(),
+                    watch_label.clone(),
                     FontId::proportional(12.0),
                     Color32::WHITE,
                 )
@@ -59,10 +70,12 @@ impl CimApp {
         let (title_full, title_short) = if count > 1 {
             let resident = self.panes[idx].media.resident_count();
             let sync = match (self.panes[idx].sync_spatial, self.panes[idx].sync_temporal) {
-                (true, true) => "",
-                (false, true) => "  ⊘pos",
-                (true, false) => "  ⊘time",
-                (false, false) => "  ⊘pos ⊘time",
+                (true, true) => String::new(),
+                (false, true) => format!("  ⊘{}", t!("pane.sync_pos")),
+                (true, false) => format!("  ⊘{}", t!("pane.sync_time")),
+                (false, false) => {
+                    format!("  ⊘{} ⊘{}", t!("pane.sync_pos"), t!("pane.sync_time"))
+                }
             };
             // Until the real end is found, show the known count with a "+" so
             // it's clear more frames may still be discovered.
@@ -72,10 +85,10 @@ impl CimApp {
                 format!("{count}+")
             };
             let tail = format!(
-                "   {}/{}  ({} in mem){}",
+                "   {}/{}  ({}){}",
                 self.frame_disp(idx) + 1,
                 count_str,
-                resident,
+                t!("pane.in_memory", n = resident),
                 sync
             );
             (
@@ -134,7 +147,7 @@ impl CimApp {
                         ui.add(egui::Label::new(path.display().to_string()).selectable(true));
                     }
                     if let Some(page) = local_page {
-                        ui.label(format!("page {page} in this file"));
+                        ui.label(t!("pane.page_in_file", page = page));
                     }
                 });
         }
@@ -153,14 +166,14 @@ impl CimApp {
         );
         let reload_resp = ui
             .interact(reload, Id::new(("reload", idx)), Sense::click())
-            .on_hover_text(self.hover_for(Action::ReloadMedia, "Reload this media from disk"));
+            .on_hover_text(self.hover_for(Action::ReloadMedia, &t!("pane.reload_hover")));
         if reload_resp.hovered() {
             hp.rect_filled(reload, 0.0, BUTTON_HOVER_FILL);
         }
         hp.text(
             reload.center(),
             Align2::CENTER_CENTER,
-            "Reload",
+            reload_label,
             FontId::proportional(12.0),
             if reload_resp.hovered() {
                 TEXT_BUTTON_HOVER
@@ -184,9 +197,9 @@ impl CimApp {
             let watch_resp = ui
                 .interact(watch, Id::new(("watch", idx)), Sense::click())
                 .on_hover_text(if watching {
-                    "Auto-reload on: reloads when the file changes on disk. Click to stop."
+                    t!("pane.auto_reload_on_hover")
                 } else {
-                    "Auto-reload: watch the file and reload it when it changes on disk."
+                    t!("pane.auto_reload_off_hover")
                 });
             if watching {
                 if focused {
@@ -200,7 +213,7 @@ impl CimApp {
             hp.text(
                 watch.center(),
                 Align2::CENTER_CENTER,
-                "Auto-reload",
+                watch_label,
                 FontId::proportional(12.0),
                 if watching {
                     TEXT_BUTTON_ACTIVE
@@ -229,7 +242,7 @@ impl CimApp {
         hp.text(
             hide.center(),
             Align2::CENTER_CENTER,
-            "Hide",
+            hide_label,
             FontId::proportional(12.0),
             if hide_resp.hovered() {
                 TEXT_BUTTON_HOVER
@@ -249,7 +262,7 @@ impl CimApp {
         hp.text(
             close.center(),
             Align2::CENTER_CENTER,
-            "Close",
+            close_label,
             FontId::proportional(12.0),
             // Red-tinted on hover to flag that Close removes the pane.
             if close_resp.hovered() {
@@ -321,7 +334,9 @@ impl CimApp {
             let (x, y) = (ci.x.floor() as i64, ci.y.floor() as i64);
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
                 text = format!(
-                    "{dims}    row={y}  col={x}    {}",
+                    "{dims}    {}={y}  {}={x}    {}",
+                    t!("pane.row"),
+                    t!("pane.col"),
                     self.value_string(idx, ci)
                 );
             }

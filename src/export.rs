@@ -8,6 +8,7 @@
 //! (gutters / letterboxing) are composited **transparent**, so a still never bakes
 //! in the dark background (MP4 ignores alpha, keeping its `BG`).
 
+use rust_i18n::t;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -1130,7 +1131,7 @@ impl Encoder {
         } else {
             let tail = self.log.lock().unwrap();
             let tail: String = tail.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-            Err(format!("ffmpeg failed: {tail}"))
+            Err(t!("error.ffmpeg_failed", err = tail).into_owned())
         }
     }
 
@@ -1196,9 +1197,7 @@ pub fn save_image(path: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<(), St
             image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
                 .map_err(|e| format!("write JPEG: {e}"))
         }
-        other => Err(format!(
-            "unsupported image extension '.{other}' — use .png or .jpg"
-        )),
+        other => Err(t!("error.save_extension", ext = other, exts = ".png, .jpg").into_owned()),
     }
 }
 

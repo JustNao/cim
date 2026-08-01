@@ -21,13 +21,13 @@ impl CimApp {
         // No pane to configure — still show the window (with a hint) so the
         // toolbar toggle has a visible effect.
         if self.panes.is_empty() {
-            egui::Window::new("Transformations")
+            egui::Window::new(t!("transform.title"))
                 .open(&mut open)
                 .default_pos(ctx.screen_rect().center())
                 .pivot(egui::Align2::CENTER_CENTER)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("No media open.");
+                    ui.label(t!("transform.no_media"));
                 });
             self.show_transform = open;
             return;
@@ -47,15 +47,15 @@ impl CimApp {
         let op_input = self.pane_is_op_input(idx);
         let lut_ok = crate::imageproc::lut_alpha_available() && op_input;
         let details_ok = crate::imageproc::details_available() && op_input;
-        let lut_hint: &str = if !crate::imageproc::lut_alpha_available() {
-            "LUT_ALPHA operator library not found"
+        let lut_hint = if !crate::imageproc::lut_alpha_available() {
+            t!("transform.op_missing_lib", lib = "LUT_ALPHA")
         } else {
-            "Only available for single-channel 16-bit (uint16) images"
+            t!("transform.op_needs_u16")
         };
-        let details_hint: &str = if !crate::imageproc::details_available() {
-            "Details operator library not found"
+        let details_hint = if !crate::imageproc::details_available() {
+            t!("transform.op_missing_lib", lib = "Details")
         } else {
-            "Only available for single-channel 16-bit (uint16) images"
+            t!("transform.op_needs_u16")
         };
 
         // Overlay: the single-channel media available to tint over this pane — a
@@ -86,7 +86,7 @@ impl CimApp {
         let mut vis_sync_changed = false;
         let mut geo_sync_changed = false;
 
-        egui::Window::new("Transformations")
+        egui::Window::new(t!("transform.title"))
             .open(&mut open)
             // Centered on first appearance each run (position then sticks for the
             // session; not persisted across runs — see `persist_egui_memory`).
@@ -102,12 +102,8 @@ impl CimApp {
                 // The current media's name, so it's clear which pane the panel
                 // is acting on (it follows the selection).
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{}  {}",
-                        idx + 1,
-                        self.panes[idx].media.name()
-                    ))
-                    .weak(),
+                    egui::RichText::new(format!("{}  {}", idx + 1, self.panes[idx].media.name()))
+                        .weak(),
                 );
 
                 // ---- Visualization group (open by default) -------------------
@@ -126,9 +122,11 @@ impl CimApp {
                         // Clicking the group *name* (not just the triangle) toggles it.
                         if ui
                             .add(
-                                egui::Label::new(egui::RichText::new("Visualization").strong())
-                                    .selectable(false)
-                                    .sense(egui::Sense::click()),
+                                egui::Label::new(
+                                    egui::RichText::new(t!("transform.visualization")).strong(),
+                                )
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
@@ -138,8 +136,8 @@ impl CimApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let mut sync = self.panes[idx].sync_tone;
                             if ui
-                                .checkbox(&mut sync, "Sync")
-                                .on_hover_text("Add this pane to the Visualization sync group (tone·details·overlay)")
+                                .checkbox(&mut sync, t!("transform.sync"))
+                                .on_hover_text(t!("transform.sync_visu_hover"))
                                 .changed()
                             {
                                 self.set_sync_tone(idx, sync);
@@ -151,95 +149,93 @@ impl CimApp {
                     vis_header.toggle();
                 }
                 vis_header.body(|ui| {
-                        egui::Grid::new(("vis_grid", pane_id))
-                            .num_columns(2)
-                            .spacing([8.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("LUT");
-                                egui::ComboBox::from_id_salt(("opt_tone", pane_id))
-                                    .selected_text(contrast.label())
-                                    .width(130.0)
+                    egui::Grid::new(("vis_grid", pane_id))
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label(t!("transform.lut"));
+                            egui::ComboBox::from_id_salt(("opt_tone", pane_id))
+                                .selected_text(contrast.label())
+                                .width(130.0)
+                                .show_ui(ui, |ui| {
+                                    for m in ContrastMode::ORDER {
+                                        // LUT_ALPHA needs the library + a 16-bit
+                                        // frame; disable it otherwise (unless it's
+                                        // already the pane's mode, so it stays
+                                        // visible / switchable away).
+                                        if m == ContrastMode::LutAlpha && !lut_ok && contrast != m {
+                                            ui.add_enabled(
+                                                false,
+                                                egui::SelectableLabel::new(false, m.label()),
+                                            )
+                                            .on_disabled_hover_text(lut_hint.clone());
+                                        } else {
+                                            ui.selectable_value(&mut contrast, m, m.label());
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+
+                            draw_tone_options(ui, pane_id, contrast, &mut tone);
+
+                            ui.label(t!("transform.rc"));
+                            ui.add_enabled(details_ok, egui::Checkbox::without_text(&mut details))
+                                .on_hover_text(t!("transform.rc_hover"))
+                                .on_disabled_hover_text(details_hint.clone());
+                            ui.end_row();
+                        });
+
+                    // Overlay picker + colour/alpha. Shown for any non-mask pane
+                    // (a mask can't itself take an overlay); when no single-channel
+                    // media is available to tint, the row still shows with a hint so
+                    // the control is discoverable.
+                    if !self_is_mask {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(t!("transform.overlay"));
+                            if sources.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(t!("transform.overlay_none_available"))
+                                        .weak()
+                                        .small(),
+                                );
+                            } else {
+                                let sel = ov_src
+                                    .and_then(|id| sources.iter().find(|(m, _)| *m == id))
+                                    .map(|(_, n)| ellipsize(n, 12))
+                                    .unwrap_or_else(|| t!("transform.overlay_none").into_owned());
+                                egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
+                                    .selected_text(sel)
+                                    .width(120.0)
                                     .show_ui(ui, |ui| {
-                                        for m in ContrastMode::ORDER {
-                                            // LUT_ALPHA needs the library + a 16-bit
-                                            // frame; disable it otherwise (unless it's
-                                            // already the pane's mode, so it stays
-                                            // visible / switchable away).
-                                            if m == ContrastMode::LutAlpha
-                                                && !lut_ok
-                                                && contrast != m
-                                            {
-                                                ui.add_enabled(
-                                                    false,
-                                                    egui::SelectableLabel::new(false, m.label()),
-                                                )
-                                                .on_disabled_hover_text(lut_hint);
-                                            } else {
-                                                ui.selectable_value(&mut contrast, m, m.label());
-                                            }
+                                        ui.selectable_value(
+                                            &mut ov_src,
+                                            None,
+                                            t!("transform.overlay_none"),
+                                        );
+                                        for (mid, mname) in &sources {
+                                            ui.selectable_value(
+                                                &mut ov_src,
+                                                Some(*mid),
+                                                ellipsize(mname, 18),
+                                            );
                                         }
                                     });
-                                ui.end_row();
-
-                                draw_tone_options(ui, pane_id, contrast, &mut tone);
-
-                                ui.label("RC");
-                                ui.add_enabled(
-                                    details_ok,
-                                    egui::Checkbox::without_text(&mut details),
-                                )
-                                .on_hover_text("Rehaussement / sharpening")
-                                .on_disabled_hover_text(details_hint);
-                                ui.end_row();
-                            });
-
-                        // Overlay picker + colour/alpha. Shown for any non-mask pane
-                        // (a mask can't itself take an overlay); when no single-channel
-                        // media is available to tint, the row still shows with a hint so
-                        // the control is discoverable.
-                        if !self_is_mask {
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Overlay");
-                                if sources.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new("no single-channel media")
-                                            .weak()
-                                            .small(),
-                                    );
-                                } else {
-                                    let sel = ov_src
-                                        .and_then(|id| sources.iter().find(|(m, _)| *m == id))
-                                        .map(|(_, n)| ellipsize(n, 12))
-                                        .unwrap_or_else(|| "None".into());
-                                    egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
-                                        .selected_text(sel)
-                                        .width(120.0)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(&mut ov_src, None, "None");
-                                            for (mid, mname) in &sources {
-                                                ui.selectable_value(
-                                                    &mut ov_src,
-                                                    Some(*mid),
-                                                    ellipsize(mname, 18),
-                                                );
-                                            }
-                                        });
-                                }
-                            });
-                            if ov_src.is_some() {
-                                ui.horizontal(|ui| {
-                                    ui.color_edit_button_srgba(&mut ov_color);
-                                    ui.add(
-                                        egui::DragValue::new(&mut ov_alpha)
-                                            .speed(0.02)
-                                            .range(0.0..=1.0)
-                                            .fixed_decimals(2)
-                                            .prefix("α "),
-                                    );
-                                });
                             }
+                        });
+                        if ov_src.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.color_edit_button_srgba(&mut ov_color);
+                                ui.add(
+                                    egui::DragValue::new(&mut ov_alpha)
+                                        .speed(0.02)
+                                        .range(0.0..=1.0)
+                                        .fixed_decimals(2)
+                                        .prefix("α "),
+                                );
+                            });
                         }
+                    }
                 });
 
                 // ---- Geometry group (collapsed by default) -------------------
@@ -255,9 +251,11 @@ impl CimApp {
                         // Clicking the group *name* (not just the triangle) toggles it.
                         if ui
                             .add(
-                                egui::Label::new(egui::RichText::new("Geometry").strong())
-                                    .selectable(false)
-                                    .sense(egui::Sense::click()),
+                                egui::Label::new(
+                                    egui::RichText::new(t!("transform.geometry")).strong(),
+                                )
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
@@ -267,8 +265,8 @@ impl CimApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let mut gsync = self.panes[idx].sync_geometry;
                             if ui
-                                .checkbox(&mut gsync, "Sync")
-                                .on_hover_text("Add this pane to the Geometry sync group (rotation)")
+                                .checkbox(&mut gsync, t!("transform.sync"))
+                                .on_hover_text(t!("transform.sync_geom_hover"))
                                 .changed()
                             {
                                 self.set_sync_geometry(idx, gsync);
@@ -280,71 +278,75 @@ impl CimApp {
                     geo_header.toggle();
                 }
                 geo_header.body(|ui| {
-                        // Display rotation (about the image centre). Also editable
-                        // directly on the pane with Alt + drag.
-                        ui.horizontal(|ui| {
-                            ui.label("Rotate");
-                            // Drag bar (its numeric readout is the text box).
-                            ui.add(
-                                egui::Slider::new(&mut rotation, -180.0..=180.0)
-                                    .step_by(1.0)
-                                    .show_value(false),
-                            )
-                            .on_hover_text("Rotate the image (Alt + drag on the pane)");
+                    // Display rotation (about the image centre). Also editable
+                    // directly on the pane with Alt + drag.
+                    ui.horizontal(|ui| {
+                        ui.label(t!("transform.rotate"));
+                        // Drag bar (its numeric readout is the text box).
+                        ui.add(
+                            egui::Slider::new(&mut rotation, -180.0..=180.0)
+                                .step_by(1.0)
+                                .show_value(false),
+                        )
+                        .on_hover_text(t!("transform.rotate_hover"));
 
-                            // Manual angle entry: a click selects the whole value so
-                            // it can be typed straight over; committed on Enter /
-                            // focus loss. While the field is focused, keep the buffer
-                            // as-typed; otherwise mirror the live angle.
-                            if self.rotation_edit_pane != Some(pane_id) {
-                                self.rotation_edit = fmt_angle(rotation);
-                            }
-                            let mut out = egui::TextEdit::singleline(&mut self.rotation_edit)
-                                .id(Id::new(("rot_edit", pane_id)))
-                                .desired_width(30.0)
-                                .show(ui);
-                            if out.response.gained_focus() {
-                                self.rotation_edit_pane = Some(pane_id);
-                                let end = self.rotation_edit.chars().count();
-                                out.state.cursor.set_char_range(Some(
-                                    egui::text::CCursorRange::two(
-                                        egui::text::CCursor::new(0),
-                                        egui::text::CCursor::new(end),
-                                    ),
-                                ));
-                                out.state.store(ui.ctx(), out.response.id);
-                            }
-                            if out.response.lost_focus() {
-                                if let Ok(v) = self
-                                    .rotation_edit
-                                    .trim()
-                                    .trim_end_matches('°')
-                                    .trim()
-                                    .parse::<f32>()
-                                {
-                                    rotation = wrap180(v);
-                                }
-                                self.rotation_edit_pane = None;
-                            }
-                            ui.label("°");
-                            if ui
-                                .add(egui::Button::new("Reset"))
-                                .on_hover_text("Reset to 0°")
-                                .clicked()
+                        // Manual angle entry: a click selects the whole value so
+                        // it can be typed straight over; committed on Enter /
+                        // focus loss. While the field is focused, keep the buffer
+                        // as-typed; otherwise mirror the live angle.
+                        if self.rotation_edit_pane != Some(pane_id) {
+                            self.rotation_edit = fmt_angle(rotation);
+                        }
+                        let mut out = egui::TextEdit::singleline(&mut self.rotation_edit)
+                            .id(Id::new(("rot_edit", pane_id)))
+                            .desired_width(30.0)
+                            .show(ui);
+                        if out.response.gained_focus() {
+                            self.rotation_edit_pane = Some(pane_id);
+                            let end = self.rotation_edit.chars().count();
+                            out.state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(0),
+                                    egui::text::CCursor::new(end),
+                                )));
+                            out.state.store(ui.ctx(), out.response.id);
+                        }
+                        if out.response.lost_focus() {
+                            if let Ok(v) = self
+                                .rotation_edit
+                                .trim()
+                                .trim_end_matches('°')
+                                .trim()
+                                .parse::<f32>()
                             {
-                                rotation = 0.0;
-                                self.rotation_edit_pane = None;
+                                rotation = wrap180(v);
                             }
-                        });
+                            self.rotation_edit_pane = None;
+                        }
+                        ui.label("°");
+                        if ui
+                            .add(egui::Button::new(t!("transform.reset")))
+                            .on_hover_text(t!("transform.rotate_reset_hover"))
+                            .clicked()
+                        {
+                            rotation = 0.0;
+                            self.rotation_edit_pane = None;
+                        }
                     });
+                });
 
                 // ---- Histogram (always visible, at the bottom) ---------------
                 ui.separator();
-                ui.strong("Histogram");
+                ui.strong(t!("transform.histogram"));
                 if have_hist {
                     self.draw_histogram(ui, idx);
                 } else {
-                    ui.label(egui::RichText::new("frame not loaded").weak().small());
+                    ui.label(
+                        egui::RichText::new(t!("transform.frame_not_loaded"))
+                            .weak()
+                            .small(),
+                    );
                 }
             });
         self.show_transform = open;
@@ -375,12 +377,17 @@ impl CimApp {
                                 true
                             } else {
                                 let sname = self.panes[src].media.name().to_string();
-                                self.error_popup = Some(format!(
-                                    "Overlay size mismatch\n\n\
-                                 This image is {}×{} but the overlay “{sname}” is {}×{}.\n\
-                                 An overlay must match the image dimensions.",
-                                    base[0], base[1], ov[0], ov[1],
-                                ));
+                                self.error_popup = Some(
+                                    t!(
+                                        "error.overlay_size",
+                                        bw = base[0],
+                                        bh = base[1],
+                                        name = sname,
+                                        ow = ov[0],
+                                        oh = ov[1]
+                                    )
+                                    .into_owned(),
+                                );
                                 false
                             }
                         }
@@ -452,7 +459,7 @@ fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone:
         // Colormap additionally picks a palette.
         ContrastMode::Linear => draw_clip_and_share(ui, tone),
         ContrastMode::Colormap => {
-            ui.label("Palette");
+            ui.label(t!("transform.palette"));
             egui::ComboBox::from_id_salt(("opt_palette", _pane_id))
                 .selected_text(tone.palette.label())
                 .width(130.0)
@@ -478,10 +485,10 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     // These are NOT greyed out under "Share clip": since Share clip rides the
     // Transformations sync, the clip toggle/percentile edited on any synced pane
     // is the very statistic the Control media derives its shared [lo, hi] from.
-    ui.label("Clip");
+    ui.label(t!("transform.clip"));
     ui.horizontal(|ui| {
         ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
-            .on_hover_text("Clip a percentile off each tail before the stretch");
+            .on_hover_text(t!("transform.clip_hover"));
         ui.add_enabled(
             tone.clip.enabled,
             egui::DragValue::new(&mut tone.clip.percent)
@@ -490,15 +497,15 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
                 .max_decimals(2)
                 .suffix(" %"),
         )
-        .on_hover_text("Percentile clipped at each tail before the stretch");
+        .on_hover_text(t!("transform.clip_percent_hover"));
         // Reset the percentile back to the default.
         let default_pct = crate::settings::ClipOptions::default().percent;
         if ui
             .add_enabled(
                 tone.clip.enabled && tone.clip.percent != default_pct,
-                egui::Button::new("Reset"),
+                egui::Button::new(t!("transform.reset")),
             )
-            .on_hover_text(format!("Reset to the default ({default_pct} %)"))
+            .on_hover_text(t!("transform.clip_reset_hover", pct = default_pct))
             .clicked()
         {
             tone.clip.percent = default_pct;
@@ -509,10 +516,8 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     // Share clip: apply the Control media's exact [lo, hi] LUT to every pane, so
     // all panes share identical clamp/scaling (even if it over/under-saturates
     // some) rather than each auto-normalising. Rides the Transformations sync.
-    ui.label("Share clip");
+    ui.label(t!("transform.share_clip"));
     ui.add(egui::Checkbox::without_text(&mut tone.share_clip))
-        .on_hover_text(
-            "Apply the Control media's exact LUT (lo/hi) to every pane — identical clamp/scaling",
-        );
+        .on_hover_text(t!("transform.share_clip_hover"));
     ui.end_row();
 }

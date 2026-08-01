@@ -26,6 +26,7 @@ pub use source::{DecodeReq, Media};
 pub use stats::{diff_frames, reduce_frames, HistData, Reduce, RegionStats};
 pub use video::VideoReader;
 
+use rust_i18n::t;
 use std::fs::File;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -94,9 +95,12 @@ pub fn save_frame(frame: &FrameData, path: &Path) -> Result<()> {
                 .with_context(|| format!("save {}", path.display()))?;
             Ok(())
         }
-        other => Err(anyhow!(
-            "unsupported format '.{other}' — use .tif, .png or .jpg"
-        )),
+        other => Err(anyhow!(t!(
+            "error.save_extension",
+            ext = other,
+            exts = ".tif, .png, .jpg"
+        )
+        .into_owned())),
     }
 }
 
