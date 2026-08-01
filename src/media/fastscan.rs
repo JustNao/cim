@@ -746,11 +746,49 @@ pub fn scan_offset_counts(paths: &[PathBuf]) -> Result<Vec<usize>, String> {
     if paths.is_empty() {
         return Err("empty sequence".into());
     }
-    let mut counts = Vec::with_capacity(paths.len());
-    for path in paths {
-        counts.push(FastScan::open(path)?.page_count()?);
+    scan_counts_batch(paths).into_iter().collect()
+}
+
+/// How many files a scan measures at once.
+///
+/// Unlike the frame path, this is **header** I/O: `page_count` binary-searches a
+/// file's pages, so it is ~20 validations of a few hundred bytes each — latency,
+/// not bandwidth. That distinction is what makes overlapping it safe on a
+/// **shared** mount (§15): it costs the server a burst of cheap metadata ops
+/// rather than a share of the link, so it can't crowd out other users the way
+/// widening the frame reads would. Sequentially a long concatenation spent tens
+/// of seconds with its timeline still undiscovered.
+const SCAN_FANOUT: usize = 8;
+
+/// Measure every file's page count, up to [`SCAN_FANOUT`] files at a time.
+///
+/// Results stay **per file and in order**: each worker writes only its own slice
+/// of the output. Keeping the failures separate matters as much as the order —
+/// a caller that only needs a prefix (`fast_jump`, which stops at the file
+/// holding its target) must not be failed by some later file it never reaches.
+fn scan_counts_batch(paths: &[PathBuf]) -> Vec<Result<usize, String>> {
+    let measure = |p: &PathBuf| FastScan::open(p).and_then(|mut scan| scan.page_count());
+
+    let mut out: Vec<Result<usize, String>> =
+        paths.iter().map(|_| Err("not measured".into())).collect();
+    if paths.len() < 2 {
+        for (slot, path) in out.iter_mut().zip(paths) {
+            *slot = measure(path);
+        }
+        return out;
     }
-    Ok(counts)
+
+    let chunk = paths.len().div_ceil(SCAN_FANOUT.min(paths.len()));
+    std::thread::scope(|s| {
+        for (slots, group) in out.chunks_mut(chunk).zip(paths.chunks(chunk)) {
+            s.spawn(move || {
+                for (slot, path) in slots.iter_mut().zip(group) {
+                    *slot = measure(path);
+                }
+            });
+        }
+    });
+    out
 }
 
 /// Apply page counts measured by [`scan_offset_counts`] to `media`: grow its
@@ -796,22 +834,36 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
             Ok(())
         }
         Media::ConcatSeq(c) => {
+            let files = c.files.clone();
             let mut counts = Vec::new();
             let mut before = 0usize; // frames in fully counted files
-            for (i, path) in c.files.clone().iter().enumerate() {
-                let mut scan = FastScan::open(path)?;
-                let n = scan.page_count()?;
-                if before + n > target {
-                    let page = target - before;
-                    let frame = scan
-                        .read_page(page)
-                        .ok_or("no page at the predicted position")?;
-                    c.extend_known(&counts, i, page)?;
-                    c.frames.insert(target, Arc::new(frame));
-                    return Ok(());
+            let mut at = 0usize;
+            while at < files.len() {
+                // Measure a bounded batch at a time rather than the whole run:
+                // every count up to the file holding `target` is needed, so only
+                // the tail of the last batch can be surplus — and that surplus is
+                // a few header reads, not pixels.
+                let end = (at + SCAN_FANOUT).min(files.len());
+                for (k, measured) in scan_counts_batch(&files[at..end]).into_iter().enumerate() {
+                    // `?` here only ever fires for a file at or before the
+                    // target: a later one in the same batch is never inspected,
+                    // so an unscannable tail can't cancel a jump that lands
+                    // before it.
+                    let n = measured?;
+                    if before + n > target {
+                        let i = at + k;
+                        let page = target - before;
+                        let frame = FastScan::open(&files[i])?
+                            .read_page(page)
+                            .ok_or("no page at the predicted position")?;
+                        c.extend_known(&counts, i, page)?;
+                        c.frames.insert(target, Arc::new(frame));
+                        return Ok(());
+                    }
+                    counts.push(n);
+                    before += n;
                 }
-                counts.push(n);
-                before += n;
+                at = end;
             }
             Err("the target frame is past the end of the run".into())
         }
@@ -1229,5 +1281,55 @@ mod tests {
                 _ => panic!("expected u8 samples for {name}"),
             }
         }
+    }
+
+    #[test]
+    fn parallel_scanning_keeps_file_order_and_prefix_safety() {
+        // Page counts are measured up to SCAN_FANOUT files at once, so the two
+        // things that could break are order (which file each count belongs to)
+        // and blast radius (a bad file failing a jump that never reaches it).
+        let dir = fixture_dir("fastscan_parallel");
+
+        // Distinct per-file page counts across more files than one batch holds,
+        // so a scan that lost order would be caught rather than coincidentally
+        // right. File k has k + 1 pages.
+        let files: Vec<PathBuf> = (0..SCAN_FANOUT * 2 + 3)
+            .map(|k| {
+                let p = dir.join(format!("run_{k:03}.tif"));
+                // >= 2 pages each: a single-page file has no stride to measure.
+                write_multipage_tiff_u16(&p, &vec![[6, 5]; k + 2]);
+                p
+            })
+            .collect();
+        let want: Vec<usize> = (0..files.len()).map(|k| k + 2).collect();
+        assert_eq!(scan_offset_counts(&files).unwrap(), want);
+
+        // Whole-run discovery agrees with the per-file counts.
+        let mut media = load_sequence(&files, "run".into()).unwrap();
+        load_offsets(&mut media).expect("regular concat");
+        assert_eq!(media.frame_count(), want.iter().sum::<usize>());
+
+        // A file the jump never reaches must not cancel it, even though it sits
+        // in the same batch: batching measures ahead, but only counts up to the
+        // target are ever inspected.
+        let mut mixed = files[..3].to_vec();
+        let bad = dir.join("run_bad.tif");
+        std::fs::write(&bad, b"not a tiff at all").unwrap();
+        mixed.insert(2, bad); // after the target's file, inside the first batch
+
+        // Target = frame 2, which is file 1's first page (file 0 has 2 pages).
+        let mut media = load_sequence(&mixed, "mixed".into()).unwrap();
+        fast_jump(&mut media, 2).expect("a later unscannable file must not cancel");
+        let jumped = media.resident(2).expect("target decoded");
+        let slow = SeqReader::open(&mixed[1])
+            .unwrap()
+            .decode(0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(u16s(&jumped), u16s(&slow));
+
+        // But a jump that *does* need the bad file still fails, unchanged.
+        let mut media = load_sequence(&mixed, "mixed".into()).unwrap();
+        assert!(fast_jump(&mut media, 40).is_err());
     }
 }
