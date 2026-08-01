@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 
 /// The UI languages cim ships with: the locale code stored in the config (and
 /// naming `locales/<code>.yml`) plus the name shown in the Settings picker —
-/// each in *its own* language, the convention for a language menu. French is the
-/// default; English is the `i18n!` fallback, so a key missing from `fr.yml`
-/// shows English rather than the bare key.
-pub const LANGUAGES: [(&str, &str); 2] = [("fr", "Français"), ("en", "English")];
+/// each in *its own* language, the convention for a language menu. English is the
+/// default; French is the `i18n!` fallback, so a key missing from `en.yml`
+/// shows French rather than the bare key.
+pub const LANGUAGES: [(&str, &str); 2] = [("en", "English"), ("fr", "Français")];
 
 /// The default UI language.
-pub const DEFAULT_LANGUAGE: &str = "fr";
+pub const DEFAULT_LANGUAGE: &str = "en";
 
 /// Point rust-i18n at `code`, falling back to the default for anything we don't
 /// ship (a hand-edited config, or a locale dropped from a later build).
@@ -594,6 +594,25 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A fresh config — and a saved one predating the setting — starts in the
+    /// default language, and an unknown code (hand-edited config, or a locale a
+    /// later build dropped) falls back to it rather than showing raw keys.
+    #[test]
+    fn default_language_is_shipped_and_applied() {
+        assert_eq!(Config::default().language, DEFAULT_LANGUAGE);
+        let old: Config = serde_json::from_str("{\"max_columns\":3,\"keybindings\":{}}").unwrap();
+        assert_eq!(old.language, DEFAULT_LANGUAGE);
+        assert!(LANGUAGES.iter().any(|(c, _)| *c == DEFAULT_LANGUAGE));
+
+        apply_locale("kl");
+        assert_eq!(&*rust_i18n::locale(), DEFAULT_LANGUAGE);
+        for (code, _) in LANGUAGES {
+            apply_locale(code);
+            assert_eq!(&*rust_i18n::locale(), code);
+        }
+        apply_locale(DEFAULT_LANGUAGE);
     }
 
     /// The dynamic `action.<id>` family: every bindable action must have a label

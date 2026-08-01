@@ -19,9 +19,9 @@ mod watcher;
 use eframe::egui;
 
 // UI translations, baked in from `locales/*.yml` (rust-i18n **version 1** format:
-// one flat file per locale). French is the default; English is the fallback, so a
-// key missing from `fr.yml` shows its English text rather than the raw key.
-rust_i18n::i18n!("locales", fallback = "en");
+// one flat file per locale). English is the default; French is the fallback, so a
+// key missing from `en.yml` shows its French text rather than the raw key.
+rust_i18n::i18n!("locales", fallback = "fr");
 
 fn main() -> eframe::Result<()> {
     // Pick the UI language before anything prints or draws: `--help` and the

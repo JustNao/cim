@@ -1195,10 +1195,10 @@ otherwise-idle app still writes. Settings' footer offers only **Reset to default
 ### 12.1 Localisation (`locales/*.yml`, `rust-i18n`)
 
 **Every user-visible string is a translation key** — nothing user-facing is a literal in
-the source. Two locales ship: **French (the default)** and English. The tables live in
-`locales/fr.yml` / `locales/en.yml` in rust-i18n's **version 1** format (one *flat* file
+the source. Two locales ship: **English (the default)** and French. The tables live in
+`locales/en.yml` / `locales/fr.yml` in rust-i18n's **version 1** format (one *flat* file
 per locale, `_version: 1` then `area.key: text`), baked into the binary by
-`rust_i18n::i18n!("locales", fallback = "en")` in `main.rs`.
+`rust_i18n::i18n!("locales", fallback = "fr")` in `main.rs`.
 
 - **Reaching it:** `t!("area.key")` (→ `Cow<'static, str>`, which egui's `WidgetText`
   takes directly, so `ui.label(t!(…))` needs no conversion); `t!("k", name = v)` fills a
@@ -1208,9 +1208,10 @@ per locale, `_version: 1` then `area.key: text`), baked into the binary by
   `action.<id>` and `Reduce::label` → `compute.reduce_<token>`, so adding an action or a
   reduction needs no second table — just a locale entry. The *ids and tokens themselves
   are never translated*: they key the config JSON and round-trip through view commands.
-- **`fallback = "en"`** means a key missing from `fr.yml` shows English, not the raw key
+- **`fallback = "fr"`** means a key missing from `en.yml` shows French, not the raw key
   — which is silent, hence the tests (§16) that the two files carry identical key sets
-  and that every literal `t!` key in the source exists.
+  and that every literal `t!` key in the source exists. `en.yml` is still the *reference*
+  table (new keys land there first); the fallback only decides what a gap degrades to.
 - **Scope:** the toolbar/panels/manager/export/settings/modals, pane chrome, status
   notes, error and warning messages (including the ffmpeg/TIFF ones that surface as a
   pane error), **and the CLI `--help` page** (`cli.help`, one multi-line entry per

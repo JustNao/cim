@@ -1,9 +1,10 @@
 _version: 1
 
-# Texte de l'interface en français — la langue par défaut de cim.
-# `en.yml` est la locale de repli : une clé absente d'ici s'affiche en anglais
-# plutôt qu'en clé brute. L'interpolation utilise les %{noms} de rust-i18n,
-# identiques aux arguments nommés passés à `t!`.
+# Texte de l'interface en français. L'anglais (`en.yml`) est la langue par
+# défaut et la table de référence ; ce fichier est la locale de *repli*, donc
+# une clé absente d'`en.yml` s'affiche avec le texte français ci-dessous plutôt
+# qu'en clé brute. L'interpolation utilise les %{noms} de rust-i18n, identiques
+# aux arguments nommés passés à `t!`.
 
 # ---- barre d'outils --------------------------------------------------------
 toolbar.open: Ouvrir

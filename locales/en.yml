@@ -1,8 +1,8 @@
 _version: 1
 
-# English UI text. This is the `i18n!` fallback locale: a key missing from
-# another locale shows the text here rather than the bare key, so en.yml is the
-# reference — add a key here first, then translate it.
+# English UI text — cim's default language, and the reference table: add a key
+# here first, then translate it. (`fr.yml` is the `i18n!` fallback, so a key
+# missing from *this* file shows its French text rather than the bare key.)
 #
 # Interpolation uses rust-i18n's %{name} placeholders, matching the named
 # arguments passed to `t!`.
