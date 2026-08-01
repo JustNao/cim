@@ -253,7 +253,18 @@ len)` grows length by one.
   *predicted* at `ifd0 + N×stride` and **validated before trust** (template
   match tag-for-tag, strip data on the same stride, predecessor's next-IFD
   pointer landing on it), so a wrong frame can never be shown — a failed
-  validation just falls back to the ordinary chain walk. Used three ways:
+  validation just falls back to the ordinary chain walk.
+
+  Reads go through `read_at`, a **positional** read (`read_exact_at`/`seek_read`):
+  one syscall, no file cursor, and `&File` rather than `&mut File`. A page's pixels
+  are fetched in **runs** — `decode_strips` merges strips already contiguous in the
+  file into a single read, so a 4096²×u16 page costs ~1 read instead of ~68 (§15).
+  `raw` fills in strip order, so a contiguous source run lands in a contiguous
+  destination slice: same bytes, no extra copy. **Contiguous runs only** — bridging a
+  gap would fetch bytes we discard, which on a shared mount spends someone else's
+  bandwidth to save our round trip.
+
+  Used three ways:
   - every `SeqReader` consults a measured layout so far probes/decodes skip the
     chain walk (falling back when a prediction fails);
   - **Load offsets fast** (frame-bar button, right of *Load offsets*, shown only
@@ -272,7 +283,16 @@ len)` grows length by one.
     `media::scan_offset_counts(paths)` (the I/O-bound binary search) runs on the
     worker and returns only a `Vec<usize>` of per-file page counts — never the
     pane's `Media`, which stays UI-thread-owned — and `media::apply_offset_counts`
-    applies them on drain. A **dedicated thread, not the decode pool**: `FastScan`
+    applies them on drain. The files themselves are measured **up to `SCAN_FANOUT`
+    (8) at a time** (`scan_counts_batch`, scoped threads): unlike the frame path
+    this is *header* I/O, latency-bound rather than bandwidth-bound, so overlapping
+    it costs a shared server cheap metadata ops rather than a share of the link
+    (§15). Each worker writes only its own slice of the output, so **file order is
+    structural** rather than something the join restores; results stay **per file**
+    (`Vec<Result<usize, _>>`, not one `Result`) because `fast_jump` stops at the
+    file holding its target and must not be cancelled by an unscannable file
+    further along that it never reaches — it measures in bounded batches, so only
+    the tail of the last batch can be surplus. A **dedicated thread, not the decode pool**: `FastScan`
     uses its own file handle (nothing to gain from the pool's persistent
     `SeqReader` cache) and a whole-sequence count vector doesn't fit the pool's
     per-frame `Decoded` result, and this way an open's scan never occupies a
@@ -761,7 +781,18 @@ only compares hashes and runs the debounce. Results are keyed by pane `id` **and
 generation** (`CimApp.watch_gen`, `Watch.inflight`): ids are stable across reload, so a
 signature in flight when the watch is re-baselined measured contents that are no longer
 the baseline and is dropped. Baselining is likewise asynchronous — `loaded = None`
-means "adopt the next signature". While any pane
+means "adopt the next signature".
+
+**The signing interval scales with the source's file count** (`CimApp::watch_interval`,
+per pane via `Watch.polled_at`; `WATCH_POLL` → `WATCH_POLL_MAX`). A signature costs one
+`stat` **per file**, so the cheap-looking metadata path is what scales badly: a 500-file
+run at `WATCH_POLL` aimed 2500 filesystem calls a second at the server, which on a
+**shared** network mount every other user pays for too. Backing off in proportion keeps
+the call *rate* roughly flat instead of scaling with run length, while a lone TIFF — the
+case auto-reload exists for — keeps the full 200 ms cadence. Deliberately **not** the
+alternative of signing a *subset* of a long run's files: that holds the cadence but
+silently stops noticing a change to any file left out. Polling all of them less often
+loses neither. While any pane
 watches, an otherwise-idle app wakes every `WATCH_POLL` to re-sign — the one
 intentional break from "idle requests no repaint", kept moderate to stay VNC-friendly
 (a quiet wake changes no pixels, so a delta framebuffer sends ~nothing) (§13/§15).
@@ -1273,6 +1304,45 @@ per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budg
 lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads
 per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code.
 
+### Network mounts (shared NFS/SMB) — the read path
+
+Sources normally live on a **shared** mount, where the picture inverts: a 4096²×u16 page
+measured **~150 ms of file I/O against ~0.1 ms of CPU decode**. Everything above tunes the
+0.1 ms side. Two constraints shape what's allowed on the other: the mount options are not
+ours to change, and the link is shared, so the goal is **to stop wasting round trips, not to
+grab bandwidth**.
+
+What the measurements said (keep these — they overturned two plausible theories):
+
+- A `dd` block-size sweep plateaus at **~210–280 MB/s regardless of request size**, and cim
+  already achieved 213 MB/s. So the ceiling is the path (server / shared link), *not* cim's
+  read shape, and **cold-path headroom is ~11%, not a multiple**. Widening concurrency was
+  dropped for this reason: at ~89% of the single-stream ceiling it could only contest the
+  remainder, and only by taking someone else's share.
+- Kernel readahead was **already working** — cim at 512 KB reads beat cold `dd` at the same
+  size (213 vs 140 MB/s) — so `posix_fadvise` was dropped too.
+- **Warm page cache runs 1.1–2.6 GB/s, ~10× the cold read.** The real lever is therefore *not
+  reading cold at all*, which is why the Settings cache slider now shows **how many frames the
+  budget holds** (`cache_budget_frames`): at 32 MB/frame the 1.5 GiB default holds only ~48,
+  so scrubbing silently evicts and re-reads.
+
+Done, in that light: **strip-run coalescing** (§4 — `decode_strips` merges file-contiguous
+strips into one read, ~68 reads/frame → 1; contiguous runs only, since bridging a gap spends
+shared bandwidth on bytes we discard), **positional reads** (`read_at` uses
+`read_exact_at`/`seek_read` — one syscall, no cursor, and `&File` rather than `&mut File`),
+**parallel per-file offset scanning** (§4 — `SCAN_FANOUT`; safe to widen because these are
+*header* reads, latency-bound, so they cost the server cheap metadata ops rather than a share
+of the link), and an **auto-reload watch that backs off with file count** (§9 —
+`watch_interval`; one `stat` per file meant a 500-file run aimed 2500 filesystem calls/s at a
+shared server).
+
+Not done, deliberately: **decimated reads** for minified panes would cut bandwidth hugely, but
+`FrameData` is the native cache behind the value readout, histograms, stats and export (§14) —
+decimating it breaks pixel accuracy, so it would need a *separate* proxy cache. **Latency-driven
+auto-tuning** of thread counts is wrong here: it widens exactly when the mount is busiest.
+Worth one email to whoever owns the mount, though: `rsize=65536` caps single-stream throughput
+at `rsize/RTT`, and `rsize=1048576` + `nconnect=8` would be worth several times anything above.
+
 **Profiling the pipeline (`debug.rs`).** Launch with **`CIM_DEBUG=1`** to enable a
 per-stage timing profiler and a **Debug** toolbar button (both hidden otherwise, so
 there's zero cost in a normal run — `debug::enabled()` reads the env var once and every
@@ -1315,6 +1385,17 @@ diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`*
 **full-frame export == live LUT render**, content-only export (`content_region`
 excludes background) + still background crop. The parity/equivalence tests are the
 net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
+
+The network-mount read path (§15) is guarded the same way — by equivalence, since every
+change there is meant to alter *only* the shape of the I/O: **strip-run coalescing**
+assembles the same bytes however a page's strips split into runs (contiguous, disjoint,
+and both mixed orders, against a naive strip-by-strip reference), and a multi-strip page
+still decodes bit-identically to the `tiff` crate; **parallel offset scanning** keeps
+counts in file order across more files than one batch holds, and an unscannable file
+does not cancel a `fast_jump` that lands before it (while one that needs it still fails);
+`app::watch` covers the signing back-off (flat call rate, capped). All three were
+mutation-checked — misaligning the chunk assignment, and failing the whole batch instead
+of the prefix, each make the relevant test fail.
 
 ---
 
