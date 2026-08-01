@@ -36,7 +36,7 @@ videos (decoded through the `ffmpeg` CLI, which must be on the `PATH` — export
 needs it too).
 
 `cim --help` lists everything, including the `--mode` / `--zoom` / `--frame` /
-`--tone` / … *view-state* flags. You normally don't type those by hand: the in-app
+`--tone` / … _view-state_ flags. You normally don't type those by hand: the in-app
 **View cmd** panel copies a ready-made command line that reopens exactly the
 session you're looking at.
 
@@ -51,7 +51,7 @@ flags do the work:
 
 The point of it is that completion is **sequence-aware**: consecutive numbered
 files collapse into the compact `PREFIX%0Xu SUFFIX,START,END` token, so tabbing
-through a directory of 10 000 frames offers you *one* suggestion that opens them
+through a directory of 10 000 frames offers you _one_ suggestion that opens them
 as a single sequence instead of 10 000 file names.
 
 Try it for the current shell:
@@ -92,8 +92,6 @@ cpp/            those optional operators (built separately)
 build_utils/    offline Docker build environment (Linux + Windows)
 ci/             CI build helpers
 ```
-
-`ARCHITECTURE.md` is the deep reference — read it before changing a subsystem.
 
 ## Development
 
