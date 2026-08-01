@@ -206,6 +206,28 @@ len)` grows length by one.
 
 - `ensure_lookahead` keeps **one page beyond the shown frame** discovered while
   browsing; playback **holds at the frontier** rather than wrapping until `at_end`.
+- **The frontier is probed a run of pages at a time** (`CimApp::probe_ahead`,
+  `FRONTIER_PROBES`), not one per update. Discovery must stay serial — `note_len`
+  grows only at `idx == len`, so page N+1 isn't confirmed until N is — but it need
+  not cost a **UI round trip** per page, which one-probe-per-update did: request →
+  worker → `request_repaint` → drain → `note_len` → next update. That loop latency,
+  *not* decode speed, is what capped playback and "Load all" of an undiscovered
+  sequence (~20 fps against 60+ once the length was known: the decode pool ran dry
+  between frames, where a known length lets `drive_eager` queue every missing frame
+  at once). While playing, `ensure_lookahead` therefore keeps a **whole prefetch
+  window** discovered ahead (`margin = ff × FRONTIER_PROBES + 1`) — `prefetch_playback`
+  never queues past the known length, so a frontier one or two pages out left it
+  able to see exactly one frame.
+  Over-probing is safe **by construction**: a result landing away from the frontier
+  is dropped and re-issued later — `note_frontier` ignores `idx != len`, and
+  `Media::frontier_ended(idx)` follows the same rule (it takes the index for exactly
+  this reason; without it a miss probed past the real end could land while earlier
+  pages were still in flight and fix the length short of pages that exist). The
+  frontier is extended by **probing, never decoding** — including at `ff == 1` —
+  since a decode landing past the frontier is dropped by `insert`, throwing away a
+  whole frame read. A `ConcatSeq` can't be probed ahead at all (an undiscovered
+  global index has no known `(file, page)` until the ones before it land, so
+  `job` returns `None` past the frontier) and quietly does the single probe as before.
 - Headers show `N+` while more frames may exist.
 - **Seeking past the frontier** (`--frame N` at launch — so exported view commands
   restore instantly — or **typing an index** in the frame bar's readout — a `TextEdit`
@@ -1378,7 +1400,9 @@ anchor survives an in-place rewrite and is refused by a reshaped file, which the
 **percentile equivalence**
 (whole-image == full-frame region, integer and float, with golden values);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
-`app::decode` **prefetch interleave order** + **adaptive depth**; `palette` endpoints /
+`app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
+results can't truncate a sequence** (a batch's misses delivered before the hits ahead of
+them — the ordering `probe_ahead` can genuinely produce); `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated),
