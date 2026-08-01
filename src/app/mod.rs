@@ -1125,16 +1125,21 @@ impl CimApp {
     /// committed frame** and discovers with a metadata-only probe, rather than
     /// full-decoding and flipping through every page in between.
     ///
-    /// Deliberately narrow so it never touches normal use: only while **paused**
-    /// (playback discovers frame-by-frame at the frontier), only for a
+    /// Deliberately narrow so it never touches normal use: only for a
     /// still-discovering sequence, and only when the target is at or past the
-    /// frontier. During single-stepping the shared frame is clamped to the
-    /// control length (`update`), so the control pane is never "catching up" —
-    /// this is for the *other*, shorter/newer synced panes.
+    /// frontier. The shared frame is clamped to the control length (`update`), so
+    /// the control pane is never "catching up" — this is for the *other*,
+    /// shorter/newer synced panes.
+    ///
+    /// It applies **while playing** too, for the pane a `playback_limit` hold is
+    /// waiting on: playback normally discovers frame-by-frame at the frontier, but
+    /// a pane opened behind an already-advanced timeline would then decode every
+    /// page it has to cross before playback could resume. Probing crosses them by
+    /// header instead, so the hold lasts as briefly as possible.
     pub(super) fn catching_up(&self, i: usize) -> bool {
         // A decode/probe error stops discovery (the pane shows its error) — don't
         // keep re-probing (which would also busy-spin the immediate repaint).
-        if self.playback.playing || self.panes[i].media.at_end() || self.panes[i].error.is_some() {
+        if self.panes[i].media.at_end() || self.panes[i].error.is_some() {
             return false;
         }
         let want = if self.panes[i].sync_temporal {
@@ -1318,6 +1323,40 @@ impl CimApp {
             .map(|p| p.media.frame_count())
             .unwrap_or(1)
             .max(1)
+    }
+
+    /// The length and end-state **playback** paces itself against: the shared
+    /// timeline (`timeline_len` / `current_at_end`), held back by any *other*
+    /// on-screen synced sequence that is **still discovering** and hasn't reached
+    /// the timeline yet.
+    ///
+    /// Without this, opening a second sequence next to an already-discovered one
+    /// let playback run at the fast pane's pace while the new pane, whose frontier
+    /// advances only as fast as it decodes, fell further and further behind —
+    /// `frame_disp` clamps it to its last discovered frame, so the panes drifted
+    /// onto different frames, which defeats the whole point of comparing them.
+    /// Holding at the slowest frontier keeps every pane on the same frame, exactly
+    /// as a single sequence already holds at its own frontier rather than wrapping
+    /// early (§4/§8).
+    ///
+    /// Only a **still-discovering** pane holds it back: a genuinely shorter but
+    /// fully-discovered sequence keeps the existing behaviour of holding on its
+    /// last frame while the timeline plays on.
+    pub(super) fn playback_limit(&self) -> (usize, bool) {
+        let mut len = self.timeline_len();
+        let mut at_end = self.current_at_end();
+        let ctrl = self.loop_control();
+        for i in self.displayed_indices() {
+            let p = &self.panes[i];
+            // An errored pane has stopped discovering — don't stall playback on a
+            // frontier that will never move.
+            if i == ctrl || !p.sync_temporal || p.media.at_end() || p.error.is_some() {
+                continue;
+            }
+            len = len.min(p.media.frame_count().max(1));
+            at_end = false;
+        }
+        (len, at_end)
     }
 
     /// Jump the shared timeline to `target`. Within the discovered length this is

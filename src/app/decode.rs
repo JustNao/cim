@@ -331,10 +331,12 @@ impl CimApp {
         if !self.playback.playing || self.panes.is_empty() {
             return;
         }
-        let tl = self.timeline_len();
+        // Same window as `advance_playback`, including its hold at the slowest
+        // still-discovering pane's frontier, so prefetch only ever asks for frames
+        // playback will actually land on.
+        let (tl, at_end) = self.playback_limit();
         let (lo, hi) = self.loop_bounds(tl);
         let full = self.playback.loop_range.is_none();
-        let at_end = self.current_at_end();
 
         // Same targets as lookahead: on-screen panes plus the loop-driving pane
         // (which drives the shared timeline even when it isn't displayed).

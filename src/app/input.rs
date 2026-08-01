@@ -145,11 +145,13 @@ impl CimApp {
             self.playback.accum = (self.playback.accum + dt).min(step);
             return;
         }
-        let tl = self.timeline_len();
-        let at_end = self.current_at_end();
         // Loop window: a user sub-range, else the whole sequence. When it's the
         // full sequence and the end isn't discovered yet, `hi` is only the
-        // frontier — hold there rather than wrapping early.
+        // frontier — hold there rather than wrapping early. The frontier is the
+        // *slowest* on-screen synced sequence's (`playback_limit`), so a newly
+        // added, still-discovering pane paces playback instead of being left
+        // behind on an older frame while the discovered one races ahead.
+        let (tl, at_end) = self.playback_limit();
         let (lo, hi) = self.loop_bounds(tl);
         let full = self.playback.loop_range.is_none();
         if hi <= lo && at_end {

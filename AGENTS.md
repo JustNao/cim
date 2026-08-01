@@ -225,14 +225,15 @@ len)` grows length by one.
 - **A synced pane behind an already-advanced timeline** (loading a second sequence after
   moving ahead in the first — `shared_frame` is past what the new pane has discovered)
   uses the **same probe fast-path** without `pending_seek`, per-pane: `catching_up(i)` is
-  true (paused, still-discovering, target ≥ its frontier), so `ensure_lookahead` **probes**
+  true (still-discovering, target ≥ its frontier), so `ensure_lookahead` **probes**
   that pane forward (metadata only, no full decode of the pages in between) and
   `refresh_textures` **skips staging it** — it holds its last committed frame (blank if
   new) instead of flipping through 0…N — until its own length passes the target, then it
   stages just that frame. The `update` clamp pins `shared_frame` to the **loop-driving**
   pane's (`loop_control`) length, so that pane is never "catching up" (that's `pending_seek`'s job); this
-  covers the *other*, shorter/newer synced panes, and only while paused (playback still
-  discovers frame-by-frame at the frontier). Both this and `pending_seek` **repaint
+  covers the *other*, shorter/newer synced panes. It applies **while playing** too — for
+  the pane a `playback_limit` hold (§8) is waiting on, so the pages it must cross are
+  crossed by header rather than decoded one per frame. Both this and `pending_seek` **repaint
   immediately** while riding the frontier, so discovery runs as fast as probes land rather
   than one per 30 fps decode-poll tick.
 - **Per-frame resolution:** `disp_size(i)` uses the resident frame's own size
@@ -594,7 +595,21 @@ a new Control drops the `loop_range` only when `loop_control()` actually changes
 Playback loops over a **window** `loop_bounds(len)` — a user sub-range (`loop_range`,
 set by dragging the scrubber brackets; `None` = whole sequence). A full range with an
 undiscovered end holds at the frontier rather than wrapping; a sub-range wraps/stops
-immediately. **The manual next/previous-frame controls obey the same window**
+immediately.
+
+**The frontier playback holds at is the *slowest* one on screen** (`playback_limit`,
+used by `advance_playback` **and** `prefetch_playback` so the two agree): the shared
+timeline's length/end (`timeline_len` / `current_at_end`), lowered by any *other*
+displayed, temporally-synced sequence that is **still discovering**. Otherwise a second
+sequence opened next to an already-discovered one was left behind — the timeline ran at
+the fast pane's pace while the new pane's frontier only crept forward as it decoded, and
+`frame_disp` clamped it to its last discovered frame, so the panes drifted onto
+*different* frames while appearing to play together. Only a **still-discovering** pane
+holds it back: a genuinely shorter, fully-discovered sequence keeps holding on its last
+frame as before, and an errored one (discovery stopped) never stalls playback. The pane
+being waited on catches up by **probe**, not decode (`catching_up`, §4), and a
+fast-scannable one usually needs no wait at all — the background offset scan (§4)
+completes its length outright. **The manual next/previous-frame controls obey the same window**
 (`apply_action(NextFrame/PrevFrame)`, shared by the keys, the Ctrl+wheel scrub, and the
 frame-bar Prev/Next buttons via `ui.ctx()`): stepping inside `[lo, hi]` moves one frame;
 at an edge a sub-range wraps to the other edge, a full range wraps only once the real end
