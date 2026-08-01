@@ -56,7 +56,11 @@ impl CimApp {
         // so a collapsed window / a cursor that left clears the green marker.
         let prev_hover = self.line_hover;
         self.line_hover = None;
+        // The window's ✕ (like the Media / Transformations panels') clears the
+        // line, which is what closes this window in the first place.
+        let mut open = true;
         egui::Window::new("📈 Line profile")
+            .open(&mut open)
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
@@ -92,6 +96,9 @@ impl CimApp {
                     self.line_profile = None;
                 }
             });
+        if !open {
+            self.line_profile = None;
+        }
         // The panes draw before this window, so a hover change reaches their green
         // marker only on the next frame: ask for one (only when it actually moved,
         // so a resting cursor doesn't spin the loop).
