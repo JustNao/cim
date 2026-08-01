@@ -39,6 +39,18 @@ impl CimApp {
             painter.circle_filled(p, 4.0, LINE_COL);
             painter.circle_stroke(p, 4.0, Stroke::new(1.0_f32, Color32::from_black_alpha(180)));
         }
+        // The position hovered in the Line-profile plot, echoed back onto the line
+        // itself: the plot's x axis is the distance along the line in pixels, so
+        // the marker sits at that fraction of the segment.
+        if let Some(d) = self.line_hover {
+            let len = (lp.b - lp.a).length();
+            if len > 0.0 {
+                let img = lp.a + (lp.b - lp.a) * (d / len).clamp(0.0, 1.0);
+                let p = self.rot_img_to_screen(idx, img.to_vec2(), coord_area);
+                painter.circle_filled(p, 4.0, LINE_HOVER_COL);
+                painter.circle_stroke(p, 4.0, Stroke::new(1.0_f32, Color32::from_black_alpha(180)));
+            }
+        }
     }
 
     /// Track the shift+right drag: on press, decide whether it grabs an endpoint,

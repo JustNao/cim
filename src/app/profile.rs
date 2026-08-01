@@ -52,6 +52,10 @@ impl CimApp {
     /// of every media along the line, with a legend underneath.
     pub(super) fn draw_profile(&mut self, ctx: &egui::Context) {
         let Some(lp) = self.line_profile else { return };
+        // Re-established below only while the pointer is actually over the plot,
+        // so a collapsed window / a cursor that left clears the green marker.
+        let prev_hover = self.line_hover;
+        self.line_hover = None;
         egui::Window::new("📈 Line profile")
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
@@ -88,19 +92,26 @@ impl CimApp {
                     self.line_profile = None;
                 }
             });
+        // The panes draw before this window, so a hover change reaches their green
+        // marker only on the next frame: ask for one (only when it actually moved,
+        // so a resting cursor doesn't spin the loop).
+        if self.line_hover != prev_hover {
+            ctx.request_repaint();
+        }
     }
 
     /// Draw the plot area itself: axes, gridlines with position (x) and value (y)
-    /// ticks, and one coloured polyline per media. `length` is the line's pixel
-    /// length (x range `0..length`); the y range spans every series' min/max.
+    /// ticks, one coloured polyline per media, and — while the pointer is over the
+    /// plot — the readout crosshair. `length` is the line's pixel length (x range
+    /// `0..length`); the y range spans every series' min/max.
     fn draw_profile_plot(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         length: f32,
         series: &[(String, Color32, Vec<f32>)],
     ) {
         let height = 300.0_f32.min((ui.available_height() - 90.0).max(140.0));
-        let (rect, _) =
+        let (rect, resp) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, Color32::from_gray(16));
@@ -239,7 +250,94 @@ impl CimApp {
             }
             flush(&mut run);
         }
+
+        // Readout crosshair: while the pointer is over the plot, a full-span
+        // horizontal + vertical line in the axis colour, each labelled with its
+        // value where it meets its axis. The hovered position is also recorded so
+        // every pane echoes it as a green marker on the line (`draw_line_overlay`).
+        if let Some(p) = resp.hover_pos().filter(|p| plot.contains(*p)) {
+            // Snap to a plotted sample: the cursor's x picks the sample index (the
+            // curves carry one point per line pixel), then among the series the one
+            // whose value there is nearest the cursor's y wins — so the readout is
+            // an actual pixel value, not a free position. A stretch where every
+            // series is NaN (out of frame) has nothing to snap to: the crosshair
+            // then just follows the cursor.
+            let npts = series.iter().map(|(_, _, v)| v.len()).max().unwrap_or(0);
+            let (xv, snap) = if npts >= 2 {
+                let k = (((p.x - plot.left()) / plot.width()) * (npts - 1) as f32)
+                    .round()
+                    .clamp(0.0, (npts - 1) as f32) as usize;
+                let mut best: Option<(f32, f32, Color32)> = None; // (screen dist, value, colour)
+                for (_, color, vals) in series {
+                    let Some(&v) = vals.get(k).filter(|v| v.is_finite()) else {
+                        continue;
+                    };
+                    let d = (sy(v) - p.y).abs();
+                    if best.is_none_or(|(bd, _, _)| d < bd) {
+                        best = Some((d, v, *color));
+                    }
+                }
+                (
+                    k as f32 / (npts - 1) as f32 * xmax,
+                    best.map(|(_, v, c)| (v, c)),
+                )
+            } else {
+                ((p.x - plot.left()) / plot.width() * xmax, None)
+            };
+            let yv = snap.map_or_else(
+                || ymin + ((plot.bottom() - p.y) / plot.height()) * (ymax - ymin),
+                |(v, _)| v,
+            );
+            let p = Pos2::new(sx(xv), sy(yv));
+            let stroke = Stroke::new(1.0_f32, axis_col);
+            painter.line_segment(
+                [Pos2::new(plot.left(), p.y), Pos2::new(plot.right(), p.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(p.x, plot.top()), Pos2::new(p.x, plot.bottom())],
+                stroke,
+            );
+            label_box(
+                &painter,
+                Pos2::new(plot.left() - 4.0, p.y),
+                Align2::RIGHT_CENTER,
+                fmt_tick(yv),
+                font.clone(),
+                axis_col,
+            );
+            label_box(
+                &painter,
+                Pos2::new(p.x, plot.bottom() + 3.0),
+                Align2::CENTER_TOP,
+                fmt_tick(xv),
+                font.clone(),
+                axis_col,
+            );
+            // Mark the snapped sample on its own curve, in that series' colour.
+            if let Some((_, color)) = snap {
+                painter.circle_filled(p, 3.5, color);
+                painter.circle_stroke(p, 3.5, Stroke::new(1.0_f32, Color32::from_black_alpha(180)));
+            }
+            self.line_hover = Some(xv);
+        }
     }
+}
+
+/// Draw `text` anchored at `pos` over a dark box, so a crosshair readout stays
+/// legible on top of the axis tick label it covers.
+fn label_box(
+    painter: &egui::Painter,
+    pos: Pos2,
+    align: Align2,
+    text: String,
+    font: FontId,
+    color: Color32,
+) {
+    let galley = painter.layout_no_wrap(text, font, color);
+    let rect = align.anchor_size(pos, galley.size());
+    painter.rect_filled(rect.expand(2.0), 2.0, Color32::from_black_alpha(220));
+    painter.galley(rect.min, galley, color);
 }
 
 /// The legend under the plot: a colour swatch + name for each media.

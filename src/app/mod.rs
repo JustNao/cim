@@ -155,6 +155,10 @@ const LINE_COL: Color32 = Color32::from_rgb(255, 191, 0);
 /// Screen-space grab radius (px) for the profile line's endpoints / body.
 const LINE_HANDLE: f32 = 8.0;
 
+/// Colour of the marker echoing the Line-profile plot's hovered position back
+/// onto the line itself — green, to read distinctly against the amber line.
+const LINE_HOVER_COL: Color32 = Color32::from_rgb(80, 230, 90);
+
 // Soft ceiling on decoded frames kept resident across all sequences. Beyond it
 // the least-recently-viewed frames are evicted (they re-decode on demand), so a
 // long sequence can't grow memory without bound. Configurable in Settings
@@ -757,6 +761,10 @@ pub struct CimApp {
     line_profile: Option<LineProfile>,
     /// In-progress profile-line shift+right-drag. See [`LineSel`].
     line_sel: LineSel,
+    /// Position along the profile line (in line pixels, `0..length`) currently
+    /// hovered in the Line-profile plot, echoed back as a green marker on the
+    /// line in every pane. `None` whenever the pointer is off the plot.
+    line_hover: Option<f32>,
 
     /// Edit buffer for the Transformations popup's typeable rotation angle, and
     /// the pane id currently being edited (so the buffer isn't overwritten with
@@ -1011,6 +1019,7 @@ impl CimApp {
 
             line_profile: None,
             line_sel: LineSel::default(),
+            line_hover: None,
             rotation_edit: String::new(),
             rotation_edit_pane: None,
 

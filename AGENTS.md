@@ -829,7 +829,17 @@ value or mean of R/G/B) sampled along the line (`line_samples`, one point per li
 `NaN`/break where a pane's frame doesn't cover it): **position on the x axis, value on the
 y axis**, default range the samples' **min/max**. One coloured polyline per media
 (`series_color`), value/position **ticks** (`nice_ticks`), and a **legend** of each media
-name + colour underneath.
+name + colour underneath. **Hover readout:** while the pointer is over the plot a
+full-span **crosshair** in the axis colour follows it, **snapped to a plotted sample** —
+the cursor's x picks the sample index, and the series whose value there is nearest the
+cursor's y wins (marked with a dot in its own colour; an all-NaN stretch has nothing to
+snap to, so the crosshair just follows the cursor there). Each arm is labelled with its
+value where it meets its axis (`label_box`, boxed so it stays legible over the tick
+labels), and the hovered position is stored in `CimApp.line_hover` (distance along the
+line, in line pixels) so **every pane** echoes it as a **green dot** on the line itself
+(`draw_line_overlay`, `LINE_HOVER_COL`). Leaving the plot clears it (`draw_profile`
+resets `line_hover` each frame and only re-sets it while hovered); since the panes draw
+*before* the window, a changed hover asks for one more repaint so the dot doesn't lag.
 
 **Compute panes.** A *generated* pane whose image is derived from other panes. The
 **toolbar** "Compute" button sets `pending_compute_create`; the deferred
