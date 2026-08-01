@@ -25,7 +25,6 @@
 //! [`availability`] rides the *Load offsets* hover text.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -209,7 +208,7 @@ impl FastScan {
     /// (`predicted`/`validate`/`read_page`/`page_count`) need them, and the
     /// offset-anchored path (`offset_jump`) works without either.
     fn open_header(path: &Path) -> Result<FastScan, String> {
-        let mut file = File::open(path).map_err(|e| format!("can't open the file: {e}"))?;
+        let file = File::open(path).map_err(|e| format!("can't open the file: {e}"))?;
         let file_len = file
             .metadata()
             .map_err(|e| format!("can't stat the file: {e}"))?
@@ -217,7 +216,7 @@ impl FastScan {
 
         // 16 bytes covers both header shapes (any real TIFF is far larger).
         let mut header = [0u8; 16];
-        read_at(&mut file, 0, &mut header).ok_or("not a readable TIFF")?;
+        read_at(&file, 0, &mut header).ok_or("not a readable TIFF")?;
         let big_endian = match &header[..2] {
             b"II" => false,
             b"MM" => true,
@@ -310,10 +309,35 @@ impl FastScan {
     fn decode_strips(&mut self, p: &PageIfd, offsets: &[u64]) -> Option<FrameData> {
         let total: u64 = p.strip_counts.iter().sum();
         let mut raw = vec![0u8; total as usize];
-        let mut at = 0usize;
-        for (off, n) in offsets.iter().zip(&p.strip_counts) {
-            read_at(&mut self.file, *off, &mut raw[at..at + *n as usize])?;
-            at += *n as usize;
+
+        // Strips are fetched in **runs**: a maximal group already contiguous in
+        // the file is read with one call instead of one per strip. `raw` is
+        // filled in strip order, so a contiguous source run lands in a
+        // contiguous destination slice — the same bytes, no extra copy, just far
+        // fewer reads. Writers lay strips down back to back, so in practice a
+        // whole page is one run: a 4096² u16 page goes from ~68 reads to 1.
+        //
+        // This is for the network mount (§15). Each read there is a round trip,
+        // and the kernel can only keep readahead RPCs in flight *within* one
+        // request — 68 small blocking reads give it one read's worth of work at
+        // a time. Contiguous runs only: bridging a gap would mean fetching bytes
+        // we then discard, and the mount is shared, so that spends someone
+        // else's bandwidth to save our round trip.
+        let strips = offsets.len().min(p.strip_counts.len());
+        let mut at = 0usize; // write cursor into `raw`
+        let mut run_start = 0usize; // where the run being accumulated began
+        let mut run_off = 0u64; // its offset in the file
+        for i in 0..strips {
+            let (off, n) = (offsets[i], p.strip_counts[i]);
+            if at == run_start {
+                run_off = off; // first strip of a fresh run
+            }
+            at += n as usize;
+            // Flush unless the next strip starts exactly where this one ends.
+            if i + 1 == strips || off + n != offsets[i + 1] {
+                read_at(&self.file, run_off, &mut raw[run_start..at])?;
+                run_start = at;
+            }
         }
 
         let be = self.big_endian;
@@ -412,13 +436,13 @@ impl FastScan {
         let (cw, fw) = (self.count_width(), self.field_width());
         let es = 4 + 2 * fw; // entry size
         let mut cb = [0u8; 8];
-        read_at(&mut self.file, off, &mut cb[..cw as usize])?;
+        read_at(&self.file, off, &mut cb[..cw as usize])?;
         let n = self.read_count(&cb);
         if n != self.template.entries {
             return None;
         }
         let mut next = [0u8; 8];
-        read_at(&mut self.file, off + cw + n * es as u64, &mut next[..fw])?;
+        read_at(&self.file, off + cw + n * es as u64, &mut next[..fw])?;
         Some(self.read_field(&next))
     }
 
@@ -433,13 +457,13 @@ impl FastScan {
             return None;
         }
         let mut cb = [0u8; 8];
-        read_at(&mut self.file, off, &mut cb[..cw as usize])?;
+        read_at(&self.file, off, &mut cb[..cw as usize])?;
         let n = self.read_count(&cb);
         if n == 0 || n > 4096 {
             return None;
         }
         let mut buf = vec![0u8; n as usize * es + fw]; // entries + next-IFD pointer
-        read_at(&mut self.file, off + cw, &mut buf)?;
+        read_at(&self.file, off + cw, &mut buf)?;
 
         let mut p = PageIfd {
             entries: n,
@@ -511,7 +535,7 @@ impl FastScan {
         } else {
             let off = self.read_field(val);
             let mut buf = vec![0u8; total];
-            read_at(&mut self.file, off, &mut buf)?;
+            read_at(&self.file, off, &mut buf)?;
             inline = buf;
             &inline
         };
@@ -615,9 +639,40 @@ fn offsets_at_stride(offs: &[u64], base: &[u64], shift: u64) -> bool {
 
 /// Read exactly `buf.len()` bytes at absolute `off`. `None` on any short read
 /// or I/O error — validation treats both as "not a valid page there".
-fn read_at(file: &mut File, off: u64, buf: &mut [u8]) -> Option<()> {
-    file.seek(SeekFrom::Start(off)).ok()?;
-    file.read_exact(buf).ok()
+///
+/// A **positional** read: it carries the offset with the request instead of
+/// seeking first, so it is one syscall rather than two and leaves no file
+/// cursor. Taking `&File` (not `&mut File`) is the load-bearing part — it means
+/// one handle can serve several readers at once, which is what lets the
+/// per-file offset scans run in parallel (§4) without opening a handle each.
+fn read_at(file: &File, off: u64, buf: &mut [u8]) -> Option<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buf, off).ok()
+    }
+    #[cfg(windows)]
+    {
+        // `seek_read` is positional but may return short, so loop to fill.
+        use std::os::windows::fs::FileExt;
+        let mut done = 0usize;
+        while done < buf.len() {
+            match file.seek_read(&mut buf[done..], off + done as u64) {
+                Ok(0) => return None, // EOF before the buffer was filled
+                Ok(n) => done += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return None,
+            }
+        }
+        Some(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = file;
+        file.seek(SeekFrom::Start(off)).ok()?;
+        file.read_exact(buf).ok()
+    }
 }
 
 fn get_u16(b: &[u8], big_endian: bool) -> u16 {
@@ -1097,5 +1152,82 @@ mod tests {
         // Past the total page count: cancelled, nothing changes.
         assert!(fast_jump(&mut media, 10).is_err());
         assert_eq!(media.frame_count(), 6);
+    }
+
+    #[test]
+    fn multistrip_pages_match_the_tiff_crate() {
+        // 1024² u16 is past the encoder's ~1 MB strip target, so each page is
+        // written as several strips — the layout `decode_strips` coalesces.
+        // Ground truth is the `tiff` crate decoding the same page, which shares
+        // no code with the raw reader.
+        let dir = fixture_dir("fastscan_strips");
+        let path = dir.join("strips.tif");
+        write_multipage_tiff_u16(&path, &[[1024, 1024]; 3]);
+
+        let mut scan = FastScan::open(&path).expect("uniform pages measure");
+        assert!(
+            scan.template.strip_offsets.len() > 1,
+            "fixture must be multi-strip to exercise run coalescing"
+        );
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(file)).unwrap();
+        for k in [0usize, 1, 2] {
+            let fast = scan.read_page(k).expect("page reads at prediction");
+            dec.seek_to_image(k).unwrap();
+            let want = match dec.read_image().unwrap() {
+                tiff::decoder::DecodingResult::U16(v) => v,
+                other => panic!(
+                    "unexpected sample type: {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            };
+            assert_eq!(u16s(&fast), &want[..], "page {k} must match the tiff crate");
+        }
+    }
+
+    #[test]
+    fn strip_runs_read_the_same_bytes_however_they_split() {
+        // `decode_strips` merges file-contiguous strips into one read. Whatever
+        // way a page's strips happen to split into runs, the bytes it assembles
+        // must equal a naive strip-by-strip read — that equivalence is the whole
+        // correctness claim, so exercise every shape of split.
+        let dir = fixture_dir("fastscan_runs");
+        let path = dir.join("src.tif");
+        write_multipage_tiff_u16(&path, &[[64, 64]; 2]); // just a byte source
+        let mut scan = FastScan::open(&path).unwrap();
+
+        let cases: [(&str, Vec<u64>, Vec<u64>); 5] = [
+            ("one run", vec![64, 74, 84], vec![10, 10, 10]),
+            ("all disjoint", vec![300, 100, 700], vec![10, 10, 10]),
+            ("joined then split", vec![64, 74, 500], vec![10, 10, 10]),
+            ("split then joined", vec![500, 64, 74], vec![10, 10, 10]),
+            ("single strip", vec![128], vec![30]),
+        ];
+        for (name, offsets, counts) in cases {
+            let p = PageIfd {
+                width: 30,
+                height: 1,
+                bits: vec![8],
+                strip_offsets: offsets.clone(),
+                strip_counts: counts.clone(),
+                ..PageIfd::default()
+            };
+
+            // Reference: one read per strip, concatenated in strip order.
+            let mut want = Vec::new();
+            let f = std::fs::File::open(&path).unwrap();
+            for (o, n) in offsets.iter().zip(&counts) {
+                let mut b = vec![0u8; *n as usize];
+                read_at(&f, *o, &mut b).expect("reference read");
+                want.extend_from_slice(&b);
+            }
+
+            let got = scan.decode_strips(&p, &offsets).expect("decodes");
+            match &got.samples {
+                Samples::U8(v) => assert_eq!(v, &want, "{name}"),
+                _ => panic!("expected u8 samples for {name}"),
+            }
+        }
     }
 }
