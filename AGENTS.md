@@ -1278,6 +1278,12 @@ net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
 
 - **Commits:** small, one concern; imperative summary + a short *why*. Committed
   directly to `main`.
+- **Always `cargo fmt` before committing** — the whole tree is rustfmt-clean
+  (default settings, no `rustfmt.toml`), so `cargo fmt --check` must pass on every
+  commit. Formatting-only churn then never rides along with a real change.
+- **`cargo clippy --all-targets` is expected to be silent.** Fix the warning where
+  there's a real fix; where the lint is wrong for this code, `#[allow(…)]` it *with
+  a comment saying why* (see the `large_enum_variant` allows).
 - **Build target:** Windows, debug, during development.
 - **Style:** match surrounding code (comment density, naming, `pub(super)` methods,
   free helpers in `app/mod.rs`).

@@ -87,9 +87,7 @@ pub fn probe_video(path: &Path) -> Result<VideoMeta> {
         None => count_packets(path)
             .or_else(|| meta.duration.map(|d| (d * meta.fps).round() as usize))
             .filter(|&n| n > 0)
-            .ok_or_else(|| {
-                anyhow!("could not determine frame count of {}", path.display())
-            })?,
+            .ok_or_else(|| anyhow!("could not determine frame count of {}", path.display()))?,
     };
     Ok(VideoMeta {
         size: meta.size,

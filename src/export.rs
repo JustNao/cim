@@ -1887,6 +1887,10 @@ mod tests {
         plan.compose(0);
         assert_eq!(plan.panes[0].window, Some(want0), "frame 0 window");
         plan.compose(1);
-        assert_eq!(plan.panes[0].window, Some(want1), "frame 1 window recomputed");
+        assert_eq!(
+            plan.panes[0].window,
+            Some(want1),
+            "frame 1 window recomputed"
+        );
     }
 }

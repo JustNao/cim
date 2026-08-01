@@ -607,7 +607,8 @@ impl CimApp {
         let contrast = self.contrast_of(c);
         let tone = self.tone_of(c);
         // Clip percentile, or None = full range (also for LUT_ALPHA's own contrast).
-        let clip = (contrast != ContrastMode::LutAlpha && tone.clip.enabled).then_some(tone.clip.percent);
+        let clip =
+            (contrast != ContrastMode::LutAlpha && tone.clip.enabled).then_some(tone.clip.percent);
         // Region the Control's bounds are computed over, mirroring the precedence
         // in `own_tone_bounds`: the export crop while the panel is open, else its
         // stats region when region-tone is on; never for LUT_ALPHA.
@@ -907,8 +908,14 @@ impl CimApp {
             Some(reg) => {
                 let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
                 let uv = Rect::from_min_max(
-                    Pos2::new((reg.min.x / iw).clamp(0.0, 1.0), (reg.min.y / ih).clamp(0.0, 1.0)),
-                    Pos2::new((reg.max.x / iw).clamp(0.0, 1.0), (reg.max.y / ih).clamp(0.0, 1.0)),
+                    Pos2::new(
+                        (reg.min.x / iw).clamp(0.0, 1.0),
+                        (reg.min.y / ih).clamp(0.0, 1.0),
+                    ),
+                    Pos2::new(
+                        (reg.max.x / iw).clamp(0.0, 1.0),
+                        (reg.max.y / ih).clamp(0.0, 1.0),
+                    ),
                 );
                 (reg.width() / reg.height().max(1.0), uv)
             }
@@ -1250,7 +1257,11 @@ mod tests {
         let ink = lb.alpha.iter().filter(|&&a| a > 0).count();
         assert!(ink > 0, "rasterized label has no ink");
         // The glyph box is a line height tall — near the requested 32 px.
-        assert!((16..=64).contains(&lb.h), "unexpected label height {}", lb.h);
+        assert!(
+            (16..=64).contains(&lb.h),
+            "unexpected label height {}",
+            lb.h
+        );
         // Blank text draws nothing at all.
         assert!(rasterize_label(&ctx, "   ", 32.0).is_none());
     }
