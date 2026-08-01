@@ -20,6 +20,11 @@ pub(super) struct ExportRun {
     path: String,
 }
 
+/// What `export_control_snapshot` hands to `ExportPlan::set_share_clip_control`:
+/// the Control media's `(source, frame count, temporal sync, own frame, clip
+/// percentile, region)`.
+type ControlSnapshot = (ExportSource, usize, bool, usize, Option<f32>, Option<Rect>);
+
 /// What the current output name exports to (chosen by its file extension).
 #[derive(PartialEq)]
 enum ExportFormat {
@@ -156,33 +161,6 @@ fn rasterize_label(ctx: &egui::Context, text: &str, size_px: f32) -> Option<Labe
         }
     }
     Some(LabelBitmap { w, h, alpha })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The label rasterizer really pulls glyph coverage out of egui's font
-    /// atlas: non-empty ink, and a bitmap about the requested pixel height.
-    #[test]
-    fn rasterizes_text_from_the_font_atlas() {
-        let ctx = egui::Context::default();
-        // One frame so the fonts exist (they're built on the first pass).
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
-        let lb = rasterize_label(&ctx, "Reference", 32.0).expect("no bitmap");
-        assert!(lb.w > 0 && lb.h > 0);
-        assert_eq!(lb.alpha.len(), lb.w * lb.h);
-        let ink = lb.alpha.iter().filter(|&&a| a > 0).count();
-        assert!(ink > 0, "rasterized label has no ink");
-        // The glyph box is a line height tall — near the requested 32 px.
-        assert!(
-            (16..=64).contains(&lb.h),
-            "unexpected label height {}",
-            lb.h
-        );
-        // Blank text draws nothing at all.
-        assert!(rasterize_label(&ctx, "   ", 32.0).is_none());
-    }
 }
 
 /// Human-readable name of a label position (the 3×3 selector's hover text).
@@ -617,12 +595,10 @@ impl CimApp {
     }
 
     /// Snapshot the Control media's tone inputs for the export's per-frame
-    /// Share-clip window: its source, temporal sync/frame, and the clip percentile
-    /// + region that reproduce `own_tone_bounds`. `None` only when there are no
-    /// panes.
-    fn export_control_snapshot(
-        &self,
-    ) -> Option<(ExportSource, usize, bool, usize, Option<f32>, Option<Rect>)> {
+    /// Share-clip window: its source, temporal sync/frame, plus the clip
+    /// percentile and region that reproduce `own_tone_bounds`. `None` only when
+    /// there are no panes.
+    fn export_control_snapshot(&self) -> Option<ControlSnapshot> {
         if self.panes.is_empty() {
             return None;
         }
@@ -1212,13 +1188,12 @@ impl CimApp {
                     );
                 });
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{}",
-                        &std::env::current_dir()
+                    egui::RichText::new(
+                        std::env::current_dir()
                             .unwrap_or_default()
                             .display()
                             .to_string(),
-                    ))
+                    )
                     .weak()
                     .small(),
                 );
@@ -1255,5 +1230,28 @@ impl CimApp {
             self.cancel_region_select();
         }
         self.export.show = open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label rasterizer really pulls glyph coverage out of egui's font
+    /// atlas: non-empty ink, and a bitmap about the requested pixel height.
+    #[test]
+    fn rasterizes_text_from_the_font_atlas() {
+        let ctx = egui::Context::default();
+        // One frame so the fonts exist (they're built on the first pass).
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let lb = rasterize_label(&ctx, "Reference", 32.0).expect("no bitmap");
+        assert!(lb.w > 0 && lb.h > 0);
+        assert_eq!(lb.alpha.len(), lb.w * lb.h);
+        let ink = lb.alpha.iter().filter(|&&a| a > 0).count();
+        assert!(ink > 0, "rasterized label has no ink");
+        // The glyph box is a line height tall — near the requested 32 px.
+        assert!((16..=64).contains(&lb.h), "unexpected label height {}", lb.h);
+        // Blank text draws nothing at all.
+        assert!(rasterize_label(&ctx, "   ", 32.0).is_none());
     }
 }

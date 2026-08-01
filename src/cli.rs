@@ -25,6 +25,9 @@ pub const LOADABLE_EXTS: &[&str] = &["tif", "tiff", "png", "jpg", "jpeg", "bmp",
 pub const VIDEO_EXTS: &[&str] = &["mp4", "avi"];
 
 /// Outcome of parsing argv.
+// One of these exists, once, at startup: boxing `Run`'s payload to even out the
+// variants would buy an allocation and an indirection for nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Cli {
     /// Launch the GUI, opening these inputs at the initial view described by
     /// `view` (empty unless `--mode`/`--zoom`/… were given).

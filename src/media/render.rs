@@ -663,7 +663,7 @@ mod tests {
             f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half),
             [2, 1]
         );
-        assert_eq!(half.len(), 2 * 1 * 4);
+        assert_eq!(half.len(), 2 * 4); // 2x1 RGBA
         assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
 

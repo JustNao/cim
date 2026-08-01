@@ -59,6 +59,9 @@ pub enum Decoded {
 /// Either persistent reader kind a pane's file can need: a TIFF's `SeqReader`
 /// (warm IFD offsets) or a video's `VideoReader` (a streaming ffmpeg child). A
 /// key only ever maps to one kind — reload/close call `forget` first.
+// Boxing the larger variant would only move a per-open-file, long-lived reader
+// (already behind an `Arc<Mutex<_>>`) behind one more pointer.
+#[allow(clippy::large_enum_variant)]
 enum Reader {
     Tiff(SeqReader),
     Video(VideoReader),

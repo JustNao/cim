@@ -349,19 +349,14 @@ mod tests {
         // Walk pages the way the app does until a probe finds nothing.
         let mut reader = SeqReader::open(&path).expect("open");
         let mut pages = 0;
-        loop {
-            match reader.decode(pages).expect("decode") {
-                Some(frame) => {
-                    // Per-page native size and values survive the round trip.
-                    let [w, h] = frame.size;
-                    assert_eq!(
-                        frame.sample(0),
-                        gray16_page(w, h, pages as u16 * 1000)[0] as u32
-                    );
-                    pages += 1;
-                }
-                None => break,
-            }
+        while let Some(frame) = reader.decode(pages).expect("decode") {
+            // Per-page native size and values survive the round trip.
+            let [w, h] = frame.size;
+            assert_eq!(
+                frame.sample(0),
+                gray16_page(w, h, pages as u16 * 1000)[0] as u32
+            );
+            pages += 1;
         }
         assert_eq!(pages, 3, "all written pages decode");
         // Probing exactly at the end reports None, not an error.

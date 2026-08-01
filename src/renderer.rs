@@ -154,8 +154,7 @@ impl Worker {
         // 16-bit render) — identical to the export path by construction.
         let (lut_time, ops_time) = self.ops.render_display(
             &job.data,
-            job.lo,
-            job.hi,
+            (job.lo, job.hi),
             job.lut_alpha,
             job.details,
             &mut self.lut,

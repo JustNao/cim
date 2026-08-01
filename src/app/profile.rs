@@ -147,8 +147,10 @@ impl CimApp {
                 }
             }
         }
-        if !(ymax > ymin) {
-            // No data, or a perfectly flat line: give the axis a unit span.
+        // No data (the ±∞ seeds survive), or a perfectly flat line: give the axis
+        // a unit span. Only finite samples are folded in above, so neither end can
+        // be NaN and a plain `<=` is the whole test.
+        if ymax <= ymin {
             if ymin.is_finite() {
                 ymax = ymin + 1.0;
             } else {
@@ -371,7 +373,9 @@ fn fmt_tick(v: f32) -> String {
 /// "Nice" evenly spaced tick values spanning `[min, max]` (roughly `target`
 /// of them), rounded to 1/2/5 × 10ⁿ so the labels read cleanly.
 fn nice_ticks(min: f32, max: f32, target: usize) -> Vec<f32> {
-    if !(max > min) {
+    // Both ends are finite by construction (the plot's own axis ranges), so an
+    // empty or inverted span is the only degenerate case to guard.
+    if max <= min {
         return vec![min];
     }
     let range = nice_num(max - min, false);

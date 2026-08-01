@@ -127,7 +127,7 @@ pub fn sign_paths(paths: &[PathBuf]) -> Option<FileSig> {
         // on close); fold it in, but don't rely on it (an mmap writer may lag).
         if let Ok(d) = m.modified().and_then(|mt| {
             mt.duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .map_err(std::io::Error::other)
         }) {
             hasher.write_u128(d.as_nanos());
         }

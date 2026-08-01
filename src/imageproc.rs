@@ -294,7 +294,7 @@ impl PaneOps {
     /// pixel-for-pixel.
     pub fn apply(
         &mut self,
-        gray: &mut Vec<u16>,
+        gray: &mut [u16],
         width: usize,
         height: usize,
         lut_alpha: bool,
@@ -311,7 +311,8 @@ impl PaneOps {
         }
     }
 
-    /// Build a frame's 8-bit display RGBA into `out`, running the proprietary
+    /// Build a frame's 8-bit display RGBA into `out` for the display window
+    /// `(lo, hi)`, running the proprietary
     /// operators when they're active for this frame/tone (`ops_active`): render a
     /// single-channel 16-bit buffer at full precision, `apply` the operators in
     /// place, then expand the grey back to RGBA. When they're not active, fall
@@ -325,8 +326,7 @@ impl PaneOps {
     pub fn render_display(
         &mut self,
         frame: &crate::media::FrameData,
-        lo: f32,
-        hi: f32,
+        (lo, hi): (f32, f32),
         lut_alpha: bool,
         details: bool,
         lut: &mut crate::media::ToneLut,

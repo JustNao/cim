@@ -45,6 +45,9 @@ pub enum ExportSource {
 }
 
 /// Either persistent reader kind an export pane/overlay can hold.
+// As in `decoder::Reader`: one long-lived reader per export pane, so evening out
+// the variants would just add an indirection on every decode.
+#[allow(clippy::large_enum_variant)]
 enum ExportReader {
     Tiff(SeqReader),
     Video(VideoReader),
@@ -421,7 +424,7 @@ impl ExportPane {
         let [fw, fh] = frame.size;
         let cropped;
         let sub: &FrameData = if x0 == 0 && y0 == 0 && cw == fw && ch == fh {
-            &*frame
+            &frame
         } else {
             cropped = frame.crop(x0, y0, cw, ch);
             &cropped
@@ -456,8 +459,7 @@ impl ExportPane {
                 // precision 16-bit render) — identical to the live view by construction.
                 self.ops.render_display(
                     sub,
-                    lo,
-                    hi,
+                    (lo, hi),
                     self.contrast == ContrastMode::LutAlpha,
                     self.details,
                     &mut self.lut,
@@ -1622,8 +1624,9 @@ mod tests {
     fn crop_to_content_trims_background() {
         // 4×3 buffer, a single opaque pixel at (2,1) surrounded by background.
         let (w, h) = (4usize, 3usize);
-        let mut rgba = vec![BG[0], BG[1], BG[2], 0].repeat(w * h);
-        let i = (1 * w + 2) * 4;
+        let mut rgba = [BG[0], BG[1], BG[2], 0].repeat(w * h);
+        let (px, py) = (2usize, 1usize);
+        let i = (py * w + px) * 4;
         rgba[i..i + 4].copy_from_slice(&[10, 20, 30, 255]);
         let (cw, ch, out) = crop_to_content(&rgba, w, h).expect("has content");
         assert_eq!((cw, ch), (1, 1));
