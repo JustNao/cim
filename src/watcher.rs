@@ -35,7 +35,7 @@ const SAMPLE_WINDOWS: u64 = 16;
 /// Only sample bytes when the source is at most this many files (the single- or
 /// few-file case). A long numbered run stays on the cheap length+mtime path — its
 /// per-frame files are written normally, so their mtime moves.
-const SAMPLE_MAX_FILES: usize = 4;
+pub const SAMPLE_MAX_FILES: usize = 4;
 
 struct SignJob {
     id: u64,

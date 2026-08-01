@@ -23,6 +23,24 @@ impl CimApp {
         }
     }
 
+    /// How often a source made of `files` files is re-signed.
+    ///
+    /// Signing costs one `stat` per file — so the metadata path, cheap per call,
+    /// is what actually scales badly: a 500-file run at `WATCH_POLL` aims 2500
+    /// filesystem calls a second at the server, and on a **shared** network mount
+    /// that is a real cost borne by everyone. Back the interval off in proportion
+    /// to the file count so the call *rate* stays roughly flat, capped by
+    /// `WATCH_POLL_MAX` so the watch still feels like one.
+    ///
+    /// Deliberately not the alternative — signing only a *subset* of a long run's
+    /// files. That would keep the 200 ms cadence but silently stop noticing a
+    /// change to any file left out, trading correctness for latency. Polling all
+    /// of them less often loses neither.
+    fn watch_interval(files: usize) -> f64 {
+        let scale = (files as f64 / crate::watcher::SAMPLE_MAX_FILES as f64).max(1.0);
+        (WATCH_POLL.as_secs_f64() * scale).min(WATCH_POLL_MAX.as_secs_f64())
+    }
+
     /// Re-baseline pane `i`'s watch to whatever is on disk *now*, discarding any
     /// signature already in flight (which measured the previous contents). Used
     /// when the watch is switched on and after a reload, so neither event makes
@@ -94,10 +112,44 @@ impl CimApp {
             let Some(paths) = Self::watch_paths(&self.panes[i].source) else {
                 continue;
             };
+            // A long run signs far more slowly than a lone file — see
+            // `watch_interval`. The global gate above only caps how often we get
+            // *here*; this is the per-source rate.
+            if now - self.panes[i].watch.polled_at < Self::watch_interval(paths.len()) {
+                continue;
+            }
+            self.panes[i].watch.polled_at = now;
             self.watch_gen += 1;
             let gen = self.watch_gen;
             self.panes[i].watch.inflight = Some(gen);
             self.watcher.request(self.panes[i].id, gen, paths);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_backs_off_with_the_file_count() {
+        let poll = WATCH_POLL.as_secs_f64();
+        let cap = WATCH_POLL_MAX.as_secs_f64();
+
+        // A small source keeps the full cadence: one or a few stats per poll is
+        // nothing, and this is the case auto-reload actually exists for.
+        for files in [0, 1, 2, crate::watcher::SAMPLE_MAX_FILES] {
+            assert_eq!(CimApp::watch_interval(files), poll, "{files} files");
+        }
+
+        // Past that it backs off in proportion, so the *rate* of filesystem
+        // calls stays flat rather than scaling with the run length.
+        let files = crate::watcher::SAMPLE_MAX_FILES * 4;
+        assert_eq!(CimApp::watch_interval(files), poll * 4.0);
+        let rate = |n: usize| n as f64 / CimApp::watch_interval(n);
+        assert!((rate(files) - rate(crate::watcher::SAMPLE_MAX_FILES)).abs() < 1e-9);
+
+        // ...but never past the cap, so a watch stays a watch.
+        assert_eq!(CimApp::watch_interval(100_000), cap);
     }
 }

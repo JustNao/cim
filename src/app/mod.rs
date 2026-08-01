@@ -112,6 +112,15 @@ const STATUS_TTL: f64 = 10.0;
 /// far faster than this while the user is interacting.
 const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Ceiling on the per-pane signing interval, which backs off with the number of
+/// files a source has (`CimApp::watch_interval`). Signing costs one `stat` per
+/// file, so the *cheap* metadata path is the expensive one for a long numbered
+/// run — 500 files at `WATCH_POLL` is 2500 filesystem calls a second aimed at a
+/// shared network server. Backing off keeps the call *rate* roughly flat instead
+/// of scaling with the run length, while this cap keeps auto-reload reactive
+/// enough to still feel like a watch.
+const WATCH_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(2000);
+
 /// A watched file's contents must stay unchanged for this long after a change
 /// before it's reloaded — a debounce so a file still being written externally
 /// (e.g. overwritten frame-by-frame) isn't read half-finished. Each further
@@ -653,6 +662,11 @@ struct Watch {
     /// matches — because a reload or the toggle re-baselined the watch meanwhile —
     /// is discarded, since it measured contents that are no longer the baseline.
     inflight: Option<u64>,
+    /// When this pane's source was last *requested* to be signed. Per pane, not
+    /// global, because the interval scales with the source's file count
+    /// (`CimApp::watch_interval`) — a lone TIFF keeps polling at `WATCH_POLL`
+    /// while a long run alongside it backs off.
+    polled_at: f64,
 }
 
 /// A pane's background bulk-load mode.
