@@ -93,6 +93,18 @@ impl CimApp {
             {
                 self.show_settings = !self.show_settings;
             }
+            if ui
+                .selectable_label(self.show_help, "Help")
+                .on_hover_text("Mouse and modifier commands (reads help.md)")
+                .clicked()
+            {
+                self.show_help = !self.show_help;
+                // Read the document on the first open, so a Help button that's
+                // never pressed costs no file I/O.
+                if self.show_help && self.help_doc.is_none() {
+                    self.help_doc = Some(super::help::load());
+                }
+            }
             // Pipeline profiler — only offered when launched with CIM_DEBUG=1.
             if crate::debug::enabled()
                 && ui
@@ -1207,21 +1219,26 @@ impl CimApp {
 
                 ui.add_space(8.0);
                 ui.separator();
-                // Settings are written only here — never on exit — so warn while
-                // the live config differs from what's on disk.
-                let dirty = self.config != self.saved_config;
+                // Settings save themselves shortly after an edit settles (see
+                // `autosave_config`), so there's nothing to press — only a way
+                // back to the shipped defaults, which is saved the same way.
                 ui.horizontal(|ui| {
-                    if ui.button("Save settings").clicked() {
-                        self.config.save();
-                        self.saved_config = self.config.clone();
-                        self.status.set("Settings saved");
+                    if ui
+                        .button("Reset to defaults")
+                        .on_hover_text(
+                            "Restore every setting above — including the keyboard \
+                             shortcuts — to its default.",
+                        )
+                        .clicked()
+                    {
+                        self.config = Config::default();
+                        self.status.set("Settings reset to defaults");
                     }
-                    if dirty {
-                        ui.label(
-                            egui::RichText::new("⚠ Unsaved changes — not written until you save")
-                                .color(Color32::from_rgb(240, 200, 120)),
-                        );
-                    }
+                    ui.label(
+                        egui::RichText::new("Changes are saved automatically.")
+                            .weak()
+                            .small(),
+                    );
                 });
             });
         self.show_settings = open;

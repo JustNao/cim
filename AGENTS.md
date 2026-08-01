@@ -33,6 +33,9 @@
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
   drag-handle grip — render instead of tofu).
+- **`help.md` is *not* embedded** — the toolbar's **Help** window reads it from disk
+  (beside the executable, else the working dir) so it can be edited or replaced per
+  deployment without a rebuild; CI ships it next to the binaries (§12).
 - **`.exe` icon (`build.rs`):** on Windows the same `assets/icon.png` is re-encoded
   to a 256×256 `.ico` in `OUT_DIR` and embedded as a Windows resource via
   `winresource` (needs the SDK resource compiler `rc.exe`), so the file/taskbar icon
@@ -119,6 +122,8 @@ src/
                  `drop_target` + `remap_move`), settings, view-command, frame bar.
     profile.rs   The Line-profile plot window.
     export_ui.rs Export panel UI + building ExportPlan from live app state.
+    help.rs      The Help window: loads the **external** `help.md` and renders a
+                 small Markdown subset (§12).
 ```
 
 `CimApp`'s methods live in sibling `impl` blocks marked `pub(super)`; shared types
@@ -1175,9 +1180,26 @@ Settings; empty = the `LIBS` folder next to the cim executable, else by name via
 auto — §5),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
-start; **written only on an explicit "Save settings"** (never on exit). `config` is
-edited live while `saved_config` holds the on-disk copy; Settings shows an **"Unsaved
-changes"** warning whenever they differ (`config != saved_config`, needing `PartialEq`).
+start; **written automatically** once an edit settles — there is no Save button.
+`config` is edited live by the widgets, so `CimApp::autosave_config` (run each `update`)
+notices a change by comparing against `seen_config`, arms `autosave_at` for
+`CONFIG_AUTOSAVE_DEBOUNCE` (0.5 s), and writes on expiry only if `config != saved_config`
+(the on-disk copy) — the debounce is what keeps a slider drag from rewriting the JSON every
+frame, and the comparisons need `PartialEq`. It requests a repaint at the deadline so an
+otherwise-idle app still writes. Settings' footer offers only **Reset to defaults**
+(`Config::default()`, keybindings included), which is then saved the same way.
+
+**Help window** (`app/help.rs`, toolbar **Help** button, no keybinding). Renders an
+**external `help.md`** — looked for beside the executable first (how a release is laid
+out, mirroring `LIBS`), then in the working directory; read on the **first open** (so an
+unused button costs no I/O) and re-read by the window's **Reload** button, cached in
+`CimApp.help_doc` as `Result<String, String>` (the error names every path tried). Only a
+deliberate Markdown subset is rendered — `#`/`##`/`###`, `-`/`*` bullets (one nesting
+level), fenced code, `---`, and inline `**bold**` / `*italic*` / `` `code` `` — each line's
+inline spans laid out as **one `LayoutJob`** so mixed styles wrap as a paragraph; anything
+else shows as plain text rather than being dropped. It documents what Settings can't: the
+**mouse/modifier** commands (§9), since the keyboard shortcuts are already listed and
+rebindable there.
 New `bool`/scalar fields take a `#[serde(default = …)]` so an older saved config still
 loads.
 
@@ -1234,11 +1256,12 @@ re-renders and commits in the same lock-step group as the other panes, never dra
 between the two; `refresh_textures`
 (stage on-screen panes and, when all ready, flip them + commit a playback step — runs last so
 it sees settled frame/tone state, just before drawing reads the textures); expire
-the transient `status` note; draw the central panel (always the **whole window** —
+the transient `status` note and `autosave_config` (write a settled Settings edit, §12);
+draw the central panel (always the **whole window** —
 the toolbar and bottom frame bar are anchored `Area` **overlays** floating over its
 top/bottom edges, not layout panels, so hiding them via `Action::ToggleChrome` never
 reflows the images; the frame bar shows whenever **any** media is a sequence), the
-compute draft, windows (manager/export/settings/view-command), error popup, the
+compute draft, windows (manager/export/settings/view-command/help), error popup, the
 **">8 sequences" resource warning** (`pending_open` — Open anyway → `commit_open`,
 Quit → close); apply deferred actions; `export_tick`; then a **paced repaint**.
 
@@ -1402,7 +1425,8 @@ anchor survives an in-place rewrite and is refused by a reshaped file, which the
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
 results can't truncate a sequence** (a batch's misses delivered before the hits ahead of
-them — the ordering `probe_ahead` can genuinely produce); `palette` endpoints /
+them — the ordering `probe_ahead` can genuinely produce); `app::help` inline-span parsing (every character of a line survives, an
+unterminated marker stays literal); `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated),

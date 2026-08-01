@@ -18,7 +18,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: cim-windows-x86_64
-          path: target/release/cim.exe
+          # help.md rides along: the Help window reads it from beside the
+          # executable, so a release without it has no help to show.
+          path: |
+            target/release/cim.exe
+            help.md
           if-no-files-found: error
 
   linux-glibc228:
@@ -37,5 +41,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: cim-linux-x86_64-glibc2.28
-          path: target/linux/release/cim
+          path: |
+            target/linux/release/cim
+            help.md
           if-no-files-found: error

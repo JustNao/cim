@@ -21,6 +21,7 @@ mod watch;
 use util::*;
 mod decode;
 mod export_ui;
+mod help;
 mod input;
 mod panels;
 mod profile;
@@ -103,6 +104,12 @@ const ASYNC_RENDER_PIXELS: usize = 1 << 20;
 /// How long a transient status notification (top toolbar, far right) stays up
 /// before it auto-clears.
 const STATUS_TTL: f64 = 10.0;
+
+/// How long the config must stay unchanged before it's written to disk. Settings
+/// have no Save button — every edit is persisted for you — so this debounce is
+/// what keeps dragging a slider from writing the JSON on every frame; the write
+/// happens once, shortly after the value settles. See `autosave_config`.
+const CONFIG_AUTOSAVE_DEBOUNCE: f64 = 0.5;
 
 /// How often a **watched** pane's source file(s) are signed for changes (also the
 /// idle wake-up interval while any pane is watching). Kept moderate to stay
@@ -693,11 +700,17 @@ enum Eager {
 
 pub struct CimApp {
     config: Config,
-    /// The config as last written to disk. `config` is edited live; the two
-    /// differ while there are unsaved Settings changes (surfaced as a warning),
-    /// and the config is written only on an explicit **Save settings** — never
-    /// on exit.
+    /// The config as last written to disk. `config` is edited live and written
+    /// back automatically once an edit settles (`autosave_config`); this is the
+    /// on-disk copy, so a write is skipped when nothing actually differs.
     saved_config: Config,
+    /// The config as of the previous frame, used only to notice *that* an edit
+    /// happened (the widgets write straight into `config`, so there's no single
+    /// place to hook). A change re-arms `autosave_at`.
+    seen_config: Config,
+    /// When the pending config write is due — `CONFIG_AUTOSAVE_DEBOUNCE` after
+    /// the last edit. `None` when nothing is waiting to be written.
+    autosave_at: Option<f64>,
     panes: Vec<Pane>,
     next_id: u64,
 
@@ -749,6 +762,12 @@ pub struct CimApp {
     /// The "View command" window: shows a `cim …` line that reopens the current
     /// files at the current view, for copying / sharing.
     show_viewcmd: bool,
+    /// The Help window, rendering the external `help.md` (see [`help`]).
+    show_help: bool,
+    /// The loaded help document (`Ok` text, or the error explaining where it was
+    /// looked for), read on first open and re-read by the window's Reload button
+    /// — so editing `help.md` doesn't need a restart.
+    help_doc: Option<Result<String, String>>,
     rebinding: Option<Action>,
     /// A Compute pane's in-pane **Compute** / **Refresh** button was clicked.
     /// Deferred so the recompute runs at the *top* of the next update, before
@@ -1012,6 +1031,8 @@ impl CimApp {
 
         let mut app = Self {
             saved_config: config.clone(),
+            seen_config: config.clone(),
+            autosave_at: None,
             config,
             panes: Vec::new(),
             next_id: 0,
@@ -1036,6 +1057,8 @@ impl CimApp {
             show_manager: false,
             show_transform: false,
             show_viewcmd: false,
+            show_help: false,
+            help_doc: None,
             rebinding: None,
             pending_recompute: None,
             show_stats: true,
@@ -1626,6 +1649,31 @@ impl CimApp {
         }
     }
 
+    /// Persist the config shortly after it stops changing — Settings has no Save
+    /// button, so every edit is written for you. The widgets edit `config` in
+    /// place, so a change is noticed by comparing against `seen_config`; each one
+    /// re-arms the deadline, and only when it expires (and the value really
+    /// differs from what's on disk) is the JSON written. That debounce is the
+    /// point: dragging a slider would otherwise write the file on every frame.
+    fn autosave_config(&mut self, ctx: &egui::Context, now: f64) {
+        if self.config != self.seen_config {
+            self.seen_config = self.config.clone();
+            self.autosave_at = Some(now + CONFIG_AUTOSAVE_DEBOUNCE);
+        }
+        let Some(at) = self.autosave_at else { return };
+        if now < at {
+            // Wake up to write it even if nothing else asks for a repaint.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+            return;
+        }
+        self.autosave_at = None;
+        if self.config != self.saved_config {
+            self.config.save();
+            self.saved_config = self.config.clone();
+            self.status.set("Settings saved");
+        }
+    }
+
     // ---- statistics region ----------------------------------------------
 
     /// Set (or clear) the shared image-space stats region. Bumps `stats_gen` so
@@ -1922,6 +1970,7 @@ impl eframe::App for CimApp {
         if let Some(remaining) = self.status.tick(now, STATUS_TTL) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(remaining));
         }
+        self.autosave_config(ctx, now);
 
         // The toolbar and frame bar are floating overlays (anchored Areas, in a
         // layer above the central panel), not layout panels — so showing or
@@ -2004,6 +2053,9 @@ impl eframe::App for CimApp {
         }
         if self.show_viewcmd {
             self.draw_viewcmd(ctx);
+        }
+        if self.show_help {
+            self.draw_help(ctx);
         }
         if self.show_debug {
             self.draw_debug(ctx);
