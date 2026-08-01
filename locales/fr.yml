@@ -18,13 +18,13 @@ toolbar.compute: Calcul
 toolbar.compute_hover: Ajouter un panneau de calcul
 toolbar.export: Export
 toolbar.export_hover: Exporter la vue courante avec ffmpeg
-toolbar.view_cmd: Cmd vue
+toolbar.view_cmd: Commande
 toolbar.view_cmd_hover: Reproduire la vue courante
 toolbar.settings: Réglages
 toolbar.settings_hover: Ouvrir les réglages
 toolbar.help: Aide
-toolbar.help_hover: Commandes souris et modificateurs (lit help.md)
-toolbar.debug: Débogage
+toolbar.help_hover: Commandes souris et modificateurs
+toolbar.debug: Debug
 toolbar.debug_hover: Temps par étape (lecture → affichage)
 
 # ---- barre de lecture (bas) ------------------------------------------------
@@ -39,7 +39,7 @@ frame_bar.full_hover: Rétablir la plage de boucle sur toute la séquence
 frame_bar.stop: Arrêter
 frame_bar.stop_load_hover: Arrêter le chargement en cours
 frame_bar.stop_seek_hover: Arrêter la recherche de l'image saisie
-frame_bar.load_all: Tout charger
+frame_bar.load_all: Charger contenu
 frame_bar.load_all_hover: >-
   Décoder toutes les images (dans la limite du cache ; le reste se poursuit en
   en-têtes/offsets seulement)
@@ -57,20 +57,20 @@ canvas.empty: Ouvrez des images ou déposez des fichiers ici
 canvas.all_hidden: Tous les médias sont masqués — réactivez-en dans ☰ Médias
 
 # ---- en-tête / pied de panneau ---------------------------------------------
-pane.reload: Recharger
-pane.reload_hover: Recharger ce média depuis le disque
-pane.auto_reload: Auto-rechargement
+pane.reload: Reload
+pane.reload_hover: Reload ce média depuis le disque
+pane.auto_reload: Auto-reload
 pane.auto_reload_on_hover: >-
-  Auto-rechargement actif : recharge quand le fichier change sur le disque.
+  Auto-reload actif : reload quand le fichier change sur le disque.
   Cliquez pour arrêter.
 pane.auto_reload_off_hover: >-
-  Auto-rechargement : surveiller le fichier et le recharger quand il change sur
+  Auto-reload : surveiller le fichier et le reload quand il change sur
   le disque.
 pane.hide: Masquer
 pane.close: Fermer
 pane.sync_pos: pos
 pane.sync_time: temps
-pane.in_memory: "%{n} en mém."
+pane.in_memory: "%{n} en mémoire."
 pane.page_in_file: page %{page} dans ce fichier
 pane.row: lig
 pane.col: col
@@ -306,10 +306,10 @@ settings.frame_cache_frames_hover: >-
   chacun des %{media} médias ouverts (%{size} chacune). Les images libérées ici
   sont relues depuis le disque à leur prochain affichage — bien plus lent sur
   un montage réseau que de les garder en mémoire.
-settings.decode_threads: Fils de décodage
+settings.decode_threads: Threads de décodage
 settings.decode_threads_auto: auto
 settings.decode_threads_hover: >-
-  Fils de décodage d'images partagés par toutes les séquences. 0 = auto (suit
+  Threads de décodage d'images partagés par toutes les séquences. 0 = auto (suit
   le nombre de cœurs, plafonné). Réduisez-le pour laisser du CPU aux autres
   utilisateurs quand plusieurs instances partagent un serveur / hôte VNC.
   Appliqué immédiatement.
