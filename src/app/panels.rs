@@ -1053,6 +1053,15 @@ impl CimApp {
                         "Memory ceiling for decoded frames kept resident across all \
                          sequences; oldest unshown frames are evicted beyond it.",
                     );
+                    // The budget means nothing in the abstract — what matters is
+                    // how many frames it actually holds at this sequence's size.
+                    if let Some(frames) = self.cache_budget_frames() {
+                        ui.weak(format!("≈ {frames} frames")).on_hover_text(
+                            "At the size of the largest frame on screen. Frames evicted \
+                                 here are re-read from disk when shown again — much slower \
+                                 over a network mount than keeping them resident.",
+                        );
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Decode threads");

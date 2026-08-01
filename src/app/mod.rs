@@ -1579,6 +1579,24 @@ impl CimApp {
         self.config.cache_budget_mb.max(1) * 1024 * 1024
     }
 
+    /// Roughly how many frames the cache budget holds, measured against the
+    /// largest frame currently on screen. `None` until something is resident.
+    ///
+    /// Surfaced next to the Settings slider because the budget is meaningless in
+    /// the abstract: at 32 MB a frame — an ordinary 4096² 16-bit page — the
+    /// default 1.5 GiB holds only ~48 of them, so scrubbing or multi-pane
+    /// playback evicts and re-reads constantly. That re-read is the expensive
+    /// kind on a network mount (§15): serving a frame from cache is roughly ten
+    /// times faster than fetching it again, and it costs a shared link nothing.
+    pub(super) fn cache_budget_frames(&self) -> Option<usize> {
+        let largest = (0..self.panes.len())
+            .filter_map(|i| self.panes[i].media.resident(self.frame_disp(i)))
+            .map(|f| f.byte_len())
+            .max()
+            .filter(|&b| b > 0)?;
+        Some((self.cache_budget_bytes() / largest).max(1))
+    }
+
     // ---- statistics region ----------------------------------------------
 
     /// Set (or clear) the shared image-space stats region. Bumps `stats_gen` so
