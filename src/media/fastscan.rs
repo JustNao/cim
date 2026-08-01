@@ -69,6 +69,42 @@ struct PageIfd {
     next: u64,
 }
 
+/// Ceiling on how many IFDs [`offset_jump`] will walk to (re)build an anchor, so
+/// a pathological file can't stall the UI thread — past it the caller falls back
+/// to riding the frontier. Each step is a couple of small header reads, so even
+/// the ceiling is a fraction of a second on a warm file.
+const MAX_ANCHOR_WALK: usize = 100_000;
+
+/// Where one page of a multi-page TIFF sits, remembered so a **reload** can jump
+/// straight back to the frame the user was on instead of rediscovering the pages
+/// before it. Unlike stride prediction ([`FastScan`]) this needs no regular
+/// layout — it pins one page rather than deriving all of them.
+///
+/// The pin is only reused when the reloaded file still matches it: same overall
+/// file shape (length and first-IFD offset), a **byte-identical** page header
+/// still at `offset` (so the same dimensions, format *and* strip positions), and
+/// the page chain still entering it through the same predecessor. That is
+/// precisely the auto-reload case this exists for — a tool overwriting a file in
+/// place with the same layout (`tifffile.memmap`) — and anything structurally
+/// different (a page spliced in, a re-encode, a different file) fails one of the
+/// checks and falls back to the ordinary discovery, so the index can't drift onto
+/// a wrong frame.
+#[derive(Clone)]
+pub struct PageAnchor {
+    /// The frame index this pins. An anchor is only reused for the same index.
+    idx: usize,
+    /// Byte offset of the page's IFD.
+    offset: u64,
+    /// The predecessor page's IFD offset (`None` for page 0), so the chain can be
+    /// checked to still reach `offset`.
+    prev: Option<u64>,
+    /// The page header as it was, compared in full on re-validation.
+    ifd: PageIfd,
+    /// The file's shape when the anchor was taken.
+    ifd0: u64,
+    file_len: u64,
+}
+
 /// A measured regular layout plus its own file handle: page N's IFD is
 /// predicted at `ifd0 + N × stride` and validated against `template` before
 /// anything is trusted. Built by [`FastScan::open`]; the `Err(reason)` strings
@@ -134,6 +170,45 @@ impl FastScan {
     /// pages differing in shape, an irregular stride, or sample layouts the raw
     /// reader can't reproduce bit-exactly.
     pub fn open(path: &Path) -> Result<FastScan, String> {
+        let mut scan = FastScan::open_header(path)?;
+        let ifd0 = scan.ifd0;
+        let p0 = scan.read_ifd(ifd0).ok_or("unreadable first page header")?;
+
+        // Everything prediction (and the raw strip reader) depends on.
+        raw_decodable(&p0)?;
+
+        if p0.next == 0 {
+            return Err("single-page TIFF (no stride to measure)".into());
+        }
+        let p1 = scan
+            .read_ifd(p0.next)
+            .ok_or("unreadable second page header")?;
+        if !p1.same_shape(&p0) {
+            return Err("the first two pages differ in size or format".into());
+        }
+        if p0.next <= ifd0 {
+            return Err("pages aren't laid out forward in the file".into());
+        }
+        let stride = p0.next - ifd0;
+        // The data must ride the same stride as the IFDs, and page 2 (if any)
+        // must continue it — one irregular writer quirk and prediction is off.
+        if !offsets_at_stride(&p1.strip_offsets, &p0.strip_offsets, stride)
+            || (p1.next != 0 && p1.next != ifd0 + 2 * stride)
+        {
+            return Err("irregular page placement (positions can't be predicted)".into());
+        }
+
+        scan.stride = stride;
+        scan.template = p0;
+        Ok(scan)
+    }
+
+    /// Parse just the TIFF header (byte order, classic vs BigTIFF, first-IFD
+    /// offset) — everything needed to read IFDs, with **no** layout requirement.
+    /// `stride`/`template` are left unset: only the stride-prediction methods
+    /// (`predicted`/`validate`/`read_page`/`page_count`) need them, and the
+    /// offset-anchored path (`offset_jump`) works without either.
+    fn open_header(path: &Path) -> Result<FastScan, String> {
         let mut file = File::open(path).map_err(|e| format!("can't open the file: {e}"))?;
         let file_len = file
             .metadata()
@@ -164,72 +239,15 @@ impl FastScan {
             _ => return Err("not a TIFF file".into()),
         };
 
-        let mut scan = FastScan {
+        Ok(FastScan {
             file,
             file_len,
             big_endian,
             big,
             ifd0,
-            stride: 0,                    // measured below
-            template: PageIfd::default(), // replaced below
-        };
-        let p0 = scan.read_ifd(ifd0).ok_or("unreadable first page header")?;
-
-        // Everything prediction (and the raw strip reader) depends on.
-        if p0.tiled {
-            return Err("pages are tiled".into());
-        }
-        if p0.compression != 1 || p0.predictor != 1 {
-            return Err("pages are compressed (no fixed byte stride)".into());
-        }
-        if p0.planar != 1 {
-            return Err("pages use planar (non-interleaved) storage".into());
-        }
-        if !matches!(p0.photometric, 1 | 2) {
-            return Err("unsupported photometric interpretation".into());
-        }
-        if !matches!(p0.spp, 1 | 3 | 4) {
-            return Err("unsupported channel count".into());
-        }
-        let bits = p0.bits.first().copied().unwrap_or(0);
-        if p0.bits.iter().any(|&b| b != bits) {
-            return Err("channels differ in bit depth".into());
-        }
-        match (bits, p0.sample_format) {
-            (8 | 16, 1) | (32, 1) | (32, 3) => {}
-            _ => return Err("unsupported bit depth or sample format".into()),
-        }
-        // Uncompressed strips must add up to exactly width × height × bytes; a
-        // mismatch means padding or a layout the raw reader would misread.
-        let expect = p0.width as u64 * p0.height as u64 * p0.spp as u64 * (bits as u64 / 8);
-        if p0.strip_counts.iter().sum::<u64>() != expect {
-            return Err("strip data doesn't match the page dimensions".into());
-        }
-
-        if p0.next == 0 {
-            return Err("single-page TIFF (no stride to measure)".into());
-        }
-        let p1 = scan
-            .read_ifd(p0.next)
-            .ok_or("unreadable second page header")?;
-        if !p1.same_shape(&p0) {
-            return Err("the first two pages differ in size or format".into());
-        }
-        if p0.next <= ifd0 {
-            return Err("pages aren't laid out forward in the file".into());
-        }
-        let stride = p0.next - ifd0;
-        // The data must ride the same stride as the IFDs, and page 2 (if any)
-        // must continue it — one irregular writer quirk and prediction is off.
-        if !offsets_at_stride(&p1.strip_offsets, &p0.strip_offsets, stride)
-            || (p1.next != 0 && p1.next != ifd0 + 2 * stride)
-        {
-            return Err("irregular page placement (positions can't be predicted)".into());
-        }
-
-        scan.stride = stride;
-        scan.template = p0;
-        Ok(scan)
+            stride: 0,                    // measured by `open`
+            template: PageIfd::default(), // replaced by `open`
+        })
     }
 
     /// Predicted byte offset of page `idx`'s IFD.
@@ -270,20 +288,36 @@ impl FastScan {
         if !self.validate(idx) {
             return None;
         }
-        let t = &self.template;
-        let total: u64 = t.strip_counts.iter().sum();
+        // The template's strip positions, shifted by the page's stride offset.
+        let t = self.template.clone();
+        let shift = idx as u64 * self.stride;
+        let offsets: Vec<u64> = t.strip_offsets.iter().map(|o| o + shift).collect();
+        self.decode_strips(&t, &offsets)
+    }
+
+    /// Decode the page described by `p` from its **own** strip positions — the
+    /// offset-anchored counterpart of `read_page` (which shifts the template's).
+    /// The caller must have checked `raw_decodable(p)`.
+    fn decode_ifd(&mut self, p: &PageIfd) -> Option<FrameData> {
+        let offsets = p.strip_offsets.clone();
+        self.decode_strips(p, &offsets)
+    }
+
+    /// Read `p`'s strips from `offsets` (same order/lengths as `p.strip_counts`)
+    /// and build the frame — bit-exact with the `tiff`-crate decode for the
+    /// layouts `raw_decodable` admits (uncompressed BlackIsZero / RGB chunky
+    /// data, where the strip bytes *are* the samples, modulo byte order).
+    fn decode_strips(&mut self, p: &PageIfd, offsets: &[u64]) -> Option<FrameData> {
+        let total: u64 = p.strip_counts.iter().sum();
         let mut raw = vec![0u8; total as usize];
         let mut at = 0usize;
-        let shift = idx as u64 * self.stride;
-        let (offsets, counts) = (t.strip_offsets.clone(), t.strip_counts.clone());
-        for (off, n) in offsets.iter().zip(&counts) {
-            read_at(&mut self.file, off + shift, &mut raw[at..at + *n as usize])?;
+        for (off, n) in offsets.iter().zip(&p.strip_counts) {
+            read_at(&mut self.file, *off, &mut raw[at..at + *n as usize])?;
             at += *n as usize;
         }
 
-        let t = &self.template;
         let be = self.big_endian;
-        let samples = match (t.bits[0], t.sample_format) {
+        let samples = match (*p.bits.first()?, p.sample_format) {
             (8, _) => Samples::U8(raw),
             (16, _) => Samples::U16(raw.chunks_exact(2).map(|c| get_u16(c, be)).collect()),
             (32, 3) => Samples::F32(
@@ -293,11 +327,11 @@ impl FastScan {
             ),
             // 32-bit uint: widen to f32, matching `decode_current`'s fallback.
             (32, _) => Samples::F32(raw.chunks_exact(4).map(|c| get_u32(c, be) as f32).collect()),
-            _ => return None, // open() admits no other layout
+            _ => return None, // `raw_decodable` admits no other layout
         };
         Some(FrameData::new(
-            [t.width as usize, t.height as usize],
-            t.spp as usize,
+            [p.width as usize, p.height as usize],
+            p.spp as usize,
             samples,
         ))
     }
@@ -323,6 +357,53 @@ impl FastScan {
             return Err("irregular sequence tail (page count can't be trusted)".into());
         }
         Ok(lo + 1)
+    }
+
+    /// Walk the IFD chain to page `idx` and pin where it lives, so a later
+    /// reload can go straight back to it. O(idx) *tiny header reads* — no strip
+    /// data, no decode — which is what makes it worth doing synchronously where
+    /// riding the frontier one probe per update would take `idx` frames.
+    fn walk_to(&mut self, idx: usize) -> Result<PageAnchor, String> {
+        if idx > MAX_ANCHOR_WALK {
+            return Err("too many pages to walk to the frame".into());
+        }
+        let mut off = self.ifd0;
+        let mut prev = None;
+        let mut p = self.read_ifd(off).ok_or("unreadable first page header")?;
+        for _ in 0..idx {
+            if p.next == 0 {
+                return Err("the frame is past the end of the file".into());
+            }
+            prev = Some(off);
+            off = p.next;
+            p = self.read_ifd(off).ok_or("unreadable page header")?;
+        }
+        raw_decodable(&p)?;
+        Ok(PageAnchor {
+            idx,
+            offset: off,
+            prev,
+            ifd: p,
+            ifd0: self.ifd0,
+            file_len: self.file_len,
+        })
+    }
+
+    /// Whether `a` still describes the same page of this (re-opened, possibly
+    /// rewritten) file — see [`PageAnchor`] for what that guarantee rests on.
+    fn still_anchored(&mut self, a: &PageAnchor) -> bool {
+        if self.ifd0 != a.ifd0 || self.file_len != a.file_len {
+            return false; // the file's overall shape changed: indices may have moved
+        }
+        if self.read_ifd(a.offset).as_ref() != Some(&a.ifd) {
+            return false; // no identical page header where it used to be
+        }
+        match a.prev {
+            // The real page chain must still enter this position, so a page
+            // spliced in or out ahead of it is caught.
+            Some(prev) => self.read_ifd(prev).map(|p| p.next) == Some(a.offset),
+            None => a.offset == self.ifd0,
+        }
     }
 
     /// The next-IFD pointer of the IFD at `off` (with an entry-count sanity
@@ -445,6 +526,44 @@ impl FastScan {
                 .collect(),
         )
     }
+}
+
+/// Whether a page's pixels can be read straight from its strips — the layout
+/// requirements shared by stride prediction and the offset-anchored jump
+/// (uncompressed, untiled, chunky, a bit depth/format `decode_strips` handles,
+/// and strip bytes adding up to exactly the page's pixels). The `Err` strings
+/// are user-facing (they ride the *Load offsets* hover text).
+fn raw_decodable(p: &PageIfd) -> Result<(), String> {
+    if p.tiled {
+        return Err("pages are tiled".into());
+    }
+    if p.compression != 1 || p.predictor != 1 {
+        return Err("pages are compressed (no fixed byte stride)".into());
+    }
+    if p.planar != 1 {
+        return Err("pages use planar (non-interleaved) storage".into());
+    }
+    if !matches!(p.photometric, 1 | 2) {
+        return Err("unsupported photometric interpretation".into());
+    }
+    if !matches!(p.spp, 1 | 3 | 4) {
+        return Err("unsupported channel count".into());
+    }
+    let bits = p.bits.first().copied().unwrap_or(0);
+    if p.bits.iter().any(|&b| b != bits) {
+        return Err("channels differ in bit depth".into());
+    }
+    match (bits, p.sample_format) {
+        (8 | 16, 1) | (32, 1) | (32, 3) => {}
+        _ => return Err("unsupported bit depth or sample format".into()),
+    }
+    // Uncompressed strips must add up to exactly width × height × bytes; a
+    // mismatch means padding or a layout the raw reader would misread.
+    let expect = p.width as u64 * p.height as u64 * p.spp as u64 * (bits as u64 / 8);
+    if p.strip_counts.iter().sum::<u64>() != expect {
+        return Err("strip data doesn't match the page dimensions".into());
+    }
+    Ok(())
 }
 
 impl PageIfd {
@@ -645,6 +764,43 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
     }
 }
 
+/// Jump to frame `target` by **byte offset**: decode the page straight from
+/// where it sits and grow the known length through it in one step, without
+/// discovering (or decoding) anything before it. Returns the anchor to remember
+/// for next time; on `Err` nothing changes and the caller falls back to ordinary
+/// discovery.
+///
+/// This is the reload path's second string, after `fast_jump`: it needs no
+/// regular layout, so it also covers the files stride prediction rejects
+/// (compressed or mixed-shape pages — the walk only reads headers, and only the
+/// *target* page must be raw-decodable). `last` is the anchor from the previous
+/// time this pane landed on this frame: when it still validates against the
+/// reloaded file (the in-place overwrite case) the jump costs **two header
+/// reads**; otherwise the chain is walked once to rebuild it, which still beats
+/// riding the frontier one probe per update — and makes the *next* reload O(1).
+pub fn offset_jump(
+    media: &mut Media,
+    target: usize,
+    last: Option<&PageAnchor>,
+) -> Result<PageAnchor, String> {
+    let Media::TiffSeq(t) = media else {
+        // A ConcatSeq spans files (`fast_jump` handles the regular case); a
+        // still / file run / video has nothing to walk.
+        return Err("offset jump only applies to a single multi-page TIFF".into());
+    };
+    let mut scan = FastScan::open_header(&t.path)?;
+    let anchor = match last.filter(|a| a.idx == target && scan.still_anchored(a)) {
+        Some(a) => a.clone(),
+        None => scan.walk_to(target)?,
+    };
+    let frame = scan
+        .decode_ifd(&anchor.ifd)
+        .ok_or("the page's pixels couldn't be read from its recorded position")?;
+    t.frames.note_len_to(target + 1);
+    t.frames.insert(target, Arc::new(frame));
+    Ok(anchor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,6 +933,90 @@ mod tests {
         // Past the real end: the jump cancels and nothing changes.
         assert!(fast_jump(&mut media, 10).is_err());
         assert_eq!(media.frame_count(), 5);
+    }
+
+    /// The offset-anchored jump covers what stride prediction can't: a run of
+    /// **mixed-shape** pages. It lands on the target alone (nothing before it is
+    /// discovered or decoded), bit-exact with the chain-walking decode.
+    #[test]
+    fn offset_jump_lands_on_an_irregular_page() {
+        let dir = fixture_dir("offset_jump");
+        let path = dir.join("mixed.tif");
+        write_multipage_tiff_u16(&path, &[[9, 7], [8, 6], [9, 7], [7, 5], [10, 4]]);
+        assert!(
+            FastScan::open(&path).is_err(),
+            "mixed shapes must not be stride-predictable"
+        );
+
+        let mut media = load(&path).unwrap();
+        assert_eq!(media.frame_count(), 1); // only page 0 known
+        offset_jump(&mut media, 3, None).expect("the walk finds page 3");
+        assert_eq!(media.frame_count(), 4); // known through the target
+        assert!(
+            media.resident(1).is_none(),
+            "pages in between stay untouched"
+        );
+
+        let jumped = media.resident(3).expect("target decoded by the jump");
+        let slow = SeqReader::open(&path).unwrap().decode(3).unwrap().unwrap();
+        assert_eq!(jumped.size, slow.size);
+        assert_eq!(u16s(&jumped), u16s(&slow));
+
+        // Past the end: nothing changes and the caller falls back.
+        assert!(offset_jump(&mut media, 99, None).is_err());
+        assert_eq!(media.frame_count(), 4);
+    }
+
+    /// An anchor survives the case it exists for — the file overwritten **in
+    /// place** with the same layout — and is refused when the file's shape
+    /// changes, where the walk transparently rebuilds it. Either way the frame
+    /// that lands is the right one, read fresh from disk.
+    #[test]
+    fn anchor_survives_in_place_rewrite_and_refuses_a_reshaped_file() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let dir = fixture_dir("offset_anchor");
+        let path = dir.join("mixed.tif");
+        let sizes = [[9, 7], [8, 6], [9, 7], [7, 5], [10, 4]];
+        write_multipage_tiff_u16(&path, &sizes);
+
+        let mut media = load(&path).unwrap();
+        let anchor = offset_jump(&mut media, 3, None).expect("walk builds an anchor");
+
+        // Overwrite page 3's pixels where they sit, exactly as an `mmap` writer
+        // refreshing a file in place does: same length, same headers, new bytes.
+        let (off, len) = (anchor.ifd.strip_offsets[0], anchor.ifd.strip_counts[0]);
+        {
+            let mut f = File::options().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(off)).unwrap();
+            f.write_all(&vec![0xABu8; len as usize]).unwrap();
+        }
+        let mut scan = FastScan::open_header(&path).unwrap();
+        assert!(
+            scan.still_anchored(&anchor),
+            "an in-place rewrite must keep the anchor valid"
+        );
+        let mut reloaded = load(&path).unwrap();
+        offset_jump(&mut reloaded, 3, Some(&anchor)).expect("anchored jump");
+        let slow = SeqReader::open(&path).unwrap().decode(3).unwrap().unwrap();
+        assert_eq!(
+            u16s(&reloaded.resident(3).unwrap()),
+            u16s(&slow),
+            "the anchored jump must read the rewritten pixels"
+        );
+
+        // A file rewritten with a different page count is a different shape: the
+        // anchor is refused, and the jump falls back to walking the fresh chain.
+        write_multipage_tiff_u16(&path, &sizes[..4]);
+        let mut scan = FastScan::open_header(&path).unwrap();
+        assert!(
+            !scan.still_anchored(&anchor),
+            "a reshaped file must be refused"
+        );
+        let mut reshaped = load(&path).unwrap();
+        offset_jump(&mut reshaped, 3, Some(&anchor)).expect("stale anchor still lands");
+        let slow = SeqReader::open(&path).unwrap().decode(3).unwrap().unwrap();
+        assert_eq!(u16s(&reshaped.resident(3).unwrap()), u16s(&slow));
     }
 
     #[test]

@@ -63,6 +63,8 @@ src/
     fastscan.rs  Fast scan (§4): measure a regular page stride from the first
                  two IFDs, then predict + validate + raw-decode page N in O(1)
                  (never trusted unvalidated; falls back to the chain walk).
+                 Also the layout-free offset_jump/PageAnchor: pin one page's
+                 byte offset so a reload lands back on it (§9).
     render.rs    Tone rendering: cached-LUT render (ToneLut + render_into*_lut /
                  _scaled / _gray_u16 / _cmap), mask/intensity overlay tints, display-bounds.
     stats.rs     Histograms, region stats/bounds, Compute reductions (mean/std/diff).
@@ -291,6 +293,15 @@ len)` grows length by one.
     mutated). The *Load offsets* hover carries the rejection reason when the fast
     path isn't available; availability is cached per pane (`Pane.fast_jump`, reset
     on reload).
+
+**Offset-anchored jump (`media::offset_jump` / `PageAnchor`)** — the layout-free
+sibling of all of the above, used by **reload** (§9). It pins *one* page's byte offset
+(plus its header, its predecessor, and the file's length/first-IFD offset) instead of
+deriving every page's position from a stride, so it also works on the files fast scan
+rejects. A remembered anchor that still validates makes a reload two header reads; when
+it doesn't, the chain is walked once (headers only, `MAX_ANCHOR_WALK`) to rebuild it.
+Same invariant as everything else here: nothing is trusted unvalidated, and a failed
+check falls back rather than showing a wrong frame.
 
 ---
 
@@ -691,13 +702,28 @@ The header is a **single row** (`header_h_for`): the title on the left, then the
 **Auto-reload** toggle, **Reload** (re-reads this media from disk → `pending_reload`),
 **Hide** (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on
 the right, matching styles (Close tints red on hover to flag that it removes the pane).
-**Reload keeps the current frame:** the shown index is captured before the swap, then
-the fresh media (which starts length 1) is jumped back to it — a direct `media::fast_jump`
-(validate + decode the frame at its predicted offset, growing the known length through it
-in one step) when the layout is regular, else `seek_to` rides the frontier back with
-metadata-only probes (an unsynced pane sets its own `frame`; a synced loop driver
-re-`seek_to`s the shared timeline; other synced panes follow `shared_frame` via
-`catching_up`).
+**Reload keeps the current frame**, jumping straight to it rather than rediscovering
+everything before it: the shown index is captured before the swap, then the fresh media
+(which starts length 1) is landed back on it by the first of these that works —
+1. `media::fast_jump` — the layout is regular, so the frame's position is *predicted*
+   arithmetically, validated and decoded, growing the known length through it in one step;
+2. `media::offset_jump` — **the frame's byte offset**, remembered from the last reload
+   (`Pane.page_anchor`, a `media::PageAnchor`), re-validated against the fresh file and
+   decoded from there. Needs **no** regular layout, so this is what covers the files
+   `fast_jump` rejects (compressed or mixed-shape pages). An anchor is reused only when
+   the file still matches it in full — same length and first-IFD offset, a byte-identical
+   page header still at that offset (same shape *and* strip positions), and the page chain
+   still entering it through the same predecessor — which is exactly the in-place
+   overwrite auto-reload exists for, at a cost of two header reads. Anything structurally
+   different fails a check, so the index can never drift onto a wrong frame; the chain is
+   then walked once (headers only, capped at `MAX_ANCHOR_WALK`) to rebuild the anchor,
+   which still beats riding the frontier a probe per update — and makes the *next* reload
+   O(1). `FastScan::open_header` (the header parse split out of `open`) and
+   `decode_strips` (shared with `read_page`) are what let this work without a stride;
+3. `seek_to` — riding the frontier back with metadata-only probes, as before.
+
+(An unsynced pane sets its own `frame`; a synced loop driver re-`seek_to`s the shared
+timeline; other synced panes follow `shared_frame` via `catching_up`.)
 (The Transformations controls are the global toolbar panel, not a per-pane header
 button.)
 
@@ -1276,7 +1302,10 @@ exclusion**); `media` lazy length / probe
 discovery / eviction (incl. **LRU peek order + shown-frame protection**), **LUT render
 matches the float reference** bit-for-bit, **`ToneLut` reuse == uncached render** (and
 the decimated small-output arithmetic path), **Colormap maps through the palette**,
-mask/intensity renders, region stats + save round-trip; **percentile equivalence**
+mask/intensity renders, region stats + save round-trip; **offset-anchored jump** (lands
+on a mixed-shape page bit-exact with the chain walk, nothing before it discovered; an
+anchor survives an in-place rewrite and is refused by a reshaped file, which then walks);
+**percentile equivalence**
 (whole-image == full-frame region, integer and float, with golden values);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; `palette` endpoints /

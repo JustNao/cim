@@ -506,6 +506,7 @@ impl CimApp {
             eager: Eager::Off,
             watch: Watch::default(),
             fast_jump: None,
+            page_anchor: None,
         });
         // Complete a fast-scannable sequence's length in the background as soon as
         // it opens, so the scrubber shows the true length and any index is
@@ -598,14 +599,30 @@ impl CimApp {
                 // Land back on the frame the user was viewing. The fresh media
                 // only knows its first page, so first try a direct fastscan offset
                 // jump (validate + decode `target` at its predicted position,
-                // growing the known length through it in one step). If the offset
-                // no longer validates (irregular layout, or the file grew/shrank
-                // its stride), fall back below to riding the frontier with
-                // metadata-only probes.
+                // growing the known length through it in one step).
+                //
+                // When the layout isn't stride-predictable, jump by **byte
+                // offset** instead: the position this frame sat at before the
+                // reload is re-checked against the fresh file and, if it still
+                // holds the same page, decoded straight from there. That is the
+                // auto-reload case — a file overwritten in place — so it costs two
+                // header reads. Without a usable anchor (the first reload) the
+                // chain is walked once to build one, still far cheaper than riding
+                // the frontier a probe per update, which is what both falling back
+                // to `None` leaves to `seek_to` below.
                 if target > 0 {
                     let clock = self.clock;
                     if media::fast_jump(&mut self.panes[i].media, target).is_ok() {
                         self.panes[i].media.touch(target, clock);
+                    } else {
+                        let last = self.panes[i].page_anchor.take();
+                        match media::offset_jump(&mut self.panes[i].media, target, last.as_ref()) {
+                            Ok(anchor) => {
+                                self.panes[i].page_anchor = Some(anchor);
+                                self.panes[i].media.touch(target, clock);
+                            }
+                            Err(_) => self.panes[i].page_anchor = None,
+                        }
                     }
                 }
                 if self.panes[i].sync_temporal {

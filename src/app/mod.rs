@@ -625,6 +625,12 @@ struct Pane {
     /// `Some(Ok(()))` = a regular page stride was measured. Reset on reload (the
     /// file may have changed shape).
     fast_jump: Option<Result<(), String>>,
+    /// Where the frame this pane last landed on after a reload sits in the file
+    /// (see [`media::PageAnchor`]), so the **next** reload of an irregular TIFF
+    /// jumps straight back to it — two header reads — instead of walking the
+    /// chain again. `None` until a reload builds one, or after one stops
+    /// validating.
+    page_anchor: Option<media::PageAnchor>,
 }
 
 /// A pane's auto-reload file-watch state: watch the source file(s) on disk and
