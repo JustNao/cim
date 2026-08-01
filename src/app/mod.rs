@@ -1579,8 +1579,14 @@ impl CimApp {
         self.config.cache_budget_mb.max(1) * 1024 * 1024
     }
 
-    /// Roughly how many frames the cache budget holds, measured against the
-    /// largest frame currently on screen. `None` until something is resident.
+    /// Roughly how many **timeline positions** the cache budget holds, counting
+    /// one frame from *every* open media. `None` until something is resident.
+    ///
+    /// The sum, not the largest, because that is how the cache is actually
+    /// consumed: panes are synced, so advancing the timeline pulls in a frame per
+    /// media at once, and a position isn't cached unless all of them are. With
+    /// four 32 MB sequences open, a budget that looks like "48 frames" against the
+    /// biggest one really holds 12 positions.
     ///
     /// Surfaced next to the Settings slider because the budget is meaningless in
     /// the abstract: at 32 MB a frame — an ordinary 4096² 16-bit page — the
@@ -1589,12 +1595,29 @@ impl CimApp {
     /// kind on a network mount (§15): serving a frame from cache is roughly ten
     /// times faster than fetching it again, and it costs a shared link nothing.
     pub(super) fn cache_budget_frames(&self) -> Option<usize> {
-        let largest = (0..self.panes.len())
+        let per_position: usize = (0..self.panes.len())
             .filter_map(|i| self.panes[i].media.resident(self.frame_disp(i)))
             .map(|f| f.byte_len())
-            .max()
-            .filter(|&b| b > 0)?;
-        Some((self.cache_budget_bytes() / largest).max(1))
+            .sum();
+        if per_position == 0 {
+            return None;
+        }
+        Some((self.cache_budget_bytes() / per_position).max(1))
+    }
+
+    /// Human-readable size of one timeline position — the frames counted by
+    /// [`Self::cache_budget_frames`], summed across the open media.
+    pub(super) fn frame_size_label(&self) -> String {
+        let bytes: usize = (0..self.panes.len())
+            .filter_map(|i| self.panes[i].media.resident(self.frame_disp(i)))
+            .map(|f| f.byte_len())
+            .sum();
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        if mb >= 10.0 {
+            format!("{mb:.0} MiB")
+        } else {
+            format!("{mb:.1} MiB")
+        }
     }
 
     // ---- statistics region ----------------------------------------------
