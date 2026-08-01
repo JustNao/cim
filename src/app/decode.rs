@@ -46,8 +46,17 @@ impl CimApp {
                 Ok(Decoded::End) => {
                     // Frontier probe found no page here: a TIFF has reached its
                     // end; a concatenation rolls over to the next file.
+                    //
+                    // Only at the *true* frontier. The frontier is probed several
+                    // pages ahead at once (`probe_ahead`), so a probe past the real
+                    // end can land while earlier pages are still in flight —
+                    // ending the sequence on it would record a length short of the
+                    // pages that do exist. `Decoded::Exists` is already safe this
+                    // way (`note_len` only grows at `idx == len`); this is the same
+                    // rule for the other outcome. A dropped result costs nothing:
+                    // the probe is simply re-issued once the frontier reaches it.
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
-                        p.media.frontier_ended();
+                        p.media.frontier_ended(d.frame);
                     }
                 }
                 Err(e) => {
@@ -84,6 +93,38 @@ impl CimApp {
         if let Some(req) = self.panes[idx].media.probe_job(frame) {
             self.decoder.request(id, frame, req);
             self.inflight.insert((id, frame));
+        }
+    }
+
+    /// Probe the next `count` undiscovered pages at once, rather than one per
+    /// update.
+    ///
+    /// Discovery is inherently serial — `SeqCache::note_len` grows only at
+    /// `idx == len`, so page N+1 isn't confirmed until N is. But that does *not*
+    /// mean it must cost a **UI round trip** per page, which is what one probe per
+    /// update cost: request → worker → `request_repaint` → drain → `note_len` →
+    /// next update. That loop latency, not decode speed, is what capped playback
+    /// and "Load all" of a not-yet-discovered sequence (~20 fps against 60+ once
+    /// the length was known — the pool simply ran dry between frames). Probes are
+    /// header-only and pipeline through the file's reader, so a run of them
+    /// collapses those round trips into one.
+    ///
+    /// Over-probing is safe by construction: a result landing ahead of the
+    /// frontier is dropped — `note_len` ignores `idx != len`, and `Decoded::End`
+    /// is guarded the same way in `pump_decoder` — and simply re-issued when the
+    /// frontier reaches it. The cost of a wasted probe is a few hundred bytes.
+    ///
+    /// A `ConcatSeq` cannot be probed ahead: an undiscovered global index has no
+    /// known `(file, page)` until the ones before it land, so `probe_job` returns
+    /// `None` past the frontier and this quietly does the single probe it always
+    /// did.
+    pub(super) fn probe_ahead(&mut self, i: usize, count: usize) {
+        if self.panes[i].media.at_end() {
+            return;
+        }
+        let known = self.panes[i].media.frame_count();
+        for f in known..known.saturating_add(count.max(1)) {
+            self.probe(i, f);
         }
     }
 
@@ -201,15 +242,15 @@ impl CimApp {
                         }
                     }
                     if !self.panes[i].media.at_end() {
-                        // Extend the known length. With a stride, skim the frontier
-                        // via a metadata-only header probe (the N-1 between decodes
-                        // are discovered, not decoded); without one, decode the next
-                        // page as before.
-                        if ff > 1 {
-                            self.probe(i, known);
-                        } else {
-                            self.request(i, known);
-                        }
+                        // Extend the known length by **probing** a run of pages,
+                        // never by decoding one. Two reasons: a decode landing at
+                        // `idx > len` is dropped by `insert` (which only grows the
+                        // length contiguously), so speculating with decodes would
+                        // throw away whole frame reads; and probing several at once
+                        // lets the loop above queue many frames next update instead
+                        // of one, which is the difference between the pool running
+                        // dry between frames and running back to back.
+                        self.probe_ahead(i, FRONTIER_PROBES);
                         pending = true;
                     }
                     if !pending {
@@ -220,8 +261,9 @@ impl CimApp {
                     if self.panes[i].media.at_end() {
                         self.panes[i].eager = Eager::Off;
                     } else {
-                        let known = self.panes[i].media.frame_count();
-                        self.probe(i, known); // headers only, no pixel decode
+                        // Headers only, no pixel decode — and a run of them, so
+                        // discovery advances by more than one page per update.
+                        self.probe_ahead(i, FRONTIER_PROBES);
                     }
                 }
             }
@@ -287,14 +329,21 @@ impl CimApp {
         if !targets.contains(&ctrl) {
             targets.push(ctrl);
         }
-        // How far past the shown frame the frontier must stay discovered. Normally
-        // one page. **While playing with a fast-forward stride, keep `ff` pages
-        // ahead** so playback's next strided target (`frame + ff`) is already known:
-        // otherwise the frontier only advances a page at a time and `advance_playback`
-        // is forced to land on (and decode) every frontier frame instead of striding
-        // past them — the very frames the stride is meant to skim.
+        // How far past the shown frame the frontier must stay discovered. Browsing
+        // needs one page. **While playing, keep a whole prefetch window ahead**:
+        // `prefetch_playback` never queues past the known length, so a frontier
+        // only a page or two out leaves it able to see exactly one frame — the
+        // decode pool then empties between frames and playback runs at the update
+        // loop's round-trip latency instead of the decode rate. With a
+        // fast-forward stride the window is measured in strides, so the next
+        // strided target (`frame + ff`) is always already known and
+        // `advance_playback` can skim rather than landing on every frontier frame.
         let ff = self.playback.fast_forward.max(1);
-        let margin = if self.playback.playing { ff + 1 } else { 2 };
+        let margin = if self.playback.playing {
+            ff * FRONTIER_PROBES + 1
+        } else {
+            2
+        };
         for i in targets {
             if self.panes[i].eager != Eager::Off || self.panes[i].media.at_end() {
                 continue; // a bulk load (drive_eager) already drives this pane's frontier
@@ -302,16 +351,20 @@ impl CimApp {
             let known = self.panes[i].media.frame_count();
             if self.catching_up(i) {
                 // Target far past the frontier (a sequence behind an advanced
-                // timeline): discover with a metadata-only probe so the pages in
+                // timeline): discover with metadata-only probes so the pages in
                 // between aren't decoded — only the target lands (see `stage`).
-                self.probe(i, known);
+                self.probe_ahead(i, FRONTIER_PROBES);
             } else if self.frame_disp(i) + margin > known {
-                // Browsing at the frontier. With a fast-forward stride, skim it by
-                // header only (probe) so the frames jumped over aren't decoded — the
-                // one landed on decodes on demand in `stage`; otherwise prefetch the
-                // next page with a full decode.
-                if ff > 1 {
-                    self.probe(i, known);
+                // At the frontier. **While playing** (or skimming with a stride)
+                // extend it by header probes, a run at a time: the pages crossed
+                // must not be decoded, and the length has to stay far enough ahead
+                // for `prefetch_playback` to have anything to queue. Frames that
+                // will actually be shown are decoded by prefetch/`stage`.
+                //
+                // Browsing, keep decoding the single next page instead — stepping
+                // frame by frame wants it resident, not merely known.
+                if self.playback.playing || ff > 1 {
+                    self.probe_ahead(i, FRONTIER_PROBES);
                 } else {
                     self.request(i, known);
                 }

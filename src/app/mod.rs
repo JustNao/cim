@@ -136,6 +136,12 @@ use crate::watcher::FileSig;
 /// stalling on decode latency when it reaches a not-yet-resident frame.
 const PLAY_PREFETCH: usize = 3;
 
+/// How many undiscovered pages the frontier is probed for at once
+/// (`CimApp::probe_ahead`). Matches the prefetch cap, since the point is to keep
+/// the known length far enough ahead that `prefetch_playback` always has frames
+/// to queue. Header-only reads, so over-probing costs a few hundred bytes.
+const FRONTIER_PROBES: usize = 8;
+
 /// Opening more sequences than this at once triggers a resource-warning
 /// confirmation (heavy CPU / memory, worst over VNC on a shared machine).
 const SEQ_WARN_LIMIT: usize = 8;

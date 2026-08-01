@@ -367,6 +367,53 @@ mod tests {
     /// discovers exactly the same length as a decode walk, but **without** making
     /// any frame resident — this is the seek fast-path that skips decompressing
     /// every page it rides past. `probe` reports the page's existence; the real
+    /// The frontier is probed several pages ahead at once (`CimApp::probe_ahead`),
+    /// so results arrive for indices that aren't the frontier yet — including,
+    /// past the real end, a miss. Both outcomes must be ignored unless they land
+    /// exactly at the frontier, or a batch would fix the length short of pages
+    /// that actually exist.
+    #[test]
+    fn out_of_order_probe_results_cannot_truncate() {
+        let dir = fixture_dir("probe_batch");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[8, 6]; 4]);
+        let mut m = load(&path).expect("open tiff");
+        let mut reader = SeqReader::open(&path).expect("open");
+
+        // A batch probing 0..8 against a 4-page file: pages 1..3 exist, 4..7 are
+        // misses. Deliver the misses *first* — the order a pipelined batch can
+        // genuinely produce, and the one that used to end the sequence at 1.
+        for idx in [7usize, 6, 5, 4] {
+            assert!(
+                !reader.probe(idx).expect("probe"),
+                "page {idx} is past the end"
+            );
+            m.frontier_ended(idx);
+        }
+        assert!(!m.at_end(), "a miss away from the frontier must not end it");
+        assert_eq!(m.frame_count(), 1, "nor grow or shrink the known length");
+
+        // Hits ahead of the frontier are likewise ignored, then applied in order
+        // as the frontier reaches them.
+        m.note_frontier(3);
+        assert_eq!(
+            m.frame_count(),
+            1,
+            "a hit away from the frontier is dropped"
+        );
+        for idx in 1..4 {
+            assert!(reader.probe(idx).expect("probe"));
+            m.note_frontier(idx);
+        }
+        assert_eq!(m.frame_count(), 4);
+
+        // Only the miss *at* the frontier ends it — with the true length.
+        assert!(!reader.probe(4).expect("probe"));
+        m.frontier_ended(4);
+        assert!(m.at_end());
+        assert_eq!(m.frame_count(), 4, "every written page survived the batch");
+    }
+
     /// length lands identically to `tiff_length_is_discovered_lazily`.
     #[test]
     fn probe_discovers_length_without_decoding() {
@@ -386,7 +433,7 @@ mod tests {
             if reader.probe(known).expect("probe") {
                 m.note_frontier(known);
             } else {
-                m.frontier_ended();
+                m.frontier_ended(known);
             }
         }
 
@@ -447,7 +494,7 @@ mod tests {
             };
             match SeqReader::open(&path).unwrap().decode(page).unwrap() {
                 Some(frame) => m.insert(known, Arc::new(frame)),
-                None => m.frontier_ended(),
+                None => m.frontier_ended(known),
             }
         }
 

@@ -459,10 +459,20 @@ impl Media {
         }
     }
 
-    /// A frontier probe found no page where one was expected. A `TiffSeq` has
-    /// reached its real end; a `ConcatSeq` has finished the current file and
-    /// rolls over to the next (only the last file's end is the real end).
-    pub fn frontier_ended(&mut self) {
+    /// A frontier probe at `idx` found no page where one was expected. A
+    /// `TiffSeq` has reached its real end; a `ConcatSeq` has finished the current
+    /// file and rolls over to the next (only the last file's end is the real end).
+    ///
+    /// **Only at the frontier** (`idx == len`), the same rule
+    /// [`Self::note_frontier`] follows — because the frontier is probed several
+    /// pages ahead at once (`CimApp::probe_ahead`), so a probe past the real end
+    /// can land while earlier pages are still in flight. Ending the sequence on it
+    /// would fix the length short of pages that do exist. A dropped result costs
+    /// nothing: the probe is re-issued once the frontier reaches it.
+    pub fn frontier_ended(&mut self, idx: usize) {
+        if idx != self.frame_count() {
+            return;
+        }
         match self {
             Media::TiffSeq(t) => t.at_end = true,
             Media::ConcatSeq(c) => c.roll_to_next_file(),
