@@ -25,6 +25,21 @@ pub(super) struct ExportRun {
 /// percentile, region)`.
 type ControlSnapshot = (ExportSource, usize, bool, usize, Option<f32>, Option<Rect>);
 
+/// Pane geometry the label preview draws from, in **composition space** (the
+/// space `export_canvas` and the plan's cells live in). Built by
+/// `CimApp::preview_geom` to mirror `ExportPlan::label_rects` exactly.
+struct PreviewGeom {
+    /// The rect the pane's label is anchored within — its packed grid cell, the
+    /// single image area, or its side of the A/B wipe.
+    label: Rect,
+    /// The part of `label` the pane's image actually covers. Equal to `label`
+    /// everywhere except A/B, where the two sides share the full image area and
+    /// a side can be part background.
+    image: Rect,
+    /// The image-space (source pixel) rect drawn onto `image`.
+    uv: Rect,
+}
+
 /// What the current output name exports to (chosen by its file extension).
 #[derive(PartialEq)]
 enum ExportFormat {
@@ -423,33 +438,97 @@ impl CimApp {
         Some((region, packed))
     }
 
-    /// The **view-reference area** pane `idx` is composited against — the rect its
-    /// view samples through, and so the rect its label is anchored within
-    /// (`ExportPlan::label_rects`). Per mode, exactly what `build_export_plan`
-    /// picks: its **grid cell** in Grid (`grid_cells`, the same call `packed_grid`
-    /// makes in bulk), the whole image area in Single, its **side of the wipe** in
-    /// A/B.
+    /// Pane `idx`'s **grid cell**, the rect its view samples through in Grid mode
+    /// (`grid_cells` — the same call `packed_grid` makes in bulk).
+    fn export_grid_cell(&self, idx: usize) -> Rect {
+        self.grid_cells(&self.visible_indices(), self.last_area)
+            .into_iter()
+            .find(|&(i, _)| i == idx)
+            .map_or(self.last_area, |(_, cell)| cell)
+    }
+
+    /// Split `r` at `ab_split`, returning the side pane `idx` occupies in A/B.
+    fn ab_side_of(&self, idx: usize, r: Rect) -> Rect {
+        let mid = r.min.x + self.ab_split.clamp(0.02, 0.98) * r.width();
+        if idx == self.slot_b && idx != self.slot_a {
+            Rect::from_min_max(Pos2::new(mid, r.min.y), r.max)
+        } else {
+            Rect::from_min_max(r.min, Pos2::new(mid, r.max.y))
+        }
+    }
+
+    /// The image-space rect a composition/screen rect samples from pane `idx`,
+    /// through its view referenced to `area` (the export's `screen_to_img`).
+    fn content_uv(&self, idx: usize, content: Rect, area: Rect) -> Rect {
+        let vt = self.view_ref(idx);
+        Rect::from_min_max(
+            vt.screen_to_img(content.min, area).to_pos2(),
+            vt.screen_to_img(content.max, area).to_pos2(),
+        )
+    }
+
+    /// Everything the label preview needs about pane `idx`, in **composition
+    /// space** — the live mirror of `ExportPlan::label_rects` plus what fills the
+    /// rect it names. See [`PreviewGeom`]: the label rect, the part of it the
+    /// pane's image covers, and the image-space rect drawn there.
     ///
-    /// The label preview reads this rather than assuming `last_area`: a Grid pane
-    /// measured against the full canvas comes out too wide by the column count
-    /// (and an A/B side too wide by the split), which is exactly the mismatch the
-    /// preview is supposed to rule out.
-    fn export_pane_area(&self, idx: usize) -> Rect {
+    /// Both halves of the preview's fidelity hang off this. The **box** takes the
+    /// label rect's shape, and the **label's size and position** are relative to
+    /// that rect — which in a multi-row grid is a *fraction* of the output, so
+    /// scaling the text by the full output height (as if the cell were the whole
+    /// frame) undersizes it by the row count and drags the margins with it.
+    fn preview_geom(&self, idx: usize) -> Option<PreviewGeom> {
         let area = self.last_area;
+        // With a crop every pane's view is `region_view(reg)`, so the crop fills
+        // its cell exactly 1:1 — the cell *is* the crop.
+        if let Some(reg) = self.export.region {
+            let cell = Rect::from_min_size(Pos2::ZERO, reg.size());
+            let (label, uv) = match self.export.mode {
+                // The wipe halves the cell, and (being 1:1) the same fraction of
+                // the crop in image space.
+                Mode::Ab => (self.ab_side_of(idx, cell), self.ab_side_of(idx, reg)),
+                Mode::Grid | Mode::Single => (cell, reg),
+            };
+            return label.is_positive().then_some(PreviewGeom {
+                label,
+                image: label,
+                uv,
+            });
+        }
         match self.export.mode {
-            Mode::Grid => self
-                .grid_cells(&self.visible_indices(), area)
-                .into_iter()
-                .find(|&(i, _)| i == idx)
-                .map_or(area, |(_, cell)| cell),
-            Mode::Single => area,
+            Mode::Grid => {
+                // Packed flush: the cell is exactly the pane's content, so the
+                // label rect and the image are one and the same rect.
+                let cell = self.export_grid_cell(idx);
+                let content = self.pane_content_in(idx, cell);
+                let place = Rect::from_min_size(Pos2::ZERO, content.size());
+                place.is_positive().then(|| PreviewGeom {
+                    label: place,
+                    image: place,
+                    uv: self.content_uv(idx, content, cell),
+                })
+            }
+            Mode::Single => {
+                // The region *is* the content, so the label rect is too.
+                let content = self.pane_content_in(idx, area);
+                content.is_positive().then(|| PreviewGeom {
+                    label: content,
+                    image: content,
+                    uv: self.content_uv(idx, content, area),
+                })
+            }
             Mode::Ab => {
-                let mid = area.min.x + self.ab_split.clamp(0.02, 0.98) * area.width();
-                if idx == self.slot_b && idx != self.slot_a {
-                    Rect::from_min_max(Pos2::new(mid, area.min.y), area.max)
-                } else {
-                    Rect::from_min_max(area.min, Pos2::new(mid, area.max.y))
-                }
+                // Both sides map through the **whole** area (`draw_ab_side` only
+                // *clips* to the half), so the pane's image is its full-area
+                // content and it covers just the part of its half it reaches —
+                // the one case where the image doesn't fill the label rect.
+                let label = self.ab_side_of(idx, area).intersect(self.export_canvas());
+                let image = self.pane_content_in(idx, area).intersect(label);
+                (label.is_positive() && image.is_positive()).then(|| PreviewGeom {
+                    label,
+                    image,
+                    uv: self.content_uv(idx, image, area),
+                })
             }
         }
     }
@@ -998,69 +1077,53 @@ impl CimApp {
         // the preview matches what actually gets exported.
         let region = self.export_canvas();
         let (_, out_h) = export::out_dims(region, self.export.out_height);
-        let dsz = self.disp_size(idx);
-        let (aspect, uv) = match self.export.region {
-            Some(reg) => {
-                let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
-                let uv = Rect::from_min_max(
-                    Pos2::new(
-                        (reg.min.x / iw).clamp(0.0, 1.0),
-                        (reg.min.y / ih).clamp(0.0, 1.0),
-                    ),
-                    Pos2::new(
-                        (reg.max.x / iw).clamp(0.0, 1.0),
-                        (reg.max.y / ih).clamp(0.0, 1.0),
-                    ),
-                );
-                (reg.width() / reg.height().max(1.0), uv)
-            }
-            None => {
-                // No crop: the export composites only the on-screen **content**
-                // (the image clipped to the visible view — `content_region` /
-                // `pane_content_in`), so the preview must show that same sub-rect
-                // honouring the live view's zoom/pan, not the whole image. It is
-                // measured against the pane's own composition area (its grid cell
-                // / A-B side), not the whole canvas — `pane_content_in` is the
-                // same call `packed_grid` makes, so the box matches the cell the
-                // export produces at any column count or window size.
-                let area = self.export_pane_area(idx);
-                let vt = self.view_ref(idx);
-                let content = self.pane_content_in(idx, area);
-                if content.is_positive() {
-                    let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
-                    let a = vt.screen_to_img(content.min, area);
-                    let b = vt.screen_to_img(content.max, area);
-                    let uv = Rect::from_min_max(
-                        Pos2::new((a.x / iw).clamp(0.0, 1.0), (a.y / ih).clamp(0.0, 1.0)),
-                        Pos2::new((b.x / iw).clamp(0.0, 1.0), (b.y / ih).clamp(0.0, 1.0)),
-                    );
-                    (content.width() / content.height().max(1.0), uv)
-                } else {
-                    (
-                        dsz[0] as f32 / dsz[1].max(1) as f32,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    )
-                }
-            }
+        let Some(g) = self.preview_geom(idx) else {
+            return;
         };
-        // Only a guard against a degenerate sliver — kept wide enough that a real
-        // cell or crop passes through unclamped, since a clamped box would be
-        // lying about the shape the export produces.
-        let aspect = aspect.clamp(0.1, 10.0);
+
+        // The box *is* the pane's label rect, so the anchor maths below is the
+        // compositor's, unscaled.
+        let aspect = (g.label.width() / g.label.height().max(1e-6)).clamp(0.1, 10.0);
         let w = ui.available_width().clamp(80.0, 300.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / aspect), Sense::hover());
         let painter = ui.painter_at(rect);
+        // Composition space → the preview box.
+        let k = Vec2::new(
+            rect.width() / g.label.width().max(1e-6),
+            rect.height() / g.label.height().max(1e-6),
+        );
+        let to_prev = |p: Pos2| rect.min + (p - g.label.min) * k;
+        let dest = Rect::from_min_max(to_prev(g.image.min), to_prev(g.image.max));
+        let dsz = self.disp_size(idx);
+        let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
+        let uv = Rect::from_min_max(
+            Pos2::new(
+                (g.uv.min.x / iw).clamp(0.0, 1.0),
+                (g.uv.min.y / ih).clamp(0.0, 1.0),
+            ),
+            Pos2::new(
+                (g.uv.max.x / iw).clamp(0.0, 1.0),
+                (g.uv.max.y / ih).clamp(0.0, 1.0),
+            ),
+        );
+        // Any part of the cell the image doesn't reach is background in the
+        // output too (the A/B case), so show it as such rather than stretching.
+        painter.rect_filled(rect, 0.0, Color32::from_gray(24));
         match self.pane_texture(idx) {
-            Some(tex) => painter.add(egui::Shape::image(tex, rect, uv, Color32::WHITE)),
+            Some(tex) => painter.add(egui::Shape::image(tex, dest, uv, Color32::WHITE)),
             // No committed texture yet (still decoding): a flat plate still shows
             // where the label lands.
-            None => painter.rect_filled(rect, 0.0, Color32::from_gray(60)),
+            None => painter.rect_filled(dest, 0.0, Color32::from_gray(60)),
         };
 
         // Same geometry as the export, scaled by the preview's share of the
         // output height, so the label keeps its true relative size.
         let st = self.export.label_style;
-        let scale = rect.height() / out_h.max(1) as f32;
+        // Preview points per **output pixel** — the unit `size_px`, `margin` and
+        // `bg_pad` are in. The label rect is a fraction of the composition, so
+        // this goes through it: preview-per-composition × composition-per-output.
+        let scale =
+            rect.height() / g.label.height().max(1e-6) * region.height() / out_h.max(1) as f32;
         let font = FontId::proportional((st.size_px * scale).max(4.0));
         let text = self.label_text(idx);
         let galley = painter.layout_no_wrap(text, font, st.color);

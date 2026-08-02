@@ -1373,6 +1373,68 @@ mod tests {
         assert_eq!(out[(w / 2) * 4 + 3], 255, "B label missing at the split");
     }
 
+    /// In a **multi-row** grid each label is anchored inside its own cell, which
+    /// is a *fraction* of the output rather than the whole frame. This is the
+    /// fact the export panel's label preview scales by (`preview_geom` and its
+    /// `scale`): a preview measuring against the full output height instead
+    /// undersizes the text — and its margins — by the row count.
+    #[test]
+    fn grid_labels_are_anchored_inside_their_own_cell() {
+        let (w, h) = (40usize, 20usize);
+        let region = Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32));
+        // 2×2 packed grid of 20×10 cells over a 40×20 output (1:1).
+        let cells: Vec<GridCell> = (0..4)
+            .map(|k| {
+                let place = Rect::from_min_size(
+                    Pos2::new((k % 2) as f32 * 20.0, (k / 2) as f32 * 10.0),
+                    Vec2::new(20.0, 10.0),
+                );
+                GridCell {
+                    pane: k,
+                    place,
+                    area: place,
+                    content: place,
+                }
+            })
+            .collect();
+        let plan = ExportPlan {
+            panes: Vec::new(),
+            layout: ExportLayout::Grid(cells),
+            control: None,
+            region,
+            labels: (0..4)
+                .map(|_| {
+                    Some(LabelBitmap {
+                        w: 3,
+                        h: 3,
+                        alpha: vec![255; 9],
+                    })
+                })
+                .collect(),
+            label_style: LabelStyle {
+                background: false,
+                margin: 0.0,
+                color: Color32::WHITE,
+                anchor: LabelAnchor::TopLeft,
+                ..LabelStyle::default()
+            },
+            out_w: w,
+            out_h: h,
+            start: 0,
+            total: 1,
+        };
+        let mut out = vec![0u8; w * h * 4];
+        plan.draw_labels(&mut out);
+        // Every cell's own top-left corner is labelled — four labels, four cells.
+        for (k, (x, y)) in [(0, 0), (20, 0), (0, 10), (20, 10)].into_iter().enumerate() {
+            assert_eq!(
+                out[(y * w + x) * 4 + 3],
+                255,
+                "cell {k} not labelled at its own top-left"
+            );
+        }
+    }
+
     /// An image-space crop exported 1:1 must reproduce exactly the region's
     /// pixels: cell of the crop's size + view (zoom 1, centred on the crop).
     #[test]

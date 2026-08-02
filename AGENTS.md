@@ -1179,14 +1179,27 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   The panel also shows a **preview**: the chosen media's live texture with the label drawn by
   the ordinary egui painter using the same anchor/margin/padding maths scaled by the
   preview's share of the output height — a faithful mock, not a re-run of the compositor.
-  The preview's box **and** its UV sub-rect mirror what will actually be exported: a crop
-  shows just that region, and with **no crop** it shows the pane's on-screen **content**
-  sub-rect (honouring the live view's zoom/pan), not the whole image — measured by calling
-  `pane_content_in` itself, against `export_pane_area(idx)`: the pane's own composition
-  area, i.e. its **grid cell** in Grid, the image area in Single, its **side of the wipe**
-  in A/B. Measuring against the whole canvas instead is the mistake to avoid — it leaves
-  the height right (one row spans the canvas) while the width comes out too wide by the
-  column count, so the box silently drifts with the window size and `max_columns`.
+  Its geometry comes from **`preview_geom(idx)` → `PreviewGeom`**, the live mirror of
+  `label_rects`, in composition space: the pane's **label rect** (its packed grid cell /
+  the single image area / its side of the A/B wipe), the part of that rect its **image**
+  covers, and the **image-space rect** drawn there. The preview box *is* the label rect,
+  so the anchor/margin/padding maths below it is the compositor's, unscaled.
+  Two things must go through that rect, and both were once wrong by taking the whole
+  canvas instead:
+  - the **box shape** — a Grid pane measured against `last_area` comes out too wide by the
+    column count (the height looks right, since one row spans the canvas), so it drifts
+    with the window size and `max_columns`;
+  - the **label scale** — `size_px`, `margin` and `bg_pad` are in **output pixels**, and
+    the cell is a *fraction* of the output, so the conversion is
+    `rect.height() / label.height() × region.height() / out_h` (preview-per-composition ×
+    composition-per-output). Dividing by `out_h` alone undersizes the text and its margins
+    by the **row count** in a multi-row grid. `grid_labels_are_anchored_inside_their_own_cell`
+    (§16) pins the compositor half of that.
+
+  A/B is the one layout where the image doesn't fill the label rect: both sides map through
+  the **whole** area (`draw_ab_side` only *clips* to the half), so a side can be part
+  background — `PreviewGeom::image` is that sub-rect, and re-centring the image inside the
+  half (`pane_content_in(idx, half)`) would be wrong.
 
 ---
 
@@ -1533,7 +1546,8 @@ defined; every bindable `Action` has an `action.<id>` entry — the three gaps t
 otherwise show up only as English text or a raw key at runtime); `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
-**pixel-exact region crop** (incl. rotated), **a Computed source recomputed per
+**pixel-exact region crop** (incl. rotated), **multi-row grid labels anchored inside
+their own cell** (the output-fraction the panel's label preview scales by), **a Computed source recomputed per
 exported frame** (the composed pixels equal the same `combine_frames` done by hand on
 each page, and the values move frame to frame — the export/view parity rule of §10),
 **full-frame export == live LUT render**, content-only export (`content_region`
