@@ -42,7 +42,7 @@ use crate::cli;
 use crate::decoder::{BackgroundDecoder, Decoded};
 use crate::export::{
     self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell, LabelAnchor,
-    LabelBitmap, LabelStyle,
+    LabelBitmap, LabelStyle, SourceInput,
 };
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
@@ -582,9 +582,15 @@ struct Compute {
     source_b: Option<u64>,
     /// False while the pane is still being configured (the in-pane form is
     /// shown); set once a compute succeeds, after which the result image shows
-    /// with the Refresh / Save controls top-left. From then on the pane
-    /// refreshes automatically whenever its inputs change.
+    /// with the Save control top-left.
     computed: bool,
+    /// The pane has been told to compute — by the form's **Compute** button or by
+    /// a view command that replayed it — and so refreshes itself whenever its
+    /// inputs change. Separate from `computed` (which only says a result exists)
+    /// so a compute that *failed* still retries: a replayed pane whose source
+    /// frames aren't resident yet, or one waiting on an upstream Compute pane in
+    /// a chain, recomputes as soon as they land.
+    armed: bool,
     /// Input signature at the last (attempted) compute, so the auto-refresh only
     /// recomputes when something actually changed. See `compute_sig`.
     last_sig: u64,

@@ -43,6 +43,56 @@ pub enum ExportSource {
     Video {
         path: std::path::PathBuf,
     },
+    /// A **binary Compute pane** (`Add`/`Sub`), recomputed per exported frame
+    /// from its two inputs — so a Compute pane animates in the video exactly as
+    /// it does live, instead of freezing on the result that happened to be on
+    /// screen. Each input carries its own timeline mapping and reader, and is an
+    /// `ExportSource` in its own right, so Compute panes chained onto Compute
+    /// panes nest here too. The per-pixel maths is `media::combine_frames` — the
+    /// same function the live pane calls.
+    ///
+    /// The **reductions** (mean/std) never appear here: they reduce whatever
+    /// frames are *resident*, which is a property of the live cache, so the plan
+    /// snapshots the on-screen result as a `Still` — the only way to replicate
+    /// the view exactly.
+    Computed {
+        kind: crate::media::Reduce,
+        a: Box<SourceInput>,
+        b: Box<SourceInput>,
+    },
+}
+
+/// One decodable input of a [`ExportSource::Computed`]: a source, the timeline
+/// mapping that decides which of its frames is showing at position `t` (the same
+/// `count`/`sync_temporal`/`own_frame` triple a pane carries), and its own
+/// persistent reader.
+pub struct SourceInput {
+    source: ExportSource,
+    count: usize,
+    sync_temporal: bool,
+    own_frame: usize,
+    reader: Option<ExportReader>,
+    cur_file: Option<usize>,
+}
+
+impl SourceInput {
+    pub fn new(source: ExportSource, count: usize, sync_temporal: bool, own_frame: usize) -> Self {
+        Self {
+            source,
+            count,
+            sync_temporal,
+            own_frame,
+            reader: None,
+            cur_file: None,
+        }
+    }
+
+    /// The frame this input *shows* at timeline position `t` — the export mirror
+    /// of the live `frame_disp`, which is what a Compute pane reads.
+    fn frame_at(&mut self, t: usize) -> Option<Arc<FrameData>> {
+        let idx = src_index(t, self.count, self.sync_temporal, self.own_frame);
+        decode_source(&mut self.source, idx, &mut self.reader, &mut self.cur_file)
+    }
 }
 
 /// Either persistent reader kind an export pane/overlay can hold.
@@ -153,8 +203,11 @@ impl ExportOverlay {
 
 /// Decode frame `idx` from `source`, keeping `reader`/`cur_file` warm for
 /// seekable sources. `None` means "keep the previous frame" (open/decode miss).
+///
+/// `&mut source` because a [`ExportSource::Computed`] drives its own inputs'
+/// readers; every other variant only reads it.
 fn decode_source(
-    source: &ExportSource,
+    source: &mut ExportSource,
     idx: usize,
     reader: &mut Option<ExportReader>,
     cur_file: &mut Option<usize>,
@@ -199,6 +252,12 @@ fn decode_source(
                 _ => None,
             }
         }
+        // `idx` is the timeline position here (a Compute pane is set up to pass
+        // `t` straight through); each input maps it to its own frame.
+        ExportSource::Computed { kind, a, b } => {
+            let (fa, fb) = (a.frame_at(idx)?, b.frame_at(idx)?);
+            crate::media::combine_frames(&fa, &fb, *kind).map(Arc::new)
+        }
     }
 }
 
@@ -233,7 +292,7 @@ impl ControlBounds {
         if self.cur_idx == Some(idx) {
             return self.cur_bounds;
         }
-        let frame = decode_source(&self.source, idx, &mut self.reader, &mut self.cur_file)?;
+        let frame = decode_source(&mut self.source, idx, &mut self.reader, &mut self.cur_file)?;
         let b = frame_bounds(&frame, self.clip, self.region);
         self.cur_idx = Some(idx);
         self.cur_bounds = Some(b);
@@ -357,7 +416,7 @@ impl ExportPane {
         if ov.cur_idx == Some(idx) {
             return;
         }
-        if let Some(frame) = decode_source(&ov.source, idx, &mut ov.reader, &mut ov.cur_file) {
+        if let Some(frame) = decode_source(&mut ov.source, idx, &mut ov.reader, &mut ov.cur_file) {
             ov.cur_size = frame.size;
             let mut buf = ov.cur_mask.take().unwrap_or_default();
             // Match the live view: a boolean mask tints where true, any other
@@ -382,7 +441,8 @@ impl ExportPane {
         if self.raw_idx == Some(idx) {
             return;
         }
-        let Some(frame) = decode_source(&self.source, idx, &mut self.reader, &mut self.cur_file)
+        let Some(frame) =
+            decode_source(&mut self.source, idx, &mut self.reader, &mut self.cur_file)
         else {
             return;
         };
@@ -1806,6 +1866,91 @@ mod tests {
                 "pixel {i}"
             );
         }
+    }
+
+    /// A binary Compute pane exports as a *live* computation, not a frozen
+    /// still: `ExportSource::Computed` re-runs `combine_frames` per exported
+    /// frame, so a sequence minus a still animates. The composed pixels must
+    /// equal the same subtraction done by hand on each page — the parity that
+    /// keeps the export equal to the view.
+    #[test]
+    fn computed_source_recomputes_every_exported_frame() {
+        let dir = crate::testutil::fixture_dir("export_computed");
+        let seq = dir.join("seq.tif");
+        // Three pages, each offset by k*1000 — so A − B differs frame to frame.
+        crate::testutil::write_multipage_tiff_u16(&seq, &[[8, 4]; 3]);
+
+        // B is a one-frame still (the "mean" case): applied to every A frame.
+        let still = Arc::new(FrameData::new([8, 4], 1, Samples::U16(vec![100u16; 32])));
+        let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(8.0, 4.0));
+        let mut view = ViewTransform::default();
+        view.fit([8, 4], area);
+
+        let make_source = || ExportSource::Computed {
+            kind: crate::media::Reduce::Sub,
+            a: Box::new(SourceInput::new(
+                ExportSource::Seq { path: seq.clone() },
+                3,
+                true,
+                0,
+            )),
+            // A still spans one frame, so it pairs with every frame of A.
+            b: Box::new(SourceInput::new(
+                ExportSource::Still(still.clone()),
+                1,
+                true,
+                0,
+            )),
+        };
+        let source = make_source();
+        // The Compute pane itself passes `t` through (count = its input span).
+        let pane = ExportPane::new(view, ContrastMode::Linear, false, None, 3, true, 0, source);
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, area),
+            control: None,
+            region: area,
+            out_w: 8,
+            out_h: 4,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
+            start: 0,
+            total: 3,
+        };
+
+        let mut reader = SeqReader::open(&seq).expect("open seq");
+        for t in 0..plan.total {
+            let buf = plan.compose(t);
+            assert_eq!(buf.len(), 8 * 4 * 4);
+            // Ground truth: this page minus the still, rendered the same way.
+            let page = Arc::new(reader.decode(t).expect("decode").expect("page"));
+            let want = crate::media::combine_frames(&page, &still, crate::media::Reduce::Sub)
+                .expect("combine");
+            let rgba = want.render_rgba(false); // full range, matching `clip: None`
+            for i in 0..8 * 4 {
+                assert_eq!(
+                    buf[i * 4..i * 4 + 3],
+                    rgba[i * 4..i * 4 + 3],
+                    "t {t} px {i}"
+                );
+            }
+        }
+
+        // The point of the exercise: the computed *values* move frame to frame.
+        // (The composed pixels can't show that here — the fixture's pages differ
+        // by a constant, which the float auto-range normalises away.)
+        let mut src = make_source();
+        let (mut r, mut f) = (None, None);
+        let vals: Vec<Vec<f32>> = (0..3)
+            .map(|t| {
+                decode_source(&mut src, t, &mut r, &mut f)
+                    .expect("computed frame")
+                    .color_f32()
+                    .1
+            })
+            .collect();
+        assert_ne!(vals[0], vals[1]);
+        assert_ne!(vals[1], vals[2]);
     }
 
     /// A "Share clip" pane's window is recomputed from the Control media **per

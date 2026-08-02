@@ -972,8 +972,13 @@ while `false` it shows the **config form** (mode + source combos + a **Compute**
 button); that button sets `pending_recompute` (run at the top of the next `update`,
 before `refresh_textures`, so the result never flashes black — §13) → `recompute_pane`,
 which on success sets `computed = true`, so the **result image** then shows with the
-**Refresh** / **Save** controls instead. `Pane.compute` holds the `kind`, source
-id(s) and `computed`. `media::Reduce` modes:
+**Save** control instead — there is **no Refresh button**, since a computed pane
+refreshes itself. `Pane.compute` holds the `kind`, source id(s), `computed` (a result
+exists → show it instead of the form) and `armed` (the user pressed **Compute**, or a
+view command replayed the pane → it refreshes itself from now on). The two are separate
+so a compute that *failed* still retries: a replayed pane whose source frames aren't
+resident yet, or one waiting on an upstream Compute pane in a chain, recomputes as soon
+as they land. `media::Reduce` modes:
 - **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
   accumulation → `f32`).
@@ -999,8 +1004,7 @@ for the binary ops, source resident-count for the reductions; a source that is *
 Compute pane contributes its `render_gen`, which is what propagates a recompute along a
 chain) against `Compute.last_sig` each update, iterating **to a fixed point** (bounded by
 the pane count) so a whole chain settles within one update whatever order the panes sit in.
-Only a pane that has been computed once auto-refreshes, so an unconfigured one keeps its
-form. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
+Only an `armed` pane refreshes, so an unconfigured one keeps its form. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
 (`media::save_frame`, `.tif` **32-bit float** or `.png`/`.jpg` 8-bit view, relative
 to the working dir).
 
@@ -1036,6 +1040,25 @@ flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced sess
 
 ## 10. Export (`export.rs` + `app/export_ui.rs`)
 
+> **The export replicates the view exactly.** This is the rule every change in this
+> section answers to: what an exported frame shows must be what the panes showed at
+> that timeline position — same pixels, same tone, same geometry, same per-frame
+> behaviour. The view command is the other half of it: it captures the viewpoint
+> precisely enough to reproduce a session, so *view command → replay → export* has to
+> land on the same image as exporting the live session did.
+>
+> Practically that means: **never re-implement the view's behaviour on the export
+> side.** Where the two need the same maths, they call the same function — the tone
+> tail is one `imageproc::PaneOps::render_display` (§7), the bounds are
+> `frame_bounds` mirroring `own_tone_bounds`, the Compute op is
+> `media::combine_frames`, the frame a source shows is `src_index` mirroring
+> `frame_disp`. Where the export *cannot* reproduce something (a reduction over
+> whatever frames happen to be **resident**), it snapshots the live result instead of
+> approximating it. And where the live view is dynamic, the plan must be dynamic too:
+> Share-clip bounds and Compute results are recomputed **per exported frame**, never
+> frozen on the frame that was on screen when Export was pressed. The parity tests
+> (§16) are what hold this — extend them with any new pane behaviour.
+
 The app builds a self-contained **`ExportPlan`** (snapshot of layout, views, clip,
 sources, frame range) decoupled from live state, composites each output frame on the
 CPU, and either pipes raw RGBA to the `ffmpeg` CLI (**MP4**, H.264/libx264) or writes a
@@ -1059,6 +1082,23 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 (`.mp4`/`.png`/`.jpg`/`.jpeg`, or none → MP4); any other extension (e.g. a stray dot in
 `clip.v2`) is rejected instead of handed to ffmpeg with an unusable name.
 
+- **A Compute pane exports as a live computation.** A binary (`Add`/`Sub`) Compute
+  pane becomes an `ExportSource::Computed { kind, a, b }` over its two inputs' own
+  export sources, and `decode_source` re-runs `media::combine_frames` — the very
+  function the live pane calls — for **every exported frame**. So a sequence minus a
+  still animates in the MP4 exactly as it does on screen, instead of freezing on the
+  result that happened to be showing. Each input is a `SourceInput`: a source, its own
+  persistent reader, and the `(count, sync_temporal, own_frame)` triple that `src_index`
+  maps `t` through — the export mirror of `frame_disp`, which is what makes a **still
+  pair with each frame of a sequence**. Inputs are `ExportSource`s themselves, so a
+  Compute pane reading another Compute pane nests. `export_timeline(idx)` gives a
+  Compute pane the span of its longest input (and `sync_temporal = true`) so `t` passes
+  through to the inputs; without it a one-frame Compute media would map every `t` to
+  frame 0 and the video would hold one image.
+  The **reductions** (mean/std) deliberately *don't* go this route: they reduce whatever
+  frames are **resident**, a property of the live cache that the export can't reproduce,
+  so the plan snapshots the on-screen result as a `Still` — which is exactly what the
+  view shows (and, being constant across the timeline, loses nothing).
 - `ExportPane` holds a snapshot view/clip/source plus its **own reader**
   (`ExportReader = Tiff(SeqReader) | Video(VideoReader)`) and a 1-frame
   decode+render cache. A pane's **mask overlay** is snapshotted too
@@ -1489,7 +1529,9 @@ defined; every bindable `Action` has an `action.<id>` entry — the three gaps t
 otherwise show up only as English text or a raw key at runtime); `palette` endpoints /
 diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
-**pixel-exact region crop** (incl. rotated),
+**pixel-exact region crop** (incl. rotated), **a Computed source recomputed per
+exported frame** (the composed pixels equal the same `combine_frames` done by hand on
+each page, and the values move frame to frame — the export/view parity rule of §10),
 **full-frame export == live LUT render**, content-only export (`content_region`
 excludes background) + still background crop. The parity/equivalence tests are the
 net that guards the unified `render_display` / `percentile_rect_*` paths (§7).

@@ -175,7 +175,6 @@ compute.new: Nouveau calcul
 compute.mode: Mode
 compute.source: Source
 compute.compute: Calculer
-compute.refresh: Actualiser
 compute.save: Enregistrer
 compute.cancel: Annuler
 compute.save_hint: nom.tif

@@ -208,8 +208,31 @@ impl CimApp {
     }
 
     /// The export source for pane `idx` (how its frames are decoded at export).
+    ///
+    /// A **binary Compute pane** becomes an `ExportSource::Computed` over its two
+    /// inputs' own export sources, so the export recomputes it per frame exactly
+    /// as the live pane does (§ the export/view parity rule). The reductions
+    /// can't be replayed that way — they reduce whatever is *resident* — so they
+    /// fall through to the `Still` snapshot of the result now on screen, which is
+    /// precisely what the view shows.
     fn export_source(&self, idx: usize) -> ExportSource {
         let p = &self.panes[idx];
+        if let Some(c) = p
+            .compute
+            .as_ref()
+            .filter(|c| c.computed && c.kind.is_binary())
+        {
+            if let (Some(a), Some(b)) = (
+                c.source_id.and_then(|id| self.export_input(id)),
+                c.source_b.and_then(|id| self.export_input(id)),
+            ) {
+                return ExportSource::Computed {
+                    kind: c.kind,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                };
+            }
+        }
         if let Some((files, map)) = p.media.concat_layout() {
             // Concatenation of multi-page TIFFs: hand export the files + the
             // discovered global→(file,page) map so it composites the same
@@ -235,6 +258,50 @@ impl CimApp {
         }
     }
 
+    /// One input of a Compute pane, by source pane id: its export source plus the
+    /// timeline mapping that picks the frame it *shows* — the export mirror of
+    /// `frame_disp`. `None` when the source pane is gone.
+    fn export_input(&self, src_id: u64) -> Option<SourceInput> {
+        let i = self.panes.iter().position(|p| p.id == src_id)?;
+        let (count, sync) = self.export_timeline(i);
+        Some(SourceInput::new(
+            self.export_source(i),
+            count,
+            sync,
+            self.panes[i].frame,
+        ))
+    }
+
+    /// Pane `idx`'s `(frame count, temporal sync)` as the export timeline sees
+    /// it. Normally the media's own values — but a Compute pane's media is a
+    /// one-frame result that *tracks* its inputs, so it spans the longest of them
+    /// and always follows `t` (each input's own sync flag then decides whether it
+    /// moves). Without this a Compute pane would map every `t` to frame 0 and the
+    /// exported video would hold one image.
+    fn export_timeline(&self, idx: usize) -> (usize, bool) {
+        let p = &self.panes[idx];
+        let Some(c) = p
+            .compute
+            .as_ref()
+            .filter(|c| c.computed && c.kind.is_binary())
+        else {
+            return (p.media.frame_count(), p.sync_temporal);
+        };
+        let span = |id: Option<u64>| -> usize {
+            let Some(i) = id.and_then(|id| self.panes.iter().position(|p| p.id == id)) else {
+                return 1;
+            };
+            // A pinned (unsynced) input never advances, so it spans one frame.
+            let (count, sync) = self.export_timeline(i);
+            if sync {
+                count
+            } else {
+                1
+            }
+        };
+        (span(c.source_id).max(span(c.source_b)).max(1), true)
+    }
+
     /// Snapshot a participating pane for the export plan, including its mask
     /// overlay (sourced from the referenced mask pane) so the export matches
     /// what's on screen.
@@ -250,13 +317,14 @@ impl CimApp {
                 None
             }
         };
+        let (count, sync) = self.export_timeline(idx);
         let mut pane = ExportPane::new(
             *self.view_ref(idx),
             self.contrast_of(idx),
             self.details_of(idx),
             clip,
-            p.media.frame_count(),
-            p.sync_temporal,
+            count,
+            sync,
             p.frame,
             self.export_source(idx),
         );
@@ -279,10 +347,11 @@ impl CimApp {
         if let Some(ov) = self.overlay_of(idx).filter(|_| !p.media.is_mask()) {
             if let Some(m) = self.panes.iter().position(|q| q.id == ov.src_id) {
                 let mp = &self.panes[m];
+                let (ocount, osync) = self.export_timeline(m);
                 pane.set_overlay(
                     self.export_source(m),
-                    mp.media.frame_count(),
-                    mp.sync_temporal,
+                    ocount,
+                    osync,
                     mp.frame,
                     [ov.color.r(), ov.color.g(), ov.color.b()],
                     (ov.opacity.clamp(0.0, 1.0) * 255.0) as u8,
@@ -622,14 +691,8 @@ impl CimApp {
         } else {
             None
         };
-        Some((
-            self.export_source(c),
-            p.media.frame_count(),
-            p.sync_temporal,
-            p.frame,
-            clip,
-            region,
-        ))
+        let (count, sync) = self.export_timeline(c);
+        Some((self.export_source(c), count, sync, p.frame, clip, region))
     }
 
     /// Format an export produces, decided by the output file's extension

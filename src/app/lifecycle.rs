@@ -439,13 +439,19 @@ impl CimApp {
         // other Compute panes, so wire them in list order and drop any that
         // would close a cycle — a hand-edited view command can name one, and a
         // cycle would recompute forever.
-        for (i, a, b) in computes {
+        for &(i, a, b) in &computes {
             let a_id = self.compute_source_id(i, base + a);
             let b_id = b.and_then(|b| self.compute_source_id(i, base + b));
             if let Some(c) = self.panes[i].compute.as_mut() {
                 c.source_id = a_id;
                 c.source_b = b_id;
             }
+        }
+        // Compute only once every source is wired, so a pane reading another
+        // Compute pane doesn't run against its placeholder. Order within the
+        // batch still isn't dependency order — `refresh_auto_compute` settles
+        // the chain on the next update, since a replayed pane is `armed`.
+        for &(i, ..) in &computes {
             self.recompute_pane(i);
         }
         let n = self.panes.len();

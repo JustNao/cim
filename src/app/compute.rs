@@ -102,6 +102,7 @@ impl CimApp {
             source_id: default_src,
             source_b: None,
             computed: false,
+            armed: false, // the form's Compute button arms it
             last_sig: 0,
             saving: false,
             save_name: "computed.tif".into(),
@@ -128,6 +129,9 @@ impl CimApp {
             source_id: None,
             source_b: None,
             computed: false,
+            // Replayed from a view command: already configured, so it retries
+            // until its sources (and any upstream Compute pane) are ready.
+            armed: true,
             last_sig: 0,
             saving: false,
             save_name: "computed.tif".into(),
@@ -313,10 +317,9 @@ impl CimApp {
                 let Some(c) = self.panes[i].compute.as_ref() else {
                     continue;
                 };
-                // Only once the pane has been computed at least once — an
-                // unconfigured pane must keep showing its form until the user
-                // presses Compute.
-                if c.computed && self.compute_sig(i) != c.last_sig {
+                // Only a pane the user (or a view command) has actually asked
+                // to compute — an unconfigured one keeps showing its form.
+                if c.armed && self.compute_sig(i) != c.last_sig {
                     self.recompute_pane(i);
                     again = true;
                 }

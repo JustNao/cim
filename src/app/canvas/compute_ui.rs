@@ -70,10 +70,9 @@ impl CimApp {
                         }
                     } else {
                         // Result controls (the form is replaced by the output).
+                        // No Refresh button: the pane recomputes itself whenever
+                        // its inputs change (`refresh_auto_compute`).
                         ui.horizontal(|ui| {
-                            if ui.button(t!("compute.refresh")).clicked() {
-                                recompute = true;
-                            }
                             if !saving && ui.button(t!("compute.save")).clicked() {
                                 saving = true;
                             }
@@ -109,6 +108,9 @@ impl CimApp {
             c.source_b = source_b;
             c.saving = saving;
             c.save_name = save_name.clone();
+            // Pressing Compute is what arms the pane's automatic refresh; from
+            // here on it recomputes itself whenever its inputs change.
+            c.armed |= recompute;
         }
         if recompute {
             // Defer to the top of the next update (before `refresh_textures`) so

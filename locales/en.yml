@@ -166,7 +166,6 @@ compute.new: New compute
 compute.mode: Mode
 compute.source: Source
 compute.compute: Compute
-compute.refresh: Refresh
 compute.save: Save
 compute.cancel: Cancel
 compute.save_hint: name.tif
