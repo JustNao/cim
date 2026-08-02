@@ -122,7 +122,7 @@ impl CimApp {
         let (Some(s), Some(n)) = (start, now) else {
             return;
         };
-        if (s - n).length() < 4.0 {
+        if (s - n).length() < MIN_DRAG_PX {
             self.set_stats_region(None); // treat a right-click as "clear"
             return;
         }

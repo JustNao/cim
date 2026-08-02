@@ -109,7 +109,7 @@ impl CimApp {
                     .export
                     .sel_rect
                     .take()
-                    .filter(|r| r.width() >= 4.0 && r.height() >= 4.0)
+                    .filter(|r| r.size().length() >= MIN_DRAG_PX)
                     .and_then(|r| self.screen_rect_to_image(r, area));
                 if let Some(m) = self.export.pre_select_mode.take() {
                     self.mode = m;
@@ -224,7 +224,7 @@ impl CimApp {
         let tex = self.pane_texture(idx);
         let overlay = self.prepare_overlay(ctx, idx);
         let painter = ui.painter_at(img_area);
-        painter.rect_filled(img_area, 0.0, Color32::from_gray(24));
+        painter.rect_filled(img_area, 0.0, PANE_BG);
         if let Some(id) = tex {
             let v = *self.view_ref(idx);
             let rect = v.image_rect(self.disp_size(idx), img_area);

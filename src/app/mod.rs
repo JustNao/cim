@@ -52,6 +52,21 @@ use export_ui::ExportRun;
 const HEADER_H: f32 = 24.0;
 const FOOTER_H: f32 = 20.0;
 const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
+
+/// Backdrop behind a pane's image, in every layout — the letterbox around a
+/// fitted image and the area a panned image has moved off. One constant so the
+/// grid/single and A/B paths can't drift to different shades.
+const PANE_BG: Color32 = Color32::from_gray(24);
+
+/// Shortest right-drag (screen px, measured on the diagonal) that counts as
+/// selecting a rectangle rather than a click. Below it the export crop and the
+/// stats region both treat the gesture as "clear". Shared so the two agree —
+/// they previously disagreed in *shape*, the crop testing each axis separately,
+/// which silently discarded a long thin crop the stats region accepted.
+///
+/// The profile line's own threshold is deliberately **not** this: it measures in
+/// image space, a different unit.
+const MIN_DRAG_PX: f32 = 4.0;
 /// Hairline that separates a floating chrome bar (pane header/footer, global
 /// toolbar / frame bar) from the image it overlays — the panels used to draw
 /// their own separators; the overlays paint this instead.
