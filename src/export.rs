@@ -557,9 +557,14 @@ impl ExportPane {
         Some(self.blend_overlay(base, ip))
     }
 
-    /// Blend the mask overlay over `base` at image point `ip`. The overlay is
-    /// stretched onto the base image rect (as in the live view), so the base
-    /// pixel maps to the mask pixel proportionally.
+    /// Blend the mask overlay over `base` at image point `ip`. The overlay shares
+    /// the base image's rect 1:1 in image space, so `ip` indexes both.
+    ///
+    /// A **mismatched** overlay is skipped, not stretched — matching the live view
+    /// (`CimApp::prepare_overlay`, which returns `None` rather than draw one). A
+    /// newly selected mismatched source is rejected up front with an error popup,
+    /// so this only guards later per-frame size drift within a sequence; stretching
+    /// it here would put an overlay in the video that the panes never showed.
     fn blend_overlay(&self, base: [u8; 3], ip: Vec2) -> [u8; 3] {
         let Some(ov) = &self.overlay else {
             return base;
@@ -568,11 +573,10 @@ impl ExportPane {
             return base;
         };
         let ([mw, mh], [bw, bh]) = (ov.cur_size, self.cur_size);
-        if mw == 0 || mh == 0 || bw == 0 || bh == 0 {
+        if mw == 0 || mh == 0 || bw == 0 || bh == 0 || [mw, mh] != [bw, bh] {
             return base;
         }
-        let mx = (ip.x / bw as f32 * mw as f32) as usize;
-        let my = (ip.y / bh as f32 * mh as f32) as usize;
+        let (mx, my) = (ip.x as usize, ip.y as usize);
         if mx >= mw || my >= mh {
             return base;
         }
