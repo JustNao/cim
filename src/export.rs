@@ -1625,6 +1625,142 @@ mod tests {
         }
     }
 
+    /// A mask overlay whose frame size differs from the base is **skipped**, not
+    /// stretched — matching `CimApp::prepare_overlay`, which returns `None`. The
+    /// export used to rescale it, so a sequence whose page sizes drift showed no
+    /// overlay on screen and a stretched one in the video (agents.md §10).
+    #[test]
+    fn a_mismatched_overlay_is_skipped_not_stretched() {
+        let base = FrameData::new([8, 8], 1, Samples::U8(vec![100u8; 64]));
+        // Half-size mask, entirely true: stretching it would tint every pixel.
+        let mask = FrameData::new_mask([4, 4], 1, Samples::U8(vec![1u8; 16]));
+
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(4.0, 4.0),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            None,
+            1,
+            true,
+            0,
+            ExportSource::Still(Arc::new(base)),
+        );
+        pane.set_overlay(
+            ExportSource::Still(Arc::new(mask)),
+            1,
+            true,
+            0,
+            [255, 0, 0],
+            255,
+        );
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            control: None,
+            region: cell,
+            out_w: 8,
+            out_h: 8,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
+            start: 0,
+            total: 1,
+        };
+        let buf = plan.compose(0);
+        for y in 0..8 {
+            for x in 0..8 {
+                let o = (y * 8 + x) * 4;
+                assert_eq!(
+                    [buf[o], buf[o + 1], buf[o + 2]],
+                    [100, 100, 100],
+                    "({x},{y}) must keep the base colour, untinted"
+                );
+            }
+        }
+    }
+
+    /// A pane whose tone is pinned to a region exports with **that region's**
+    /// bounds, not whole-frame ones — the export mirror of `own_tone_bounds`
+    /// taking `tone_region` into account. Before `ExportPane::region` existed the
+    /// export had no region at all, so a region-pinned pane exported with a
+    /// visibly different contrast than it displayed.
+    #[test]
+    fn a_pinned_region_drives_the_exported_tone() {
+        // Left half spans 0..=3; the right half holds a single bright outlier, so
+        // whole-frame bounds (0..200) and left-half bounds (0..3) differ sharply.
+        let mut v = vec![0u8; 64];
+        for y in 0..8 {
+            for x in 0..4 {
+                v[y * 8 + x] = x as u8;
+            }
+        }
+        v[8 * 4 + 4] = 200;
+        let frame = Arc::new(FrameData::new([8, 8], 1, Samples::U8(v)));
+
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(4.0, 4.0),
+            needs_fit: false,
+        };
+        let compose_with = |region: Option<Rect>| {
+            let mut pane = ExportPane::new(
+                view,
+                ContrastMode::Linear,
+                false,
+                None, // clip off: bounds are the region's plain extent
+                1,
+                true,
+                0,
+                ExportSource::Still(frame.clone()),
+            );
+            pane.region = region;
+            let mut plan = ExportPlan {
+                panes: vec![pane],
+                layout: ExportLayout::Single(0, cell),
+                control: None,
+                region: cell,
+                out_w: 8,
+                out_h: 8,
+                labels: Vec::new(),
+                label_style: LabelStyle::default(),
+                start: 0,
+                total: 1,
+            };
+            plan.compose(0)
+        };
+
+        let region = Rect::from_min_max(Pos2::ZERO, Pos2::new(4.0, 8.0));
+        let pinned = compose_with(Some(region));
+        let whole = compose_with(None);
+
+        // The bounds the live view would use for the same region, applied by hand.
+        let (lo, hi) = frame.region_display_bounds(0, 0, 4, 8, false, 0.01);
+        let expect = |val: u8| (((val as f32 - lo) / (hi - lo)).clamp(0.0, 1.0) * 255.0) as u8;
+
+        for y in 0..8 {
+            for x in 0..4 {
+                let o = (y * 8 + x) * 4;
+                assert_eq!(
+                    pinned[o],
+                    expect(x as u8),
+                    "({x},{y}) must use the region's bounds"
+                );
+            }
+        }
+        // And it genuinely differs from the whole-frame tone, so the assertion
+        // above is not vacuous.
+        assert_ne!(
+            pinned, whole,
+            "a pinned region must change the exported tone"
+        );
+    }
+
     /// A 180° pane rotation flips the exported image about its centre: output
     /// pixel (x, y) shows source pixel (w-1-x, h-1-y).
     #[test]
