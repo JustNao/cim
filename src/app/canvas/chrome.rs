@@ -319,13 +319,8 @@ impl CimApp {
         );
 
         let [w, h] = self.disp_size(idx);
-        // Native sample format (uint8 / uint16 / float32), when the frame is
-        // resident. Kept next to the resolution so the readout reads "H×W type".
-        let kind = self.panes[idx]
-            .media
-            .resident(self.frame_disp(idx))
-            .map(|fr| fr.kind_label());
-        let dims = match kind {
+        // Native sample format kept next to the resolution: "H×W type".
+        let dims = match self.kind_label(idx) {
             Some(k) => format!("{h}×{w}  {k}"),
             None => format!("{h}×{w}"),
         };
@@ -378,6 +373,16 @@ impl CimApp {
     /// The native pixel value at the shared image cursor for pane `idx`: the
     /// value string when on a resident pixel, `…` when the frame isn't loaded,
     /// or `—` when the cursor falls outside this pane's image.
+    /// Pane `idx`'s native sample format (`uint8` / `uint16` / `float32`), or
+    /// `None` while its shown frame isn't resident. Shared by the per-pane footer
+    /// and the A/B footer so both report the depth the same way.
+    pub(super) fn kind_label(&self, idx: usize) -> Option<&'static str> {
+        self.panes[idx]
+            .media
+            .resident(self.frame_disp(idx))
+            .map(|fr| fr.kind_label())
+    }
+
     pub(super) fn value_string(&self, idx: usize, cursor: Vec2) -> String {
         let [w, h] = self.disp_size(idx);
         let (x, y) = (cursor.x.floor() as i64, cursor.y.floor() as i64);

@@ -147,7 +147,7 @@ impl CimApp {
         top_inset: f32,
     ) {
         let painter = ui.painter_at(clip);
-        painter.rect_filled(clip, 0.0, Color32::from_gray(18));
+        painter.rect_filled(clip, 0.0, PANE_BG);
         if let Some(id) = tex {
             let rect = self.view_ref(idx).image_rect(self.disp_size(idx), area);
             let theta = self.pane_theta(idx);
@@ -200,15 +200,21 @@ impl CimApp {
             Stroke::new(1.0_f32, CHROME_BORDER),
         );
         let [w, h] = self.disp_size(a);
+        // Each side carries its own native format, as the per-pane footer does:
+        // the two media may differ in depth, which is exactly what A/B compares.
+        let side = |idx: usize, tag: &str, ci: Vec2| match self.kind_label(idx) {
+            Some(k) => format!("{tag} {k} {}", self.value_string(idx, ci)),
+            None => format!("{tag} {}", self.value_string(idx, ci)),
+        };
         let text = match self.cursor_img {
             Some(ci) => format!(
-                "{h}×{w}    {} {}  {} {}    A {}   B {}",
-                t!("pane.col"),
-                ci.x.floor() as i64,
+                "{h}×{w}    {}={}  {}={}    {}   {}",
                 t!("pane.row"),
                 ci.y.floor() as i64,
-                self.value_string(a, ci),
-                self.value_string(b, ci),
+                t!("pane.col"),
+                ci.x.floor() as i64,
+                side(a, "A", ci),
+                side(b, "B", ci),
             ),
             None => format!("{h}×{w}"),
         };
