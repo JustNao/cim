@@ -90,6 +90,10 @@ src/
   watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
                  (sign_paths / FileWatcher, §9) — file I/O off the paint path.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
+  tone.rs        The display-bounds maths shared by the live view and the export
+                 (§10's parity rule, made structural): pixel_bounds, frame_bounds,
+                 clip_pct, uses_colormap, synced_index. Borrows only a frame plus
+                 plain parameters, so both sides can call it without either's state.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   palette.rs     Colour palettes (viridis/turbo/diverging) for the Colormap tone.
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
@@ -521,17 +525,19 @@ Control pane's clip / full-range map on its current frame) instead of computing 
 for any non-LUT_ALPHA tone, so panes are **locked to identical display bounds** and real
 intensity differences show as brightness rather than being hidden by per-pane
 auto-normalisation. `tone_bounds` splits into `own_tone_bounds` (a pane's own clip / region
-bounds) and the Share-clip path (which reads the Control's `own_tone_bounds`, so it can't
+bounds — `tone::clip_pct` + `tone_region` + `tone::frame_bounds`, §2) and the Share-clip path
+(which reads the Control's `own_tone_bounds`, so it can't
 recurse); the effective bounds move with the Control pane's frame/clip, so `tone_sig` folds
 in the Control frame's identity (`control_frame_key` — pane index + frame `Arc` pointer)
 plus its clip/region inputs (cheap — never the computed percentile). Edited in the popup's
 **Share clip** row (greys out the clip when on), and round-tripped via `--share-clip`. For
 export the bounds are **recomputed per exported frame** (not frozen): a share-clip
 `ExportPane` carries a `share_clip` flag, and the plan holds one `ExportPlan::control`
-(`ControlBounds` — the Control media's source + its clip/region snapshot); `compose(t)`
-decodes the Control's frame for `t`, computes its bounds (`frame_bounds`, the export mirror
-of `own_tone_bounds`), and pushes that one shared window onto every share-clip pane — so an
-animated Control is tracked exactly as the live view tracks it.
+(`ControlBounds` — the Control media's source + its clip/region snapshot, both taken through
+`tone::clip_pct` / `tone_region`); `compose(t)` decodes the Control's frame for `t`, computes
+its bounds with the same `tone::frame_bounds` the live path calls, and pushes that one shared
+window onto every share-clip pane — so an animated Control is tracked exactly as the live view
+tracks it.
 
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
@@ -619,10 +625,16 @@ min/max (clip off) or its per-tail-percentile clip (clip on). Pixels outside the
 region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA still
 runs over the whole image. Recomputed on each texture rebuild; replicates to all
 panes. **An export crop drives the same thing:** while the Export panel is open and a
-crop is set, `own_tone_bounds` derives every non-LUT_ALPHA pane's bounds from
-`export.region` (taking precedence over `stats_region`), so the live view previews the
-region-restricted tone the export composites; `tone_sig` folds the crop rect in so panes
-re-render when it changes/clears.
+crop is set, every non-LUT_ALPHA pane's bounds come from `export.region` (taking
+precedence over `stats_region`), so the live view previews the region-restricted tone
+the export composites; `tone_sig` folds the crop rect in so panes re-render when it
+changes/clears.
+
+That precedence — **export crop → pinned stats region → whole frame**, never for
+LUT_ALPHA — is `CimApp::tone_region(idx)`, the one place it is stated. It is *policy*;
+the maths it feeds is `tone::frame_bounds` (§2). The export snapshots the method's
+result into `ExportPane.region`, so a region-pinned pane exports with the bounds it
+displays (§10) — it previously had no region on the export side at all.
 
 **Texture filtering:** always **nearest**, at every zoom, both magnification and
 minification (`TextureOptions::NEAREST`). The tool is pixel-accurate — an on-screen
@@ -748,7 +760,16 @@ pixel in the footer (`value_string`). So the same source pixel is read across al
 at once. The dot is **not** drawn on `cursor_pane` (its OS cursor already marks the
 spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
 per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
-shows the shared position with **both** A and B values.
+shows the shared position with **both** A and B values, each preceded by its own native
+format (`kind_label`, shared with `draw_footer`) — the two media may differ in depth,
+which is exactly what A/B is for.
+
+Both footers, and every layout's image backdrop and right-drag threshold, are driven by
+shared values rather than per-path literals: `PANE_BG` and `MIN_DRAG_PX` in `app/mod.rs`.
+Both had silently drifted (gray 24 vs 18; a per-axis 4 px test for the export crop
+against a diagonal one for the stats region, so a long thin crop was discarded while the
+same drag made a valid stats region). The **profile line** keeps its own threshold: it
+measures in image space, a different unit.
 
 The header is a **single row** (`header_h_for`): the title on the left, then the
 **Auto-reload** toggle, **Reload** (re-reads this media from disk → `pending_reload`),
@@ -1049,10 +1070,21 @@ flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced sess
 >
 > Practically that means: **never re-implement the view's behaviour on the export
 > side.** Where the two need the same maths, they call the same function — the tone
-> tail is one `imageproc::PaneOps::render_display` (§7), the bounds are
-> `frame_bounds` mirroring `own_tone_bounds`, the Compute op is
-> `media::combine_frames`, the frame a source shows is `src_index` mirroring
-> `frame_disp`. Where the export *cannot* reproduce something (a reduction over
+> tail is one `imageproc::PaneOps::render_display` (§7), the Compute op is
+> `media::combine_frames`, and everything about *tone bounds and frame choice* is
+> `crate::tone` (§2): `frame_bounds`, `pixel_bounds`, `clip_pct`, `uses_colormap`
+> and `synced_index` each have exactly one definition, called by
+> `own_tone_bounds`/`stage`/`frame_disp`/`stage_target` on the view side and by
+> `ExportPane`/`ControlBounds` on the export side. The *region precedence* (export
+> crop → pinned stats region → whole frame) is likewise one method,
+> `CimApp::tone_region`, whose result the export snapshots into `ExportPane.region`
+> rather than restating.
+>
+> These were all hand-written mirrors once, and the mirrors did drift — a
+> region-pinned pane had no region on the export side at all, so it exported with
+> whole-frame bounds while displaying region ones, and a size-mismatched overlay
+> was stretched into the video while the view refused to draw it. Both are now
+> pinned by tests (§16). Where the export *cannot* reproduce something (a reduction over
 > whatever frames happen to be **resident**), it snapshots the live result instead of
 > approximating it. And where the live view is dynamic, the plan must be dynamic too:
 > Share-clip bounds and Compute results are recomputed **per exported frame**, never
@@ -1551,8 +1583,16 @@ their own cell** (the output-fraction the panel's label preview scales by), **a 
 exported frame** (the composed pixels equal the same `combine_frames` done by hand on
 each page, and the values move frame to frame — the export/view parity rule of §10),
 **full-frame export == live LUT render**, content-only export (`content_region`
-excludes background) + still background crop. The parity/equivalence tests are the
-net that guards the unified `render_display` / `percentile_rect_*` paths (§7).
+excludes background) + still background crop, **a size-mismatched overlay skipped rather
+than stretched** and **a pinned region driving the exported tone** (the two §10 mirrors
+that had actually drifted — the export used to stretch the overlay the view refused to
+draw, and carried no region at all). `tone` covers its own maths directly:
+**`frame_bounds` == the `FrameData` call it stands for** across clip on/off × region
+some/none on an integer and a float frame, a **region outside the frame falling back to
+whole-frame bounds**, `clip_pct` ignoring LUT_ALPHA, and `synced_index` holding a short
+media / pinning an unsynced one / not dividing by zero. The parity/equivalence tests are
+the net that guards the unified `render_display` / `percentile_rect_*` / `tone::*`
+paths (§7, §10).
 
 The network-mount read path (§15) is guarded the same way — by equivalence, since every
 change there is meant to alter *only* the shape of the I/O: **strip-run coalescing**
