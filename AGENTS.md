@@ -1179,10 +1179,14 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   The panel also shows a **preview**: the chosen media's live texture with the label drawn by
   the ordinary egui painter using the same anchor/margin/padding maths scaled by the
   preview's share of the output height — a faithful mock, not a re-run of the compositor.
-  The preview's UV sub-rect mirrors what will actually be exported: a crop shows just that
-  region, and with **no crop** it shows the pane's on-screen **content** sub-rect (honouring
-  the live view's zoom/pan, via `view_ref`/`image_rect`/`screen_to_img` like
-  `pane_content_in`), not the whole image.
+  The preview's box **and** its UV sub-rect mirror what will actually be exported: a crop
+  shows just that region, and with **no crop** it shows the pane's on-screen **content**
+  sub-rect (honouring the live view's zoom/pan), not the whole image — measured by calling
+  `pane_content_in` itself, against `export_pane_area(idx)`: the pane's own composition
+  area, i.e. its **grid cell** in Grid, the image area in Single, its **side of the wipe**
+  in A/B. Measuring against the whole canvas instead is the mistake to avoid — it leaves
+  the height right (one row spans the canvas) while the width comes out too wide by the
+  column count, so the box silently drifts with the window size and `max_columns`.
 
 ---
 

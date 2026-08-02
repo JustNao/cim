@@ -423,6 +423,37 @@ impl CimApp {
         Some((region, packed))
     }
 
+    /// The **view-reference area** pane `idx` is composited against — the rect its
+    /// view samples through, and so the rect its label is anchored within
+    /// (`ExportPlan::label_rects`). Per mode, exactly what `build_export_plan`
+    /// picks: its **grid cell** in Grid (`grid_cells`, the same call `packed_grid`
+    /// makes in bulk), the whole image area in Single, its **side of the wipe** in
+    /// A/B.
+    ///
+    /// The label preview reads this rather than assuming `last_area`: a Grid pane
+    /// measured against the full canvas comes out too wide by the column count
+    /// (and an A/B side too wide by the split), which is exactly the mismatch the
+    /// preview is supposed to rule out.
+    fn export_pane_area(&self, idx: usize) -> Rect {
+        let area = self.last_area;
+        match self.export.mode {
+            Mode::Grid => self
+                .grid_cells(&self.visible_indices(), area)
+                .into_iter()
+                .find(|&(i, _)| i == idx)
+                .map_or(area, |(_, cell)| cell),
+            Mode::Single => area,
+            Mode::Ab => {
+                let mid = area.min.x + self.ab_split.clamp(0.02, 0.98) * area.width();
+                if idx == self.slot_b && idx != self.slot_a {
+                    Rect::from_min_max(Pos2::new(mid, area.min.y), area.max)
+                } else {
+                    Rect::from_min_max(area.min, Pos2::new(mid, area.max.y))
+                }
+            }
+        }
+    }
+
     /// Composition-space region covering only image **content** (no surrounding
     /// background) for the current mode — used when no explicit crop is set, so
     /// panning the image into a corner doesn't export the empty background.
@@ -987,10 +1018,14 @@ impl CimApp {
                 // No crop: the export composites only the on-screen **content**
                 // (the image clipped to the visible view — `content_region` /
                 // `pane_content_in`), so the preview must show that same sub-rect
-                // honouring the live view's zoom/pan, not the whole image.
-                let area = self.last_area;
+                // honouring the live view's zoom/pan, not the whole image. It is
+                // measured against the pane's own composition area (its grid cell
+                // / A-B side), not the whole canvas — `pane_content_in` is the
+                // same call `packed_grid` makes, so the box matches the cell the
+                // export produces at any column count or window size.
+                let area = self.export_pane_area(idx);
                 let vt = self.view_ref(idx);
-                let content = vt.image_rect(dsz, area).intersect(area);
+                let content = self.pane_content_in(idx, area);
                 if content.is_positive() {
                     let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
                     let a = vt.screen_to_img(content.min, area);
@@ -1008,7 +1043,10 @@ impl CimApp {
                 }
             }
         };
-        let aspect = aspect.clamp(0.25, 4.0);
+        // Only a guard against a degenerate sliver — kept wide enough that a real
+        // cell or crop passes through unclamped, since a clamped box would be
+        // lying about the shape the export produces.
+        let aspect = aspect.clamp(0.1, 10.0);
         let w = ui.available_width().clamp(80.0, 300.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / aspect), Sense::hover());
         let painter = ui.painter_at(rect);
