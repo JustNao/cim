@@ -322,16 +322,8 @@ impl CimApp {
     /// what's on screen.
     pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
         let p = &self.panes[idx];
-        // Snapshot the clip: on for Linear / Colormap with the toggle set;
-        // LUT_ALPHA takes the full range (None).
-        let clip = {
-            let t = self.tone_of(idx);
-            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.clip.enabled {
-                Some(t.clip.percent)
-            } else {
-                None
-            }
-        };
+        // Snapshot the clip through the same rule the live render uses.
+        let clip = crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx));
         let (count, sync) = self.export_timeline(idx);
         let mut pane = ExportPane::new(
             *self.view_ref(idx),
@@ -356,6 +348,9 @@ impl CimApp {
                 pane.palette = Some(t.palette);
             }
         }
+        // Same region the live bounds are computed over (export crop → stats
+        // region → none), so a region-pinned tone survives the export.
+        pane.region = self.tone_region(idx);
         pane.rotation = self.rotation_of(idx).to_radians();
         // Use the effective overlay (shared when the pane is tone-synced), and
         // skip mask panes (they don't take an overlay), matching prepare_overlay.
@@ -784,23 +779,11 @@ impl CimApp {
         }
         let c = self.control.min(self.panes.len() - 1);
         let p = &self.panes[c];
-        let contrast = self.contrast_of(c);
-        let tone = self.tone_of(c);
-        // Clip percentile, or None = full range (also for LUT_ALPHA's own contrast).
-        let clip =
-            (contrast != ContrastMode::LutAlpha && tone.clip.enabled).then_some(tone.clip.percent);
-        // Region the Control's bounds are computed over, mirroring the precedence
-        // in `own_tone_bounds`: the export crop while the panel is open, else its
-        // stats region when region-tone is on; never for LUT_ALPHA.
-        let region = if contrast == ContrastMode::LutAlpha {
-            None
-        } else if self.export.show && self.export.region.is_some() {
-            self.export.region
-        } else if p.region_tone {
-            self.stats_region
-        } else {
-            None
-        };
+        // Both inputs come from the same helpers the live render uses, so the
+        // per-frame Share-clip window the export recomputes is the one the panes
+        // show — no second statement of the clip rule or the region precedence.
+        let clip = crate::tone::clip_pct(self.contrast_of(c), &self.tone_of(c));
+        let region = self.tone_region(c);
         let (count, sync) = self.export_timeline(c);
         Some((self.export_source(c), count, sync, p.frame, clip, region))
     }

@@ -625,15 +625,12 @@ impl CimApp {
     /// the playback prefetch (the candidate next shared frame) if one is in flight,
     /// else the committed shared frame; unsynced panes use their own frame.
     fn stage_target(&self, idx: usize) -> usize {
-        let c = self.panes[idx].media.frame_count().max(1);
-        if self.panes[idx].sync_temporal {
-            self.playback
-                .prefetch
-                .unwrap_or(self.shared_frame)
-                .min(c - 1)
-        } else {
-            self.panes[idx].frame % c
-        }
+        crate::tone::synced_index(
+            self.playback.prefetch.unwrap_or(self.shared_frame),
+            self.panes[idx].media.frame_count(),
+            self.panes[idx].sync_temporal,
+            self.panes[idx].frame,
+        )
     }
 
     /// Source pixels per screen pixel for pane `idx` at its current zoom — the
@@ -716,8 +713,7 @@ impl CimApp {
         let contrast = self.contrast_of(idx);
         // Colormap is a plain (mono-only) palette render, done synchronously; it
         // takes precedence over the proprietary operators (details is ignored).
-        let cmap =
-            contrast == ContrastMode::Colormap && frame.color_channels() == 1 && !frame.is_mask();
+        let cmap = crate::tone::uses_colormap(contrast, &frame);
         // The proprietary operators only run on single-channel 16-bit frames with
         // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
         // render, so there's nothing heavy to push off-thread.
@@ -928,38 +924,38 @@ impl CimApp {
     /// bounds when region-tone is pinned) — ignoring "Share clip", so it can be
     /// read for the Control media itself without recursing.
     fn own_tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
-        let contrast = self.contrast_of(idx);
-        let tone = self.tone_of(idx);
-        let pct = tone.clip.percent;
-        // Clip the built-in maps (Linear and Colormap share the same bounds),
-        // only when the toggle is on; LUT_ALPHA takes the full range (own contrast).
-        let clip = contrast != ContrastMode::LutAlpha && tone.clip.enabled;
-        let base = |clip: bool| {
-            if clip {
-                frame.clip_bounds(pct)
-            } else {
-                frame.display_bounds(false)
-            }
-        };
-        let region_bounds = |reg: Rect| {
-            pixel_bounds(reg, frame.size)
-                .map(|(x0, y0, x1, y1)| frame.region_display_bounds(x0, y0, x1, y1, clip, pct))
-        };
-        // An export crop (while the Export panel is open) restricts every
-        // non-LUT_ALPHA pane's LUT to the selected region, so the live tone
-        // matches what the export composites. Takes precedence over the stats
-        // region. LUT_ALPHA keeps its own full-range contrast.
-        if contrast != ContrastMode::LutAlpha && self.export.show {
-            if let Some(b) = self.export.region.and_then(region_bounds) {
-                return b;
+        crate::tone::frame_bounds(
+            frame,
+            crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx)),
+            self.tone_region(idx),
+        )
+    }
+
+    /// The region pane `idx`'s display bounds are computed over, or `None` for
+    /// the whole frame. **Policy, not maths** — the maths is `tone::frame_bounds`
+    /// — and the export snapshots the result of this same method
+    /// (`export_ui::export_pane`) rather than restating the precedence:
+    ///
+    /// 1. an **export crop**, while the Export panel is open, so the live view
+    ///    previews the region-restricted tone the export composites;
+    /// 2. else the pinned **stats region**, when this pane has region-tone on;
+    /// 3. else nothing.
+    ///
+    /// LUT_ALPHA is excluded throughout: it runs over the whole image with its
+    /// own contrast.
+    pub(super) fn tone_region(&self, idx: usize) -> Option<Rect> {
+        if self.contrast_of(idx) == ContrastMode::LutAlpha {
+            return None;
+        }
+        if self.export.show {
+            if let Some(reg) = self.export.region {
+                return Some(reg);
             }
         }
         if self.panes[idx].region_tone {
             self.stats_region
-                .and_then(region_bounds)
-                .unwrap_or_else(|| base(clip))
         } else {
-            base(clip)
+            None
         }
     }
 

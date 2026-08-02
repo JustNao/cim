@@ -13,6 +13,7 @@ mod renderer;
 mod settings;
 #[cfg(test)]
 mod testutil;
+mod tone;
 mod view;
 mod watcher;
 

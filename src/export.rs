@@ -19,6 +19,7 @@ use eframe::egui::{Color32, Pos2, Rect, Vec2};
 
 use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
+use crate::tone::{frame_bounds, synced_index};
 use crate::view::ViewTransform;
 
 const BG: [u8; 4] = [24, 24, 24, 255];
@@ -90,7 +91,7 @@ impl SourceInput {
     /// The frame this input *shows* at timeline position `t` — the export mirror
     /// of the live `frame_disp`, which is what a Compute pane reads.
     fn frame_at(&mut self, t: usize) -> Option<Arc<FrameData>> {
-        let idx = src_index(t, self.count, self.sync_temporal, self.own_frame);
+        let idx = synced_index(t, self.count, self.sync_temporal, self.own_frame);
         decode_source(&mut self.source, idx, &mut self.reader, &mut self.cur_file)
     }
 }
@@ -119,6 +120,11 @@ pub struct ExportPane {
     /// (so an animated Control is tracked, matching the live view); otherwise it
     /// stays `None`.
     pub window: Option<(f32, f32)>,
+    /// Region (full-image space) this pane's bounds are computed over, or `None`
+    /// for the whole frame — snapshotted from `CimApp::tone_region`, so a pane
+    /// whose tone is pinned to the stats region exports with the bounds it
+    /// displays rather than whole-frame ones.
+    pub region: Option<Rect>,
     /// Whether this pane follows the Control media's "Share clip" bounds. When
     /// set, `compose` rewrites `window` from `ExportPlan::control` each frame.
     pub share_clip: bool,
@@ -182,22 +188,9 @@ struct ExportOverlay {
     cur_size: [usize; 2],
 }
 
-/// Which source frame a `count`-frame pane/overlay shows at timeline position
-/// `t`: synced sequences track `t` (holding on their last frame when shorter),
-/// unsynced ones stay pinned to their own frame. Shared by `ExportPane` and its
-/// mask overlay so the two stay in step.
-fn src_index(t: usize, count: usize, sync_temporal: bool, own_frame: usize) -> usize {
-    let c = count.max(1);
-    if sync_temporal {
-        t.min(c - 1)
-    } else {
-        own_frame % c
-    }
-}
-
 impl ExportOverlay {
     fn src_index(&self, t: usize) -> usize {
-        src_index(t, self.count, self.sync_temporal, self.own_frame)
+        synced_index(t, self.count, self.sync_temporal, self.own_frame)
     }
 }
 
@@ -288,7 +281,7 @@ impl ControlBounds {
     /// recomputed only when its source frame changes; `None` if it can't be
     /// decoded (the Share-clip panes then fall back to their own `clip`).
     fn bounds_at(&mut self, t: usize) -> Option<(f32, f32)> {
-        let idx = src_index(t, self.count, self.sync_temporal, self.own_frame);
+        let idx = synced_index(t, self.count, self.sync_temporal, self.own_frame);
         if self.cur_idx == Some(idx) {
             return self.cur_bounds;
         }
@@ -298,39 +291,6 @@ impl ControlBounds {
         self.cur_bounds = Some(b);
         Some(b)
     }
-}
-
-/// Display bounds `[lo, hi]` for `frame` — the export-side mirror of the live
-/// `own_tone_bounds`: a region (min/max, or its per-tail percentile when `clip`),
-/// else the whole-frame clip / full-range map.
-fn frame_bounds(frame: &FrameData, clip: Option<f32>, region: Option<Rect>) -> (f32, f32) {
-    if let Some(reg) = region {
-        if let Some((x0, y0, x1, y1)) = pixel_bounds(reg, frame.size) {
-            return frame.region_display_bounds(
-                x0,
-                y0,
-                x1,
-                y1,
-                clip.is_some(),
-                clip.unwrap_or(0.01),
-            );
-        }
-    }
-    match clip {
-        Some(pct) => frame.clip_bounds(pct),
-        None => frame.display_bounds(false),
-    }
-}
-
-/// Convert an image-space region rect to integer pixel bounds `(x0, y0, x1, y1)`
-/// clamped to `size`, or `None` when empty. Mirrors `app::pixel_bounds`.
-fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usize)> {
-    let (w, h) = (size[0], size[1]);
-    let x0 = (reg.min.x.floor().max(0.0) as usize).min(w);
-    let y0 = (reg.min.y.floor().max(0.0) as usize).min(h);
-    let x1 = (reg.max.x.ceil().max(0.0) as usize).min(w);
-    let y1 = (reg.max.y.ceil().max(0.0) as usize).min(h);
-    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
 }
 
 impl ExportPane {
@@ -351,6 +311,7 @@ impl ExportPane {
             details,
             clip,
             window: None,
+            region: None,
             share_clip: false,
             palette: None,
             rotation: 0.0,
@@ -403,7 +364,7 @@ impl ExportPane {
 
     /// Which source frame this pane shows at timeline position `t`.
     fn src_index(&self, t: usize) -> usize {
-        src_index(t, self.count, self.sync_temporal, self.own_frame)
+        synced_index(t, self.count, self.sync_temporal, self.own_frame)
     }
 
     /// Decode + render the mask overlay for timeline `t` (if any), caching the
@@ -491,18 +452,28 @@ impl ExportPane {
             &cropped
         };
         // Explicit bounds (from "Share clip" — the Control media's [lo, hi])
-        // override the clip / auto bounds (mirrors tone_bounds).
-        let (lo, hi) = match (self.window, self.clip) {
-            (Some(win), _) => win,
-            (None, Some(pct)) => sub.clip_bounds(pct),
-            (None, None) => sub.display_bounds(false),
+        // override everything else, exactly as `tone_bounds` does live.
+        //
+        // Otherwise the shared `frame_bounds`. A pinned region is measured on the
+        // **full** frame, since it is in full-image coordinates and need not
+        // coincide with the sampled crop box; with no region the cropped `sub` is
+        // the subject, so a crop's auto-contrast is computed on the region the
+        // output actually shows (and a full-view export skips the copy entirely).
+        let (lo, hi) = match self.window {
+            Some(win) => win,
+            None => match self.region {
+                Some(_) => frame_bounds(&frame, self.clip, self.region),
+                None => frame_bounds(sub, self.clip, None),
+            },
         };
         let mut rgba = Vec::new();
         // Colormap is a plain mono-only palette render (mirrors the live sync
         // path); everything else goes through the shared operator render tail.
+        // Same mono-only gate as the live view, so a multi-channel or mask frame
+        // falls back to the plain render on both sides.
         match self
             .palette
-            .filter(|_| sub.color_channels() == 1 && !sub.is_mask())
+            .filter(|_| crate::tone::uses_colormap(self.contrast, sub))
         {
             Some(pal) => {
                 sub.render_into_scaled_cmap(

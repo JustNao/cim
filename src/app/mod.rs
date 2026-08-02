@@ -46,6 +46,7 @@ use crate::export::{
 };
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
+use crate::tone::pixel_bounds;
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
 
@@ -1199,12 +1200,12 @@ impl CimApp {
     /// its end (rather than wrapping early), then loops with the selected media.
     /// Un-synced media wrap within their own length.
     pub(super) fn frame_disp(&self, i: usize) -> usize {
-        let c = self.panes[i].media.frame_count().max(1);
-        if self.panes[i].sync_temporal {
-            self.shared_frame.min(c - 1)
-        } else {
-            self.panes[i].frame % c
-        }
+        crate::tone::synced_index(
+            self.shared_frame,
+            self.panes[i].media.frame_count(),
+            self.panes[i].sync_temporal,
+            self.panes[i].frame,
+        )
     }
 
     /// A pane whose target frame lies **beyond everything it has discovered** — a
@@ -2221,19 +2222,6 @@ fn default_cpp_lib_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("LIBS"))
 }
-/// Clamp an image-space region to a frame's pixel grid, returning the integer
-/// half-open bounds `[x0, x1) × [y0, y1)`, or `None` if it doesn't cover at
-/// least one pixel (e.g. the region lies entirely outside this frame — pages
-/// can differ in size).
-fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize, usize)> {
-    let (w, h) = (size[0], size[1]);
-    let x0 = (reg.min.x.floor().max(0.0) as usize).min(w);
-    let y0 = (reg.min.y.floor().max(0.0) as usize).min(h);
-    let x1 = (reg.max.x.ceil().max(0.0) as usize).min(w);
-    let y1 = (reg.max.y.ceil().max(0.0) as usize).min(h);
-    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
-}
-
 /// Draw a histogram's per-channel curves into `rect` over a dark base: one grey
 /// curve when mono, else R/G/B, each sqrt-scaled so the tails stay legible.
 /// Shared by the pane Transformations histogram (`draw_histogram`) and the
