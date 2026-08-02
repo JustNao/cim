@@ -559,7 +559,6 @@ enum OpenItem {
         kind: Reduce,
         a: usize,
         b: Option<usize>,
-        auto: bool,
     },
 }
 
@@ -573,20 +572,20 @@ impl OpenItem {
 
 /// A Compute pane: derives a single displayed image from other panes — a
 /// mean/std reduction across one source's resident frames, or a per-pixel
-/// difference of two sources' current frames — with an inline Save.
+/// add/subtract of two sources' current frames — with an inline Save. Its
+/// result is itself a usable source, so Compute panes chain.
 struct Compute {
     kind: Reduce,
-    /// Stable id of the source pane (source A for `Diff`), if chosen.
+    /// Stable id of the source pane (source A for the binary ops), if chosen.
     source_id: Option<u64>,
-    /// Second source (B) for `Diff`; unused by the reductions.
+    /// Second source (B) for the binary ops; unused by the reductions.
     source_b: Option<u64>,
     /// False while the pane is still being configured (the in-pane form is
     /// shown); set once a compute succeeds, after which the result image shows
-    /// with the Refresh / Save / Auto-refresh controls top-left.
+    /// with the Refresh / Save controls top-left. From then on the pane
+    /// refreshes automatically whenever its inputs change.
     computed: bool,
-    /// Recompute automatically whenever the inputs' shown frame(s) change.
-    auto: bool,
-    /// Input signature at the last (attempted) compute, so auto-refresh only
+    /// Input signature at the last (attempted) compute, so the auto-refresh only
     /// recomputes when something actually changed. See `compute_sig`.
     last_sig: u64,
     /// Save UI expanded (showing the file-name input).

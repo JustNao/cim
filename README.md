@@ -10,7 +10,7 @@ pane at once, and nothing is ever interpolated or re-encoded behind your back.
 Open any number of images, numbered runs, whole folders or videos as panes in a
 grid, single view or A/B wipe, with view, timeline and tone controls synced across
 them; then read exact values, plot histograms/profiles/region stats, compute
-mean/std/diff panes, and export the comparison as an MP4 or a still.
+mean/std/add/sub compute panes, and export the comparison as an MP4 or a still.
 
 Also: lazy discovery of huge TIFF sequences (with an O(1) fast scan for regularly
 laid out files), a bounded frame cache, auto-reload on file change, and optional

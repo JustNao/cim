@@ -51,13 +51,12 @@ pub enum Input {
     },
     /// A Compute pane recreated from a view command (`compute:<kind>:<srcs>`).
     /// Its sources are given as **pane indices** (0-based over the whole pane
-    /// list) — resolved to the newly created panes once they all exist. `Diff`
-    /// carries two indices, the reductions one. `auto` restores auto-refresh.
+    /// list) — resolved to the newly created panes once they all exist. The
+    /// binary ops carry two indices, the reductions one.
     Compute {
         kind: crate::media::Reduce,
         a: usize,
         b: Option<usize>,
-        auto: bool,
     },
 }
 
@@ -428,25 +427,24 @@ fn list_dir_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Parse a `compute:<kind>:<srcs>[:auto]` token into an `Input::Compute`, or
-/// `None` when `arg` isn't such a token. `<kind>` is `mean`/`std`/`diff`;
-/// `<srcs>` is one pane index for the reductions or `A,B` for `diff`; a trailing
-/// `:auto` restores the auto-refresh toggle. Indices are 0-based over the pane
-/// list and resolved to panes once they all exist.
+/// Parse a `compute:<kind>:<srcs>` token into an `Input::Compute`, or `None`
+/// when `arg` isn't such a token. `<kind>` is `mean`/`std`/`add`/`sub`;
+/// `<srcs>` is one pane index for the reductions or `A,B` for the binary ops.
+/// Indices are 0-based over the pane list and resolved to panes once they all
+/// exist. A trailing `:auto` from an older view command is accepted and ignored
+/// — Compute panes now always refresh automatically.
 fn parse_compute_token(arg: &str) -> Option<Input> {
     let rest = arg.strip_prefix("compute:")?;
     let mut segs = rest.split(':');
     let kind = crate::media::Reduce::from_token(segs.next()?)?;
     let srcs = segs.next()?;
-    let auto = matches!(segs.next(), Some("auto"));
-    let (a, b) = match kind {
-        crate::media::Reduce::Diff => {
-            let (a, b) = srcs.split_once(',')?;
-            (a.trim().parse().ok()?, Some(b.trim().parse().ok()?))
-        }
-        _ => (srcs.trim().parse().ok()?, None),
+    let (a, b) = if kind.is_binary() {
+        let (a, b) = srcs.split_once(',')?;
+        (a.trim().parse().ok()?, Some(b.trim().parse().ok()?))
+    } else {
+        (srcs.trim().parse().ok()?, None)
     };
-    Some(Input::Compute { kind, a, b, auto })
+    Some(Input::Compute { kind, a, b })
 }
 
 /// Expand a `PREFIX%0Xu SUFFIX,START,END` token into the files it stands for, or
@@ -839,19 +837,20 @@ mod tests {
         let Cli::Run { inputs, .. } = parse(vec![
             "a.tif".into(),
             "b.tif".into(),
+            // The legacy `diff` kind and its `:auto` suffix still replay.
             "compute:diff:0,1:auto".into(),
             "compute:mean:0".into(),
+            "compute:add:1,0".into(),
         ]) else {
             panic!("expected Run");
         };
-        assert_eq!(inputs.len(), 4);
+        assert_eq!(inputs.len(), 5);
         assert!(matches!(
             inputs[2],
             Input::Compute {
-                kind: Reduce::Diff,
+                kind: Reduce::Sub,
                 a: 0,
                 b: Some(1),
-                auto: true
             }
         ));
         assert!(matches!(
@@ -860,7 +859,14 @@ mod tests {
                 kind: Reduce::Mean,
                 a: 0,
                 b: None,
-                auto: false
+            }
+        ));
+        assert!(matches!(
+            inputs[4],
+            Input::Compute {
+                kind: Reduce::Add,
+                a: 1,
+                b: Some(0),
             }
         ));
         // A malformed token isn't silently turned into a phantom pane — it just

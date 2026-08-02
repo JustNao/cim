@@ -378,8 +378,8 @@ impl CimApp {
                 // A Compute pane carries no media to load — keep it in order so it
                 // lands at its original pane index (its sources are wired up by
                 // `commit_open` once every pane exists).
-                cli::Input::Compute { kind, a, b, auto } => {
-                    loaded.push(OpenItem::Compute { kind, a, b, auto });
+                cli::Input::Compute { kind, a, b } => {
+                    loaded.push(OpenItem::Compute { kind, a, b });
                     continue;
                 }
             };
@@ -427,18 +427,21 @@ impl CimApp {
         for item in loaded {
             match item {
                 OpenItem::Media(m, source) => self.add_pane(m, source),
-                OpenItem::Compute { kind, a, b, auto } => {
-                    let i = self.add_configured_compute_pane(kind, auto);
+                OpenItem::Compute { kind, a, b } => {
+                    let i = self.add_configured_compute_pane(kind);
                     computes.push((i, a, b));
                 }
             }
         }
         // Pass 2: wire each Compute pane's sources (pane index → stable id) and
         // compute it best-effort (a source frame not yet resident just leaves a
-        // status; auto-refresh, if set, recomputes once frames land).
+        // status; the auto-refresh recomputes once frames land). Sources may be
+        // other Compute panes, so wire them in list order and drop any that
+        // would close a cycle — a hand-edited view command can name one, and a
+        // cycle would recompute forever.
         for (i, a, b) in computes {
-            let a_id = self.panes.get(base + a).map(|p| p.id);
-            let b_id = b.and_then(|b| self.panes.get(base + b)).map(|p| p.id);
+            let a_id = self.compute_source_id(i, base + a);
+            let b_id = b.and_then(|b| self.compute_source_id(i, base + b));
             if let Some(c) = self.panes[i].compute.as_mut() {
                 c.source_id = a_id;
                 c.source_b = b_id;

@@ -25,16 +25,31 @@ pub struct RegionStats {
 }
 
 /// A Compute-panel operation. `Mean`/`Std` reduce a stack of frames from one
-/// source (see [`reduce_frames`]); `Diff` is a binary per-pixel difference of
-/// two sources' current frames (see [`diff_frames`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// source (see [`reduce_frames`]); `Add`/`Sub` are binary per-pixel operations
+/// on two sources' current frames (see [`combine_frames`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
     Mean,
     Std,
-    Diff,
+    Add,
+    Sub,
 }
 
 impl Reduce {
+    /// Whether this is a binary (two-source) operation rather than a reduction
+    /// over one source's stack of frames.
+    pub fn is_binary(self) -> bool {
+        matches!(self, Reduce::Add | Reduce::Sub)
+    }
+
+    /// The operator sign shown in a binary result's media name (`A + B` /
+    /// `A − B`); meaningless for the reductions, which never use it.
+    pub fn sign(self) -> &'static str {
+        match self {
+            Reduce::Sub => "−",
+            _ => "+",
+        }
+    }
     /// Human label for the Compute pickers, in the current UI language. The
     /// [`Self::token`] below is the *stable* form — it round-trips through view
     /// commands and must never be translated.
@@ -48,7 +63,8 @@ impl Reduce {
         match self {
             Reduce::Mean => "mean",
             Reduce::Std => "std",
-            Reduce::Diff => "diff",
+            Reduce::Add => "add",
+            Reduce::Sub => "sub",
         }
     }
 
@@ -57,7 +73,10 @@ impl Reduce {
         match s.to_ascii_lowercase().as_str() {
             "mean" => Some(Reduce::Mean),
             "std" => Some(Reduce::Std),
-            "diff" => Some(Reduce::Diff),
+            "add" => Some(Reduce::Add),
+            // `diff` is the old name of the (signed) subtraction, kept so an
+            // older view command still replays.
+            "sub" | "diff" => Some(Reduce::Sub),
             _ => None,
         }
     }
@@ -99,25 +118,28 @@ pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameDat
         .map(|i| {
             let m = sum[i] * inv;
             match kind {
-                Reduce::Mean => m as f32,
                 Reduce::Std => ((sumsq[i] * inv - m * m).max(0.0)).sqrt() as f32,
-                // Diff is a binary op (see `diff_frames`), never a stack reduction.
-                Reduce::Diff => m as f32,
+                // Add/Sub are binary ops (see `combine_frames`), never stack
+                // reductions; Mean is the sensible fallback.
+                _ => m as f32,
             }
         })
         .collect();
     Some(FrameData::new(size, ch, Samples::F32(out)))
 }
 
-/// Per-pixel signed difference `a - b` of two same-shape frames, as a float
-/// frame so negatives and sub-integer deltas survive. Returns `None` if the
-/// frames differ in size or channel count.
-pub fn diff_frames(a: &FrameData, b: &FrameData) -> Option<FrameData> {
-    if a.size != b.size || a.channels != b.channels {
+/// Per-pixel `a + b` / `a − b` of two same-shape frames, as a float frame so
+/// negatives and sub-integer results survive. Returns `None` if the frames
+/// differ in size or channel count, or for a non-binary `kind`.
+pub fn combine_frames(a: &FrameData, b: &FrameData, kind: Reduce) -> Option<FrameData> {
+    if a.size != b.size || a.channels != b.channels || !kind.is_binary() {
         return None;
     }
     let n = a.size[0] * a.size[1] * a.channels;
-    let out: Vec<f32> = (0..n).map(|i| a.sample_f(i) - b.sample_f(i)).collect();
+    let out: Vec<f32> = match kind {
+        Reduce::Add => (0..n).map(|i| a.sample_f(i) + b.sample_f(i)).collect(),
+        _ => (0..n).map(|i| a.sample_f(i) - b.sample_f(i)).collect(),
+    };
     Some(FrameData::new(a.size, a.channels, Samples::F32(out)))
 }
 
@@ -342,16 +364,29 @@ mod tests {
         // Empty input reduces to nothing.
         assert!(reduce_frames(&[], Reduce::Mean).is_none());
 
-        // Per-pixel signed difference, as a float frame (negatives survive).
+        // Per-pixel add / signed subtract, as a float frame (negatives survive).
         let da = FrameData::new([2, 1], 1, Samples::U8(vec![0, 10]));
         let db = FrameData::new([2, 1], 1, Samples::U8(vec![4, 20]));
         assert_eq!(
-            diff_frames(&da, &db).expect("diff").color_f32().1,
+            combine_frames(&da, &db, Reduce::Sub)
+                .expect("sub")
+                .color_f32()
+                .1,
             vec![-4.0, -10.0]
         );
-        // Mismatched shapes don't diff.
+        assert_eq!(
+            combine_frames(&da, &db, Reduce::Add)
+                .expect("add")
+                .color_f32()
+                .1,
+            vec![4.0, 30.0]
+        );
+        // Mismatched shapes — and a non-binary kind — don't combine.
         let wide = FrameData::new([3, 1], 1, Samples::U8(vec![0, 0, 0]));
-        assert!(diff_frames(&da, &wide).is_none());
+        assert!(combine_frames(&da, &wide, Reduce::Sub).is_none());
+        assert!(combine_frames(&da, &db, Reduce::Mean).is_none());
+        // `diff` is the old token for the subtraction, still parsed.
+        assert_eq!(Reduce::from_token("diff"), Some(Reduce::Sub));
 
         let dir = std::env::temp_dir().join("cim_compute_test");
         let _ = std::fs::create_dir_all(&dir);

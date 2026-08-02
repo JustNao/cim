@@ -1,6 +1,7 @@
 //! The in-pane Compute controls: the config form (mode + source pickers +
-//! Compute) while unconfigured, then the Refresh / Save / Auto-refresh row
-//! over the result. The compute engine itself is in app (recompute_pane).
+//! Compute) while unconfigured, then the Refresh / Save row over the result
+//! (a computed pane always refreshes itself when its inputs change, so there
+//! is no toggle). The compute engine itself is in app (recompute_pane).
 
 use crate::app::*;
 
@@ -8,7 +9,8 @@ impl CimApp {
     /// Overlay a Compute pane with a top-left foreground `Area`. Two states:
     /// **unconfigured** shows the config form (mode + source combos + a
     /// **Compute** button that runs it); once computed, the result image shows
-    /// with the **Refresh** / **Save** / **Auto refresh** controls instead.
+    /// with the **Refresh** / **Save** controls instead (the refresh is also
+    /// automatic — see `refresh_auto_compute`).
     /// Edits are written back and a recompute / save is dispatched after.
     /// `header_bottom` is the header strip's bottom edge relative to the cell's
     /// top (its height *plus* any chrome inset above it), so the panel clears
@@ -21,29 +23,19 @@ impl CimApp {
         header_bottom: f32,
     ) {
         let pane_id = self.panes[idx].id;
-        let (
-            mut kind,
-            mut source_id,
-            mut source_b,
-            computed,
-            mut auto,
-            mut saving,
-            mut save_name,
-            status,
-        ) = {
+        let (mut kind, mut source_id, mut source_b, computed, mut saving, mut save_name, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
             (
                 c.kind,
                 c.source_id,
                 c.source_b,
                 c.computed,
-                c.auto,
                 c.saving,
                 c.save_name.clone(),
                 c.status.clone(),
             )
         };
-        let sources = self.compute_sources(kind);
+        let sources = self.compute_sources(idx, kind);
         let mut recompute = false;
         let mut do_save = false;
 
@@ -68,8 +60,8 @@ impl CimApp {
                             &mut source_id,
                             &mut source_b,
                         );
-                        let ready = source_id.is_some()
-                            && (!matches!(kind, media::Reduce::Diff) || source_b.is_some());
+                        let ready =
+                            source_id.is_some() && (!kind.is_binary() || source_b.is_some());
                         if ui
                             .add_enabled(ready, egui::Button::new(t!("compute.compute")))
                             .clicked()
@@ -85,7 +77,6 @@ impl CimApp {
                             if !saving && ui.button(t!("compute.save")).clicked() {
                                 saving = true;
                             }
-                            ui.checkbox(&mut auto, t!("compute.auto_refresh"));
                         });
                         // Inline save: a name field (relative to the working dir).
                         if saving {
@@ -116,7 +107,6 @@ impl CimApp {
             c.kind = kind;
             c.source_id = source_id;
             c.source_b = source_b;
-            c.auto = auto;
             c.saving = saving;
             c.save_name = save_name.clone();
         }
@@ -136,8 +126,8 @@ impl CimApp {
 /// The mode + source combo rows shared by the floating compute draft and a
 /// realized Compute pane. `salt` disambiguates widget ids between the two.
 /// `sources` is the caller's kind-filtered source list. Returns true if any
-/// selection changed (so the caller can recompute). Diff shows an A and a B
-/// picker; the reductions show a single Source.
+/// selection changed (so the caller can recompute). The binary ops show an A and
+/// a B picker; the reductions show a single Source.
 fn compute_config_rows(
     ui: &mut egui::Ui,
     salt: u64,
@@ -152,14 +142,14 @@ fn compute_config_rows(
         egui::ComboBox::from_id_salt(("ckind", salt))
             .selected_text(kind.label())
             .show_ui(ui, |ui| {
-                for k in [Reduce::Mean, Reduce::Std, Reduce::Diff] {
+                for k in [Reduce::Mean, Reduce::Std, Reduce::Add, Reduce::Sub] {
                     if ui.selectable_value(kind, k, k.label()).clicked() {
                         changed = true;
                     }
                 }
             });
     });
-    let diff = matches!(*kind, Reduce::Diff);
+    let binary = kind.is_binary();
     let mut pick = |ui: &mut egui::Ui, label: &str, id: &str, sel: &mut Option<u64>| {
         ui.horizontal(|ui| {
             ui.label(label);
@@ -183,7 +173,7 @@ fn compute_config_rows(
     };
     pick(
         ui,
-        &if diff {
+        &if binary {
             "A ".to_owned()
         } else {
             format!("{} ", t!("compute.source"))
@@ -191,7 +181,7 @@ fn compute_config_rows(
         "csrc",
         source_id,
     );
-    if diff {
+    if binary {
         pick(ui, "B ", "csrcb", source_b);
     }
     changed

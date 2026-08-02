@@ -1,17 +1,26 @@
 //! Compute panes: generated media derived from other panes (mean / std of a
-//! stack, per-pixel diff of two). Holds the recompute engine and the
+//! stack, per-pixel add / subtract of two). Holds the recompute engine and the
 //! auto-refresh signature check; the in-pane form is canvas/compute_ui.rs.
+//!
+//! A Compute result is itself a valid source, so panes chain: reduce a sequence
+//! to its mean, then subtract that mean from the sequence. Chains recompute in
+//! dependency order (`refresh_auto_compute`) and can't be wired into a cycle
+//! (`compute_sources` / `compute_source_id`, both gated on `depends_on`).
 
 use super::*;
 
 impl CimApp {
-    /// Panes usable as a Compute source for `kind`: any non-compute pane, but
-    /// the reductions (mean/std) also need ≥2 frames. `Diff` accepts stills.
-    pub(super) fn compute_sources(&self, kind: Reduce) -> Vec<(u64, String)> {
+    /// Panes usable as a Compute source for pane `idx` under `kind`: any pane
+    /// except the pane itself and anything that (transitively) already depends
+    /// on it, since that would close a recompute cycle. The binary ops accept
+    /// stills — including another Compute pane's result — while the reductions
+    /// (mean/std) need a real stack, so they also require ≥2 frames.
+    pub(super) fn compute_sources(&self, idx: usize, kind: Reduce) -> Vec<(u64, String)> {
+        let me = self.panes[idx].id;
         self.panes
             .iter()
-            .filter(|p| p.compute.is_none())
-            .filter(|p| matches!(kind, Reduce::Diff) || p.media.frame_count() > 1)
+            .filter(|p| p.id != me && !self.depends_on(p.id, me))
+            .filter(|p| kind.is_binary() || p.media.frame_count() > 1)
             .map(|p| (p.id, p.media.name().to_string()))
             .collect()
     }
@@ -21,25 +30,53 @@ impl CimApp {
         self.panes.iter().position(|p| p.id == id)
     }
 
-    /// Build the `compute:<kind>:<srcs>[:auto]` view-command token for Compute
-    /// pane `p`, or `None` if a source is no longer open (a dangling index would
+    /// The Compute sources of pane `id`, if it is a Compute pane.
+    fn compute_inputs(&self, id: u64) -> [Option<u64>; 2] {
+        match self
+            .pane_idx(id)
+            .and_then(|i| self.panes[i].compute.as_ref())
+        {
+            Some(c) => [c.source_id, c.source_b],
+            None => [None, None],
+        }
+    }
+
+    /// Whether pane `id` reads pane `target`, directly or through a chain of
+    /// Compute panes. `id == target` counts (a pane trivially depends on
+    /// itself), so this doubles as the self-source check. The walk is bounded by
+    /// the pane count, so even a cycle wired in from a stale view command can't
+    /// spin here.
+    fn depends_on(&self, id: u64, target: u64) -> bool {
+        let mut seen: Vec<u64> = Vec::new();
+        let mut stack = vec![id];
+        while let Some(cur) = stack.pop() {
+            if cur == target {
+                return true;
+            }
+            if seen.contains(&cur) {
+                continue;
+            }
+            seen.push(cur);
+            stack.extend(self.compute_inputs(cur).into_iter().flatten());
+        }
+        false
+    }
+
+    /// Build the `compute:<kind>:<srcs>` view-command token for Compute pane
+    /// `p`, or `None` if a source is no longer open (a dangling index would
     /// replay wrong). Sources are emitted as **pane indices** (0-based over the
     /// whole pane list), matching the positional per-pane flags. (No `@` prefix:
     /// a leading `@` is PowerShell's splatting operator and would mangle the arg.)
     pub(super) fn compute_token(&self, p: &Pane) -> Option<String> {
         let c = p.compute.as_ref()?;
         let a = self.pane_idx(c.source_id?)?;
-        let srcs = if matches!(c.kind, Reduce::Diff) {
+        let srcs = if c.kind.is_binary() {
             let b = self.pane_idx(c.source_b?)?;
             format!("{a},{b}")
         } else {
             a.to_string()
         };
-        let mut tok = format!("compute:{}:{}", c.kind.token(), srcs);
-        if c.auto {
-            tok.push_str(":auto");
-        }
-        Some(tok)
+        Some(format!("compute:{}:{}", c.kind.token(), srcs))
     }
 
     /// Add a new, *unconfigured* Compute pane (from the toolbar "Compute"
@@ -54,17 +91,17 @@ impl CimApp {
         let i = self.panes.len() - 1;
         // Default source A to the previously focused pane when it can be one.
         let prev = self.current.min(i.saturating_sub(1));
+        // The default mode is Mean, so only a real stack makes a usable default.
         let default_src = self
             .panes
             .get(prev)
-            .filter(|p| p.compute.is_none())
+            .filter(|p| prev != i && p.media.frame_count() > 1)
             .map(|p| p.id);
         self.panes[i].compute = Some(Compute {
             kind: Reduce::Mean,
             source_id: default_src,
             source_b: None,
             computed: false,
-            auto: false,
             last_sig: 0,
             saving: false,
             save_name: "computed.tif".into(),
@@ -78,9 +115,9 @@ impl CimApp {
     }
 
     /// Recreate a Compute pane from a view command: a fresh Compute pane with the
-    /// given `kind` and auto-refresh flag, its sources left unset (the caller
-    /// wires them once every pane exists). Returns the new pane's index.
-    pub(super) fn add_configured_compute_pane(&mut self, kind: Reduce, auto: bool) -> usize {
+    /// given `kind`, its sources left unset (the caller wires them once every
+    /// pane exists). Returns the new pane's index.
+    pub(super) fn add_configured_compute_pane(&mut self, kind: Reduce) -> usize {
         self.add_pane(
             media::Media::still("Compute".into(), media::placeholder_frame()),
             Source::Computed,
@@ -91,7 +128,6 @@ impl CimApp {
             source_id: None,
             source_b: None,
             computed: false,
-            auto,
             last_sig: 0,
             saving: false,
             save_name: "computed.tif".into(),
@@ -99,6 +135,15 @@ impl CimApp {
         });
         self.set_compute_tone_defaults(i);
         i
+    }
+
+    /// Resolve a replayed source **pane index** to a stable id for Compute pane
+    /// `idx`: `None` when the index is out of range, names the pane itself, or
+    /// names a pane that already reads it (which would close a recompute cycle).
+    pub(super) fn compute_source_id(&self, idx: usize, src: usize) -> Option<u64> {
+        let me = self.panes[idx].id;
+        let id = self.panes.get(src)?.id;
+        (!self.depends_on(id, me)).then_some(id)
     }
 
     /// A Compute result is its own thing (a derived still), so it doesn't follow
@@ -136,10 +181,16 @@ impl CimApp {
         Ok((fr, name, status))
     }
 
-    /// Per-pixel difference of two sources' *current* frames → (frame, name,
+    /// Per-pixel add / subtract of two sources' *current* frames → (frame, name,
     /// status). Both current frames must be resident and share size/channels.
-    fn compute_diff(
+    ///
+    /// Each source contributes whatever frame it is showing, so a **still** (one
+    /// frame — a loaded image, or another Compute pane's result) pairs with the
+    /// sequence's *current* frame: as the sequence advances, auto-refresh
+    /// recomputes and the still is applied to each of its frames in turn.
+    fn compute_binary(
         &self,
+        kind: Reduce,
         a_id: Option<u64>,
         b_id: Option<u64>,
     ) -> Result<(media::FrameData, String, String), String> {
@@ -160,15 +211,22 @@ impl CimApp {
             .media
             .resident(fb)
             .ok_or_else(|| t!("compute.err_frame_missing", slot = "B").into_owned())?;
-        let fr = media::diff_frames(&a, &b)
+        let fr = media::combine_frames(&a, &b, kind)
             .ok_or_else(|| t!("compute.err_shape_mismatch").into_owned())?;
         let name = format!(
-            "{} · {} − {}",
-            Reduce::Diff.label(),
+            "{} · {} {} {}",
+            kind.label(),
             self.panes[ia].media.name(),
+            kind.sign(),
             self.panes[ib].media.name()
         );
-        let status = t!("compute.status_diff", a = fa + 1, b = fb + 1).into_owned();
+        let status = t!(
+            "compute.status_binary",
+            sign = kind.sign(),
+            a = fa + 1,
+            b = fb + 1
+        )
+        .into_owned();
         Ok((fr, name, status))
     }
 
@@ -182,9 +240,10 @@ impl CimApp {
             return;
         };
         let (kind, a, b) = (c.kind, c.source_id, c.source_b);
-        let result = match kind {
-            Reduce::Diff => self.compute_diff(a, b),
-            _ => self.compute_reduce(a, kind),
+        let result = if kind.is_binary() {
+            self.compute_binary(kind, a, b)
+        } else {
+            self.compute_reduce(a, kind)
         };
         match result {
             Ok((fr, name, status)) => {
@@ -210,36 +269,60 @@ impl CimApp {
         }
     }
 
-    /// A cheap signature of a Compute pane's inputs, so auto-refresh recomputes
-    /// only when they change: the shown frames for `Diff`, the source's resident
-    /// count for the reductions (which grows as playback decodes more frames).
+    /// A cheap signature of a Compute pane's inputs, so a recompute happens only
+    /// when they change: the shown frames for the binary ops, the source's
+    /// resident count for the reductions (which grows as playback decodes more
+    /// frames). A source that is *itself* a Compute pane contributes its data
+    /// generation instead, since its result changes without its frame index
+    /// moving — that's what propagates a recompute along a chain.
     fn compute_sig(&self, idx: usize) -> u64 {
         let Some(c) = self.panes[idx].compute.as_ref() else {
             return 0;
         };
-        let frame_sig = |id: Option<u64>| -> u64 {
-            id.and_then(|id| self.pane_idx(id))
-                .map(|i| self.frame_disp(i) as u64 + 1)
-                .unwrap_or(0)
+        let src_sig = |id: Option<u64>, stack: bool| -> u64 {
+            let Some(i) = id.and_then(|id| self.pane_idx(id)) else {
+                return 0;
+            };
+            let p = &self.panes[i];
+            if p.compute.is_some() {
+                p.render_gen + 1
+            } else if stack {
+                p.media.resident_count() as u64
+            } else {
+                self.frame_disp(i) as u64 + 1
+            }
         };
-        match c.kind {
-            Reduce::Diff => (frame_sig(c.source_id) << 32) ^ frame_sig(c.source_b),
-            _ => c
-                .source_id
-                .and_then(|id| self.pane_idx(id))
-                .map(|i| self.panes[i].media.resident_count() as u64)
-                .unwrap_or(0),
+        if c.kind.is_binary() {
+            (src_sig(c.source_id, false) << 32) ^ src_sig(c.source_b, false)
+        } else {
+            src_sig(c.source_id, true)
         }
     }
 
-    /// Recompute every auto-refresh Compute pane whose inputs changed this frame.
+    /// Recompute every Compute pane whose inputs changed this frame (they all
+    /// refresh automatically — there is no per-pane toggle).
+    ///
+    /// Chains are handled by iterating to a fixed point rather than by sorting:
+    /// a downstream pane's signature folds in its upstream's data generation, so
+    /// once the upstream recomputes the downstream is seen as stale on the next
+    /// pass. A chain is at most `panes.len()` deep, which bounds the passes.
     pub(super) fn refresh_auto_compute(&mut self) {
-        for i in 0..self.panes.len() {
-            let Some(c) = self.panes[i].compute.as_ref() else {
-                continue;
-            };
-            if c.auto && self.compute_sig(i) != c.last_sig {
-                self.recompute_pane(i);
+        for _ in 0..self.panes.len() {
+            let mut again = false;
+            for i in 0..self.panes.len() {
+                let Some(c) = self.panes[i].compute.as_ref() else {
+                    continue;
+                };
+                // Only once the pane has been computed at least once — an
+                // unconfigured pane must keep showing its form until the user
+                // presses Compute.
+                if c.computed && self.compute_sig(i) != c.last_sig {
+                    self.recompute_pane(i);
+                    again = true;
+                }
+            }
+            if !again {
+                break;
             }
         }
     }

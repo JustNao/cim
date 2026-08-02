@@ -73,7 +73,8 @@ src/
                  byte offset so a reload lands back on it (§9).
     render.rs    Tone rendering: cached-LUT render (ToneLut + render_into*_lut /
                  _scaled / _gray_u16 / _cmap), mask/intensity overlay tints, display-bounds.
-    stats.rs     Histograms, region stats/bounds, Compute reductions (mean/std/diff).
+    stats.rs     Histograms, region stats/bounds, Compute ops (mean/std reductions,
+                 add/sub of two frames).
     percentile.rs  The one per-tail percentile histogram scan (rect + fallback),
                  shared by whole-image auto-contrast and region tone.
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
@@ -101,7 +102,8 @@ src/
                  per-pane state resolution, the update loop (tick / draw_modals /
                  apply_deferred).
     lifecycle.rs Open/add/remove/reload media; view-state replay + "View cmd".
-    compute.rs   Compute panes: reduce/diff/recompute/auto-refresh/save.
+    compute.rs   Compute panes: reduce/add/sub, source graph (chaining +
+                 cycle guard), recompute/auto-refresh/save.
     watch.rs     Auto-reload file watching (poll_watches / rebaseline_watch):
                  rate-limited requests + the debounce, signing done off-thread.
     decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
@@ -511,7 +513,7 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   display-only tone (no operators), rendered synchronously via `render_into_scaled_cmap`
   (a per-value RGB table in the pane's `ToneLut`). Multi-channel frames fall back to the
   plain render; each texel is still one true source sample (only its colour is the
-  palette). The diverging ramp suits a signed **Diff** Compute pane (zero → white).
+  palette). The diverging ramp suits a signed **Sub** Compute pane (zero → white).
 
 Plus a per-pane **Share clip** toggle (`ToneOptions.share_clip`) that locks the pane's
 display bounds to the **Control** media's own `[lo,hi]` (`control_clip_bounds` — the
@@ -970,20 +972,35 @@ while `false` it shows the **config form** (mode + source combos + a **Compute**
 button); that button sets `pending_recompute` (run at the top of the next `update`,
 before `refresh_textures`, so the result never flashes black — §13) → `recompute_pane`,
 which on success sets `computed = true`, so the **result image** then shows with the
-**Refresh** / **Save** / **Auto refresh** controls instead. `Pane.compute` holds the `kind`, source id(s), `computed`, and the
-auto-refresh flag. `media::Reduce` modes:
+**Refresh** / **Save** controls instead. `Pane.compute` holds the `kind`, source
+id(s) and `computed`. `media::Reduce` modes:
 - **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
   accumulation → `f32`).
-- **Diff** — `compute_diff` takes **two** sources' *current* frames
-  (`frame_disp`, both must be resident) and calls `media::diff_frames` (signed
-  `A − B`, float). Sources may be stills; reductions need ≥2 frames
-  (`compute_sources`).
+- **Add | Sub** (`Reduce::is_binary`) — `compute_binary` takes **two** sources'
+  *current* frames (`frame_disp`, both must be resident) and calls
+  `media::combine_frames` (`A + B` / signed `A − B`, float). Sources may be stills;
+  reductions need ≥2 frames (`compute_sources`).
 
-Results become an `f32` `Media::still` (default tone Linear, clip on). **Auto refresh**
-recomputes when inputs change: `refresh_auto_compute` compares `compute_sig` (shown
-frames for Diff, source resident-count for reductions) against `Compute.last_sig`
-each update. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
+**A sequence paired with a still** needs no special case: each source contributes the
+frame it is *showing*, and a still always shows its only frame — so a binary op between
+a sequence and a single image applies that image to whichever frame the sequence is on,
+and the always-on refresh follows it across the whole sequence as it plays.
+
+**Compute results are themselves sources**, so panes chain (mean of a sequence → subtract
+that mean from the sequence). `compute_sources(idx, kind)` offers every pane *except* the
+pane itself and anything that already reads it — `depends_on` walks the source graph, so a
+cycle can't be selected; `compute_source_id` applies the same guard when a view command
+replays sources by index.
+
+Results become an `f32` `Media::still` (default tone Linear, clip on). **Refresh is
+automatic** and has no toggle: `refresh_auto_compute` compares `compute_sig` (shown frames
+for the binary ops, source resident-count for the reductions; a source that is *itself* a
+Compute pane contributes its `render_gen`, which is what propagates a recompute along a
+chain) against `Compute.last_sig` each update, iterating **to a fixed point** (bounded by
+the pane count) so a whole chain settles within one update whatever order the panes sit in.
+Only a pane that has been computed once auto-refreshes, so an unconfigured one keeps its
+form. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
 (`media::save_frame`, `.tif` **32-bit float** or `.png`/`.jpg` 8-bit view, relative
 to the working dir).
 
@@ -991,19 +1008,21 @@ to the working dir).
 does **not** null `tex`; instead it bumps a per-pane data generation
 (`Pane.render_gen`, folded into `tone_sig`). The stale front texture keeps showing
 while `stage` re-renders the new data into `pending` (off-thread for a large frame),
-and the lock-step commit swaps it in when ready — so an **auto-refreshing** Diff pane
+and the lock-step commit swaps it in when ready — so an auto-refreshing **Sub** pane
 holds its last frame instead of blanking to black each time it recomputes (nulling
 `tex` would blank a large/off-thread render until it lands).
 
 **View-command round-trip.** A Compute pane re-emits in `view_command` as a
-`compute:<kind>:<srcs>[:auto]` positional token (`compute_token`), its sources given
+`compute:<kind>:<srcs>` positional token (`compute_token`), its sources given
 as **pane indices** (0-based over the whole list) — so it keeps its slot and the
 positional per-pane flags (`--tone`/`--tsync`/…) stay aligned. `cli::parse_compute_token`
 turns it back into `cli::Input::Compute`; `commit_open` recreates the panes **in order**
 (`add_configured_compute_pane`), then a second pass wires each source index → pane id and
-recomputes (best-effort — a not-yet-resident source just leaves a status; `auto` recomputes
-once frames land). A pane whose source is gone is skipped rather than emitting a dangling
-index. Because the transformations-sync flag is per-pane positional (`--tsync`), it now
+recomputes (best-effort — a not-yet-resident source just leaves a status; the auto-refresh
+recomputes once frames land), refusing any source index that would close a cycle. A pane
+whose source is gone is skipped rather than emitting a dangling index. Older commands still
+replay: `Reduce::from_token` accepts `diff` as an alias of `sub`, and a trailing `:auto` is
+parsed and ignored. Because the transformations-sync flag is per-pane positional (`--tsync`), it now
 round-trips for Compute panes too (they default un-synced). The token is deliberately
 **not** prefixed with `@` — a leading `@` is PowerShell's splatting operator and would
 silently drop the argument before it reached cim.
@@ -1154,9 +1173,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   ≥2 files → `Sequence` opening as **one** pane (`.tif` run → `ConcatSeq`, else
   `FileSeq`). `token` is kept on the pane's `Source` so reload/round-trip work.
   Drag-and-drop / the file dialog only produce `Single`s.
-- A positional **`compute:<kind>:<srcs>[:auto]`** token (kind = `mean|std|diff`;
-  `srcs` = one pane index for the reductions or `A,B` for `diff`; trailing `:auto`
-  restores auto-refresh) → `Input::Compute`, recreating a **Compute pane** from a
+- A positional **`compute:<kind>:<srcs>`** token (kind = `mean|std|add|sub`;
+  `srcs` = one pane index for the reductions or `A,B` for the binary ops) →
+  `Input::Compute`, recreating a **Compute pane** from a
   view command (`view_command` emits it for a `Source::Computed` pane; §9). Normally
   generated for you, not typed by hand.
 - **Videos** (`VIDEO_EXTS = [mp4,avi]`) always open **one pane each** — a video

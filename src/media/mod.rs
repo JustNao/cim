@@ -23,7 +23,7 @@ pub use fastscan::{
 pub use loader::{decode_file, load, load_sequence, SeqReader};
 pub use render::ToneLut;
 pub use source::{DecodeReq, Media};
-pub use stats::{diff_frames, reduce_frames, HistData, Reduce, RegionStats};
+pub use stats::{combine_frames, reduce_frames, HistData, Reduce, RegionStats};
 pub use video::VideoReader;
 
 use rust_i18n::t;

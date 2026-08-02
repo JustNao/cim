@@ -170,12 +170,12 @@ compute.refresh: Refresh
 compute.save: Save
 compute.cancel: Cancel
 compute.save_hint: name.tif
-compute.auto_refresh: Auto refresh
 compute.reduce_mean: Mean
 compute.reduce_std: Std
-compute.reduce_diff: Diff
+compute.reduce_add: Add
+compute.reduce_sub: Subtract
 compute.status_reduce: "%{kind} of %{n} frame(s) in memory"
-compute.status_diff: Diff of frame %{a} − %{b}
+compute.status_binary: Frame %{a} %{sign} frame %{b}
 compute.saved: Saved %{name}
 compute.save_failed: "Save failed: %{err}"
 compute.nothing_to_save: Nothing computed to save
@@ -428,9 +428,9 @@ cli.help: |
           sorted alphabetically, concatenated into one pane. Videos (%{vexts};
           decoded via the ffmpeg CLI, which must be on the PATH) always open as
           one pane each — including those found in a directory.
-          A compute:<kind>:<srcs>[:auto] token (kind = mean|std|diff; srcs = one
-          pane index, or A,B for diff) recreates a Compute pane; it is normally
-          generated for you by the "View cmd" panel, not typed by hand.
+          A compute:<kind>:<srcs> token (kind = mean|std|add|sub; srcs = one
+          pane index, or A,B for add/sub) recreates a Compute pane; it is
+          normally generated for you by the "View cmd" panel, not typed by hand.
 
   OPTIONS:
       -h, --help                 Print this help and exit

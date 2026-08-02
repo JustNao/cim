@@ -179,12 +179,12 @@ compute.refresh: Actualiser
 compute.save: Enregistrer
 compute.cancel: Annuler
 compute.save_hint: nom.tif
-compute.auto_refresh: Actualisation auto
 compute.reduce_mean: Moyenne
 compute.reduce_std: Écart-type
-compute.reduce_diff: Différence
+compute.reduce_add: Addition
+compute.reduce_sub: Soustraction
 compute.status_reduce: "%{kind} de %{n} image(s) en mémoire"
-compute.status_diff: Différence des images %{a} − %{b}
+compute.status_binary: Image %{a} %{sign} image %{b}
 compute.saved: "%{name} enregistré"
 compute.save_failed: "Échec de l'enregistrement : %{err}"
 compute.nothing_to_save: Aucun calcul à enregistrer
@@ -452,9 +452,9 @@ cli.help: |
           Les vidéos (%{vexts} ; décodées par la CLI ffmpeg, qui doit être dans
           le PATH) ouvrent toujours un panneau chacune — y compris celles
           trouvées dans un dossier.
-          Un jeton compute:<type>:<sources>[:auto] (type = mean|std|diff ;
-          sources = un indice de panneau, ou A,B pour diff) recrée un panneau de
-          calcul ; il est normalement généré par le panneau « Cmd vue », pas
+          Un jeton compute:<type>:<sources> (type = mean|std|add|sub ;
+          sources = un indice de panneau, ou A,B pour add/sub) recrée un panneau
+          de calcul ; il est normalement généré par le panneau « Cmd vue », pas
           saisi à la main.
 
   OPTIONS :
