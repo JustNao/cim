@@ -323,14 +323,14 @@ impl PaneOps {
     /// heavy render tail, shared by the live render worker
     /// (`renderer::Worker::render`) and export (`export::ExportPane::render`), so
     /// the two produce identical pixels.
-    pub fn render_display(
+    pub fn render_display<S: crate::media::RgbaSink>(
         &mut self,
         frame: &crate::media::FrameData,
         (lo, hi): (f32, f32),
         lut_alpha: bool,
         details: bool,
         lut: &mut crate::media::ToneLut,
-        out: &mut Vec<u8>,
+        out: &mut S,
     ) -> (std::time::Duration, std::time::Duration) {
         use std::time::{Duration, Instant};
         if !ops_active(frame, lut_alpha, details) {
@@ -347,14 +347,9 @@ impl PaneOps {
         self.apply(&mut gray, w, h, lut_alpha, details);
         let ops_time = t.elapsed();
         // Expand the processed grey back to 8-bit RGBA for the texture.
-        out.clear();
-        out.resize(gray.len() * 4, 255);
-        for (i, &s) in gray.iter().enumerate() {
-            let g = (s >> 8) as u8;
-            let o = i * 4;
-            out[o] = g;
-            out[o + 1] = g;
-            out[o + 2] = g;
+        out.begin(gray.len());
+        for &s in &gray {
+            out.push_gray((s >> 8) as u8);
         }
         (lut_time, ops_time)
     }
