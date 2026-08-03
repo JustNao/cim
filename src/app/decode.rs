@@ -769,6 +769,12 @@ impl CimApp {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             let debug = crate::debug::enabled();
             let t = debug.then(std::time::Instant::now);
+            // Rendered straight into egui's pixel type (see `media::RgbaSink`):
+            // the buffer *becomes* the texture's `ColorImage`, so there's no
+            // conversion pass between the tone map and the upload. Taking it
+            // leaves the scratch empty — it's re-grown by the next render, which
+            // reserves exactly once and writes every pixel once.
+            let mut pixels = std::mem::take(&mut self.render_scratch);
             let size = if cmap {
                 // Colormap: false-colour the mono frame through the palette.
                 let pal = self.tone_of(idx).palette;
@@ -779,7 +785,7 @@ impl CimApp {
                     pal.table(),
                     pal.id(),
                     &mut self.panes[idx].tex.lut,
-                    &mut self.render_scratch,
+                    &mut pixels,
                 )
             } else {
                 frame.render_into_scaled_lut(
@@ -787,14 +793,14 @@ impl CimApp {
                     hi,
                     step,
                     &mut self.panes[idx].tex.lut,
-                    &mut self.render_scratch,
+                    &mut pixels,
                 )
             };
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
             }
             let t = debug.then(std::time::Instant::now);
-            let img = ColorImage::from_rgba_unmultiplied(size, &self.render_scratch);
+            let img = ColorImage { size, pixels };
             let name = format!("m{}", self.panes[idx].id);
             let native = frame.size; // `size` above is the decimated texel count
             set_cached_tex(

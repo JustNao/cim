@@ -21,7 +21,7 @@ pub use fastscan::{
     offset_paths, scan_offset_counts, PageAnchor,
 };
 pub use loader::{decode_file, load, load_sequence, SeqReader};
-pub use render::ToneLut;
+pub use render::{RgbaSink, ToneLut};
 pub use source::{DecodeReq, Media};
 pub use stats::{combine_frames, reduce_frames, HistData, Reduce, RegionStats};
 pub use video::VideoReader;

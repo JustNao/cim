@@ -85,32 +85,11 @@ impl FrameData {
     /// a fixed tone reuses one table instead of rebuilding it each frame. Float
     /// sources have no bounded domain to tabulate and map arithmetically (the
     /// `lut` is left untouched).
-    pub fn render_into_lut(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut Vec<u8>) {
-        let px = self.size[0] * self.size[1];
-        let ch = self.channels;
-        let cc = self.color_channels();
-        out.clear();
-        out.resize(px * 4, 255); // alpha stays 255; rgb overwritten below
-
-        match &self.samples {
-            // The table folds in the mask rule (0 → black, else white) and the
-            // linear map, so both integer paths are one table look-up per pixel.
-            Samples::U8(v) => {
-                let tab = lut.map8(lo, hi, self.mask, 256);
-                fill_rgba(out, v, ch, cc, px, |s| tab[s as usize]);
-            }
-            Samples::U16(v) => {
-                let tab = lut.map8(lo, hi, self.mask, 1 << 16);
-                fill_rgba(out, v, ch, cc, px, |s| tab[s as usize]);
-            }
-            Samples::F32(v) if self.mask => {
-                fill_rgba(out, v, ch, cc, px, |s| if s != 0.0 { 255 } else { 0 })
-            }
-            Samples::F32(v) => {
-                let map_f = map_u8(lo, hi);
-                fill_rgba(out, v, ch, cc, px, map_f)
-            }
-        }
+    ///
+    /// The full-resolution case of
+    /// [`render_into_scaled_lut`](Self::render_into_scaled_lut).
+    pub fn render_into_lut<S: RgbaSink>(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut S) {
+        self.render_into_scaled_lut(lo, hi, 1, lut, out);
     }
 
     /// Render the display RGBA at a **nearest-decimated** resolution — every
@@ -130,65 +109,57 @@ impl FrameData {
     /// [`render_into_lut`](Self::render_into_lut)); a small decimated output skips
     /// the table entirely and maps arithmetically, which is cheaper than building
     /// a 64 Ki-entry LUT for a few thousand pixels.
-    pub fn render_into_scaled_lut(
+    pub fn render_into_scaled_lut<S: RgbaSink>(
         &self,
         lo: f32,
         hi: f32,
         step: usize,
         lut: &mut ToneLut,
-        out: &mut Vec<u8>,
+        out: &mut S,
     ) -> [usize; 2] {
-        if step <= 1 {
-            self.render_into_lut(lo, hi, lut, out);
-            return self.size;
-        }
         let [w, h] = self.size;
-        let ow = w.div_ceil(step); // ceil: cover the whole image
-        let oh = h.div_ceil(step);
-        let ch = self.channels;
-        let cc = self.color_channels();
-        out.clear();
-        out.resize(ow * oh * 4, 255); // alpha stays 255; rgb overwritten below
+        let decim = step > 1;
+        let (ow, oh) = if decim {
+            (w.div_ceil(step), h.div_ceil(step)) // ceil: cover the whole image
+        } else {
+            (w, h)
+        };
+        let grid = Grid {
+            w,
+            ch: self.channels,
+            cc: self.color_channels(),
+            ow,
+            oh,
+            step: step.max(1),
+        };
         let opx = ow * oh;
 
         match &self.samples {
             // 256-entry table is always cheaper than a per-pixel map.
             Samples::U8(v) => {
                 let tab = lut.map8(lo, hi, self.mask, 256);
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| tab[s as usize]);
+                fill_lut(out, v, grid, |s| tab[s as usize]);
             }
             // For a small decimated output, building a 64 Ki table costs more than
             // mapping each output pixel arithmetically — so skip the table then.
-            Samples::U16(v) if opx < (1 << 16) => {
+            Samples::U16(v) if decim && opx < (1 << 16) => {
                 if self.mask {
-                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| {
-                        if s != 0 {
-                            255
-                        } else {
-                            0
-                        }
-                    });
+                    fill_lut(out, v, grid, |s| if s != 0 { 255 } else { 0 });
                 } else {
                     let map_f = map_u8(lo, hi);
-                    fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| map_f(s as f32));
+                    fill_lut(out, v, grid, |s| map_f(s as f32));
                 }
             }
             Samples::U16(v) => {
                 let tab = lut.map8(lo, hi, self.mask, 1 << 16);
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| tab[s as usize]);
+                fill_lut(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) if self.mask => {
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, |s| {
-                    if s != 0.0 {
-                        255
-                    } else {
-                        0
-                    }
-                });
+                fill_lut(out, v, grid, |s| if s != 0.0 { 255 } else { 0 });
             }
             Samples::F32(v) => {
                 let map_f = map_u8(lo, hi);
-                fill_rgba_decimated(out, v, w, ch, cc, ow, oh, step, map_f);
+                fill_lut(out, v, grid, map_f);
             }
         }
         [ow, oh]
@@ -202,7 +173,7 @@ impl FrameData {
     /// from the palette, so pixel-accuracy holds (the readout still reads native
     /// values). The caller ensures the frame is single-channel and non-mask.
     #[allow(clippy::too_many_arguments)]
-    pub fn render_into_scaled_cmap(
+    pub fn render_into_scaled_cmap<S: RgbaSink>(
         &self,
         lo: f32,
         hi: f32,
@@ -210,56 +181,46 @@ impl FrameData {
         palette: &[[u8; 3]; 256],
         palette_id: u8,
         lut: &mut ToneLut,
-        out: &mut Vec<u8>,
+        out: &mut S,
     ) -> [usize; 2] {
         let [w, h] = self.size;
-        let ch = self.channels;
-        let (ow, oh) = if step <= 1 {
-            (w, h)
-        } else {
-            (w.div_ceil(step), h.div_ceil(step))
-        };
-        out.clear();
-        out.resize(ow * oh * 4, 255);
         let decim = step > 1;
+        let (ow, oh) = if decim {
+            (w.div_ceil(step), h.div_ceil(step))
+        } else {
+            (w, h)
+        };
+        // Mono source (the caller guarantees it): only the first channel is read,
+        // so the grid's colour-channel count is 1.
+        let grid = Grid {
+            w,
+            ch: self.channels,
+            cc: 1,
+            ow,
+            oh,
+            step: step.max(1),
+        };
         let opx = ow * oh;
 
-        // `rgb` yields the colour for one source sample; `write` fans it out over
-        // the full or decimated grid (the fill helpers below).
+        // `rgb` yields the colour for one source sample; `fill_cmap` fans it out
+        // over the full or decimated grid.
         match &self.samples {
             Samples::U8(v) => {
                 let tab = lut.map_rgb(lo, hi, palette, palette_id, 256);
-                let rgb = |s: u8| tab[s as usize];
-                if decim {
-                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
-                } else {
-                    fill_rgb(out, v, ch, w * h, rgb);
-                }
+                fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
             // Small decimated output maps arithmetically (skip the 64 Ki table).
             Samples::U16(v) if decim && opx < (1 << 16) => {
                 let map_f = map_u8(lo, hi);
-                fill_rgb_decimated(out, v, w, ch, ow, oh, step, |s| {
-                    palette[map_f(s as f32) as usize]
-                });
+                fill_cmap(out, v, grid, |s| palette[map_f(s as f32) as usize]);
             }
             Samples::U16(v) => {
                 let tab = lut.map_rgb(lo, hi, palette, palette_id, 1 << 16);
-                let rgb = |s: u16| tab[s as usize];
-                if decim {
-                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
-                } else {
-                    fill_rgb(out, v, ch, w * h, rgb);
-                }
+                fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) => {
                 let map_f = map_u8(lo, hi);
-                let rgb = |s: f32| palette[map_f(s) as usize];
-                if decim {
-                    fill_rgb_decimated(out, v, w, ch, ow, oh, step, rgb);
-                } else {
-                    fill_rgb(out, v, ch, w * h, rgb);
-                }
+                fill_cmap(out, v, grid, |s| palette[map_f(s) as usize]);
             }
         }
         [ow, oh]
@@ -446,103 +407,119 @@ impl ToneLut {
     }
 }
 
-/// Write interleaved samples into an RGBA buffer through `map`. Mono sources
-/// (1 colour channel) replicate the grey value across R/G/B; alpha is left at
-/// whatever `out` already holds (255). `out` must already be `px * 4` long.
-fn fill_rgba<T: Copy, U: Copy>(
-    out: &mut [U],
-    v: &[T],
+/// Where a render deposits its display pixels, appended one at a time.
+///
+/// Two sinks exist: a plain `Vec<u8>` of RGBA bytes (export, and the operator
+/// tail's 16-bit expansion) and egui's packed [`Color32`] buffer
+/// (`renderer::RgbaSink for Vec<Color32>`). Rendering **straight into** the
+/// texture's own pixel type is the point: going through bytes first cost a
+/// full-buffer conversion copy (`ColorImage::from_rgba_unmultiplied`) on every
+/// frame — on a 4096×3000 image that is ~50 MB read + 50 MB written per render,
+/// comparable to the tone map itself.
+///
+/// Appending (rather than writing into a pre-sized buffer) is also what keeps
+/// the buffer from being memset first: `begin` only reserves. Every pixel a
+/// render produces is opaque, so alpha never needs a separate pass.
+pub trait RgbaSink {
+    /// Drop any previous contents and reserve room for `px` pixels.
+    fn begin(&mut self, px: usize);
+    /// Append one opaque pixel.
+    fn push_rgb(&mut self, rgb: [u8; 3]);
+    /// Append one opaque grey pixel (mono sources replicate across R/G/B).
+    #[inline]
+    fn push_gray(&mut self, g: u8) {
+        self.push_rgb([g, g, g]);
+    }
+
+    /// Append a whole run of grey pixels. Worth overriding: pushing one pixel at
+    /// a time updates the buffer's length on every iteration, and that
+    /// loop-carried dependency stops the mapping loop from vectorising. A sink
+    /// whose pixel type matches the iterator's can hand the run straight to
+    /// `Vec::extend`, which writes the run without touching the length until the
+    /// end (worth ~2× on a full-resolution render).
+    #[inline]
+    fn extend_gray<I: Iterator<Item = u8>>(&mut self, it: I) {
+        for g in it {
+            self.push_gray(g);
+        }
+    }
+
+    /// [`extend_gray`](Self::extend_gray) for coloured pixels (the Colormap tone).
+    #[inline]
+    fn extend_rgb<I: Iterator<Item = [u8; 3]>>(&mut self, it: I) {
+        for c in it {
+            self.push_rgb(c);
+        }
+    }
+}
+
+impl RgbaSink for Vec<u8> {
+    #[inline]
+    fn begin(&mut self, px: usize) {
+        self.clear();
+        self.reserve(px * 4);
+    }
+    #[inline]
+    fn push_rgb(&mut self, rgb: [u8; 3]) {
+        self.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+    }
+    // A byte buffer holds four elements per pixel, so there's no run to hand to
+    // `extend` — the per-pixel default is what this sink wants.
+}
+
+/// The source→output sampling grid shared by the fill helpers: an `ow × oh`
+/// output taking every `step`-th pixel per axis from a `w`-wide interleaved
+/// source of `ch` channels, of which `cc` carry colour (1 = mono, replicated).
+/// `step == 1` is the full-resolution render.
+#[derive(Clone, Copy)]
+struct Grid {
+    w: usize,
     ch: usize,
     cc: usize,
-    px: usize,
-    map: impl Fn(T) -> U,
-) {
-    for i in 0..px {
-        let base = i * ch;
-        let o = i * 4;
-        if cc == 1 {
-            let g = map(v[base]);
-            out[o] = g;
-            out[o + 1] = g;
-            out[o + 2] = g;
+    ow: usize,
+    oh: usize,
+    step: usize,
+}
+
+impl Grid {
+    /// The source samples of output row `oy`, in output order.
+    #[inline]
+    fn row<'a, T>(&self, v: &'a [T], oy: usize) -> impl Iterator<Item = &'a [T]> {
+        v[oy * self.step * self.w * self.ch..]
+            .chunks_exact(self.ch)
+            .step_by(self.step)
+            .take(self.ow)
+    }
+}
+
+/// Map interleaved samples through `map` into `out`, over `grid`.
+fn fill_lut<S: RgbaSink, T: Copy>(out: &mut S, v: &[T], grid: Grid, map: impl Fn(T) -> u8) {
+    out.begin(grid.ow * grid.oh);
+    // The hot path — an undecimated single-channel image — walks the samples
+    // contiguously, with no per-row setup and no strided iterator.
+    if grid.step == 1 && grid.ch == 1 {
+        out.extend_gray(v[..grid.ow * grid.oh].iter().map(|&s| map(s)));
+        return;
+    }
+    for oy in 0..grid.oh {
+        if grid.cc == 1 {
+            out.extend_gray(grid.row(v, oy).map(|s| map(s[0])));
         } else {
-            out[o] = map(v[base]);
-            out[o + 1] = map(v[base + 1]);
-            out[o + 2] = map(v[base + 2]);
+            out.extend_rgb(grid.row(v, oy).map(|s| [map(s[0]), map(s[1]), map(s[2])]));
         }
     }
 }
 
-/// Like [`fill_rgba`] but samples every `step`-th source pixel per axis from a
-/// `w`-wide source into an `ow × oh` output (both `ceil(dim / step)`). Used by
-/// [`FrameData::render_into_scaled`] to build a minified pane's texture at
-/// ~display resolution instead of full resolution.
-#[allow(clippy::too_many_arguments)]
-fn fill_rgba_decimated<T: Copy, U: Copy>(
-    out: &mut [U],
-    v: &[T],
-    w: usize,
-    ch: usize,
-    cc: usize,
-    ow: usize,
-    oh: usize,
-    step: usize,
-    map: impl Fn(T) -> U,
-) {
-    for oy in 0..oh {
-        let row = oy * step * w; // source row of this output row
-        for ox in 0..ow {
-            let base = (row + ox * step) * ch;
-            let o = (oy * ow + ox) * 4;
-            if cc == 1 {
-                let g = map(v[base]);
-                out[o] = g;
-                out[o + 1] = g;
-                out[o + 2] = g;
-            } else {
-                out[o] = map(v[base]);
-                out[o + 1] = map(v[base + 1]);
-                out[o + 2] = map(v[base + 2]);
-            }
-        }
+/// [`fill_lut`] for the Colormap tone: the first channel of each pixel picks a
+/// colour (not a grey) through `rgb`. Mono sources only (`grid.cc == 1`).
+fn fill_cmap<S: RgbaSink, T: Copy>(out: &mut S, v: &[T], grid: Grid, rgb: impl Fn(T) -> [u8; 3]) {
+    out.begin(grid.ow * grid.oh);
+    if grid.step == 1 && grid.ch == 1 {
+        out.extend_rgb(v[..grid.ow * grid.oh].iter().map(|&s| rgb(s)));
+        return;
     }
-}
-
-/// Write a per-pixel RGB triple (from the first channel of each interleaved
-/// pixel) into an RGBA buffer; alpha is left at whatever `out` holds (255). Used
-/// by the Colormap tone. `out` must already be `px * 4` long.
-fn fill_rgb<T: Copy>(out: &mut [u8], v: &[T], ch: usize, px: usize, rgb: impl Fn(T) -> [u8; 3]) {
-    for i in 0..px {
-        let c = rgb(v[i * ch]);
-        let o = i * 4;
-        out[o] = c[0];
-        out[o + 1] = c[1];
-        out[o + 2] = c[2];
-    }
-}
-
-/// Decimated [`fill_rgb`]: samples every `step`-th source pixel per axis from a
-/// `w`-wide source into an `ow × oh` output.
-#[allow(clippy::too_many_arguments)]
-fn fill_rgb_decimated<T: Copy>(
-    out: &mut [u8],
-    v: &[T],
-    w: usize,
-    ch: usize,
-    ow: usize,
-    oh: usize,
-    step: usize,
-    rgb: impl Fn(T) -> [u8; 3],
-) {
-    for oy in 0..oh {
-        let row = oy * step * w;
-        for ox in 0..ow {
-            let c = rgb(v[(row + ox * step) * ch]);
-            let o = (oy * ow + ox) * 4;
-            out[o] = c[0];
-            out[o + 1] = c[1];
-            out[o + 2] = c[2];
-        }
+    for oy in 0..grid.oh {
+        out.extend_rgb(grid.row(v, oy).map(|s| rgb(s[0])));
     }
 }
 
@@ -650,7 +627,7 @@ mod tests {
         // step 1 is identical to render_into (same size, same bytes).
         let mut full = Vec::new();
         f.render_into(lo, hi, &mut full);
-        let mut one = Vec::new();
+        let mut one = Vec::<u8>::new();
         assert_eq!(
             f.render_into_scaled_lut(lo, hi, 1, &mut lut, &mut one),
             [4, 2]
@@ -658,7 +635,7 @@ mod tests {
         assert_eq!(one, full);
 
         // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
-        let mut half = Vec::new();
+        let mut half = Vec::<u8>::new();
         assert_eq!(
             f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half),
             [2, 1]
@@ -668,7 +645,7 @@ mod tests {
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
 
         // step 3 -> ceil(4/3) x ceil(2/3) = 2x1, sampling (0,0) and (3,0): 0, 30.
-        let mut third = Vec::new();
+        let mut third = Vec::<u8>::new();
         assert_eq!(
             f.render_into_scaled_lut(lo, hi, 3, &mut lut, &mut third),
             [2, 1]
@@ -691,7 +668,7 @@ mod tests {
         for f in [&a, &b] {
             let mut plain = Vec::new();
             f.render_into(lo, hi, &mut plain);
-            let mut cached = Vec::new();
+            let mut cached = Vec::<u8>::new();
             f.render_into_lut(lo, hi, &mut lut, &mut cached);
             assert_eq!(cached, plain, "cached render must equal the plain render");
         }
@@ -700,7 +677,7 @@ mod tests {
         assert_eq!(lut.key8, Some((lo.to_bits(), hi.to_bits(), false, 1 << 16)));
 
         // Changing the window rebuilds the table (new key).
-        let mut cached = Vec::new();
+        let mut cached = Vec::<u8>::new();
         a.render_into_lut(500.0, 40000.0, &mut lut, &mut cached);
         assert_eq!(
             lut.key8,
@@ -723,7 +700,7 @@ mod tests {
         let (lo, hi) = (0.0, 63000.0);
 
         let mut lut = ToneLut::default();
-        let mut scaled = Vec::new();
+        let mut scaled = Vec::<u8>::new();
         let size = f.render_into_scaled_lut(lo, hi, 4, &mut lut, &mut scaled);
         assert_eq!(size, [2, 2]); // 4 px < 65536 → arithmetic path
 
@@ -750,7 +727,7 @@ mod tests {
         // A 3-pixel mono ramp min/mid/max over the window [0, 255].
         let f = FrameData::new([3, 1], 1, Samples::U8(vec![0, 128, 255]));
         let mut lut = ToneLut::default();
-        let mut out = Vec::new();
+        let mut out = Vec::<u8>::new();
         let size = f.render_into_scaled_cmap(0.0, 255.0, 1, tab, pal.id(), &mut lut, &mut out);
         assert_eq!(size, [3, 1]);
         // Each pixel's RGB is palette[value], with alpha preserved (255).
@@ -764,7 +741,7 @@ mod tests {
         assert_ne!([out[0], out[1], out[2]], [out[8], out[9], out[10]]);
 
         // A flat window (lo == hi) collapses every sample to one palette colour.
-        let mut flat = Vec::new();
+        let mut flat = Vec::<u8>::new();
         f.render_into_scaled_cmap(5.0, 5.0, 1, tab, pal.id(), &mut lut, &mut flat);
         assert_eq!([flat[0], flat[1], flat[2]], [flat[4], flat[5], flat[6]]);
         assert_eq!([flat[4], flat[5], flat[6]], [flat[8], flat[9], flat[10]]);

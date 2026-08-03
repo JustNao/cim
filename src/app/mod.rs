@@ -940,9 +940,11 @@ pub struct CimApp {
     warn_popup: Option<String>,
     /// Monotonic per-frame counter driving cache LRU recency.
     clock: u64,
-    /// Reused RGBA scratch buffer for texture rendering, so `prepare` doesn't
-    /// allocate a full-image buffer on every frame change.
-    render_scratch: Vec<u8>,
+    /// Scratch pixel buffer for the synchronous texture render, in egui's own
+    /// pixel type so the render's output *is* the `ColorImage` (no conversion
+    /// pass). `stage` takes it and hands it to the texture, so it holds the
+    /// allocation only between renders.
+    render_scratch: Vec<egui::Color32>,
     /// Windows: the main window's Win32 handle while it is still DWM-cloaked
     /// against the startup white flash; `tick` uncloaks and clears it once the
     /// first maximized frame has been presented (see `set_window_cloak`).

@@ -48,15 +48,40 @@ pub struct RenderDone {
     pub id: u64,
     pub frame: usize,
     pub sig: u64,
-    /// The finished display image, already converted to egui's `ColorImage` **on
-    /// the worker**: `from_rgba_unmultiplied` is a full-buffer conversion copy
-    /// (several ms on a large frame), so doing it here leaves only the cheap
-    /// texture-delta queueing (`tex.set`) on the UI thread.
+    /// The finished display image, rendered **directly** into egui's pixel type
+    /// on the worker (see [`RgbaSink`]), so neither the conversion copy nor the
+    /// texture-delta queueing costs the UI thread anything but a move.
     pub image: eframe::egui::ColorImage,
     /// LUT / tone map time (the gray or 8-bit render), for the `CIM_DEBUG` profiler.
     pub lut_time: std::time::Duration,
     /// Proprietary-operator `apply` time (zero when no operator ran).
     pub ops_time: std::time::Duration,
+}
+
+/// Render straight into egui's packed pixel type, skipping the RGBA-bytes
+/// round trip (see [`crate::media::RgbaSink`]). Every pixel a render produces is
+/// opaque, so `from_rgb` is exactly what `from_rgba_unmultiplied(r, g, b, 255)`
+/// used to yield — the texture is byte-identical to the old two-step path.
+impl crate::media::RgbaSink for Vec<eframe::egui::Color32> {
+    #[inline]
+    fn begin(&mut self, px: usize) {
+        self.clear();
+        self.reserve(px);
+    }
+    #[inline]
+    fn push_rgb(&mut self, rgb: [u8; 3]) {
+        self.push(eframe::egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+    }
+    // One `Color32` per pixel, so a run maps 1:1 onto `Vec::extend` — see the
+    // trait's note on why that beats per-pixel pushes.
+    #[inline]
+    fn extend_gray<I: Iterator<Item = u8>>(&mut self, it: I) {
+        self.extend(it.map(eframe::egui::Color32::from_gray));
+    }
+    #[inline]
+    fn extend_rgb<I: Iterator<Item = [u8; 3]>>(&mut self, it: I) {
+        self.extend(it.map(|c| eframe::egui::Color32::from_rgb(c[0], c[1], c[2])));
+    }
 }
 
 pub struct RenderPool {
@@ -149,20 +174,19 @@ impl Worker {
     /// `export::ensure_frame` so all three match pixel-for-pixel.
     fn render(&mut self, job: RenderJob) -> RenderDone {
         let size = job.data.size;
-        let mut rgba = Vec::new();
+        let mut pixels = Vec::new();
         // The one shared render tail (plain LUT, or operators on a full-precision
-        // 16-bit render) — identical to the export path by construction.
+        // 16-bit render) — identical to the export path by construction, which
+        // renders the same tail into a byte buffer instead (see `RgbaSink`).
         let (lut_time, ops_time) = self.ops.render_display(
             &job.data,
             (job.lo, job.hi),
             job.lut_alpha,
             job.details,
             &mut self.lut,
-            &mut rgba,
+            &mut pixels,
         );
-        // Convert to egui's image format here, off the UI thread (a full-buffer
-        // copy — see `RenderDone::image`).
-        let image = eframe::egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let image = eframe::egui::ColorImage { size, pixels };
         RenderDone {
             id: job.id,
             frame: job.frame,
