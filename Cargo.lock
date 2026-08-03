@@ -825,6 +825,7 @@ dependencies = [
  "image",
  "libloading",
  "raw-window-handle",
+ "rayon",
  "rfd",
  "rust-i18n",
  "serde",

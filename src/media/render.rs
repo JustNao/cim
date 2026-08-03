@@ -5,6 +5,8 @@
 //! gray16 variants), and the mask / intensity overlay tints. No media,
 //! caching or decoding concerns — those stay in the parent module.
 
+use rayon::prelude::*;
+
 use super::{FrameData, Samples};
 
 impl FrameData {
@@ -451,7 +453,39 @@ pub trait RgbaSink {
             self.push_rgb(c);
         }
     }
+
+    /// Fill from a **parallel** run of grey values — one per output pixel, in
+    /// output order — returning whether this sink took it. The default is
+    /// `false`: the caller then renders the same run serially, so a sink opts
+    /// into parallelism rather than every sink having to support it.
+    ///
+    /// Only a sink holding exactly one element per pixel can implement this,
+    /// because rayon splits the output by index and each task must own a
+    /// disjoint, statically-known slice of it. That rules out the RGBA-byte sink
+    /// (four elements per pixel) and is why this returns a bool instead of being
+    /// required. The one implementor is egui's `Vec<Color32>`
+    /// (`renderer::RgbaSink for Vec<Color32>`) — the display render, which is the
+    /// path with a frame budget.
+    ///
+    /// Splitting is by pixel index over a contiguous source, so the mapping is
+    /// the *same* per-pixel function the serial path applies, in the same order:
+    /// the two outputs are identical by construction, which the pixel-accuracy
+    /// invariant requires (`par_matches_serial_render` locks it down).
+    fn par_gray<I: rayon::iter::IndexedParallelIterator<Item = u8>>(&mut self, _it: I) -> bool {
+        false
+    }
+
+    /// [`par_gray`](Self::par_gray) for coloured pixels (the Colormap tone).
+    fn par_rgb<I: rayon::iter::IndexedParallelIterator<Item = [u8; 3]>>(&mut self, _it: I) -> bool {
+        false
+    }
 }
+
+/// Output pixels below which a render stays serial: rayon's split/join costs a
+/// few microseconds, and a small pane's whole render is not much more than that.
+/// A full-resolution pane worth parallelising is orders of magnitude past this,
+/// and a decimated one never reaches the parallel path at all.
+const PAR_MIN_PX: usize = 1 << 20;
 
 impl RgbaSink for Vec<u8> {
     #[inline]
@@ -493,14 +527,41 @@ impl Grid {
 }
 
 /// Map interleaved samples through `map` into `out`, over `grid`.
-fn fill_lut<S: RgbaSink, T: Copy>(out: &mut S, v: &[T], grid: Grid, map: impl Fn(T) -> u8) {
-    out.begin(grid.ow * grid.oh);
-    // The hot path — an undecimated single-channel image — walks the samples
-    // contiguously, with no per-row setup and no strided iterator.
+///
+/// The undecimated cases run output pixel `i` off source pixel `i`, so the whole
+/// image is one contiguous run: no per-row setup, no strided iterator, and — past
+/// [`PAR_MIN_PX`], for a sink that takes it — split across cores by pixel index
+/// (see [`RgbaSink::par_gray`]). A decimated grid stays serial and row-wise: it
+/// is already 4× or more cheaper, and its rows aren't a single contiguous span.
+fn fill_lut<S: RgbaSink, T: Copy + Sync>(
+    out: &mut S,
+    v: &[T],
+    grid: Grid,
+    map: impl Fn(T) -> u8 + Sync,
+) {
+    let px = grid.ow * grid.oh;
+    // The hot path: an undecimated single-channel image, samples 1:1 with pixels.
     if grid.step == 1 && grid.ch == 1 {
-        out.extend_gray(v[..grid.ow * grid.oh].iter().map(|&s| map(s)));
+        let src = &v[..px];
+        if px >= PAR_MIN_PX && out.par_gray(src.par_iter().map(|&s| map(s))) {
+            return;
+        }
+        out.begin(px);
+        out.extend_gray(src.iter().map(|&s| map(s)));
         return;
     }
+    // Undecimated colour: rows are contiguous, so the image is one strided run.
+    if grid.step == 1 && grid.cc == 3 {
+        let src = &v[..px * grid.ch];
+        let rgb = |s: &[T]| [map(s[0]), map(s[1]), map(s[2])];
+        if px >= PAR_MIN_PX && out.par_rgb(src.par_chunks_exact(grid.ch).map(rgb)) {
+            return;
+        }
+        out.begin(px);
+        out.extend_rgb(src.chunks_exact(grid.ch).map(rgb));
+        return;
+    }
+    out.begin(px);
     for oy in 0..grid.oh {
         if grid.cc == 1 {
             out.extend_gray(grid.row(v, oy).map(|s| map(s[0])));
@@ -512,12 +573,23 @@ fn fill_lut<S: RgbaSink, T: Copy>(out: &mut S, v: &[T], grid: Grid, map: impl Fn
 
 /// [`fill_lut`] for the Colormap tone: the first channel of each pixel picks a
 /// colour (not a grey) through `rgb`. Mono sources only (`grid.cc == 1`).
-fn fill_cmap<S: RgbaSink, T: Copy>(out: &mut S, v: &[T], grid: Grid, rgb: impl Fn(T) -> [u8; 3]) {
-    out.begin(grid.ow * grid.oh);
+fn fill_cmap<S: RgbaSink, T: Copy + Sync>(
+    out: &mut S,
+    v: &[T],
+    grid: Grid,
+    rgb: impl Fn(T) -> [u8; 3] + Sync,
+) {
+    let px = grid.ow * grid.oh;
     if grid.step == 1 && grid.ch == 1 {
-        out.extend_rgb(v[..grid.ow * grid.oh].iter().map(|&s| rgb(s)));
+        let src = &v[..px];
+        if px >= PAR_MIN_PX && out.par_rgb(src.par_iter().map(|&s| rgb(s))) {
+            return;
+        }
+        out.begin(px);
+        out.extend_rgb(src.iter().map(|&s| rgb(s)));
         return;
     }
+    out.begin(px);
     for oy in 0..grid.oh {
         out.extend_rgb(grid.row(v, oy).map(|s| rgb(s[0])));
     }

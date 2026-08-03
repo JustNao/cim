@@ -22,6 +22,7 @@
 //! reload): its channel closes, the thread exits, and its owned operator
 //! instances are destroyed on that thread.
 
+use rayon::iter::IndexedParallelIterator;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -81,6 +82,25 @@ impl crate::media::RgbaSink for Vec<eframe::egui::Color32> {
     #[inline]
     fn extend_rgb<I: Iterator<Item = [u8; 3]>>(&mut self, it: I) {
         self.extend(it.map(|c| eframe::egui::Color32::from_rgb(c[0], c[1], c[2])));
+    }
+
+    // One `Color32` per pixel, so rayon can hand each task a disjoint slice of
+    // the output addressed by pixel index — the precondition `par_gray` states.
+    // `collect_into_vec` sizes this buffer once and lets the worker threads write
+    // their own ranges into the spare capacity, so the parallelism covers the
+    // *first touch* of those pages too, not just the tone map. That matters more
+    // than the mapping itself here: a fresh full-resolution buffer is ~50 MB of
+    // never-yet-faulted memory, and faulting it in is the larger half of a render
+    // (see the `DEFAULT_MMAP_THRESHOLD_MAX` note in the render docs).
+    fn par_gray<I: rayon::iter::IndexedParallelIterator<Item = u8>>(&mut self, it: I) -> bool {
+        it.map(eframe::egui::Color32::from_gray)
+            .collect_into_vec(self);
+        true
+    }
+    fn par_rgb<I: rayon::iter::IndexedParallelIterator<Item = [u8; 3]>>(&mut self, it: I) -> bool {
+        it.map(|c| eframe::egui::Color32::from_rgb(c[0], c[1], c[2]))
+            .collect_into_vec(self);
+        true
     }
 }
 
@@ -239,6 +259,62 @@ mod tests {
                 done.image, reference,
                 "lut_alpha={lut_alpha} details={details}"
             );
+        }
+    }
+
+    /// Past `PAR_MIN_PX` the `Vec<Color32>` sink renders across rayon's pool
+    /// instead of serially. Splitting is by pixel index over a contiguous
+    /// source, so it must reproduce the serial render exactly — the
+    /// pixel-accuracy invariant does not bend for a faster path. Checked for
+    /// both the grey map and the Colormap palette, at an image comfortably over
+    /// the threshold (1024² = 1 Mpx) so the parallel branch really is taken.
+    #[test]
+    fn par_render_matches_serial_render() {
+        use crate::media::ToneLut;
+        use eframe::egui::Color32;
+
+        let f = FrameData::new(
+            [1024, 1024],
+            1,
+            Samples::U16(crate::testutil::gray16_page(1024, 1024, 3)),
+        );
+        let (lo, hi) = (700.0, 61000.0);
+
+        // The byte sink has no parallel path, so it *is* the serial reference.
+        let mut serial = Vec::<u8>::new();
+        f.render_into_lut(lo, hi, &mut ToneLut::default(), &mut serial);
+
+        let mut par = Vec::<Color32>::new();
+        f.render_into_lut(lo, hi, &mut ToneLut::default(), &mut par);
+        assert_eq!(par.len() * 4, serial.len());
+        for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
+            assert_eq!(p.to_array(), s, "grey pixel {i}");
+        }
+
+        // Same for the Colormap tone, which takes the `par_rgb` branch.
+        let pal = crate::palette::Palette::Viridis;
+        let mut serial = Vec::<u8>::new();
+        f.render_into_scaled_cmap(
+            lo,
+            hi,
+            1,
+            pal.table(),
+            pal.id(),
+            &mut ToneLut::default(),
+            &mut serial,
+        );
+        let mut par = Vec::<Color32>::new();
+        f.render_into_scaled_cmap(
+            lo,
+            hi,
+            1,
+            pal.table(),
+            pal.id(),
+            &mut ToneLut::default(),
+            &mut par,
+        );
+        for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
+            assert_eq!(p.to_array(), s, "colormap pixel {i}");
         }
     }
 }
