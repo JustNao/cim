@@ -291,12 +291,14 @@ settings.frame_cache_frames_hover: >-
   How many timeline positions fit, counting one frame from each of the %{media}
   open media (%{size} each). Frames evicted here are re-read from disk when
   shown again — much slower over a network mount than keeping them resident.
-settings.decode_threads: Decode threads
-settings.decode_threads_auto: auto
-settings.decode_threads_hover: >-
-  Background image-decoding worker threads shared by all sequences. 0 = auto
-  (scales with CPU cores, capped). Lower it to leave CPU for other users when
-  several instances share one server / VNC host. Applies immediately.
+settings.cpu_budget: CPU threads
+settings.cpu_budget_split: (%{decode} decode + %{rayon} render)
+settings.cpu_budget_hover: >-
+  Total CPU worker threads this instance may use, split between background
+  image decoding and the parallel render / export / statistics passes. Lower it
+  to leave CPU for other users when several instances share one server / VNC
+  host; raise it temporarily for a heavy export, then put it back. Each pane
+  keeps its own render thread on top of this. Applies immediately.
 settings.cursor_dot: Cursor dot on other panes
 settings.cursor_dot_hover: >-
   Mark the hovered pixel on every other pane with a red dot, so the same

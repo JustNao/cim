@@ -403,7 +403,7 @@ impl CimApp {
         let depth = prefetch_depth(
             self.decode_ema_secs,
             self.playback.fps,
-            self.decode_threads_active,
+            self.resolve_decode_threads(),
             targets.len(),
         );
 
@@ -771,27 +771,25 @@ impl CimApp {
             // leaves the scratch empty — it's re-grown by the next render, which
             // reserves exactly once and writes every pixel once.
             let mut pixels = std::mem::take(&mut self.render_scratch);
-            let size = if cmap {
+            // On the budgeted pool: an undecimated render of this size splits
+            // across cores (`media::render`), and this is the *synchronous* path
+            // on the UI thread, so it must draw from the instance's share rather
+            // than rayon's machine-sized global pool (`crate::cpu`).
+            let palette = cmap.then(|| self.tone_of(idx).palette);
+            let lut = &mut self.panes[idx].tex.lut;
+            let size = crate::cpu::install(|| match palette {
                 // Colormap: false-colour the mono frame through the palette.
-                let pal = self.tone_of(idx).palette;
-                frame.render_into_scaled_cmap(
+                Some(pal) => frame.render_into_scaled_cmap(
                     lo,
                     hi,
                     step,
                     pal.table(),
                     pal.id(),
-                    &mut self.panes[idx].tex.lut,
+                    lut,
                     &mut pixels,
-                )
-            } else {
-                frame.render_into_scaled_lut(
-                    lo,
-                    hi,
-                    step,
-                    &mut self.panes[idx].tex.lut,
-                    &mut pixels,
-                )
-            };
+                ),
+                None => frame.render_into_scaled_lut(lo, hi, step, lut, &mut pixels),
+            });
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
             }
@@ -930,11 +928,12 @@ impl CimApp {
     /// bounds when region-tone is pinned) — ignoring "Share clip", so it can be
     /// read for the Control media itself without recursing.
     fn own_tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
-        crate::tone::frame_bounds(
-            frame,
-            crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx)),
-            self.tone_region(idx),
-        )
+        let clip = crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx));
+        let region = self.tone_region(idx);
+        // On the budgeted pool: an unmemoized bound runs a whole-image percentile
+        // scan, which splits across cores, and this is called from the UI thread
+        // (`crate::cpu`). Memoized hits never reach the scan, so this is cheap.
+        crate::cpu::install(|| crate::tone::frame_bounds(frame, clip, region))
     }
 
     /// The region pane `idx`'s display bounds are computed over, or `None` for

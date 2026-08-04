@@ -143,7 +143,14 @@ impl RenderPool {
                 // proprietary operator instances) for the life of the thread.
                 let mut worker = Worker::default();
                 while let Ok(job) = job_rx.recv() {
-                    if done_tx.send(worker.render(job)).is_err() {
+                    // Render on the budgeted rayon pool: the full-resolution LUT
+                    // render splits across cores (`media::render`), and a bare
+                    // `par_iter` would take rayon's machine-sized global pool
+                    // instead of this instance's share (`crate::cpu`). Installed
+                    // per job rather than around the loop so a budget change
+                    // applies to the next render, not only to new panes.
+                    let done = crate::cpu::install(|| worker.render(job));
+                    if done_tx.send(done).is_err() {
                         break; // UI gone: shutting down
                     }
                     // Wake the UI to commit this render promptly (see `ctx`).

@@ -306,13 +306,15 @@ settings.frame_cache_frames_hover: >-
   chacun des %{media} médias ouverts (%{size} chacune). Les images libérées ici
   sont relues depuis le disque à leur prochain affichage — bien plus lent sur
   un montage réseau que de les garder en mémoire.
-settings.decode_threads: Threads de décodage
-settings.decode_threads_auto: auto
-settings.decode_threads_hover: >-
-  Threads de décodage d'images partagés par toutes les séquences. 0 = auto (suit
-  le nombre de cœurs, plafonné). Réduisez-le pour laisser du CPU aux autres
-  utilisateurs quand plusieurs instances partagent un serveur / hôte VNC.
-  Appliqué immédiatement.
+settings.cpu_budget: Threads CPU
+settings.cpu_budget_split: (%{decode} décodage + %{rayon} rendu)
+settings.cpu_budget_hover: >-
+  Nombre total de threads CPU utilisables par cette instance, répartis entre le
+  décodage d'images en arrière-plan et les passes parallèles de rendu / export /
+  statistiques. Réduisez-le pour laisser du CPU aux autres utilisateurs quand
+  plusieurs instances partagent un serveur / hôte VNC ; augmentez-le
+  temporairement pour un export lourd, puis remettez-le. Chaque panneau garde en
+  plus son propre thread de rendu. Appliqué immédiatement.
 settings.cursor_dot: Point du curseur sur les autres panneaux
 settings.cursor_dot_hover: >-
   Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour

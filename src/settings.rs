@@ -403,11 +403,19 @@ pub struct Config {
     /// sequences before the least-recently-viewed ones are evicted.
     #[serde(default = "default_cache_budget_mb")]
     pub cache_budget_mb: usize,
-    /// Number of background image-decoding worker threads shared by all
-    /// sequences. `0` = auto (scale with CPU cores, capped). Lower it to leave
-    /// CPU for other users when several instances share one server / VNC host.
-    #[serde(default = "default_decode_threads")]
-    pub decode_threads: usize,
+    /// **Total** CPU worker threads this instance may run across the two shared
+    /// pools — background decoding, and the parallel render / composite /
+    /// analytic scans (`crate::cpu::split` divides it). Lower it to leave CPU
+    /// for other users when several instances share one server / VNC host.
+    ///
+    /// Per-pane render workers sit outside this budget (see `crate::cpu`).
+    ///
+    /// Replaces the old `decode_threads`, which capped the decode pool while
+    /// leaving rayon to size itself to the machine. An old config's
+    /// `decode_threads` is simply ignored (unknown fields are), so such an
+    /// instance comes back at the default budget rather than its former cap.
+    #[serde(default = "default_cpu_budget")]
+    pub cpu_budget: usize,
     /// Replicate the hovered pixel onto the other panes as a red dot (the pane
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
@@ -436,8 +444,8 @@ fn default_cache_budget_mb() -> usize {
     1536 // 1.5 GiB
 }
 
-fn default_decode_threads() -> usize {
-    0 // auto: scale with CPU cores (see CimApp::resolve_decode_threads)
+fn default_cpu_budget() -> usize {
+    crate::cpu::DEFAULT
 }
 
 impl Default for Config {
@@ -447,7 +455,7 @@ impl Default for Config {
             max_columns: 3,
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
-            decode_threads: default_decode_threads(),
+            cpu_budget: default_cpu_budget(),
             cursor_dot: true,
             cpp_lib_dir: String::new(),
             keybindings: Keybindings::default(),

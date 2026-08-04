@@ -986,10 +986,10 @@ impl CimApp {
             return;
         }
         if let Some(frame) = self.panes[idx].media.resident(f) {
-            self.panes[idx].hist = Some(HistCache {
-                key,
-                data: frame.histogram_display(256),
-            });
+            // On the budgeted pool: the histogram scan splits across cores for a
+            // large frame, and this runs on the UI thread (`crate::cpu`).
+            let data = crate::cpu::install(|| frame.histogram_display(256));
+            self.panes[idx].hist = Some(HistCache { key, data });
         }
     }
 
@@ -1106,18 +1106,20 @@ impl CimApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label(t!("settings.decode_threads"));
-                    ui.add(
-                        egui::Slider::new(&mut self.config.decode_threads, 0..=16)
-                            .custom_formatter(|n, _| {
-                                if n == 0.0 {
-                                    t!("settings.decode_threads_auto").into_owned()
-                                } else {
-                                    format!("{n}")
-                                }
-                            }),
-                    )
-                    .on_hover_text(t!("settings.decode_threads_hover"));
+                    ui.label(t!("settings.cpu_budget"));
+                    ui.add(egui::Slider::new(
+                        &mut self.config.cpu_budget,
+                        crate::cpu::MIN..=crate::cpu::MAX,
+                    ))
+                    .on_hover_text(t!("settings.cpu_budget_hover"));
+                    // The budget alone doesn't say where the threads go; show the
+                    // split so raising it for one heavy job has a visible effect.
+                    let (decode, rayon) = crate::cpu::split(self.config.cpu_budget);
+                    ui.weak(t!(
+                        "settings.cpu_budget_split",
+                        decode = decode,
+                        rayon = rayon
+                    ));
                 });
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
                     .on_hover_text(t!("settings.cursor_dot_hover"));

@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod cpu;
 mod debug;
 mod decoder;
 mod export;

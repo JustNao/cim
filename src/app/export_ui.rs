@@ -76,7 +76,10 @@ fn run_export(
             if cancel2.load(Ordering::Relaxed) {
                 return; // cancelled: stop composing
             }
-            let buf = plan.compose(t);
+            // On the budgeted rayon pool: the composite splits by row and each
+            // pane's render splits internally, so an export must not be able to
+            // take the whole machine (`crate::cpu`).
+            let buf = crate::cpu::install(|| plan.compose(t));
             if tx.send(buf).is_err() {
                 return; // encoder side bailed (write error / cancel): stop
             }

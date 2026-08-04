@@ -82,6 +82,8 @@ src/
                  into two .so, loaded by hard-coded name. PaneOps owns a pane's
                  per-operator instances (create/apply/destroy; 16-bit only) and
                  the shared render tail render_display; ops_active gates them.
+  cpu.rs         The instance's CPU thread budget (§5.1): splits config.cpu_budget
+                 between the decode pool and the rayon pool, and owns the latter.
   decoder.rs     Background decode thread pool (per-sequence persistent readers).
   offsets.rs     Off-UI-thread fast-offset scanner: measures a fast-scannable
                  sequence's page counts on open/reload (§4) without hitching paint.
@@ -378,13 +380,11 @@ check falls back rather than showing a wrong frame.
 ## 5. Background decode pool (`decoder.rs`)
 
 - `BackgroundDecoder::new(threads)` shares one `mpsc` job queue behind a `Mutex`
-  (locked only for the hand-off). The thread count is `CimApp::resolve_decode_threads`:
-  `config.decode_threads` clamped to `[1,16]`, or — when it's `0` (**auto**, the
-  default) — `available_parallelism().clamp(2,6)`. The **Decode threads** Settings
-  slider caps it for shared / VNC hosts where several instances share the CPU; a
-  change is **live-applied** in `update` by rebuilding the pool (and clearing
-  `inflight`, since jobs queued on the old pool won't land on the new one — they
-  re-request; persistent readers reopen on demand).
+  (locked only for the hand-off). The thread count is `CimApp::resolve_decode_threads`
+  — this pool's share of the **CPU budget** (§5.1). A budget change is **live-applied**
+  in `update` by rebuilding the pool (and clearing `inflight`, since jobs queued on the
+  old pool won't land on the new one — they re-request; persistent readers reopen on
+  demand).
 - **Jobs addressed by stable pane `id`**, not Vec index, so results land after
   reorder/close.
 - **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Mutex<Reader>>>`,
@@ -417,6 +417,43 @@ check falls back rather than showing a wrong frame.
     a cap using an always-on decode-latency **EMA** (`decode_ema_secs`, maintained in
     `pump_decoder` independent of `CIM_DEBUG`), the displayed-pane count, and the pool
     size — deeper when decode is slow / many panes, shallower when cheap.
+
+### 5.1 CPU thread budget (`cpu.rs`)
+
+`Config.cpu_budget` is the **total** worker threads this instance may run across the
+two *shared* pools, split by `cpu::split(n) -> (decode, rayon)`: decode takes a
+quarter, floored at 2 and capped at 8 (decoding is as much I/O as CPU, and on a shared
+mount extra readers crowd out other users); rayon takes the rest. Default **16**
+(→ 4 + 12), slider range `cpu::MIN` 4 … `cpu::MAX` 64. Because it is a *total*, the
+number in Settings is the number of threads the instance actually runs — the point of
+the setting on a shared host. Live-applied, so a user can raise it for one heavy export
+and drop it back without restarting.
+
+**Per-pane render workers sit outside the budget** (one per open pane, §7): each is
+idle unless its pane re-renders, and tying them to the budget would make opening a pane
+silently slow decoding.
+
+**Why it exists.** Rayon's *global* pool sizes itself to the machine, so before this a
+64-core host gave one instance 64 threads no matter how the rest was capped — the
+parallel render / composite / scans (§7, §14, `media`) all ran on it. `cpu::install(f)`
+runs `f` on the budgeted pool instead; rayon resolves nested parallelism against the
+pool the caller is in, so **install at thread boundaries, not at `par_iter` call
+sites** — the wrapper then covers parallel calls added later, which is what stops the
+cap leaking. Current install points: the render worker's per-job body (`renderer.rs`),
+the export composer (`export_ui::run_export`), and the UI thread's four parallel entry
+points (`ensure_pane_histogram`, the synchronous `stage` render, `own_tone_bounds`,
+`ensure_region_stats`). The UI thread can't be wrapped wholesale — `install` runs its
+closure *on a pool thread*, and eframe needs the main thread for GL.
+
+`set_budget` swaps an `Arc<ThreadPool>` behind an `RwLock`; `install` clones the `Arc`
+and **releases the lock before running**, so a resize can't deadlock against a long
+render, and a replaced pool lives until its last in-flight job finishes. Sizing helpers
+that read `rayon::current_num_threads` (`media::scan_band`) see the budgeted count
+inside `install`, so they adapt on their own.
+
+Replaces the old `decode_threads` knob, which capped only the decode pool. An old
+config's `decode_threads` is an unknown field and simply ignored, so an instance that
+had capped it comes back at the default budget.
 
 ---
 
@@ -1306,12 +1343,12 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { language, max_columns, ui_scale, cache_budget_mb, decode_threads, cursor_dot,
+`Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, cursor_dot,
 cpp_lib_dir, keybindings }` (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
 — §7 — with a Browse/paste field plus found/not-found and loaded indicators in
-Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `decode_threads` = the background decode pool size, `0` =
-auto — §5),
+Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `cpu_budget` = total
+worker threads across the decode and rayon pools, 4–64, default 16 — §5.1),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written automatically** once an edit settles — there is no Save button.
@@ -1412,8 +1449,8 @@ it. On Windows the window is additionally **DWM-cloaked** in `new`
 still-blank window white for a few frames. A cloaked window is fully managed but
 never composited, so nothing can flash; `tick` **uncloaks on the third frame**, once
 a real maximized frame has been swapped, requesting repaints until then so those
-first frames come even while idle); **rebuild the decode pool if
-`resolve_decode_threads` changed** (§5); `pump_decoder` → `pump_render` (stage
+first frames come even while idle); **resize both shared pools if `cpu_budget`
+changed** (§5.1); `pump_decoder` → `pump_render` (stage
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while
 playing, §5) → `poll_decoding_all` → `enforce_cache_budget`; clamp
@@ -1511,12 +1548,17 @@ fraction of it), **off-thread big plain-LUT renders** (§7 — `ASYNC_RENDER_PIX
 playback step's tens-of-ms LUT render doesn't block an update and hitch a concurrent
 pan), an **off-thread, rate-limited auto-reload watch** (§9 — the signature I/O used to
 run inline on every repaint, so panning/zooming with Auto-reload on stalled the frame
-60–140×/s), and a **configurable decode-thread count** (§5 — cap the pool per instance on a
-shared host). For shared multi-user servers there's also a **">8 sequences" resource warning**
+60–140×/s), **parallel per-pixel work** (§7/§14 — the display render, the export
+composite and the analytic scans all split across cores), and a **single CPU thread
+budget** (§5.1 — one live-applied cap covering the decode *and* rayon pools, so an
+instance on a shared host runs the thread count Settings shows rather than one per
+core). For shared multi-user servers there's also a **">8 sequences" resource warning**
 (§13) before opening a heavy number of sequences at once. Remaining candidates: minor
 per-frame allocations (`Action::all()`, `grid_cells`); a per-instance cache-budget cap /
-lower default for shared hosts; and capping the software-GL (llvmpipe) rasterizer threads
-per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code.
+lower default for shared hosts; capping the software-GL (llvmpipe) rasterizer threads
+per session (`LP_NUM_THREADS`), which is an env/deploy knob, not code; and passing
+`-threads` to the export ffmpeg, whose x264 encoder still sizes itself to the machine
+(a child process, so outside the budget above).
 
 ### Network mounts (shared NFS/SMB) — the read path
 
@@ -1593,7 +1635,12 @@ anchor survives an in-place rewrite and is refused by a reshaped file, which the
 (whole-image == full-frame region, integer and float, with golden values);
 **parallel-scan equivalence** (percentile, histogram, stack reduction and binary combine
 each give bit-identical results across 1/2/3/4/8-thread rayon pools, and a region scan
-still ignores pixels outside it);
+still ignores pixels outside it); `cpu` **budget split** (the two shared pools never
+exceed the total at any budget, out-of-range values clamp, **nested** parallel work stays
+within the cap — counting the distinct workers that actually ran, since
+`current_num_threads` alone wouldn't catch a job escaping to the global pool — and a
+resize mid-job can't deadlock; the resizing tests share a `SERIAL` mutex because the
+pool is process-global);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
 results can't truncate a sequence** (a batch's misses delivered before the hits ahead of

@@ -903,13 +903,9 @@ pub struct CimApp {
     pending_view: Option<cli::ViewState>,
 
     decoder: BackgroundDecoder,
-    /// Auto decode-thread count (scaled to CPU cores, capped), used when
-    /// `config.decode_threads == 0`. Computed once at startup so the per-frame
-    /// resolve doesn't re-query the OS.
-    auto_decode_threads: usize,
-    /// Thread count the live `decoder` pool was built with. When the resolved
-    /// setting changes, the pool is rebuilt to match (`update`).
-    decode_threads_active: usize,
+    /// The `cpu_budget` the live `decoder` pool and rayon pool were built for.
+    /// When the Settings budget changes, both are rebuilt to match (`update`).
+    cpu_budget_active: usize,
     /// The `cpp_lib_dir` value the operator libraries were last (auto-)loaded
     /// from. When the setting changes, `update` retries loading from the new
     /// folder (`load_cpp_libs`) so a corrected path applies without a restart.
@@ -1030,17 +1026,13 @@ impl CimApp {
         }
         cc.egui_ctx.set_fonts(fonts);
 
-        let auto_decode_threads = std::thread::available_parallelism()
-            .map(|n| n.get().clamp(2, 6))
-            .unwrap_or(4);
-
         let config = Config::load();
-        // 0 = auto (scale with cores); an explicit setting caps it for shared hosts.
-        let threads = if config.decode_threads == 0 {
-            auto_decode_threads
-        } else {
-            config.decode_threads.clamp(1, 16)
-        };
+        // One budget covers both shared pools, so an instance on a shared host
+        // runs the thread count Settings shows (see `crate::cpu`). Size rayon
+        // before any parallel work, or it would build its machine-sized default.
+        let cpu_budget = config.cpu_budget;
+        let (threads, _) = crate::cpu::split(cpu_budget);
+        crate::cpu::set_budget(cpu_budget);
         // Load the optional proprietary operator libraries from the configured
         // folder (or, when unset, by their hard-coded names via LD_LIBRARY_PATH).
         // Each operator is independent; a missing library just leaves its feature
@@ -1132,8 +1124,7 @@ impl CimApp {
             pending_open: None,
             pending_view: None,
             decoder: BackgroundDecoder::new(threads, cc.egui_ctx.clone()),
-            auto_decode_threads,
-            decode_threads_active: threads,
+            cpu_budget_active: cpu_budget,
             cpp_dir_active,
             inflight: HashSet::new(),
             // One render worker: serialises the proprietary operators (whose
@@ -1169,15 +1160,10 @@ impl CimApp {
         }
         app
     }
-    /// Resolve the effective background decode-thread count: the configured value
-    /// (clamped) or, when it's `0`, the auto count scaled to CPU cores. Read each
-    /// update so a Settings change rebuilds the pool.
+    /// The decode pool's share of the configured CPU budget (`crate::cpu`).
+    /// Read each update so a Settings change rebuilds the pool.
     pub(super) fn resolve_decode_threads(&self) -> usize {
-        if self.config.decode_threads == 0 {
-            self.auto_decode_threads
-        } else {
-            self.config.decode_threads.clamp(1, 16)
-        }
+        crate::cpu::split(self.config.cpu_budget).0
     }
     // ---- per-pane state resolution --------------------------------------
 
@@ -1768,7 +1754,9 @@ impl CimApp {
             self.panes[idx].stats = None;
             return;
         };
-        let data = frame.region_stats(x0, y0, x1, y1, 256);
+        // On the budgeted pool: the region extent/percentile scan under this can
+        // split across cores for a large selection, on the UI thread (`crate::cpu`).
+        let data = crate::cpu::install(|| frame.region_stats(x0, y0, x1, y1, 256));
         self.panes[idx].stats = Some(RegionStatsCache { key, data });
     }
 
@@ -1806,15 +1794,18 @@ impl CimApp {
             set_window_cloak(hwnd, false);
         }
 
-        // Rebuild the decode pool if the thread setting changed (live-applied like
-        // the other config). Orphaned in-flight jobs won't land on the new pool,
-        // so clear `inflight` to let them be re-requested; the old pool's
-        // persistent readers are dropped and reopen on demand.
-        let want_threads = self.resolve_decode_threads();
-        if want_threads != self.decode_threads_active {
-            self.decoder = BackgroundDecoder::new(want_threads, ctx.clone());
+        // Resize both shared pools if the CPU budget changed (live-applied like
+        // the other config), so a user can raise the cap for one heavy job and
+        // drop it again without restarting. Orphaned in-flight decode jobs won't
+        // land on the new pool, so clear `inflight` to let them be re-requested;
+        // the old pool's persistent readers are dropped and reopen on demand.
+        // The rayon side needs no such care — `cpu::set_budget` lets in-flight
+        // jobs finish on the pool they started on.
+        if self.config.cpu_budget != self.cpu_budget_active {
+            crate::cpu::set_budget(self.config.cpu_budget);
+            self.decoder = BackgroundDecoder::new(self.resolve_decode_threads(), ctx.clone());
             self.inflight.clear();
-            self.decode_threads_active = want_threads;
+            self.cpu_budget_active = self.config.cpu_budget;
         }
 
         // Auto-load the proprietary operator libraries when the configured folder
