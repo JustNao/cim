@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use super::{FrameData, Samples};
+use rayon::prelude::*;
+
+use super::{merge_hist, scan_band, FrameData, Samples, PAR_MIN_SCAN_PX};
 
 /// Per-channel histogram plus the true value extent, for the Visualise panel.
 pub struct HistData {
@@ -94,37 +96,44 @@ pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameDat
     let n = size[0] * size[1] * ch;
 
     let need_sq = matches!(kind, Reduce::Std);
-    let mut sum = vec![0f64; n];
-    let mut sumsq = if need_sq { vec![0f64; n] } else { Vec::new() };
-    let mut count = 0usize;
-    for f in frames {
-        if f.size != size || f.channels != ch {
-            continue;
-        }
-        for i in 0..n {
-            let v = f.sample_f(i) as f64;
-            sum[i] += v;
-            if need_sq {
-                sumsq[i] += v * v;
-            }
-        }
-        count += 1;
-    }
+    // Frames of a different shape contribute nothing, so drop them up front:
+    // the accumulation below is then a plain sweep over a uniform stack.
+    let stack: Vec<&Arc<FrameData>> = frames
+        .iter()
+        .filter(|f| f.size == size && f.channels == ch)
+        .collect();
+    let count = stack.len();
     if count == 0 {
         return None;
     }
     let inv = 1.0 / count as f64;
-    let out: Vec<f32> = (0..n)
-        .map(|i| {
-            let m = sum[i] * inv;
-            match kind {
-                Reduce::Std => ((sumsq[i] * inv - m * m).max(0.0)).sqrt() as f32,
-                // Add/Sub are binary ops (see `combine_frames`), never stack
-                // reductions; Mean is the sensible fallback.
-                _ => m as f32,
+
+    // Split by **sample index**, not by frame: each output sample then sums its
+    // stack in the same order the serial version did, so the f64 accumulation —
+    // which is not associative — reproduces bit for bit. Splitting across frames
+    // instead would reorder the adds and could shift the last ulp.
+    let sample = |i: usize| {
+        let (mut sum, mut sumsq) = (0f64, 0f64);
+        for f in &stack {
+            let v = f.sample_f(i) as f64;
+            sum += v;
+            if need_sq {
+                sumsq += v * v;
             }
-        })
-        .collect();
+        }
+        let m = sum * inv;
+        match kind {
+            Reduce::Std => ((sumsq * inv - m * m).max(0.0)).sqrt() as f32,
+            // Add/Sub are binary ops (see `combine_frames`), never stack
+            // reductions; Mean is the sensible fallback.
+            _ => m as f32,
+        }
+    };
+    let out: Vec<f32> = if n >= PAR_MIN_SCAN_PX {
+        (0..n).into_par_iter().map(sample).collect()
+    } else {
+        (0..n).map(sample).collect()
+    };
     Some(FrameData::new(size, ch, Samples::F32(out)))
 }
 
@@ -136,9 +145,21 @@ pub fn combine_frames(a: &FrameData, b: &FrameData, kind: Reduce) -> Option<Fram
         return None;
     }
     let n = a.size[0] * a.size[1] * a.channels;
-    let out: Vec<f32> = match kind {
-        Reduce::Add => (0..n).map(|i| a.sample_f(i) + b.sample_f(i)).collect(),
-        _ => (0..n).map(|i| a.sample_f(i) - b.sample_f(i)).collect(),
+    // Each output sample is an independent function of the two inputs at the
+    // same index, so this splits by index with nothing to merge.
+    let add = matches!(kind, Reduce::Add);
+    let sample = |i: usize| {
+        let (x, y) = (a.sample_f(i), b.sample_f(i));
+        if add {
+            x + y
+        } else {
+            x - y
+        }
+    };
+    let out: Vec<f32> = if n >= PAR_MIN_SCAN_PX {
+        (0..n).into_par_iter().map(sample).collect()
+    } else {
+        (0..n).map(sample).collect()
     };
     Some(FrameData::new(a.size, a.channels, Samples::F32(out)))
 }
@@ -147,24 +168,46 @@ impl FrameData {
     /// Per-channel histogram binned across the true [min, max] extent.
     pub fn histogram_display(&self, nbins: usize) -> HistData {
         let cc = self.color_channels();
-        let px = self.size[0] * self.size[1];
+        let [w, h] = self.size;
+        let px = w * h;
 
         let (min, max) = self.value_extent();
         let span = (max - min).max(f32::MIN_POSITIVE);
         let last = (nbins - 1) as f32;
 
-        let mut bins = vec![vec![0u32; nbins]; cc];
-        for i in 0..px {
-            let base = i * self.channels;
-            for (c, chan) in bins.iter_mut().enumerate() {
-                let s = self.sample_f(base + c);
-                if s.is_nan() {
-                    continue;
+        // Past `PAR_MIN_SCAN_PX` each band of rows bins into its own accumulator
+        // and the counts are summed at the end (`merge_hist`) — exact integer
+        // addition, so the result is identical to the serial scan bin for bin.
+        let empty = || vec![vec![0u32; nbins]; cc];
+        let take = |mut bins: Vec<Vec<u32>>, row: usize| {
+            for i in row * w..((row + 1) * w).min(px) {
+                let base = i * self.channels;
+                for (c, chan) in bins.iter_mut().enumerate() {
+                    let s = self.sample_f(base + c);
+                    if s.is_nan() {
+                        continue;
+                    }
+                    let bin = (((s - min) / span) * last) as usize;
+                    chan[bin.min(nbins - 1)] += 1;
                 }
-                let bin = (((s - min) / span) * last) as usize;
-                chan[bin.min(nbins - 1)] += 1;
             }
-        }
+            bins
+        };
+        let merge = |mut a: Vec<Vec<u32>>, b: Vec<Vec<u32>>| {
+            for (ca, cb) in a.iter_mut().zip(&b) {
+                merge_hist(ca, cb);
+            }
+            a
+        };
+        let bins = if px >= PAR_MIN_SCAN_PX {
+            (0..h)
+                .into_par_iter()
+                .with_min_len(scan_band(h))
+                .fold(empty, take)
+                .reduce(empty, merge)
+        } else {
+            (0..h).fold(empty(), take)
+        };
         HistData {
             bins,
             min,
@@ -444,5 +487,113 @@ mod tests {
             (lo - 10.0).abs() < 0.01 && (hi - 20.0).abs() < 0.01,
             "({lo}, {hi})"
         );
+    }
+
+    /// Big enough to take the parallel path (`PAR_MIN_SCAN_PX`).
+    const DIM: usize = 512;
+
+    /// Run `f` inside a rayon pool of exactly `threads` threads.
+    fn with_threads<T: Send>(threads: usize, f: impl Fn() -> T + Sync + Send) -> T {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("build pool")
+            .install(f)
+    }
+
+    /// A deterministic RGB frame with a different distribution per channel, so a
+    /// merge that crossed channels would show up.
+    fn rgb_frame() -> FrameData {
+        let v: Vec<u16> = (0..DIM * DIM * 3)
+            .map(|i| ((i as u64 * 7919 + (i as u64 % 3) * 13) % 65536) as u16)
+            .collect();
+        FrameData::new([DIM, DIM], 3, Samples::U16(v))
+    }
+
+    /// The whole-image histogram — and the value extent it is binned across —
+    /// must come out identical however many ways rayon splits the scan. One
+    /// thread is the serial fold; wider splits merge per-band accumulators, and
+    /// integer counts make that merge exact.
+    #[test]
+    fn histogram_is_independent_of_the_split() {
+        let f = rgb_frame();
+        let at = |t| {
+            let h = with_threads(t, || f.histogram_display(256));
+            (h.bins, h.min, h.max)
+        };
+        let serial = at(1);
+        // Every sample counted exactly once, per channel.
+        for chan in &serial.0 {
+            assert_eq!(chan.iter().sum::<u32>(), (DIM * DIM) as u32);
+        }
+        for threads in [2, 3, 4, 8] {
+            assert_eq!(at(threads), serial, "{threads} threads");
+        }
+    }
+
+    /// The stack reduction splits by **sample index**, so each output sample
+    /// still sums its frames in the original order. `f64` addition is not
+    /// associative, so that ordering is what makes the parallel result equal the
+    /// serial one *exactly* — this asserts bit equality, not an epsilon.
+    #[test]
+    fn stack_reduction_is_independent_of_the_split() {
+        // Values whose f64 sums are order-sensitive: a large one alongside small
+        // ones, so reordering the adds would actually lose low bits.
+        let frames: Vec<Arc<FrameData>> = (0..7)
+            .map(|k: usize| {
+                let v: Vec<f32> = (0..DIM * DIM)
+                    .map(|i| {
+                        if (i + k).is_multiple_of(5) {
+                            1e9
+                        } else {
+                            (i % 97) as f32 * 1e-3
+                        }
+                    })
+                    .collect();
+                Arc::new(FrameData::new([DIM, DIM], 1, Samples::F32(v)))
+            })
+            .collect();
+
+        for kind in [Reduce::Mean, Reduce::Std] {
+            let at = |t| match with_threads(t, || reduce_frames(&frames, kind).unwrap()).samples {
+                Samples::F32(v) => v,
+                _ => panic!("reduction is always float"),
+            };
+            let serial = at(1);
+            for threads in [2, 3, 4, 8] {
+                assert_eq!(at(threads), serial, "{kind:?}, {threads} threads");
+            }
+        }
+    }
+
+    /// The binary ops are per-sample and independent, so the split can't change
+    /// them either — and a mismatched pair is still rejected.
+    #[test]
+    fn binary_combine_is_independent_of_the_split() {
+        let a = FrameData::new(
+            [DIM, DIM],
+            1,
+            Samples::U16((0..DIM * DIM).map(|i| (i % 65536) as u16).collect()),
+        );
+        let b = FrameData::new(
+            [DIM, DIM],
+            1,
+            Samples::U16((0..DIM * DIM).map(|i| ((i * 3) % 65536) as u16).collect()),
+        );
+
+        for kind in [Reduce::Add, Reduce::Sub] {
+            let at = |t| match with_threads(t, || combine_frames(&a, &b, kind).unwrap()).samples {
+                Samples::F32(v) => v,
+                _ => panic!("combine is always float"),
+            };
+            let serial = at(1);
+            // Spot-check against the definition, so this isn't just self-consistent.
+            let (x, y) = (a.sample_f(1234), b.sample_f(1234));
+            let want = if kind == Reduce::Add { x + y } else { x - y };
+            assert_eq!(serial[1234], want);
+            for threads in [2, 3, 4, 8] {
+                assert_eq!(at(threads), serial, "{kind:?}, {threads} threads");
+            }
+        }
     }
 }

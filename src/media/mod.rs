@@ -32,7 +32,39 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
 use tiff::encoder::{colortype, TiffEncoder};
+
+/// Pixels below which an analytic whole-image scan — value extent, histogram,
+/// percentile — stays serial. Each is a map-reduce over the samples, so the
+/// parallel form costs a split/join plus a per-chunk accumulator merge (a
+/// histogram's is a few thousand adds); below this the scan itself is not much
+/// more than that. Distinct from `render::PAR_MIN_PX`, which guards a *render*
+/// splitting into disjoint output slices with no merge at all, and so can afford
+/// to wait for a larger frame before bothering.
+const PAR_MIN_SCAN_PX: usize = 1 << 18;
+
+/// Element-wise `a += b` over two equal-length histograms — the merge step of a
+/// parallel binning scan. Counts are integers, so the merge is exact and
+/// order-independent: the parallel total equals the serial one bin for bin.
+fn merge_hist(a: &mut [u32], b: &[u32]) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x += y;
+    }
+}
+
+/// Rows per job for a parallel binning scan, sized so the rectangle is covered
+/// by roughly one job per thread.
+///
+/// Unlike an extent scan — whose accumulator is two floats — a binning scan
+/// allocates and merges a **whole histogram** per job, 65536 bins for 16-bit
+/// data. Letting rayon split down to its default granularity would make that
+/// merge cost dominate the scan, so the job count is pinned to the thread count
+/// instead. Rows of a rectangle cost the same, so nothing is lost by not
+/// splitting finer for work-stealing.
+fn scan_band(rows: usize) -> usize {
+    rows.div_ceil(rayon::current_num_threads()).max(1)
+}
 
 /// Original interleaved samples, at native bit depth.
 pub enum Samples {
@@ -240,12 +272,19 @@ impl FrameData {
 
     /// Actual [min, max] of the colour samples, in native units (NaN-skipping).
     /// Falls back to the nominal range for empty / all-NaN frames.
+    ///
+    /// Past [`PAR_MIN_SCAN_PX`] the scan splits across cores: min/max is
+    /// associative, so the per-chunk extents merge to exactly the serial answer
+    /// whatever order the chunks finish in. NaN survives the split too — a NaN
+    /// sample fails both `<` and `>`, so it never enters a local extent, and the
+    /// merge below uses `f32::min`/`max`, which return the non-NaN operand.
     fn value_extent(&self) -> (f32, f32) {
         let cc = self.color_channels();
         let px = self.size[0] * self.size[1];
-        let mut min = f32::INFINITY;
-        let mut max = f32::NEG_INFINITY;
-        for i in 0..px {
+        let none = (f32::INFINITY, f32::NEG_INFINITY);
+        // One pixel's contribution to a running extent — the same closure both
+        // paths fold with, so they cannot drift.
+        let take = |(mut min, mut max): (f32, f32), i: usize| {
             let base = i * self.channels;
             for c in 0..cc {
                 let s = self.sample_f(base + c);
@@ -256,7 +295,17 @@ impl FrameData {
                     max = s;
                 }
             }
-        }
+            (min, max)
+        };
+        let merge = |a: (f32, f32), b: (f32, f32)| (a.0.min(b.0), a.1.max(b.1));
+        let (min, max) = if px >= PAR_MIN_SCAN_PX {
+            (0..px)
+                .into_par_iter()
+                .fold(|| none, take)
+                .reduce(|| none, merge)
+        } else {
+            (0..px).fold(none, take)
+        };
         if min > max {
             (0.0, self.max_possible() as f32)
         } else {

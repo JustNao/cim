@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
+use rayon::prelude::*;
 
 use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
@@ -23,6 +24,13 @@ use crate::tone::{frame_bounds, synced_index};
 use crate::view::ViewTransform;
 
 const BG: [u8; 4] = [24, 24, 24, 255];
+
+/// Output pixels below which a composite stays serial. Far lower than the
+/// display render's threshold (`media::render`'s `PAR_MIN_PX`, 1M): a pixel here
+/// costs a layout hit-test, a view transform, a rotation and two buffer lookups
+/// — orders of magnitude more than that path's single LUT index — so the split
+/// pays for itself on a much smaller frame. A thumbnail-sized still stays serial.
+const PAR_MIN_PX: usize = 1 << 14;
 
 /// Where a pane's frames come from during export.
 pub enum ExportSource {
@@ -506,6 +514,52 @@ impl ExportPane {
         self.cur_idx = self.raw_idx;
     }
 
+    /// Borrow the read-only slice of this pane the compositor samples through.
+    /// Cheap (a few copies plus two slice borrows), so it can be taken per call.
+    fn sampler(&self) -> PaneSampler<'_> {
+        PaneSampler {
+            view: self.view,
+            rotation: self.rotation,
+            cur_display: self.cur_display.as_deref(),
+            cur_origin: self.cur_origin,
+            cur_render_size: self.cur_render_size,
+            cur_size: self.cur_size,
+            overlay: self.overlay.as_ref().and_then(|ov| {
+                Some(MaskSampler {
+                    buf: ov.cur_mask.as_deref()?,
+                    size: ov.cur_size,
+                })
+            }),
+        }
+    }
+}
+
+/// The read-only view of an [`ExportPane`] that sampling needs: the rendered
+/// display buffer plus the geometry mapping a composition point onto it.
+///
+/// This exists so the composite loop can run **across cores**. `ExportPane` is
+/// not `Sync` — it owns its proprietary operator instances
+/// (`imageproc::Instance` is `Send` but deliberately not `Sync`, one thread per
+/// pane) and its persistent reader — so rayon can't share a `&ExportPane`. None
+/// of that is touched once the render phase has finished; borrowing only the
+/// plain-data fields is what lets the pixels split.
+struct PaneSampler<'a> {
+    view: ViewTransform,
+    rotation: f32,
+    cur_display: Option<&'a [u8]>,
+    cur_origin: [usize; 2],
+    cur_render_size: [usize; 2],
+    cur_size: [usize; 2],
+    overlay: Option<MaskSampler<'a>>,
+}
+
+/// The rendered mask overlay of a pane, as sampled over the base image.
+struct MaskSampler<'a> {
+    buf: &'a [u8],
+    size: [usize; 2],
+}
+
+impl PaneSampler<'_> {
     /// Undo the pane's display rotation on a sampled image point: map the point
     /// `ip` (in the unrotated view's image space) to the source pixel it shows by
     /// rotating it by `-rotation` about the image centre. Mirrors the live view's
@@ -540,10 +594,8 @@ impl ExportPane {
         let Some(ov) = &self.overlay else {
             return base;
         };
-        let Some(buf) = &ov.cur_mask else {
-            return base;
-        };
-        let ([mw, mh], [bw, bh]) = (ov.cur_size, self.cur_size);
+        let buf = ov.buf;
+        let ([mw, mh], [bw, bh]) = (ov.size, self.cur_size);
         if mw == 0 || mh == 0 || bw == 0 || bh == 0 || [mw, mh] != [bw, bh] {
             return base;
         }
@@ -567,7 +619,7 @@ impl ExportPane {
     /// nearest so every exported pixel is a true source value, never a blend —
     /// upscaling just replicates source pixels.
     fn sample_base(&self, ip: Vec2) -> Option<[u8; 3]> {
-        let buf = self.cur_display.as_ref()?;
+        let buf = self.cur_display?;
         // `cur_display` covers only the crop box (`cur_render_size`) whose top-left
         // is `cur_origin` in full-image pixels — shift `ip` into that sub-buffer.
         let [ox, oy] = self.cur_origin;
@@ -832,25 +884,44 @@ impl ExportPlan {
         let (w, h) = (self.out_w, self.out_h);
         let (rw, rh) = (self.region.width(), self.region.height());
         let mut out = vec![0u8; w * h * 4];
-        for oy in 0..h {
-            let cy = self.region.min.y + (oy as f32 + 0.5) / h as f32 * rh;
+        // The panes are fully rendered by now, so the resample below only *reads*
+        // them — every output pixel is an independent function of that read-only
+        // state. Rows are therefore disjoint and the buffer splits by row.
+        let (samplers, layout, region) = (
+            self.panes
+                .iter()
+                .map(ExportPane::sampler)
+                .collect::<Vec<_>>(),
+            &self.layout,
+            self.region,
+        );
+        let row = |oy: usize, dst: &mut [u8]| {
+            let cy = region.min.y + (oy as f32 + 0.5) / h as f32 * rh;
             for ox in 0..w {
-                let cx = self.region.min.x + (ox as f32 + 0.5) / w as f32 * rw;
+                let cx = region.min.x + (ox as f32 + 0.5) / w as f32 * rw;
                 let c = Pos2::new(cx, cy);
-                let o = (oy * w + ox) * 4;
                 // Uncovered pixels (gutters between panes, letterboxing around an
                 // image) get alpha 0 — flagged as background. The still export
                 // crops them off (`crop_to_content`); MP4 (yuv420p) ignores alpha,
                 // so its dark `BG` is unchanged.
                 let mut col = [BG[0], BG[1], BG[2], 0];
-                if let Some(loc) = self.layout.locate(c) {
-                    let pane = &self.panes[loc.pane];
+                if let Some(loc) = layout.locate(c) {
+                    let pane = &samplers[loc.pane];
                     let ip = pane.unrotate(pane.view.screen_to_img(loc.sample, loc.area));
                     if let Some(rgb) = pane.sample(ip) {
                         col = [rgb[0], rgb[1], rgb[2], 255];
                     }
                 }
-                out[o..o + 4].copy_from_slice(&col);
+                dst[ox * 4..ox * 4 + 4].copy_from_slice(&col);
+            }
+        };
+        if w * h >= PAR_MIN_PX {
+            out.par_chunks_mut(w * 4)
+                .enumerate()
+                .for_each(|(oy, dst)| row(oy, dst));
+        } else {
+            for (oy, dst) in out.chunks_mut(w * 4).enumerate() {
+                row(oy, dst);
             }
         }
         // Names are burned in **after** the resample, in output pixels: the text
@@ -983,7 +1054,7 @@ impl ExportPlan {
                    pane: usize,
                    sample: Pos2,
                    area: Rect| {
-            let p = &self.panes[pane];
+            let p = self.panes[pane].sampler();
             let ip = p.unrotate(p.view.screen_to_img(sample, area));
             let e = &mut acc[pane];
             *e = Some(match *e {
@@ -1918,6 +1989,77 @@ mod tests {
                 reference[i * 4..i * 4 + 3],
                 "pixel {i}"
             );
+        }
+    }
+
+    /// The same 1:1 check as `full_frame_export_matches_lut_render`, but on an
+    /// output big enough to take the **parallel** composite path
+    /// (`PAR_MIN_PX`) — the other export tests are all 16×8 and only ever
+    /// exercise the serial loop.
+    ///
+    /// Composing under several thread counts pins two things at once: that the
+    /// row split reproduces the serial mapping pixel for pixel (against the LUT
+    /// render, an independent reference), and that no row is skipped or written
+    /// twice however rayon divides the buffer.
+    #[test]
+    fn par_composite_matches_serial_composite() {
+        // 256x128 = 32768 output pixels, past `PAR_MIN_PX`. Zoom 1 and a region
+        // matching the image means output pixel i is source pixel i.
+        let (w, h) = (256usize, 128usize);
+        let mut v: Vec<u16> = (0..w * h).map(|i| ((i * 7919) % 65536) as u16).collect();
+        v[0] = 0;
+        v[w * h - 1] = 65535;
+        let frame = Arc::new(FrameData::new([w, h], 1, Samples::U16(v)));
+
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(w as f32, h as f32));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(w as f32 / 2.0, h as f32 / 2.0),
+            needs_fit: false,
+        };
+        let compose = || {
+            let mut plan = ExportPlan {
+                panes: vec![ExportPane::new(
+                    view,
+                    ContrastMode::Linear,
+                    false,
+                    None,
+                    1,
+                    true,
+                    0,
+                    ExportSource::Still(frame.clone()),
+                )],
+                layout: ExportLayout::Single(0, cell),
+                control: None,
+                region: cell,
+                out_w: w,
+                out_h: h,
+                labels: Vec::new(),
+                label_style: LabelStyle::default(),
+                start: 0,
+                total: 1,
+            };
+            plan.compose(0)
+        };
+
+        // `clip: None` on the pane means the full range, as here.
+        let (lo, hi) = frame.display_bounds(false);
+        let mut reference = Vec::new();
+        frame.render_into(lo, hi, &mut reference);
+
+        for threads in [1, 2, 3, 8] {
+            let buf = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("build pool")
+                .install(compose);
+            for i in 0..w * h {
+                assert_eq!(
+                    buf[i * 4..i * 4 + 3],
+                    reference[i * 4..i * 4 + 3],
+                    "pixel {i}, {threads} threads"
+                );
+            }
         }
     }
 

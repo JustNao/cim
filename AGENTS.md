@@ -154,6 +154,20 @@ being one level deeper). Many CimApp fields are grouped into sub-structs —
   `new()`; `byte_len()` (cache budget); `render_rgba`/`render_into` (§7);
   `display_bounds(clip)` memoized in the two `OnceLock` cells; `pixel_string`,
   `histogram_display`, `region_stats`.
+- **Parallel analytic scans.** The whole-image passes — `value_extent`,
+  `histogram_display`, both `percentile_rect_*` (via the shared `scan_rows`), and the
+  Compute ops `reduce_frames` / `combine_frames` — split across cores past
+  `media::PAR_MIN_SCAN_PX` (256k px; ~3–3.8× on 4 cores). Each is a map-reduce, so unlike
+  the render (`render::PAR_MIN_PX`, disjoint output slices, no merge) it pays a per-job
+  accumulator merge — hence the lower threshold, and `scan_band` pinning a *binning* scan
+  to one job per thread (a 16-bit histogram is 65536 bins to merge, so rayon's default
+  splitting would cost more than the scan).
+  **Results are identical to the serial ones, not merely close:** histogram counts merge
+  by exact integer addition (`merge_hist`), extents by associative min/max (NaN fails both
+  comparisons, so it is skipped either way), and `reduce_frames` splits by **sample index**
+  rather than by frame — each output sample still sums its stack in the original order, so
+  the non-associative `f64` accumulation reproduces bit for bit. The `*_is_independent_of_
+  the_split` tests assert equality across 1/2/3/4/8-thread pools.
 - **Boolean masks:** a frame from a **1-bit bilevel TIFF** is flagged `mask`
   (`new_mask`/`is_mask`). `render_into` paints false→black/true→white (bypassing
   tone), and `render_mask_rgba(rgb, alpha)` builds a tinted overlay buffer; any
@@ -1158,6 +1172,15 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   output pixel back through the pane's view (Grid via `GridCell`'s place→content remap),
   sampling **nearest** — upscaling to a larger output just replicates source pixels, never
   blends them. `start` offsets so output frame `t` = timeline `start+t`.
+- **The resample runs across cores** (rayon, past `export::PAR_MIN_PX` = 16k output px;
+  ~3.4× on 4 cores at 1080p). By then the panes are rendered, so every output pixel is an
+  independent read — the buffer splits by **row** (`par_chunks_mut(w * 4)`). `ExportPane`
+  itself is **not `Sync`** (it owns its `imageproc::Instance` operators, `Send`-only by
+  design, plus its reader), so the loop borrows a `PaneSampler` per pane instead: just the
+  rendered buffer plus the geometry sampling needs. `PaneSampler` owns `unrotate` /
+  `sample` / `sample_base` / `blend_overlay`, and `pane_boxes` maps corners through it too,
+  so there is a single sampling implementation. `par_composite_matches_serial_composite`
+  pins the split against the LUT render at several thread counts.
 - **Region crop** is chosen in image space ("Select…" forces Single): a **right-drag**
   draws the crop (secondary-button edge detection in `region_overlay`, like the stats
   region) while **left-drag pans and the wheel zooms** so the user can move around first;
@@ -1568,6 +1591,9 @@ on a mixed-shape page bit-exact with the chain walk, nothing before it discovere
 anchor survives an in-place rewrite and is refused by a reshaped file, which then walks);
 **percentile equivalence**
 (whole-image == full-frame region, integer and float, with golden values);
+**parallel-scan equivalence** (percentile, histogram, stack reduction and binary combine
+each give bit-identical results across 1/2/3/4/8-thread rayon pools, and a region scan
+still ignores pixels outside it);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
 `app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
 results can't truncate a sequence** (a batch's misses delivered before the hits ahead of
@@ -1582,7 +1608,9 @@ diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`*
 their own cell** (the output-fraction the panel's label preview scales by), **a Computed source recomputed per
 exported frame** (the composed pixels equal the same `combine_frames` done by hand on
 each page, and the values move frame to frame — the export/view parity rule of §10),
-**full-frame export == live LUT render**, content-only export (`content_region`
+**full-frame export == live LUT render** (and the same at 256×128, past `PAR_MIN_PX`, so
+the **row-parallel composite** is checked against it at several thread counts),
+content-only export (`content_region`
 excludes background) + still background crop, **a size-mismatched overlay skipped rather
 than stretched** and **a pinned region driving the exported tone** (the two §10 mirrors
 that had actually drifted — the export used to stretch the overlay the view refused to
