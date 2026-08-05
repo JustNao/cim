@@ -310,6 +310,47 @@ impl Keybindings {
     }
 }
 
+/// Which processor builds a pane's display pixels — the tone map that turns
+/// native samples into the 8-bit RGBA texture (and, for a Compute pane, its
+/// reduction). Chosen in Settings; changing it takes effect on **restart**,
+/// because GPU mode also swaps eframe's renderer (see `crate::gpu`).
+///
+/// The GPU path is not merely "the same work, elsewhere": it keeps the decoded
+/// frame resident in VRAM and writes the toned pixels straight into a texture
+/// egui samples, so re-toning a resident frame (dragging the contrast slider on
+/// a big image) costs a small table upload and a dispatch instead of a
+/// full-image CPU map plus a full-image texture upload. That is the whole point;
+/// everything else is roughly a wash.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
+pub enum RenderBackend {
+    /// Use the GPU when a **hardware** adapter is present, else the CPU. The
+    /// default, and the only value that inspects the machine.
+    #[default]
+    Auto,
+    /// Always the CPU. Leaves the renderer on glow (OpenGL) — byte-for-byte the
+    /// behaviour of a build without any GPU support, for a machine whose driver
+    /// or remote-desktop stack doesn't get on with the GPU path.
+    Cpu,
+    /// Use the GPU, including a software adapter (llvmpipe / lavapipe) that
+    /// `Auto` would reject. Falls back to the CPU when there is no adapter at
+    /// all — the app never fails to start over this.
+    Gpu,
+}
+
+impl RenderBackend {
+    /// The modes in dropdown order.
+    pub const ORDER: [RenderBackend; 3] =
+        [RenderBackend::Auto, RenderBackend::Cpu, RenderBackend::Gpu];
+
+    pub fn label(self) -> String {
+        match self {
+            RenderBackend::Auto => t!("settings.backend_auto").into_owned(),
+            RenderBackend::Cpu => t!("settings.backend_cpu").into_owned(),
+            RenderBackend::Gpu => t!("settings.backend_gpu").into_owned(),
+        }
+    }
+}
+
 /// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
 /// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
 /// `crate::imageproc`); `Linear` is the built-in full-range map, with an
@@ -425,6 +466,11 @@ pub struct Config {
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
     #[serde(default)]
     pub cpp_lib_dir: String,
+    /// Which processor builds display pixels (see [`RenderBackend`]). Read once
+    /// at startup — it also selects eframe's renderer — so a change needs a
+    /// restart, which the Settings panel says.
+    #[serde(default)]
+    pub render_backend: RenderBackend,
     pub keybindings: Keybindings,
 }
 
@@ -458,6 +504,7 @@ impl Default for Config {
             cpu_budget: default_cpu_budget(),
             cursor_dot: true,
             cpp_lib_dir: String::new(),
+            render_backend: RenderBackend::default(),
             keybindings: Keybindings::default(),
         }
     }
@@ -621,6 +668,28 @@ mod tests {
             assert_eq!(&*rust_i18n::locale(), code);
         }
         apply_locale(DEFAULT_LANGUAGE);
+    }
+
+    /// A config saved before the render backend existed keeps working and comes
+    /// back on `Auto` — the value that probes the machine — rather than on
+    /// whichever variant happens to be listed first. The setting also has to
+    /// survive a save/load round trip, since it is only read at startup and a
+    /// silently dropped value would look like the toggle doing nothing.
+    #[test]
+    fn render_backend_defaults_to_auto_and_round_trips() {
+        let old: Config = serde_json::from_str("{\"max_columns\":3,\"keybindings\":{}}").unwrap();
+        assert_eq!(old.render_backend, RenderBackend::Auto);
+        assert_eq!(Config::default().render_backend, RenderBackend::Auto);
+
+        for backend in RenderBackend::ORDER {
+            let c = Config {
+                render_backend: backend,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&c).unwrap();
+            let back: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.render_backend, backend);
+        }
     }
 
     /// The dynamic `action.<id>` family: every bindable action must have a label

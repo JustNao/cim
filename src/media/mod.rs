@@ -73,11 +73,21 @@ pub enum Samples {
     F32(Vec<f32>),
 }
 
+/// Hands out one [`FrameData::uid`] per frame ever built in this process.
+static NEXT_FRAME_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// A single decoded frame at native bit depth.
 pub struct FrameData {
     pub size: [usize; 2], // [width, height]
     pub channels: usize,  // 1 (gray), 3 (rgb) or 4 (rgba)
     pub samples: Samples,
+    /// Process-unique identity of this frame's contents, for caches keyed on
+    /// "the same frame" outside the `Arc` (the GPU's resident sample buffers —
+    /// see `crate::gpu`). An address can't serve: a frame the LRU evicted frees
+    /// its allocation, and the next frame may be handed the same one, which
+    /// would silently alias two different images. Never reused, so a stale key
+    /// simply misses.
+    uid: u64,
     /// Display bounds are content-invariant per frame, so memoize them the
     /// first time each mapping is needed (full-range vs 0.01% clip) — the clip
     /// path otherwise re-scans the whole image on every redraw.
@@ -142,10 +152,17 @@ impl FrameData {
             size,
             channels,
             samples,
+            uid: NEXT_FRAME_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             bounds_full: OnceLock::new(),
             bounds_clip: OnceLock::new(),
             mask: false,
         }
+    }
+
+    /// This frame's process-unique identity — see [`FrameData::uid`].
+    #[inline]
+    pub fn uid(&self) -> u64 {
+        self.uid
     }
 
     /// Like [`FrameData::new`] but flagged as a boolean mask (1-bit source).

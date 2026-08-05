@@ -266,6 +266,67 @@ impl FrameData {
         }
     }
 
+    /// The display table the GPU tone map indexes (`gpu/tone.wgsl`), one opaque
+    /// `0xAABBGGRR` word per entry, appended into `out`.
+    ///
+    /// Built from the **same** [`ToneLut`] tables the CPU render walks, which is
+    /// the whole reason the GPU path can claim to be bit-identical rather than
+    /// merely close: for an integer source the entry *is* the mapped display
+    /// value of that native sample — mask rule and Colormap palette already
+    /// folded in — so the shader does no arithmetic at all and has nothing to
+    /// drift from. A float source has no bounded domain to tabulate (the same
+    /// reason [`render_into_scaled_lut`](Self::render_into_scaled_lut) maps it
+    /// per pixel), so its table is indexed by the toned 8-bit level the shader
+    /// computes itself, mirroring [`map_u8`], and supplies only the colour.
+    ///
+    /// Entry count is therefore the sample domain for integers (256 / 64 Ki) and
+    /// a flat 256 for floats. `palette` is the Colormap tone's table and id, as
+    /// [`render_into_scaled_cmap`](Self::render_into_scaled_cmap) takes them.
+    pub fn tone_table_rgba(
+        &self,
+        lo: f32,
+        hi: f32,
+        palette: Option<(&[[u8; 3]; 256], u8)>,
+        out: &mut Vec<u32>,
+    ) {
+        /// Opaque RGB in the byte order an `Rgba8Unorm` texel wants.
+        fn pack(c: [u8; 3]) -> u32 {
+            0xff00_0000 | ((c[2] as u32) << 16) | ((c[1] as u32) << 8) | c[0] as u32
+        }
+        let entries = self.tone_table_entries();
+        out.clear();
+        out.reserve(entries);
+        // The table is uploaded and then reused across frames by the GPU cache,
+        // so this builder runs only when the tone changes — a throwaway `ToneLut`
+        // costs nothing here and keeps the CPU render's own cached table free for
+        // the CPU render.
+        let mut lut = ToneLut::default();
+        match (&self.samples, palette) {
+            (Samples::F32(_), Some((pal, _))) => out.extend(pal.iter().map(|&c| pack(c))),
+            (Samples::F32(_), None) => out.extend((0..256).map(|g| pack([g as u8; 3]))),
+            (_, Some((pal, id))) => out.extend(
+                lut.map_rgb(lo, hi, pal, id, entries)
+                    .iter()
+                    .map(|&c| pack(c)),
+            ),
+            (_, None) => out.extend(
+                lut.map8(lo, hi, self.mask, entries)
+                    .iter()
+                    .map(|&g| pack([g; 3])),
+            ),
+        }
+    }
+
+    /// How many entries [`tone_table_rgba`](Self::tone_table_rgba) yields for
+    /// this frame — the native sample domain for an integer source, or the 256
+    /// toned levels for a float one.
+    pub fn tone_table_entries(&self) -> usize {
+        match &self.samples {
+            Samples::U8(_) | Samples::F32(_) => 256,
+            Samples::U16(_) => 1 << 16,
+        }
+    }
+
     /// Build an RGBA overlay from this mask: true pixels take `rgb` at `alpha`,
     /// false pixels are fully transparent. Used to tint a boolean mask over
     /// another pane. `out` is resized to `w*h*4`.

@@ -45,7 +45,7 @@ use crate::export::{
     LabelBitmap, LabelStyle, SourceInput,
 };
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
-use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
+use crate::settings::{Action, Chord, Config, ContrastMode, RenderBackend, ToneOptions};
 use crate::tone::pixel_bounds;
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
@@ -200,8 +200,32 @@ enum Mode {
     Ab,
 }
 
+/// Where a cached texture's pixels live.
+///
+/// The two arms are the two render backends, not two kinds of image: a texture
+/// holds the same bytes either way (the GPU tone map is pinned to the CPU
+/// render's output — see `crate::gpu`), it just may never have passed through
+/// system memory. Overlays and every CPU render are `Managed`.
+enum TexImage {
+    /// Uploaded through egui from a CPU-rendered buffer.
+    Managed(TextureHandle),
+    /// Written by the GPU tone map straight into a texture egui samples. Boxed
+    /// because it is an order of magnitude larger than a texture handle, and
+    /// every CPU-rendered pane would otherwise carry that much dead space.
+    Native(Box<crate::gpu::GpuTex>),
+}
+
+impl TexImage {
+    fn id(&self) -> TextureId {
+        match self {
+            TexImage::Managed(h) => h.id(),
+            TexImage::Native(g) => g.id(),
+        }
+    }
+}
+
 struct CachedTex {
-    handle: TextureHandle,
+    image: TexImage,
     shown: usize, // frame index currently uploaded
     /// Native pixel size of the frame this texture shows (**not** the rendered
     /// texel count, which decimates at `step > 1`). Drawing/readout size the pane
@@ -256,7 +280,7 @@ impl PaneTex {
         self.front
             .as_ref()
             .or(self.pending.as_ref())
-            .map(|t| t.handle.id())
+            .map(|t| t.image.id())
     }
 
     /// Drop both textures, so the frame re-renders from fresh data (reload,
@@ -264,6 +288,87 @@ impl PaneTex {
     fn clear(&mut self) {
         self.front = None;
         self.pending = None;
+    }
+}
+
+/// The GPU display path's live state, present only when this run resolved to GPU
+/// mode — that is, when eframe was asked for (and got) the wgpu renderer. In CPU
+/// mode, and on any machine without a usable adapter, this is `None` and nothing
+/// below is ever reached; see [`crate::gpu`].
+struct GpuState {
+    ctx: std::sync::Arc<crate::gpu::GpuContext>,
+    mapper: crate::gpu::GpuToneMapper,
+    /// eframe's own render state: the device the tone map shares, and the
+    /// registry a toned texture is published to so egui can sample it.
+    rs: eframe::egui_wgpu::RenderState,
+}
+
+impl GpuState {
+    /// Wrap the device eframe created, or `None` when this run is on glow —
+    /// which is CPU mode, and also what eframe falls back to if the wgpu
+    /// renderer it was asked for could not start.
+    fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
+        let rs = cc.wgpu_render_state.as_ref()?.clone();
+        let ctx = crate::gpu::GpuContext::from_render_state(&rs);
+        let mapper = crate::gpu::GpuToneMapper::new(&ctx);
+        crate::debug::log(&format!("gpu: display path on {}", ctx.describe()));
+        Some(Self { ctx, mapper, rs })
+    }
+
+    /// Drop pane `id`'s uploaded display table, on close or reload. Resident
+    /// *frames* are keyed by frame rather than by pane (they are shared between
+    /// panes showing the same image), so those are left to the LRU.
+    fn forget_pane(&mut self, id: u64) {
+        self.mapper.forget_pane(id);
+    }
+
+    /// The adapter this is running on, for the Settings readout.
+    fn describe(&self) -> String {
+        self.ctx.describe()
+    }
+
+    /// Tone `frame` for pane `pane_id` into `slot`, as a texture egui samples
+    /// directly — the pixels are never read back.
+    ///
+    /// The slot's existing GPU texture is reused whenever it is the right size,
+    /// so a playback run through same-sized pages neither reallocates it nor
+    /// re-registers its id; only a size change (or a slot holding a CPU-uploaded
+    /// texture) builds a new one.
+    fn tone_into(
+        &mut self,
+        pane_id: u64,
+        frame: &media::FrameData,
+        tone: crate::gpu::Tone,
+        slot: &mut Option<CachedTex>,
+        shown: usize,
+        sig: u64,
+    ) -> Result<(), crate::gpu::GpuError> {
+        let size = frame.size;
+        let mut tex = match slot.take() {
+            Some(CachedTex {
+                image: TexImage::Native(g),
+                ..
+            }) if g.size() == size => g,
+            _ => Box::new(crate::gpu::GpuTex::new(&self.rs, &self.ctx, size)?),
+        };
+        // Disjoint borrows of the output buffer and its texture: the tone map
+        // writes the first and copies it into the second in one submission.
+        let crate::gpu::GpuTex { out, tex: t, .. } = &mut *tex;
+        let done = self
+            .mapper
+            .tone(&self.ctx, pane_id, frame, tone, out, Some(&*t));
+        // A failure leaves the slot empty on purpose: the caller falls through to
+        // the CPU render, which fills it with a managed texture this same update.
+        done?;
+        *slot = Some(CachedTex {
+            image: TexImage::Native(tex),
+            shown,
+            size,
+            sig,
+            // Never decimated — the GPU path only ever renders full resolution.
+            step: 1,
+        });
+        Ok(())
     }
 }
 
@@ -957,6 +1062,19 @@ pub struct CimApp {
     /// pass). `stage` takes it and hands it to the texture, so it holds the
     /// allocation only between renders.
     render_scratch: Vec<egui::Color32>,
+    /// The GPU display path, or `None` in CPU mode / on a machine with no usable
+    /// adapter. Cleared for the rest of the session the first time the GPU
+    /// refuses a frame, which sends every later render back to the CPU — see
+    /// [`GpuState`] and `crate::gpu`.
+    gpu: Option<GpuState>,
+    /// The `render_backend` this run actually started with. The renderer can
+    /// only be chosen before the window exists, so Settings compares against
+    /// this to say when a change needs a restart.
+    gpu_backend_active: RenderBackend,
+    /// Cached answer to "what adapter would the current setting find?", with the
+    /// setting it was asked for. Probed lazily by `gpu_status`, because opening a
+    /// device costs enough not to do it on every repaint of the Settings window.
+    gpu_probe: Option<(bool, Option<String>)>,
     /// Windows: the main window's Win32 handle while it is still DWM-cloaked
     /// against the startup white flash; `tick` uncloaks and clears it once the
     /// first maximized frame has been presented (see `set_window_cloak`).
@@ -1040,6 +1158,7 @@ impl CimApp {
         let cpp_dir = cpp_lib_dir(&config);
         crate::imageproc::init(cpp_dir.as_deref());
         let cpp_dir_active = config.cpp_lib_dir.clone();
+        let backend_active = config.render_backend;
 
         // eframe shows the window right after the first frame is *painted* but
         // just before it is *presented* (`set_visible` runs before
@@ -1147,6 +1266,11 @@ impl CimApp {
             warn_popup: None,
             clock: 0,
             render_scratch: Vec::new(),
+            // Present exactly when `main` resolved this run to GPU mode and
+            // eframe actually gave us the wgpu renderer.
+            gpu: GpuState::new(cc),
+            gpu_backend_active: backend_active,
+            gpu_probe: None,
             #[cfg(windows)]
             cloaked_hwnd,
         };
@@ -1160,6 +1284,31 @@ impl CimApp {
         }
         app
     }
+    /// What the render-backend setting means on *this* machine, for the readout
+    /// beside the Settings dropdown — the three abstract choices say nothing on
+    /// their own, since "Auto" depends entirely on whether there is a card to
+    /// find. Reports the running state first, and only probes for an adapter
+    /// when there isn't one to report; the probe opens a throwaway device, so
+    /// its answer is remembered until the setting changes.
+    pub(super) fn gpu_status(&mut self) -> String {
+        if let Some(g) = &self.gpu {
+            return t!("settings.backend_using", gpu = g.describe()).into_owned();
+        }
+        if self.config.render_backend == RenderBackend::Cpu {
+            return t!("settings.backend_cpu_only").into_owned();
+        }
+        // `Gpu` accepts a software adapter where `Auto` insists on real
+        // hardware, so the answer differs between them — key the cache on it.
+        let software = self.config.render_backend == RenderBackend::Gpu;
+        if self.gpu_probe.as_ref().is_none_or(|(s, _)| *s != software) {
+            self.gpu_probe = Some((software, crate::gpu::adapter_summary(software)));
+        }
+        match &self.gpu_probe.as_ref().expect("just filled").1 {
+            Some(name) => t!("settings.backend_found", gpu = name).into_owned(),
+            None => t!("settings.backend_none").into_owned(),
+        }
+    }
+
     /// The decode pool's share of the configured CPU budget (`crate::cpu`).
     /// Read each update so a Settings change rebuilds the pool.
     pub(super) fn resolve_decode_threads(&self) -> usize {

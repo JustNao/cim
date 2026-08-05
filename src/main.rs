@@ -6,6 +6,7 @@ mod cpu;
 mod debug;
 mod decoder;
 mod export;
+mod gpu;
 mod imageproc;
 mod media;
 mod offsets;
@@ -26,9 +27,10 @@ use eframe::egui;
 rust_i18n::i18n!("locales", fallback = "fr");
 
 fn main() -> eframe::Result<()> {
+    let config = settings::Config::load();
     // Pick the UI language before anything prints or draws: `--help` and the
     // completion output are localised too, and they never reach the window.
-    settings::apply_locale(&settings::Config::load().language);
+    settings::apply_locale(&config.language);
 
     // Handle CLI-only requests (--help, completion) and expand sequence tokens
     // before we ever open a window.
@@ -41,7 +43,31 @@ fn main() -> eframe::Result<()> {
         cli::Cli::Exit(code) => std::process::exit(code),
     };
 
+    // Which renderer this run gets, decided here because eframe can only be told
+    // once — hence the "takes effect after restart" note in Settings.
+    //
+    // **glow (OpenGL) stays the default and the fallback.** It is what every CPU
+    // -mode run and every machine without a usable adapter uses, unchanged from
+    // before this option existed, which is the point: adding a GPU path must not
+    // change the graphics stack under users who aren't asking for one. GPU mode
+    // takes wgpu instead, because sharing its device is what lets the tone map
+    // write into a texture egui samples without a readback (see `crate::gpu`).
+    // If wgpu then fails to start, eframe falls back on its own and `CimApp`
+    // finds no render state, which is simply CPU mode.
+    let gpu = gpu::wants_gpu(config.render_backend);
     let native_options = eframe::NativeOptions {
+        renderer: if gpu {
+            eframe::Renderer::Wgpu
+        } else {
+            eframe::Renderer::Glow
+        },
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            // Ask for the adapter's real limits, not wgpu's portable defaults —
+            // a 4096² RGBA 16-bit frame needs a storage binding four times the
+            // default ceiling (see `gpu::device_descriptor`).
+            device_descriptor: std::sync::Arc::new(gpu::device_descriptor),
+            ..Default::default()
+        },
         viewport: egui::ViewportBuilder::default()
             .with_min_inner_size([640.0, 400.0])
             // The app opens filling the screen, but NOT via `with_maximized`:

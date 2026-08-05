@@ -5,7 +5,12 @@ edition = "2021"
 description = "Compare Images & Sequences — lossless side-by-side viewer for images and sequences"
 
 [dependencies]
-eframe = { version = "0.29", default-features = true }
+# Both renderer backends are compiled in and the choice is made at startup from
+# the config (see main.rs / settings::RenderBackend): **glow** (OpenGL) stays the
+# default and the only backend a CPU-mode or GPU-less machine ever touches, while
+# GPU mode takes **wgpu** so the tone map can write straight into a texture egui
+# samples — no readback, no re-upload (see src/gpu).
+eframe = { version = "0.29", default-features = true, features = ["wgpu"] }
 # Already in the tree via winit; used to reach the Win32 HWND for the
 # startup DWM cloak (no white flash — see app/mod.rs::set_window_cloak).
 raw-window-handle = "0.6"
@@ -30,6 +35,20 @@ libloading = "0.8"
 # alongside the executable. `help.md` is deliberately *not* part of this — it
 # stays an external document (see src/app/help.rs).
 rust-i18n = "4"
+# GPU tone mapping (see src/gpu). Pinned to the versions eframe's `wgpu` feature
+# already resolves, so these add no new package to the tree — but they *are*
+# direct dependencies now, so the offline build image (build_utils/) must be
+# rebuilt online before it can be used.
+#
+# The feature set matches `egui-wgpu`'s own (`default-features = false` +
+# `wgsl`) on purpose: the compute pipelines share eframe's device, so the two
+# must agree, and taking wgpu's defaults would additionally pull the DX12
+# backend — a package the tree doesn't otherwise carry. Vulkan and GLES are
+# enabled per-target rather than by feature, so Windows and Linux both keep a
+# hardware backend (Vulkan on NVIDIA) without it.
+wgpu = { version = "22.1", default-features = false, features = ["wgsl"] }
+pollster = "0.3" # blocking adapter/device init and test readback (no async runtime)
+bytemuck = { version = "1", features = ["derive"] } # sample buffers -> GPU bytes without a copy
 
 # Embed the Windows .exe icon at build time (see build.rs). `image` decodes/resizes
 # the PNG(s) in assets/, `ico` assembles the multi-size .ico, and `winresource`

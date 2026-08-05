@@ -21,6 +21,19 @@ pub fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("CIM_DEBUG").as_deref() == Ok("1"))
 }
 
+/// A one-off diagnostic line, printed only under `CIM_DEBUG=1`.
+///
+/// For the places where a fallback silently changes *how* the app does its work
+/// without changing what the user sees — the GPU path giving up and handing the
+/// frame back to the CPU (`crate::gpu`). That must not interrupt anyone with a
+/// dialog, since the image is correct either way, but it has to be findable when
+/// someone asks why a machine is slower than its neighbour.
+pub fn log(msg: &str) {
+    if enabled() {
+        eprintln!("cim: {msg}");
+    }
+}
+
 /// Recent timing samples for one pipeline stage (a bounded ring buffer, in
 /// milliseconds), plus a lifetime count.
 #[derive(Default)]

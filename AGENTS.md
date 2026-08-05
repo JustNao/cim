@@ -89,6 +89,12 @@ src/
                  sequence's page counts on open/reload (§4) without hitching paint.
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
                  PaneOps::render_display) for heavy panes so the UI never blocks.
+  gpu/           Optional GPU display path (§7.1), used only in GPU mode:
+    mod.rs         GpuContext (wraps eframe's wgpu device), GpuTex (a texture egui
+                   samples directly), backend resolution + adapter probe.
+    tonemap.rs     Resident VRAM sample buffers keyed by FrameData::uid, the
+                   uploaded display table, and the compute dispatch.
+    tone.wgsl      The u8 / u16 / f32 tone-map kernels.
   watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
                  (sign_paths / FileWatcher, §9) — file I/O off the paint path.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
@@ -691,6 +697,49 @@ displays (§10) — it previously had no region on the export side at all.
 minification (`TextureOptions::NEAREST`). The tool is pixel-accurate — an on-screen
 pixel must be a true source sample, never a blend — so there is no interpolation option
 anywhere (display or export).
+
+### 7.1 GPU display path (`gpu/`, optional)
+
+**What it is.** When `config.render_backend` resolves to GPU, `main` asks eframe for the
+**wgpu** renderer instead of glow, `CimApp` wraps eframe's own device
+(`gpu::GpuContext::from_render_state`), and `stage` hands the large full-resolution
+renders to `gpu::GpuToneMapper` instead of the render pool. The toned pixels are written
+into a `wgpu::Texture` registered with egui (`gpu::GpuTex`, `CachedTex.image ==
+TexImage::Native`), so they never enter system memory.
+
+**Why (and why not just "the CPU map, elsewhere").** The CPU tone map is already
+row-parallel and near memory bandwidth, so a compute pass that reads its result back
+saves nothing — the readback costs what the map saved. The gain is **residency**: a
+frame's samples are uploaded once (keyed by the process-unique `FrameData::uid`, since a
+pointer would alias after an LRU eviction) and stay in VRAM, so **re-toning** it —
+dragging the contrast slider on a 4096² image — is a table upload plus a dispatch instead
+of a full-image map plus a full-image texture upload. Playback gains little; that is
+expected, and the sample upload is still half the bytes of the RGBA one it replaces.
+
+**Exactness.** The GPU is held to the same bar as the CPU render paths, not a looser one.
+Integer sources do **no arithmetic on the GPU**: they index the very table `ToneLut`
+built on the CPU (`FrameData::tone_table_rgba`), with the mask rule and the Colormap
+palette already folded in, so they are bit-identical by construction. The compute pass
+writes a **buffer** which is byte-copied into the texture, rather than writing a storage
+texture — that would have inserted an f32→unorm8 quantisation whose rounding the specs
+pin only to within 0.6 ULP. Only float sources compute anything, mirroring `map_u8` term
+for term; they are tested to ±1 code value (denormal flushing) with NaN/±∞ pinned
+exactly. Filtering stays **NEAREST**, as everywhere else.
+
+**Scope.** Only `step == 1` renders of frames ≥ `ASYNC_RENDER_PIXELS` — exactly the
+renders the CPU path already judged too big for the UI thread. Panes running the
+proprietary C++ operators are excluded outright (closed-source CPU code owned by the
+pane's render thread). Decode, the export composite and the Compute reductions are
+**deliberately** not on the GPU — see the `gpu` module docs for the reasoning on each,
+notably that Mean/Std accumulate in `f64` (which WGSL has no equivalent for) and that
+Add/Sub would lose on the readback, their float result being larger than the inputs.
+
+**Falling back is the normal case, not the error case.** A machine with no adapter never
+builds a context; `Auto` refuses a software adapter (llvmpipe is slower than the CPU path
+it would replace). Any failure — a frame past the device's buffer limits, a lost device —
+drops `CimApp.gpu` for the rest of the session, logs under `CIM_DEBUG`, and falls through
+to the CPU render *in the same call*. **glow remains the default renderer** and is what
+every CPU-mode run uses, unchanged.
 
 ---
 
@@ -1344,7 +1393,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, cursor_dot,
-cpp_lib_dir, keybindings }` (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
+cpp_lib_dir, render_backend, keybindings }` (`render_backend` = `Auto | Cpu | Gpu`,
+which processor builds display pixels — §7.1; read **once at startup**, since it also
+picks eframe's renderer, so Settings shows a "restart to apply" note) (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
 — §7 — with a Browse/paste field plus found/not-found and loaded indicators in
 Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `cpu_budget` = total
@@ -1529,6 +1580,12 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
 ---
 
 ## 15. Performance notes (VNC / no GPU)
+
+Everything in this section is about making the tool fast **without** a graphics card, and
+none of it is superseded by the optional GPU path (§7.1): that path is off by default on
+any machine without a hardware adapter, is never used by a pane running the C++
+operators, and hands work back to the CPU on any failure. A GPU is an addition here, not
+a replacement — the CPU pipeline stays the one that must be fast.
 
 Done: lazy length, persistent readers, bounded LRU cache, LUT render + memoized bounds
 + reused buffer, **cross-frame LUT reuse** (§7 — `ToneLut` per pane, so fixed-tone

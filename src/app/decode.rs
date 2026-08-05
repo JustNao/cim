@@ -731,8 +731,55 @@ impl CimApp {
         // thread. Only at `step == 1`: a decimated (minified) render is small and
         // cheap, and the worker renders full-resolution only, so its result would
         // never match a `step > 1` commit.
-        let big =
-            !cmap && !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+        // A full-resolution render of a large frame: too expensive to do on the
+        // UI thread, and so the render this app pushes elsewhere — to the render
+        // pool on the CPU, or to the graphics card in GPU mode.
+        let bulk =
+            !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+
+        // GPU mode takes those renders itself, Colormap included. It is
+        // synchronous but not expensive: the dispatch is queued rather than
+        // awaited, and a frame already resident in VRAM (the pane is being
+        // re-toned rather than stepped) uploads nothing at all — which is the
+        // interaction the whole path exists for. Heavy panes are excluded
+        // outright: the proprietary operators are CPU code owned by the pane's
+        // render thread and cannot be part of this.
+        if bulk && self.gpu.is_some() {
+            let (lo, hi) = self.tone_bounds(idx, &frame);
+            let tone = crate::gpu::Tone {
+                lo,
+                hi,
+                palette: cmap.then(|| self.tone_of(idx).palette),
+            };
+            let pane_id = self.panes[idx].id;
+            let t = crate::debug::enabled().then(std::time::Instant::now);
+            let done = self.gpu.as_mut().expect("checked above").tone_into(
+                pane_id,
+                &frame,
+                tone,
+                &mut self.panes[idx].tex.pending,
+                target,
+                sig,
+            );
+            match done {
+                Ok(()) => {
+                    if let Some(t) = t {
+                        self.metrics.lut.record(t.elapsed());
+                    }
+                    return true;
+                }
+                // The card refused the work (too large for its limits, or the
+                // device went away). Hand this session back to the CPU for good
+                // and render the frame below — the user sees a correct image,
+                // just built the other way, and `CIM_DEBUG` says why.
+                Err(e) => {
+                    crate::debug::log(&format!("gpu: falling back to the CPU ({e})"));
+                    self.gpu = None;
+                }
+            }
+        }
+
+        let big = !cmap && bulk;
 
         if heavy || big {
             // Render off-thread. One render per pane at a time, so rapid tone /
@@ -1012,7 +1059,7 @@ impl CimApp {
         let Some(frame) = self.panes[src].media.resident(f) else {
             // Not decoded yet: request it and keep the previous overlay texture.
             self.request(src, f);
-            return self.panes[idx].overlay_tex.as_ref().map(|t| t.handle.id());
+            return self.panes[idx].overlay_tex.as_ref().map(|t| t.image.id());
         };
         // Never stretch a mismatched overlay onto the base: if the source frame's
         // size differs from this pane's current frame, skip drawing it. (A newly
@@ -1054,7 +1101,7 @@ impl CimApp {
                 1,
             );
         }
-        Some(self.panes[idx].overlay_tex.as_ref().unwrap().handle.id())
+        Some(self.panes[idx].overlay_tex.as_ref().unwrap().image.id())
     }
 }
 
@@ -1074,25 +1121,34 @@ fn set_cached_tex(
     step: usize,
 ) {
     let opts = TextureOptions::NEAREST;
+    // Reuse the egui-managed handle when there is one, so a playback run doesn't
+    // allocate a texture per frame. A slot left holding a *GPU* texture (the
+    // backend gave up mid-session, or this pane shrank below the GPU threshold)
+    // is replaced wholesale — it has no handle to write into, and dropping it
+    // releases its registration.
     match slot {
-        Some(t) => {
-            t.handle.set(img, opts);
-            t.shown = shown;
-            t.size = size;
-            t.sig = sig;
-            t.step = step;
+        Some(CachedTex {
+            image: TexImage::Managed(handle),
+            ..
+        }) => {
+            handle.set(img, opts);
         }
-        None => {
-            let handle = ctx.load_texture(name, img, opts);
+        _ => {
             *slot = Some(CachedTex {
-                handle,
+                image: TexImage::Managed(ctx.load_texture(name, img, opts)),
                 shown,
                 size,
                 sig,
                 step,
             });
+            return;
         }
     }
+    let t = slot.as_mut().expect("just matched a populated slot");
+    t.shown = shown;
+    t.size = size;
+    t.sig = sig;
+    t.step = step;
 }
 
 /// How many frames per pane to prefetch, adapting to how slow decoding actually

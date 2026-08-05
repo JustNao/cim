@@ -299,6 +299,21 @@ settings.cpu_budget_hover: >-
   to leave CPU for other users when several instances share one server / VNC
   host; raise it temporarily for a heavy export, then put it back. Each pane
   keeps its own render thread on top of this. Applies immediately.
+settings.render_backend: Rendering
+settings.backend_auto: Auto
+settings.backend_cpu: CPU
+settings.backend_gpu: GPU
+settings.backend_using: "on %{gpu}"
+settings.backend_found: "GPU available: %{gpu}"
+settings.backend_none: no GPU found
+settings.backend_cpu_only: CPU only
+settings.render_backend_restart: (restart to apply)
+settings.render_backend_hover: >-
+  Which processor builds the displayed image. On the GPU a large frame stays in
+  video memory, so changing the contrast window re-tones it almost instantly
+  instead of re-mapping and re-uploading the whole image; the pixels are
+  identical either way. Auto uses the GPU when the machine has one. Panes
+  running the C++ operators always use the CPU. Takes effect after a restart.
 settings.cursor_dot: Cursor dot on other panes
 settings.cursor_dot_hover: >-
   Mark the hovered pixel on every other pane with a red dot, so the same

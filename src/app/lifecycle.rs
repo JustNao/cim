@@ -531,6 +531,9 @@ impl CimApp {
         let removed_id = self.panes[i].id;
         self.decoder.forget(removed_id); // drop its persistent reader
         self.renderer.forget(removed_id); // drop its render thread + operator instances
+        if let Some(g) = &mut self.gpu {
+            g.forget_pane(removed_id); // drop its uploaded display table
+        }
         self.render_inflight.remove(&removed_id);
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
@@ -583,6 +586,9 @@ impl CimApp {
                 let id = self.panes[i].id;
                 self.decoder.forget(id); // reopen the file for its fresh contents
                 self.renderer.forget(id); // rebuild the render thread + instances for fresh contents
+                if let Some(g) = &mut self.gpu {
+                    g.forget_pane(id); // its display table describes the old contents
+                }
                 self.render_inflight.remove(&id);
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);

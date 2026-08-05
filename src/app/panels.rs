@@ -1121,6 +1121,27 @@ impl CimApp {
                         rayon = rayon
                     ));
                 });
+                ui.horizontal(|ui| {
+                    ui.label(t!("settings.render_backend"));
+                    let before = self.config.render_backend;
+                    egui::ComboBox::from_id_salt("render_backend")
+                        .selected_text(before.label())
+                        .show_ui(ui, |ui| {
+                            for b in RenderBackend::ORDER {
+                                ui.selectable_value(&mut self.config.render_backend, b, b.label());
+                            }
+                        });
+                    // What the setting resolves to on *this* machine — which the
+                    // three abstract choices can't say on their own, since "Auto"
+                    // means nothing until you know whether there is a card to find.
+                    let status = self.gpu_status();
+                    ui.weak(status)
+                        .on_hover_text(t!("settings.render_backend_hover"));
+                    // The renderer is chosen once, before the window exists.
+                    if self.config.render_backend != self.gpu_backend_active {
+                        ui.weak(t!("settings.render_backend_restart"));
+                    }
+                });
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
                     .on_hover_text(t!("settings.cursor_dot_hover"));
                 ui.add_space(8.0);
