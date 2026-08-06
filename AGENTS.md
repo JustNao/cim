@@ -1496,7 +1496,14 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   (§9), sharing `list_dir_files` with `dir_inputs` so the order matches the open's.
 - `--complete <word>` lists loadable completions (collapses numbered runs into the
   token — videos are listed literally, never collapsed); `--completions
-  <bash|powershell>` prints a completer. `LOADABLE_EXTS =
+  <bash|powershell>` prints a completer. A folder candidate ends with **one**
+  `MAIN_SEPARATOR`, and the bash completer deliberately does **not** set `compopt -o
+  filenames`: readline would then quote each candidate as a filename and escape that
+  separator (`imgs\` → `imgs\\`), while giving nothing back (it trims a candidate's
+  display at the last *forward* slash, so a backslash path showed in full either way).
+  The completer escapes spaces itself on the way out and un-escapes them on the way
+  back in, and keeps the manual `nospace` for a lone folder candidate so it can be
+  descended. `LOADABLE_EXTS =
   [tif,tiff,png,jpg,jpeg,bmp,webp]` + `VIDEO_EXTS` is shared by the dialog and
   the filter.
 

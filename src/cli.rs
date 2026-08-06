@@ -682,14 +682,23 @@ fn completion_script(shell: &str) -> Option<&'static str> {
     }
 }
 
+// Deliberately **not** `compopt -o filenames`: readline would then quote every
+// candidate as a filename and escape the directory separator a folder candidate
+// ends with, so `imgs\` came back as `imgs\\`. It bought nothing in exchange —
+// readline trims a candidate's display at the last *forward* slash, so a
+// backslash path was shown in full either way, and its "append a separator to a
+// directory" handling is why the nospace branch below is here at all. We emit
+// whole paths, so only spaces need protecting; that is the one thing this does
+// itself (and undoes on the way back in, since the word being completed may
+// carry the escapes from a previous Tab).
 const BASH_COMPLETION: &str = r#"_cim() {
-    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local cur="${COMP_WORDS[COMP_CWORD]//\\ / }"
     local IFS=$'\n'
     COMPREPLY=( $(cim --complete "$cur") )
-    compopt -o filenames
-    if [[ ${#COMPREPLY[@]} -eq 1 && "${COMPREPLY[0]}" == *\\ ]]; then
+    if [[ ${#COMPREPLY[@]} -eq 1 && "${COMPREPLY[0]}" == *[/\\] ]]; then
         compopt -o nospace
     fi
+    COMPREPLY=( "${COMPREPLY[@]// /\\ }" )
 }
 complete -F _cim cim
 "#;
