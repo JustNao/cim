@@ -9,7 +9,6 @@
 //! recomputed pane can't be handed the previous image's buffer.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use wgpu::util::DeviceExt;
 
@@ -121,13 +120,10 @@ impl GpuOutput {
 }
 
 /// A frame's samples, resident in VRAM.
-///
-/// The buffer is an `Arc` so a caller can take a handle to it and use it after
-/// releasing the cache lock — see [`GpuToneMapper::resident_frame`].
 struct FrameBuf {
-    buf: Arc<wgpu::Buffer>,
+    buf: wgpu::Buffer,
     bytes: u64,
-    /// Value of the cache's tick when this was last rendered from, for the LRU.
+    /// Value of the mapper's tick when this was last rendered from, for the LRU.
     touched: u64,
 }
 
@@ -207,41 +203,16 @@ const VRAM_SHARE: f64 = 0.25;
 /// big frames, which is what the re-tone path actually revisits.
 const VRAM_CAP: u64 = 1 << 30;
 
-/// The resident sample buffers, keyed by [`FrameData::uid`], plus their LRU.
-///
-/// **Shared between panes on purpose** — a frame shown in two panes is uploaded
-/// once — which is why it is the one piece of mapper state behind a lock.
-struct FrameCache {
-    map: HashMap<u64, FrameBuf>,
-    resident: u64,
-    budget: u64,
-    tick: u64,
-}
-
-/// The parts of the tone map every pane shares: the compute pipelines (built
-/// once, immutable) and the resident-frame cache.
-///
-/// Everything here takes `&self`, so this lives in an `Arc` handed to every
-/// pane's render worker and the panes tone **concurrently** — see
-/// [`PaneTone`] for the per-pane half and [`resident_frame`](Self::resident_frame)
-/// for how the one shared, mutable piece stays out of the way.
 pub struct GpuToneMapper {
     pipelines: HashMap<Kernel, wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
-    frames: Mutex<FrameCache>,
-}
-
-/// One pane's tone-map state, owned by that pane's render worker thread.
-///
-/// The display table is a function of the pane's own `[lo, hi]`, so it was
-/// already per-pane when the mapper kept them all in a map keyed by pane id;
-/// giving it to the worker instead just puts it where its single owner is —
-/// exactly as the CPU worker owns the pane's `ToneLut` and its operator
-/// instances. Nothing here is shared, so nothing here locks, and a closed pane's
-/// table is freed when its worker thread exits rather than needing a `forget`.
-#[derive(Default)]
-pub struct PaneTone {
-    lut: Option<LutBuf>,
+    /// Resident sample buffers, keyed by [`FrameData::uid`].
+    frames: HashMap<u64, FrameBuf>,
+    /// Display tables, keyed by pane id (each pane has its own `[lo, hi]`).
+    luts: HashMap<u64, LutBuf>,
+    resident: u64,
+    budget: u64,
+    tick: u64,
     /// CPU-side scratch for building a display table before upload.
     table: Vec<u32>,
 }
@@ -306,12 +277,12 @@ impl GpuToneMapper {
         Self {
             pipelines,
             layout,
-            frames: Mutex::new(FrameCache {
-                map: HashMap::new(),
-                resident: 0,
-                budget: vram_budget(gpu),
-                tick: 0,
-            }),
+            frames: HashMap::new(),
+            luts: HashMap::new(),
+            resident: 0,
+            budget: vram_budget(gpu),
+            tick: 0,
+            table: Vec::new(),
         }
     }
 
@@ -322,32 +293,23 @@ impl GpuToneMapper {
     /// establishes it itself. This is here for the tests that pin the contract.
     #[cfg(test)]
     pub fn is_resident(&self, uid: u64) -> bool {
-        self.frames
-            .lock()
-            .expect("frame cache")
-            .map
-            .contains_key(&uid)
+        self.frames.contains_key(&uid)
     }
 
-    /// Tone `frame` into `out` using `pane`'s display table, and — when `tex` is
-    /// given — copy the result into it, all in one submission.
+    /// Tone `frame` for pane `pane_id` into `out`, and — when `tex` is given —
+    /// copy the result into it, all in one submission.
     ///
     /// Uploads only what changed: the samples on the first render of a frame,
     /// the display table when the tone moved, and nothing at all when a repaint
     /// re-renders the same frame at the same tone.
     ///
-    /// Takes `&self`, so **every pane's worker may be in here at once**. The
-    /// sample upload — the expensive part, and a plain CPU memcpy into mapped
-    /// memory — genuinely runs in parallel; the dispatches behind it are still
-    /// serialised by the one device, which is the GPU's business, not ours.
-    ///
     /// Full resolution only. The decimated render (`step > 1`) is small, cheap
     /// and already off the critical path, and its output would not match a
     /// full-resolution texture's identity anyway — `stage` keeps it on the CPU.
     pub fn tone(
-        &self,
+        &mut self,
         gpu: &GpuContext,
-        pane: &mut PaneTone,
+        pane_id: u64,
         frame: &FrameData,
         tone: Tone,
         out: &mut Option<GpuOutput>,
@@ -365,6 +327,7 @@ impl GpuToneMapper {
         if frame.channels == 0 || frame.channels > 4 {
             return Err(GpuError::Unsupported("channel count"));
         }
+        self.tick += 1;
 
         let kernel = Kernel::of(frame);
         let bytes = match &frame.samples {
@@ -374,10 +337,13 @@ impl GpuToneMapper {
         };
         gpu.check_binding(bytes.len() as u64)?;
 
-        // Bring all three buffers up to date first, then borrow them together.
-        let src = self.resident_frame(gpu, frame.uid(), bytes);
-        let lut = Self::resident_lut(gpu, pane, frame, tone);
+        // Bring all three buffers up to date first, then borrow them together —
+        // each step may allocate and so needs the mapper mutably.
+        self.resident_frame(gpu, frame.uid(), bytes);
+        self.resident_lut(gpu, pane_id, frame, tone);
         let output = Self::resident_output(gpu, out, [w, h])?;
+        let src = &self.frames[&frame.uid()].buf;
+        let lut = &self.luts[&pane_id].buf;
 
         let denom = tone.hi - tone.lo;
         let params = Params {
@@ -440,76 +406,39 @@ impl GpuToneMapper {
         }
         gpu.queue.submit([enc.finish()]);
         // The submission is queued, not awaited: egui's own paint lands on the
-        // same queue afterwards, so it observes these writes without this thread
-        // ever blocking on the GPU.
-        self.frames.lock().expect("frame cache").evict_over_budget();
+        // same queue afterwards, so it observes these writes without the UI
+        // thread ever blocking on the GPU.
+        self.evict_over_budget();
         Ok(())
     }
 
     /// Ensure the frame's samples are in VRAM, uploading them on first use, and
-    /// mark them as used this tick (for the LRU). Returns the buffer to bind.
-    ///
-    /// **The upload happens with the lock released.** That is the whole reason
-    /// the buffer is an `Arc`: holding the cache locked across a 30-odd-MB
-    /// memcpy would serialise exactly the work this path just moved off the UI
-    /// thread to get done in parallel, leaving panes queued behind each other as
-    /// badly as before, only somewhere less visible.
-    ///
-    /// So two panes that first show the *same* frame in the same instant can
-    /// both upload it, and one of the two buffers is dropped unused. That is
-    /// accepted deliberately: it costs one redundant upload in a rare race,
-    /// where the alternative costs a serialised upload in the common case. The
-    /// insert resolves the race — whoever gets there second takes the winner's
-    /// buffer and drops its own — so both panes still bind the same VRAM, and
-    /// the accounting counts it once.
-    fn resident_frame(&self, gpu: &GpuContext, uid: u64, bytes: &[u8]) -> Arc<wgpu::Buffer> {
-        {
-            let mut cache = self.frames.lock().expect("frame cache");
-            cache.tick += 1;
-            let tick = cache.tick;
-            if let Some(f) = cache.map.get_mut(&uid) {
-                f.touched = tick;
-                return f.buf.clone();
-            }
-        }
-        let buf = Arc::new(
-            gpu.device
+    /// mark them as used this tick (for the LRU).
+    fn resident_frame(&mut self, gpu: &GpuContext, uid: u64, bytes: &[u8]) {
+        let tick = self.tick;
+        let resident = &mut self.resident;
+        let buf = self.frames.entry(uid).or_insert_with(|| {
+            let buf = gpu
+                .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("cim frame samples"),
                     contents: bytes,
                     usage: wgpu::BufferUsages::STORAGE,
-                }),
-        );
-        let size = buf.size();
-        let mut cache = self.frames.lock().expect("frame cache");
-        let tick = cache.tick;
-        if let Some(f) = cache.map.get_mut(&uid) {
-            // Lost the race: take the resident buffer and drop ours.
-            f.touched = tick;
-            return f.buf.clone();
-        }
-        cache.resident += size;
-        cache.map.insert(
-            uid,
+                });
+            let bytes = buf.size();
+            *resident += bytes;
             FrameBuf {
-                buf: buf.clone(),
-                bytes: size,
+                buf,
+                bytes,
                 touched: tick,
-            },
-        );
-        buf
+            }
+        });
+        buf.touched = tick;
     }
 
     /// Ensure the pane's display table is in VRAM, rebuilding and re-uploading
     /// it only when its tone changed. This is the one upload a slider drag pays.
-    ///
-    /// Pane-local, so no lock: the table belongs to the worker that calls this.
-    fn resident_lut<'a>(
-        gpu: &GpuContext,
-        pane: &'a mut PaneTone,
-        frame: &FrameData,
-        tone: Tone,
-    ) -> &'a wgpu::Buffer {
+    fn resident_lut(&mut self, gpu: &GpuContext, pane_id: u64, frame: &FrameData, tone: Tone) {
         let key = TableKey {
             lo: tone.lo.to_bits(),
             hi: tone.hi.to_bits(),
@@ -518,19 +447,19 @@ impl GpuToneMapper {
             entries: frame.tone_table_entries(),
             kernel: Kernel::of(frame),
         };
-        if !pane.lut.as_ref().is_some_and(|l| l.key == key) {
-            let pal = tone.palette.map(|p| (p.table(), p.id()));
-            frame.tone_table_rgba(tone.lo, tone.hi, pal, &mut pane.table);
-            let buf = gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("cim tone table"),
-                    contents: bytemuck::cast_slice(&pane.table),
-                    usage: wgpu::BufferUsages::STORAGE,
-                });
-            pane.lut = Some(LutBuf { buf, key });
+        if self.luts.get(&pane_id).is_some_and(|l| l.key == key) {
+            return;
         }
-        &pane.lut.as_ref().expect("just built").buf
+        let pal = tone.palette.map(|p| (p.table(), p.id()));
+        frame.tone_table_rgba(tone.lo, tone.hi, pal, &mut self.table);
+        let buf = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cim tone table"),
+                contents: bytemuck::cast_slice(&self.table),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        self.luts.insert(pane_id, LutBuf { buf, key });
     }
 
     /// The pane's output buffer, reallocated only when the frame size changes
@@ -559,34 +488,32 @@ impl GpuToneMapper {
         }))
     }
 
+    /// Drop the least recently toned frames until the resident set is back
+    /// inside its budget. The frame rendered this tick is never a candidate —
+    /// it was just touched, so it sorts last.
+    fn evict_over_budget(&mut self) {
+        while self.resident > self.budget && self.frames.len() > 1 {
+            let Some((&uid, _)) = self.frames.iter().min_by_key(|(_, f)| f.touched) else {
+                break;
+            };
+            if let Some(f) = self.frames.remove(&uid) {
+                self.resident -= f.bytes;
+            }
+        }
+    }
+
+    /// Forget pane `id`'s display table (pane closed or reloaded). Resident
+    /// frames are shared between panes and keyed by frame, so they are left to
+    /// the LRU.
+    pub fn forget_pane(&mut self, id: u64) {
+        self.luts.remove(&id);
+    }
+
     /// Bytes of frame samples currently held in VRAM. See
     /// [`is_resident`](Self::is_resident) on why this is test-only.
     #[cfg(test)]
     pub fn resident_bytes(&self) -> u64 {
-        self.frames.lock().expect("frame cache").resident
-    }
-
-    /// Set the resident-frame budget. Test-only: the app sizes it from the
-    /// adapter (see [`vram_budget`]).
-    #[cfg(test)]
-    pub fn set_budget(&self, bytes: u64) {
-        self.frames.lock().expect("frame cache").budget = bytes;
-    }
-}
-
-impl FrameCache {
-    /// Drop the least recently toned frames until the resident set is back
-    /// inside its budget. A frame just rendered from is never a candidate — it
-    /// was touched on the way in, so it sorts last.
-    fn evict_over_budget(&mut self) {
-        while self.resident > self.budget && self.map.len() > 1 {
-            let Some((&uid, _)) = self.map.iter().min_by_key(|(_, f)| f.touched) else {
-                break;
-            };
-            if let Some(f) = self.map.remove(&uid) {
-                self.resident -= f.bytes;
-            }
-        }
+        self.resident
     }
 }
 
@@ -661,11 +588,10 @@ mod tests {
     }
 
     fn gpu_render(gpu: &GpuContext, frame: &FrameData, tone: Tone) -> Vec<[u8; 4]> {
-        let mapper = GpuToneMapper::new(gpu);
-        let mut pane = PaneTone::default();
+        let mut mapper = GpuToneMapper::new(gpu);
         let mut out = None;
         mapper
-            .tone(gpu, &mut pane, frame, tone, &mut out, None)
+            .tone(gpu, 1, frame, tone, &mut out, None)
             .expect("gpu tone map");
         out.unwrap().read_back(gpu)
     }
@@ -688,11 +614,7 @@ mod tests {
         let gpu = gpu_or_skip!();
         // 8-bit mono at an odd width, 16-bit mono, 16-bit RGB, a 1-row frame,
         // and a 4-channel frame (whose alpha the render ignores).
-        let mono8 = FrameData::new(
-            [37, 21],
-            1,
-            Samples::U8((0..37 * 21).map(|i| i as u8).collect()),
-        );
+        let mono8 = FrameData::new([37, 21], 1, Samples::U8((0..37 * 21).map(|i| i as u8).collect()));
         let mono16 = FrameData::new(
             [40, 30],
             1,
@@ -760,11 +682,7 @@ mod tests {
     fn colormap_tone_map_matches_cpu_exactly() {
         let gpu = gpu_or_skip!();
         let pal = crate::palette::Palette::Viridis;
-        let u8f = FrameData::new(
-            [31, 5],
-            1,
-            Samples::U8((0..31 * 5).map(|i| i as u8).collect()),
-        );
+        let u8f = FrameData::new([31, 5], 1, Samples::U8((0..31 * 5).map(|i| i as u8).collect()));
         let u16f = FrameData::new(
             [31, 5],
             1,
@@ -827,21 +745,18 @@ mod tests {
             1,
             Samples::U16((0..64 * 64).map(|i| (i * 7) as u16).collect()),
         );
-        let mapper = GpuToneMapper::new(&gpu);
-        let mut pane = PaneTone::default();
+        let mut mapper = GpuToneMapper::new(&gpu);
         let mut out = None;
 
         mapper
-            .tone(&gpu, &mut pane, &frame, plain(0.0, 65535.0), &mut out, None)
+            .tone(&gpu, 1, &frame, plain(0.0, 65535.0), &mut out, None)
             .unwrap();
         assert!(mapper.is_resident(frame.uid()));
         let after_first = mapper.resident_bytes();
         assert_eq!(after_first, 64 * 64 * 2);
 
         let retone = plain(2000.0, 50000.0);
-        mapper
-            .tone(&gpu, &mut pane, &frame, retone, &mut out, None)
-            .unwrap();
+        mapper.tone(&gpu, 1, &frame, retone, &mut out, None).unwrap();
         assert_eq!(
             mapper.resident_bytes(),
             after_first,
@@ -881,16 +796,13 @@ mod tests {
             1,
             Samples::U16((0..256).map(|i| i as u16).collect()),
         );
-        let mapper = GpuToneMapper::new(&gpu);
-        let mut pane = PaneTone::default();
+        let mut mapper = GpuToneMapper::new(&gpu);
         let mut out = None;
         // Twice around, so each frame is rendered both first (building the
         // table) and after the others (reusing or rebuilding it).
         for _ in 0..2 {
             for frame in [&u8f, &f32f, &u16f] {
-                mapper
-                    .tone(&gpu, &mut pane, frame, tone, &mut out, None)
-                    .unwrap();
+                mapper.tone(&gpu, 1, frame, tone, &mut out, None).unwrap();
                 let got = out.as_ref().unwrap().read_back(&gpu);
                 let want = cpu_render(frame, tone);
                 // The float path is the ±1 one (see the test above); comparing
@@ -907,97 +819,25 @@ mod tests {
         }
     }
 
-    /// Panes tone **concurrently** through one shared mapper — that is the whole
-    /// point of `tone` taking `&self`, and what keeps a grid of panes from
-    /// queueing behind each other the way they did when this ran on the UI
-    /// thread.
-    ///
-    /// Two things have to hold at once, and they pull against each other. Every
-    /// pane must get the CPU render's answer (so the sharing hasn't crossed any
-    /// wires), *and* a frame several panes show at the same instant must end up
-    /// resident **once** (so the race in `resident_frame` — which deliberately
-    /// uploads outside the lock, and so can upload twice — still resolves to one
-    /// buffer and one accounting entry).
-    #[test]
-    fn panes_tone_concurrently_and_share_one_upload() {
-        let gpu = gpu_or_skip!();
-        let shared = FrameData::new(
-            [64, 64],
-            1,
-            Samples::U16((0..64 * 64).map(|i| (i * 11) as u16).collect()),
-        );
-        let tone = plain(300.0, 60000.0);
-        let want = cpu_render(&shared, tone);
-        let mapper = GpuToneMapper::new(&gpu);
-
-        // Eight "panes" hitting the same not-yet-resident frame at once.
-        std::thread::scope(|s| {
-            for _ in 0..8 {
-                s.spawn(|| {
-                    let mut pane = PaneTone::default();
-                    let mut out = None;
-                    mapper
-                        .tone(&gpu, &mut pane, &shared, tone, &mut out, None)
-                        .expect("gpu tone map");
-                    assert_eq!(out.unwrap().read_back(&gpu), want);
-                });
-            }
-        });
-        assert!(mapper.is_resident(shared.uid()));
-        assert_eq!(
-            mapper.resident_bytes(),
-            64 * 64 * 2,
-            "a frame every pane shows must be uploaded and accounted for once, \
-             however many of them raced to upload it"
-        );
-
-        // And distinct frames in parallel: each pane's own table, one shared
-        // cache, no crossed results.
-        let frames: Vec<FrameData> = (1..=4)
-            .map(|k| {
-                FrameData::new(
-                    [32, 32],
-                    1,
-                    Samples::U16((0..32 * 32).map(|i| (i * k) as u16).collect()),
-                )
-            })
-            .collect();
-        std::thread::scope(|s| {
-            for f in &frames {
-                s.spawn(|| {
-                    let mut pane = PaneTone::default();
-                    let mut out = None;
-                    mapper
-                        .tone(&gpu, &mut pane, f, tone, &mut out, None)
-                        .expect("gpu tone map");
-                    assert_eq!(out.unwrap().read_back(&gpu), cpu_render(f, tone));
-                });
-            }
-        });
-    }
-
     /// The resident set is bounded: past its budget the least recently toned
     /// frames are dropped, and the one just rendered is never the victim.
     #[test]
     fn resident_frames_evict_over_budget() {
         let gpu = gpu_or_skip!();
-        let mapper = GpuToneMapper::new(&gpu);
-        mapper.set_budget(4 * 1024); // a couple of the frames below
-        let mut pane = PaneTone::default();
+        let mut mapper = GpuToneMapper::new(&gpu);
+        mapper.budget = 4 * 1024; // a couple of the frames below
         let frames: Vec<FrameData> = (0..6)
             .map(|k| FrameData::new([32, 16], 1, Samples::U16(vec![k as u16; 32 * 16])))
             .collect();
         let mut out = None;
         for f in &frames {
-            mapper
-                .tone(&gpu, &mut pane, f, plain(0.0, 10.0), &mut out, None)
-                .unwrap();
+            mapper.tone(&gpu, 1, f, plain(0.0, 10.0), &mut out, None).unwrap();
         }
         assert!(
-            mapper.resident_bytes() <= 4 * 1024,
+            mapper.resident_bytes() <= mapper.budget,
             "resident {} over budget {}",
             mapper.resident_bytes(),
-            4 * 1024
+            mapper.budget
         );
         assert!(
             mapper.is_resident(frames.last().unwrap().uid()),
@@ -1056,11 +896,10 @@ mod tests {
             view_formats: &[],
         });
 
-        let mapper = GpuToneMapper::new(&gpu);
-        let mut pane = PaneTone::default();
+        let mut mapper = GpuToneMapper::new(&gpu);
         let mut out = None;
         mapper
-            .tone(&gpu, &mut pane, &frame, tone, &mut out, Some(&tex))
+            .tone(&gpu, 1, &frame, tone, &mut out, Some(&tex))
             .expect("gpu tone map");
 
         // Pull the texture back the same way it was filled, padding and all.

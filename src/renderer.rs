@@ -11,28 +11,16 @@
 //!   media-specific class instances that are heavy to construct (keyed on the
 //!   image dimensions) and are not assumed thread-safe. Pinning each pane's
 //!   renders to one thread gives those instances a single owner — no locking,
-//!   and no reliance on the proprietary code being reentrant. They live in
+//!   and no reliance on the proprietary code being reentrant. They will live in
 //!   [`Worker`], built lazily and rebuilt when a frame's dimensions change.
 //!
-//! **The GPU tone map runs here too** ([`How::Gpu`]), for the first reason and
-//! for a plainer one: it is not free. The compute dispatch is asynchronous, but
-//! uploading a frame's samples to VRAM is a multi-megabyte memcpy, and on the UI
-//! thread that landed inside `update` and cost more frame time than the faster
-//! tone map saved. On a worker it overlaps with everything else — and with the
-//! *other* panes' uploads, since `gpu::GpuToneMapper` is shared by `&self` and
-//! only its per-pane half ([`gpu::PaneTone`]) lives in the worker, next to the
-//! CPU path's `ToneLut` and operator instances for exactly the same reason. The
-//! GPU's own execution is still serialised by the one device; the uploads, which
-//! are what cost, are not.
-//!
 //! The UI submits a job for a pane's current `(frame, tone-signature)`, keeps
-//! showing its last committed texture, and takes the result when it lands —
-//! mirroring how the decode pool keeps painting responsive. Jobs and results are
-//! addressed by the stable pane `id`, so they still route correctly after a
-//! reorder / close. `forget(id)` drops a pane's worker (on close / reload): its
-//! channel closes, the thread exits, and its owned operator instances and
-//! uploaded display table are destroyed on that thread — which is why neither
-//! has a separate "forget" of its own.
+//! showing its last texture with a spinner, and uploads the finished RGBA when it
+//! lands — mirroring how the decode pool keeps painting responsive. Jobs and
+//! results are addressed by the stable pane `id`, so they still route correctly
+//! after a reorder / close. `forget(id)` drops a pane's worker (on close /
+//! reload): its channel closes, the thread exits, and its owned operator
+//! instances are destroyed on that thread.
 
 use rayon::iter::IndexedParallelIterator;
 use std::collections::HashMap;
@@ -51,62 +39,24 @@ pub struct RenderJob {
     /// Linear display bounds `[lo, hi] → [0, 255]`, computed on the UI thread.
     pub lo: f32,
     pub hi: f32,
-    /// Which processor builds this render, and what it needs to do it.
-    pub how: How,
-}
-
-/// How one job is rendered — the CPU tail (with the proprietary operators) or
-/// the GPU tone map.
-///
-/// The choice is the UI thread's (`CimApp::stage`), because only it knows
-/// whether the app is in GPU mode and whether this pane is eligible. The worker
-/// just does as it is told, which keeps the two paths' *dispatch* identical: one
-/// pool, one in-flight cap, one `pending` slot, one lock-step commit.
-pub enum How {
-    Cpu {
-        /// Whether to run LUT_ALPHA on the render (non-LUT_ALPHA tones and masks
-        /// leave it off).
-        lut_alpha: bool,
-        details: bool,
-    },
-    Gpu {
-        gpu: Arc<crate::gpu::GpuContext>,
-        /// egui's render state, so a new texture can be registered from here.
-        rs: eframe::egui_wgpu::RenderState,
-        mapper: Arc<crate::gpu::GpuToneMapper>,
-        palette: Option<crate::palette::Palette>,
-        /// The pane's previous GPU texture, handed back for reuse when it is the
-        /// right size — the same recycling the CPU path does through `pending`,
-        /// so a playback run neither reallocates the texture nor re-registers
-        /// its id with egui.
-        recycle: Option<Box<crate::gpu::GpuTex>>,
-    },
+    /// Whether to run LUT_ALPHA on the render (non-LUT_ALPHA tones and masks
+    /// leave it off).
+    pub lut_alpha: bool,
+    pub details: bool,
 }
 
 pub struct RenderDone {
     pub id: u64,
     pub frame: usize,
     pub sig: u64,
-    pub out: Out,
+    /// The finished display image, rendered **directly** into egui's pixel type
+    /// on the worker (see [`RgbaSink`]), so neither the conversion copy nor the
+    /// texture-delta queueing costs the UI thread anything but a move.
+    pub image: eframe::egui::ColorImage,
     /// LUT / tone map time (the gray or 8-bit render), for the `CIM_DEBUG` profiler.
     pub lut_time: std::time::Duration,
     /// Proprietary-operator `apply` time (zero when no operator ran).
     pub ops_time: std::time::Duration,
-}
-
-/// What a finished job hands back.
-pub enum Out {
-    /// The finished display image, rendered **directly** into egui's pixel type
-    /// on the worker (see [`RgbaSink`]), so neither the conversion copy nor the
-    /// texture-delta queueing costs the UI thread anything but a move.
-    Cpu(eframe::egui::ColorImage),
-    /// A texture egui already knows about, holding pixels that never left the
-    /// card. The UI thread only parks it in the pane's `pending` slot.
-    Gpu(Box<crate::gpu::GpuTex>),
-    /// The GPU refused the work (frame past the device's limits, device lost).
-    /// The UI thread drops the GPU context on seeing this, and every later
-    /// render — including this pane's re-request — goes to the CPU.
-    GpuFailed(crate::gpu::GpuError),
 }
 
 /// Render straight into egui's packed pixel type, skipping the RGBA-bytes
@@ -199,9 +149,6 @@ impl RenderPool {
                     // instead of this instance's share (`crate::cpu`). Installed
                     // per job rather than around the loop so a budget change
                     // applies to the next render, not only to new panes.
-                    //
-                    // A GPU job is installed the same way for uniformity; it
-                    // does no rayon work, so the wrapper costs it nothing.
                     let done = crate::cpu::install(|| worker.render(job));
                     if done_tx.send(done).is_err() {
                         break; // UI gone: shutting down
@@ -244,107 +191,36 @@ struct Worker {
     /// Cached value→display table, reused across this pane's frames (see
     /// [`crate::media::ToneLut`]) — the worker is the pane's single render thread.
     lut: crate::media::ToneLut,
-    /// The GPU counterpart of `lut`: this pane's uploaded display table and the
-    /// scratch it is built in. Same reasoning, same owner — see
-    /// [`crate::gpu::PaneTone`].
-    tone: crate::gpu::PaneTone,
 }
 
 impl Worker {
-    /// One job, on the pane's own thread.
+    /// The heavy part, run on a pane's worker thread: build the display RGBA (LUT
+    /// render) and, for a single-channel 16-bit frame with the proprietary library
+    /// loaded, apply the tone operators on a 16-bit render before downscaling to 8
+    /// bits. Mirrors the live path in `app::decode::prepare` and the export path in
+    /// `export::ensure_frame` so all three match pixel-for-pixel.
     fn render(&mut self, job: RenderJob) -> RenderDone {
-        let (id, frame, sig) = (job.id, job.frame, job.sig);
-        let (out, lut_time, ops_time) = match job.how {
-            How::Cpu { lut_alpha, details } => {
-                self.render_cpu(&job.data, job.lo, job.hi, lut_alpha, details)
-            }
-            How::Gpu {
-                gpu,
-                rs,
-                mapper,
-                palette,
-                recycle,
-            } => self.render_gpu(
-                &job.data, job.lo, job.hi, &gpu, &rs, &mapper, palette, recycle,
-            ),
-        };
-        RenderDone {
-            id,
-            frame,
-            sig,
-            out,
-            lut_time,
-            ops_time,
-        }
-    }
-
-    /// The heavy CPU part: build the display RGBA (LUT render) and, for a
-    /// single-channel 16-bit frame with the proprietary library loaded, apply the
-    /// tone operators on a 16-bit render before downscaling to 8 bits. Mirrors the
-    /// export path in `export::ensure_frame` so both match pixel-for-pixel.
-    fn render_cpu(
-        &mut self,
-        data: &FrameData,
-        lo: f32,
-        hi: f32,
-        lut_alpha: bool,
-        details: bool,
-    ) -> (Out, std::time::Duration, std::time::Duration) {
-        let size = data.size;
+        let size = job.data.size;
         let mut pixels = Vec::new();
         // The one shared render tail (plain LUT, or operators on a full-precision
         // 16-bit render) — identical to the export path by construction, which
         // renders the same tail into a byte buffer instead (see `RgbaSink`).
         let (lut_time, ops_time) = self.ops.render_display(
-            data,
-            (lo, hi),
-            lut_alpha,
-            details,
+            &job.data,
+            (job.lo, job.hi),
+            job.lut_alpha,
+            job.details,
             &mut self.lut,
             &mut pixels,
         );
-        (
-            Out::Cpu(eframe::egui::ColorImage { size, pixels }),
+        let image = eframe::egui::ColorImage { size, pixels };
+        RenderDone {
+            id: job.id,
+            frame: job.frame,
+            sig: job.sig,
+            image,
             lut_time,
             ops_time,
-        )
-    }
-
-    /// The GPU tone map, run **here** rather than on the UI thread.
-    ///
-    /// This is the whole point of routing GPU renders through the pool: the work
-    /// is not free just because the dispatch is asynchronous — uploading a new
-    /// frame's samples is a multi-megabyte memcpy, which on the UI thread landed
-    /// squarely inside `update` and cost more in frame time than the faster tone
-    /// map saved. Here it overlaps with everything else, and — because the mapper
-    /// takes `&self` — with the *other panes'* uploads.
-    #[allow(clippy::too_many_arguments)]
-    fn render_gpu(
-        &mut self,
-        data: &FrameData,
-        lo: f32,
-        hi: f32,
-        gpu: &crate::gpu::GpuContext,
-        rs: &eframe::egui_wgpu::RenderState,
-        mapper: &crate::gpu::GpuToneMapper,
-        palette: Option<crate::palette::Palette>,
-        recycle: Option<Box<crate::gpu::GpuTex>>,
-    ) -> (Out, std::time::Duration, std::time::Duration) {
-        let zero = std::time::Duration::ZERO;
-        let t = std::time::Instant::now();
-        // Reuse the pane's previous texture when it still fits this frame.
-        let mut tex = match recycle {
-            Some(g) if g.size() == data.size => g,
-            _ => match crate::gpu::GpuTex::new(rs, gpu, data.size) {
-                Ok(g) => Box::new(g),
-                Err(e) => return (Out::GpuFailed(e), zero, zero),
-            },
-        };
-        let tone = crate::gpu::Tone { lo, hi, palette };
-        let crate::gpu::GpuTex { out, tex: t2, .. } = &mut *tex;
-        match mapper.tone(gpu, &mut self.tone, data, tone, out, Some(&*t2)) {
-            Ok(()) => (Out::Gpu(tex), t.elapsed(), zero),
-            Err(e) => (Out::GpuFailed(e), zero, zero),
         }
     }
 }
@@ -382,13 +258,14 @@ mod tests {
                 data: frame.clone(),
                 lo,
                 hi,
-                how: How::Cpu { lut_alpha, details },
+                lut_alpha,
+                details,
             });
-            let Out::Cpu(image) = done.out else {
-                panic!("a CPU job must come back as a CPU image");
-            };
-            assert_eq!(image.size, [8, 4]);
-            assert_eq!(image, reference, "lut_alpha={lut_alpha} details={details}");
+            assert_eq!(done.image.size, [8, 4]);
+            assert_eq!(
+                done.image, reference,
+                "lut_alpha={lut_alpha} details={details}"
+            );
         }
     }
 

@@ -58,18 +58,6 @@
 //! float sources compute anything on the GPU, mirroring `map_u8` term for term.
 //! `gpu::tonemap`'s tests hold both to the CPU render's output.
 //!
-//! # Where it runs
-//!
-//! On the pane's **render worker thread**, not the UI thread — the same pool and
-//! the same per-pane threads the CPU renders use (`crate::renderer`). The
-//! dispatch is asynchronous, but the sample upload in front of it is a
-//! multi-megabyte memcpy, and paying that on the UI thread cost more frame time
-//! than the faster tone map saved. So [`GpuToneMapper`] is shared (`&self`,
-//! behind an `Arc`) and holds only what panes share — the pipelines and the
-//! resident-frame cache — while [`PaneTone`], the pane's display table, belongs
-//! to its worker. Panes therefore tone concurrently, and a frame two panes both
-//! show is still uploaded once.
-//!
 //! # Falling back
 //!
 //! Every entry point returns `Result`, and `CimApp` treats any error as "this
@@ -80,7 +68,7 @@
 
 mod tonemap;
 
-pub use tonemap::{GpuOutput, GpuToneMapper, PaneTone, Tone};
+pub use tonemap::{GpuOutput, GpuToneMapper, Tone};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -280,8 +268,8 @@ impl GpuContext {
 /// texture nor re-registers its id.
 pub struct GpuTex {
     /// The compute output, allocated on first use by the tone mapper.
-    pub out: Option<GpuOutput>,
-    pub tex: wgpu::Texture,
+    pub(crate) out: Option<GpuOutput>,
+    pub(crate) tex: wgpu::Texture,
     id: eframe::egui::TextureId,
     size: [usize; 2],
     /// Kept so the registration can be released when this is dropped. Cheap —
