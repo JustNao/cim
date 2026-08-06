@@ -871,6 +871,46 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
     }
 }
 
+/// Jump straight to `page` of `file` within a concatenation, returning the
+/// **global frame index** it landed on. The file-addressed sibling of
+/// [`fast_jump`], for the reload of a folder / concatenated run: the user was
+/// watching a page of a particular file, and after a reload that page may sit at
+/// a different global index — files can have been added to or removed from the
+/// folder, or an earlier file can have grown or shrunk (§9). Asking for the frame
+/// by *file and page* lands on the frame they were actually watching; asking for
+/// the old index would land wherever that index now falls.
+///
+/// Costs the same as `fast_jump`: each file **before** the named one is
+/// page-counted by binary search (header reads, no pixels), the global map is
+/// extended through the target — verified against whatever prefix ordinary
+/// discovery already built — and only the target page is decoded. On `Err`
+/// **nothing changes** and the caller falls back to the global index.
+pub fn fast_jump_to_file(media: &mut Media, file: &Path, page: usize) -> Result<usize, String> {
+    let Media::ConcatSeq(c) = media else {
+        // A `FileSeq` needs no I/O to locate a file (`Media::locate_file`); the
+        // single-file kinds have no file to name.
+        return Err("a file-anchored jump only applies to a concatenated TIFF run".into());
+    };
+    let files = c.files.clone();
+    let at = files
+        .iter()
+        .position(|p| p == file)
+        .ok_or("the file is no longer part of the run")?;
+    // Every file before it is needed (its pages are what `page` sits after on the
+    // global timeline), so unlike `fast_jump` there is no surplus to bound: the
+    // whole prefix is measured in one fanned-out batch.
+    let counts: Vec<usize> = scan_counts_batch(&files[..at])
+        .into_iter()
+        .collect::<Result<_, _>>()?;
+    let frame = FastScan::open(&files[at])?
+        .read_page(page)
+        .ok_or("no page at the predicted position (the file lost pages, or is irregular)")?;
+    let target = counts.iter().sum::<usize>() + page;
+    c.extend_known(&counts, at, page)?;
+    c.frames.insert(target, Arc::new(frame));
+    Ok(target)
+}
+
 /// Jump to frame `target` by **byte offset**: decode the page straight from
 /// where it sits and grow the known length through it in one step, without
 /// discovering (or decoding) anything before it. Returns the anchor to remember
@@ -1204,6 +1244,84 @@ mod tests {
         // Past the total page count: cancelled, nothing changes.
         assert!(fast_jump(&mut media, 10).is_err());
         assert_eq!(media.frame_count(), 6);
+    }
+
+    /// The reload case: the folder behind a concatenation gained a file *before*
+    /// the one being watched, so every global index after it shifted. Asking for
+    /// the frame by (file, page) lands on the frame the user was watching; asking
+    /// for the old global index would land on a different one.
+    #[test]
+    fn file_anchored_jump_follows_a_page_across_a_re_listed_folder() {
+        let dir = fixture_dir("fastjump_file");
+        let a = dir.join("run_000.tif");
+        let b = dir.join("run_001.tif");
+        let inserted = dir.join("run_000a.tif"); // sorts between a and b
+        write_multipage_tiff_u16(&a, &[[9, 7]; 3]);
+        write_multipage_tiff_u16(&b, &[[9, 7]; 4]);
+        write_multipage_tiff_u16(&inserted, &[[9, 7]; 2]);
+
+        // Before: global 5 is file b, page 2.
+        let mut before = load_sequence(&[a.clone(), b.clone()], "run".into()).unwrap();
+        fast_jump(&mut before, 5).expect("jump across files");
+        let (file, page) = before
+            .local_file(5)
+            .expect("a concatenation names its file");
+        assert_eq!((file, page), (b.as_path(), 2));
+        let (file, page) = (file.to_path_buf(), page);
+
+        // After the re-listing, the same page sits at global 7 (3 + 2 before it).
+        let mut after =
+            load_sequence(&[a.clone(), inserted.clone(), b.clone()], "run".into()).unwrap();
+        assert_eq!(
+            after.locate_file(&file, page),
+            None,
+            "a freshly opened concatenation knows only its first page"
+        );
+        let landed = fast_jump_to_file(&mut after, &file, page).expect("file-anchored jump");
+        assert_eq!(landed, 7);
+        assert_eq!(after.frame_count(), 8); // known through the target, no further
+        assert_eq!(after.local_file(landed), Some((b.as_path(), 2)));
+        assert!(
+            after.resident(6).is_none(),
+            "the pages in between must not be decoded"
+        );
+
+        // And it is that file's page that was decoded, read fresh from disk.
+        let slow = SeqReader::open(&b).unwrap().decode(2).unwrap().unwrap();
+        assert_eq!(u16s(&after.resident(landed).unwrap()), u16s(&slow));
+
+        // Once the map is discovered that far, the same lookup needs no I/O.
+        assert_eq!(after.locate_file(&file, page), Some(7));
+
+        // A file dropped from the folder, or a page it no longer has: refused,
+        // nothing mutated, and the caller falls back to the global index.
+        let mut shrunk = load_sequence(&[a.clone(), inserted.clone()], "run".into()).unwrap();
+        assert!(fast_jump_to_file(&mut shrunk, &file, page).is_err());
+        assert_eq!(shrunk.frame_count(), 1);
+        assert!(fast_jump_to_file(&mut after, &b, 99).is_err());
+        assert_eq!(after.frame_count(), 8);
+    }
+
+    /// A numbered **still** run resolves a file to its frame with no I/O at all —
+    /// one file per frame, and the whole list is known when it opens.
+    #[test]
+    fn a_still_run_locates_its_files_directly() {
+        let dir = fixture_dir("locate_fileseq");
+        let files = crate::testutil::write_png_run(&dir, 4, 5, 3);
+
+        let media = load_sequence(&files, "run".into()).unwrap();
+        assert_eq!(media.frame_count(), 4);
+        for (k, f) in files.iter().enumerate() {
+            assert_eq!(media.locate_file(f, 0), Some(k));
+        }
+        // Only page 0 exists per file, and an unrelated path is not in the run.
+        assert_eq!(media.locate_file(&files[2], 1), None);
+        assert_eq!(media.locate_file(&dir.join("nope.png"), 0), None);
+
+        // Dropping the first file shifts the rest down by one — which is exactly
+        // what makes the global index the wrong thing to restore a reload with.
+        let shifted = load_sequence(&files[1..], "run".into()).unwrap();
+        assert_eq!(shifted.locate_file(&files[2], 0), Some(1));
     }
 
     #[test]

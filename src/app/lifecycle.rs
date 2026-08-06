@@ -575,7 +575,23 @@ impl CimApp {
         }
         // The frame the user is viewing, captured before the media is swapped so
         // we can land back on it below (the fresh media starts length 1).
-        let target = self.frame_disp(i);
+        let mut target = self.frame_disp(i);
+        // For a media built from several files, capture *which file* (and which
+        // page within it) that frame is — the durable identity of what the user
+        // is watching. The global index isn't: a re-listed folder or a file that
+        // changed length shifts every index after it.
+        let anchor_file = self.panes[i]
+            .media
+            .local_file(target)
+            .map(|(p, page)| (p.to_path_buf(), page));
+        // A pane opened from a **folder** re-lists it, so files added or removed
+        // since it was opened join or leave the timeline — the point of reloading
+        // a folder. A numbered token states its own range, so it reopens as given.
+        if let Source::Sequence { token, files } = &mut self.panes[i].source {
+            if let Some(fresh) = cli::folder_files(token) {
+                *files = fresh;
+            }
+        }
         let loaded = match &self.panes[i].source {
             Source::File(p) => media::load(p),
             Source::Sequence { token, files } => media::load_sequence(files, token.clone()),
@@ -611,10 +627,30 @@ impl CimApp {
                         p.overlay_tex = None;
                     }
                 }
-                // Land back on the frame the user was viewing. The fresh media
-                // only knows its first page, so first try a direct fastscan offset
-                // jump (validate + decode `target` at its predicted position,
-                // growing the known length through it in one step).
+                // Land back on what the user was viewing. For a media spanning
+                // several files (a folder, a concatenated run) that is a *file*
+                // and a page within it, not a global index — the re-listing above
+                // may have shifted every index, so the old one no longer names the
+                // same frame. Ask for the file: `locate_file` answers from what
+                // the fresh media already knows (a still run knows its whole file
+                // list up front, so it's free), and beyond that `fast_jump_to_file`
+                // page-counts the files before it by binary search and decodes the
+                // page from its own file — headers, not a decode sweep. The index
+                // it lands on becomes the new `target`, which the seek below uses.
+                let clock = self.clock;
+                let mut landed = None;
+                if let Some((path, page)) = &anchor_file {
+                    landed = self.panes[i].media.locate_file(path, *page);
+                    if landed.is_none() {
+                        landed =
+                            media::fast_jump_to_file(&mut self.panes[i].media, path, *page).ok();
+                    }
+                }
+                // Single-file media (one multi-page TIFF), or a file-anchored jump
+                // that couldn't be made: land on the same global index instead. The
+                // fresh media only knows its first page, so first try a direct
+                // fastscan offset jump (validate + decode `target` at its predicted
+                // position, growing the known length through it in one step).
                 //
                 // When the layout isn't stride-predictable, jump by **byte
                 // offset** instead: the position this frame sat at before the
@@ -625,8 +661,10 @@ impl CimApp {
                 // chain is walked once to build one, still far cheaper than riding
                 // the frontier a probe per update, which is what both falling back
                 // to `None` leaves to `seek_to` below.
-                if target > 0 {
-                    let clock = self.clock;
+                if let Some(f) = landed {
+                    target = f;
+                    self.panes[i].media.touch(target, clock);
+                } else if target > 0 {
                     if media::fast_jump(&mut self.panes[i].media, target).is_ok() {
                         self.panes[i].media.touch(target, clock);
                     } else {

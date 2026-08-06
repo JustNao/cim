@@ -430,6 +430,28 @@ fn list_dir_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Re-list the **folder** a sequence pane was opened from, for a reload: the
+/// image files in it now, in the same alphabetical order the open used, so files
+/// added or removed since become part of (or leave) the timeline. `None` when
+/// `token` doesn't name a directory — a numbered `%0Xu…,START,END` token states
+/// its own range, so it is reopened exactly as given — or when the folder no
+/// longer holds the two-or-more images a concatenated pane needs, in which case
+/// the caller keeps the file list it already has rather than breaking the pane.
+///
+/// Videos are excluded, matching [`dir_inputs`]: they open as their own panes, so
+/// they were never part of this pane's timeline.
+pub fn folder_files(token: &str) -> Option<Vec<PathBuf>> {
+    let dir = Path::new(token);
+    if !dir.is_dir() {
+        return None;
+    }
+    let images: Vec<PathBuf> = list_dir_files(dir)
+        .into_iter()
+        .filter(|p| !is_video(&p.to_string_lossy()))
+        .collect();
+    (images.len() >= 2).then_some(images)
+}
+
 /// Parse a `compute:<kind>:<srcs>` token into an `Input::Compute`, or `None`
 /// when `arg` isn't such a token. `<kind>` is `mean`/`std`/`add`/`sub`;
 /// `<srcs>` is one pane index for the reductions or `A,B` for the binary ops.
@@ -994,6 +1016,42 @@ mod tests {
             Input::Single(p) => assert!(p.ends_with("only.tif")),
             _ => panic!("a one-file directory should open as a single image"),
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A reload re-lists the folder a pane was opened from, so files that
+    /// appeared or vanished since join or leave its timeline — in the same
+    /// alphabetical order the open used, and still without the videos (they are
+    /// panes of their own).
+    #[test]
+    fn folder_files_relists_a_directory_but_not_a_token() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("cim_relist_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("b.tif"), b"").unwrap();
+        fs::write(dir.join("c.tif"), b"").unwrap();
+        fs::write(dir.join("clip.mp4"), b"").unwrap();
+        let token = dir.to_str().unwrap();
+
+        let listed = folder_files(token).expect("a folder re-lists");
+        assert_eq!(listed, vec![dir.join("b.tif"), dir.join("c.tif")]);
+
+        // A file added ahead of them joins the run, in order.
+        fs::write(dir.join("a.tif"), b"").unwrap();
+        assert_eq!(
+            folder_files(token).unwrap(),
+            vec![dir.join("a.tif"), dir.join("b.tif"), dir.join("c.tif")]
+        );
+
+        // Down to one image: no longer a sequence, so the caller keeps the list
+        // it has rather than breaking the pane.
+        fs::remove_file(dir.join("a.tif")).unwrap();
+        fs::remove_file(dir.join("b.tif")).unwrap();
+        assert_eq!(folder_files(token), None);
+
+        // A numbered token names its own range and is never re-listed.
+        assert_eq!(folder_files("frame_%05u.tif,0,12"), None);
         fs::remove_dir_all(&dir).unwrap();
     }
 

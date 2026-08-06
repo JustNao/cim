@@ -372,6 +372,13 @@ len)` grows length by one.
     path isn't available; availability is cached per pane (`Pane.fast_jump`, reset
     on reload).
 
+**File-anchored jump (`media::fast_jump_to_file`)** — `fast_jump` addressed by *file and
+page* instead of by global index, returning the index it landed on. Same cost and the
+same validation; the difference is only what identifies the frame, which matters when the
+timeline itself moved under it (a re-listed folder, a file that changed length — §9's
+reload). Its no-I/O counterpart is `Media::locate_file`, the inverse of `local_file`,
+which answers from the file list and the discovered part of the map alone.
+
 **Offset-anchored jump (`media::offset_jump` / `PageAnchor`)** — the layout-free
 sibling of all of the above, used by **reload** (§9). It pins *one* page's byte offset
 (plus its header, its predecessor, and the file's length/first-IFD offset) instead of
@@ -956,12 +963,34 @@ The header is a **single row** (`header_h_for`): the title on the left, then the
 **Auto-reload** toggle, **Reload** (re-reads this media from disk → `pending_reload`),
 **Hide** (sets `visible = false` — keeps the pane) and **Close** (removes it) buttons on
 the right, matching styles (Close tints red on hover to flag that it removes the pane).
+**Reload of a folder re-lists it** (`cli::folder_files`, called on the pane's
+`Source::Sequence` before it is reopened): a pane opened from a directory reloads to the
+image files in that directory *now*, in the same alphabetical order the open used, so
+files a render added — or removed — join or leave its timeline. That is the point of
+reloading a folder. A **numbered token** (`PREFIX%0Xu…,START,END`) states its own range,
+so it is reopened exactly as given; and a folder that no longer holds two or more images
+keeps the file list the pane already has, rather than breaking the pane.
+
 **Reload keeps the current frame**, jumping straight to it rather than rediscovering
-everything before it: the shown index is captured before the swap, then the fresh media
-(which starts length 1) is landed back on it by the first of these that works —
-1. `media::fast_jump` — the layout is regular, so the frame's position is *predicted*
-   arithmetically, validated and decoded, growing the known length through it in one step;
-2. `media::offset_jump` — **the frame's byte offset**, remembered from the last reload
+everything before it. What is captured before the swap is, for a media spanning several
+files (a folder, a concatenated run), the **file** the shown frame is in and its **page
+within that file** (`Media::local_file`) — not the global index, which the re-listing
+above (or a file that grew or shrank) shifts out from under the frame the user was
+watching. The fresh media (which starts length 1) is then landed back by the first of
+these that works —
+0. `Media::locate_file` — the inverse of `local_file`, answered from what the fresh media
+   already knows, no I/O: a still run (`FileSeq`) knows its whole file list on open, so
+   this is the whole story for a folder of PNGs;
+1. `media::fast_jump_to_file` — the file-addressed sibling of `fast_jump`, for a
+   `ConcatSeq`: the files **before** the named one are page-counted by binary search
+   (headers, no pixels), the global map is extended through the target and only that
+   page is decoded, from its own file. It returns the **global index it landed on**,
+   which becomes the frame the seek below restores;
+2. `media::fast_jump` — for a single multi-page TIFF (nothing to name a file with), or
+   when the file-anchored jump can't be made: the layout is regular, so the frame's
+   position is *predicted* arithmetically, validated and decoded, growing the known
+   length through it in one step;
+3. `media::offset_jump` — **the frame's byte offset**, remembered from the last reload
    (`Pane.page_anchor`, a `media::PageAnchor`), re-validated against the fresh file and
    decoded from there. Needs **no** regular layout, so this is what covers the files
    `fast_jump` rejects (compressed or mixed-shape pages). An anchor is reused only when
@@ -974,7 +1003,7 @@ everything before it: the shown index is captured before the swap, then the fres
    which still beats riding the frontier a probe per update — and makes the *next* reload
    O(1). `FastScan::open_header` (the header parse split out of `open`) and
    `decode_strips` (shared with `read_page`) are what let this work without a stride;
-3. `seek_to` — riding the frontier back with metadata-only probes, as before.
+4. `seek_to` — riding the frontier back with metadata-only probes, as before.
 
 (An unsynced pane sets its own `frame`; a synced loop driver re-`seek_to`s the shared
 timeline; other synced panes follow `shared_frame` via `catching_up`.)
@@ -1463,6 +1492,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   (`dir_inputs`, shared with drops/dialog via `inputs_for_path`), and a numbered
   `%0Xu` token naming videos expands to one pane per file rather than a
   `FileSeq`.
+- `cli::folder_files(token)` re-lists a **folder** token's image files for a reload
+  (§9), sharing `list_dir_files` with `dir_inputs` so the order matches the open's.
 - `--complete <word>` lists loadable completions (collapses numbered runs into the
   token — videos are listed literally, never collapsed); `--completions
   <bash|powershell>` prints a completer. `LOADABLE_EXTS =

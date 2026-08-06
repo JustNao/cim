@@ -311,6 +311,28 @@ impl Media {
         }
     }
 
+    /// The inverse of [`Self::local_file`]: the global frame index showing `page`
+    /// of `path`, or `None` when this media has no such frame **or hasn't
+    /// discovered it yet**. Resolved from what is already known — the file list
+    /// and, for a concatenation, the discovered part of the map — so this never
+    /// touches the disk; a `ConcatSeq` freshly opened knows only its first page,
+    /// and reaching further is [`super::fast_jump_to_file`]'s job.
+    ///
+    /// Used by a **reload** to land back on the file the user was watching rather
+    /// than on the global index they were at — once a folder has gained or lost
+    /// files, that index no longer names the same frame (§9).
+    pub fn locate_file(&self, path: &Path, page: usize) -> Option<usize> {
+        match self {
+            // One still per file: the global index *is* the file's position.
+            Media::FileSeq(f) if page == 0 => f.paths.iter().position(|p| p == path),
+            Media::ConcatSeq(c) => {
+                let file = c.files.iter().position(|p| p == path)?;
+                c.map.iter().position(|&(f, p)| f == file && p == page)
+            }
+            _ => None,
+        }
+    }
+
     /// More than 8 bits per sample → clip-on-load is a sensible default.
     pub fn hi_depth(&self) -> bool {
         match self {
