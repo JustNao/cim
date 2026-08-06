@@ -545,8 +545,38 @@ impl CimApp {
                     self.metrics.operators.record(d.ops_time);
                 }
             }
-            if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
-                self.upload_tex(ctx, idx, d.image, d.frame, d.sig);
+            let idx = self.panes.iter().position(|p| p.id == d.id);
+            match d.out {
+                crate::renderer::Out::Cpu(image) => {
+                    if let Some(idx) = idx {
+                        self.upload_tex(ctx, idx, image, d.frame, d.sig);
+                    }
+                }
+                // Already a texture egui knows about: nothing to upload, just
+                // park it for the lock-step commit.
+                crate::renderer::Out::Gpu(tex) => {
+                    if let Some(idx) = idx {
+                        let size = tex.size();
+                        self.panes[idx].tex.pending = Some(CachedTex {
+                            image: TexImage::Native(tex),
+                            shown: d.frame,
+                            size,
+                            sig: d.sig,
+                            // The GPU path only ever renders full resolution.
+                            step: 1,
+                        });
+                    }
+                }
+                // The card refused the work (too large for its limits, or the
+                // device went away). Hand this session back to the CPU for good;
+                // the pane keeps its last committed frame and re-requests on the
+                // next update, taking the CPU path — the user sees a correct
+                // image, just built the other way, and `CIM_DEBUG` says why.
+                crate::renderer::Out::GpuFailed(e) => {
+                    crate::debug::log(&format!("gpu: falling back to the CPU ({e})"));
+                    self.gpu = None;
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -734,61 +764,56 @@ impl CimApp {
         // A full-resolution render of a large frame: too expensive to do on the
         // UI thread, and so the render this app pushes elsewhere — to the render
         // pool on the CPU, or to the graphics card in GPU mode.
-        let bulk =
-            !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+        let bulk = !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
 
-        // GPU mode takes those renders itself, Colormap included. It is
-        // synchronous but not expensive: the dispatch is queued rather than
-        // awaited, and a frame already resident in VRAM (the pane is being
-        // re-toned rather than stepped) uploads nothing at all — which is the
-        // interaction the whole path exists for. Heavy panes are excluded
-        // outright: the proprietary operators are CPU code owned by the pane's
-        // render thread and cannot be part of this.
-        if bulk && self.gpu.is_some() {
-            let (lo, hi) = self.tone_bounds(idx, &frame);
-            let tone = crate::gpu::Tone {
-                lo,
-                hi,
-                palette: cmap.then(|| self.tone_of(idx).palette),
-            };
-            let pane_id = self.panes[idx].id;
-            let t = crate::debug::enabled().then(std::time::Instant::now);
-            let done = self.gpu.as_mut().expect("checked above").tone_into(
-                pane_id,
-                &frame,
-                tone,
-                &mut self.panes[idx].tex.pending,
-                target,
-                sig,
-            );
-            match done {
-                Ok(()) => {
-                    if let Some(t) = t {
-                        self.metrics.lut.record(t.elapsed());
-                    }
-                    return true;
-                }
-                // The card refused the work (too large for its limits, or the
-                // device went away). Hand this session back to the CPU for good
-                // and render the frame below — the user sees a correct image,
-                // just built the other way, and `CIM_DEBUG` says why.
-                Err(e) => {
-                    crate::debug::log(&format!("gpu: falling back to the CPU ({e})"));
-                    self.gpu = None;
-                }
-            }
-        }
-
+        // GPU mode takes those renders too, Colormap included. Heavy panes are
+        // excluded outright: the proprietary operators are CPU code owned by the
+        // pane's render thread and cannot be part of this.
+        //
+        // It goes through the **same pool** as the CPU render rather than running
+        // here, and that is not cosmetic. The dispatch is asynchronous, but the
+        // work in front of it is not: uploading a new frame's samples is a
+        // multi-megabyte memcpy, and on the UI thread it landed inside `update`
+        // and cost more frame time than the faster tone map saved (a 4096²×u16
+        // frame measured ~4.5 ms, against ~0.5 ms for the whole rest of the
+        // update). Off here it overlaps with everything else, and — the mapper
+        // being shared by `&self` — with the other panes' uploads, so a grid
+        // tones concurrently exactly as the CPU path does.
+        let gpu = bulk && self.gpu.is_some();
         let big = !cmap && bulk;
 
-        if heavy || big {
+        if heavy || big || gpu {
             // Render off-thread. One render per pane at a time, so rapid tone /
             // frame changes coalesce instead of piling up jobs.
             let id = self.panes[idx].id;
             if !self.render_inflight.contains(&id) {
                 let (lo, hi) = self.tone_bounds(idx, &frame);
-                let lut_alpha = contrast == ContrastMode::LutAlpha;
-                let details = self.details_of(idx);
+                let how = if gpu {
+                    // Hand the pane's own texture over for reuse when it has one,
+                    // so a playback run neither reallocates it nor re-registers
+                    // its id — the GPU counterpart of the commit parking the old
+                    // texture back in `pending`.
+                    let recycle = match self.panes[idx].tex.pending.take() {
+                        Some(CachedTex {
+                            image: TexImage::Native(g),
+                            ..
+                        }) => Some(g),
+                        other => {
+                            self.panes[idx].tex.pending = other;
+                            None
+                        }
+                    };
+                    let palette = cmap.then(|| self.tone_of(idx).palette);
+                    self.gpu
+                        .as_ref()
+                        .expect("checked above")
+                        .job(palette, recycle)
+                } else {
+                    crate::renderer::How::Cpu {
+                        lut_alpha: contrast == ContrastMode::LutAlpha,
+                        details: self.details_of(idx),
+                    }
+                };
                 self.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: target,
@@ -796,8 +821,7 @@ impl CimApp {
                     data: frame.clone(),
                     lo,
                     hi,
-                    lut_alpha,
-                    details,
+                    how,
                 });
                 self.render_inflight.insert(id);
             }

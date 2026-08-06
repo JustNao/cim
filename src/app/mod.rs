@@ -297,7 +297,11 @@ impl PaneTex {
 /// below is ever reached; see [`crate::gpu`].
 struct GpuState {
     ctx: std::sync::Arc<crate::gpu::GpuContext>,
-    mapper: crate::gpu::GpuToneMapper,
+    /// Shared with every pane's render worker (`crate::renderer`), which is where
+    /// the tone map actually runs — hence the `Arc`, and hence `GpuToneMapper`'s
+    /// methods taking `&self`. Panes tone concurrently; the per-pane half of the
+    /// state lives in each worker as a `gpu::PaneTone`.
+    mapper: std::sync::Arc<crate::gpu::GpuToneMapper>,
     /// eframe's own render state: the device the tone map shares, and the
     /// registry a toned texture is published to so egui can sample it.
     rs: eframe::egui_wgpu::RenderState,
@@ -310,16 +314,9 @@ impl GpuState {
     fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let rs = cc.wgpu_render_state.as_ref()?.clone();
         let ctx = crate::gpu::GpuContext::from_render_state(&rs);
-        let mapper = crate::gpu::GpuToneMapper::new(&ctx);
+        let mapper = std::sync::Arc::new(crate::gpu::GpuToneMapper::new(&ctx));
         crate::debug::log(&format!("gpu: display path on {}", ctx.describe()));
         Some(Self { ctx, mapper, rs })
-    }
-
-    /// Drop pane `id`'s uploaded display table, on close or reload. Resident
-    /// *frames* are keyed by frame rather than by pane (they are shared between
-    /// panes showing the same image), so those are left to the LRU.
-    fn forget_pane(&mut self, id: u64) {
-        self.mapper.forget_pane(id);
     }
 
     /// The adapter this is running on, for the Settings readout.
@@ -327,48 +324,25 @@ impl GpuState {
         self.ctx.describe()
     }
 
-    /// Tone `frame` for pane `pane_id` into `slot`, as a texture egui samples
-    /// directly — the pixels are never read back.
+    /// What a render worker needs to tone one frame for a pane.
     ///
-    /// The slot's existing GPU texture is reused whenever it is the right size,
-    /// so a playback run through same-sized pages neither reallocates it nor
-    /// re-registers its id; only a size change (or a slot holding a CPU-uploaded
-    /// texture) builds a new one.
-    fn tone_into(
-        &mut self,
-        pane_id: u64,
-        frame: &media::FrameData,
-        tone: crate::gpu::Tone,
-        slot: &mut Option<CachedTex>,
-        shown: usize,
-        sig: u64,
-    ) -> Result<(), crate::gpu::GpuError> {
-        let size = frame.size;
-        let mut tex = match slot.take() {
-            Some(CachedTex {
-                image: TexImage::Native(g),
-                ..
-            }) if g.size() == size => g,
-            _ => Box::new(crate::gpu::GpuTex::new(&self.rs, &self.ctx, size)?),
-        };
-        // Disjoint borrows of the output buffer and its texture: the tone map
-        // writes the first and copies it into the second in one submission.
-        let crate::gpu::GpuTex { out, tex: t, .. } = &mut *tex;
-        let done = self
-            .mapper
-            .tone(&self.ctx, pane_id, frame, tone, out, Some(&*t));
-        // A failure leaves the slot empty on purpose: the caller falls through to
-        // the CPU render, which fills it with a managed texture this same update.
-        done?;
-        *slot = Some(CachedTex {
-            image: TexImage::Native(tex),
-            shown,
-            size,
-            sig,
-            // Never decimated — the GPU path only ever renders full resolution.
-            step: 1,
-        });
-        Ok(())
+    /// A pane's *table* and output buffer belong to its worker, so there is
+    /// nothing pane-keyed to look up here — and nothing to `forget` when a pane
+    /// closes either, since the worker's exit takes them with it. Resident
+    /// frames are keyed by frame rather than pane (they are shared between panes
+    /// showing the same image), so those are left to the LRU.
+    fn job(
+        &self,
+        palette: Option<crate::palette::Palette>,
+        recycle: Option<Box<crate::gpu::GpuTex>>,
+    ) -> crate::renderer::How {
+        crate::renderer::How::Gpu {
+            gpu: self.ctx.clone(),
+            rs: self.rs.clone(),
+            mapper: self.mapper.clone(),
+            palette,
+            recycle,
+        }
     }
 }
 

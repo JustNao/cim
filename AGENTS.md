@@ -92,8 +92,10 @@ src/
   gpu/           Optional GPU display path (§7.1), only when Hardware acceleration is on:
     mod.rs         GpuContext (wraps eframe's wgpu device), GpuTex (a texture egui
                    samples directly), toggle resolution + adapter probe.
-    tonemap.rs     Resident VRAM sample buffers keyed by FrameData::uid, the
-                   uploaded display table, and the compute dispatch.
+    tonemap.rs     GpuToneMapper (shared: pipelines + the resident VRAM sample
+                   buffers keyed by FrameData::uid) and PaneTone (per pane: its
+                   uploaded display table), plus the compute dispatch. Runs on
+                   the pane's render worker, not the UI thread.
     tone.wgsl      The u8 / u16 / f32 tone-map kernels.
   watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
                  (sign_paths / FileWatcher, §9) — file I/O off the paint path.
@@ -705,10 +707,25 @@ acceleration* checkbox in Settings) is **off by default**, so an ordinary run is
 path exactly as it was before this module existed. When it is on *and* the machine has a
 hardware adapter (`gpu::wants_gpu`), `main` asks eframe for the **wgpu** renderer
 instead of glow, `CimApp` wraps eframe's own device
-(`gpu::GpuContext::from_render_state`), and `stage` hands the large full-resolution
-renders to `gpu::GpuToneMapper` instead of the render pool. The toned pixels are written
-into a `wgpu::Texture` registered with egui (`gpu::GpuTex`, `CachedTex.image ==
-TexImage::Native`), so they never enter system memory.
+(`gpu::GpuContext::from_render_state`), and `stage` sends the large full-resolution
+renders to the render pool as `renderer::How::Gpu` instead of `How::Cpu`. The toned
+pixels are written into a `wgpu::Texture` registered with egui (`gpu::GpuTex`,
+`CachedTex.image == TexImage::Native`), so they never enter system memory.
+
+**It runs on the pane's render worker, through the same pool as the CPU render** — same
+`render_inflight` cap, same `pending` slot, same lock-step commit; only `How` differs.
+Not cosmetic: the dispatch is asynchronous but the sample upload before it is a
+multi-megabyte memcpy, and on the UI thread that sat inside `update` and cost more frame
+time than the faster tone map saved (a 4096²×u16 frame measured ~4.5 ms against ~0.5 ms
+for the entire rest of the update). So `GpuToneMapper` takes `&self` and holds only what
+panes share — the pipelines and the resident-frame cache, the latter behind a `Mutex` —
+while `gpu::PaneTone` (the pane's uploaded display table) lives in its worker beside the
+CPU path's `ToneLut` and operator instances. Panes tone **concurrently**; the uploads,
+which are the cost, genuinely overlap, while the device serialises the dispatches behind
+them as it always would. `resident_frame` uploads with the cache lock *released* — two
+panes racing on the same new frame may both upload it and one buffer is dropped, which
+is preferred to serialising every upload for a rare race. A pane's table needs no
+`forget`: `renderer::forget` drops the worker and the table with it.
 
 **Why (and why not just "the CPU map, elsewhere").** The CPU tone map is already
 row-parallel and near memory bandwidth, so a compute pass that reads its result back
