@@ -642,8 +642,23 @@ impl CimApp {
                 if let Some((path, page)) = &anchor_file {
                     landed = self.panes[i].media.locate_file(path, *page);
                     if landed.is_none() {
-                        landed =
-                            media::fast_jump_to_file(&mut self.panes[i].media, path, *page).ok();
+                        // Carry the anchor this pane left last time: for a run
+                        // rewritten in place it pins the page in two header reads
+                        // instead of a walk. It is only reused for the same page
+                        // of the same file (`PageAnchor::pins`).
+                        let last = self.panes[i].page_anchor.take();
+                        match media::fast_jump_to_file(
+                            &mut self.panes[i].media,
+                            path,
+                            *page,
+                            last.as_ref(),
+                        ) {
+                            Ok((f, anchor)) => {
+                                landed = Some(f);
+                                self.panes[i].page_anchor = anchor;
+                            }
+                            Err(_) => self.panes[i].page_anchor = None,
+                        }
                     }
                 }
                 // Single-file media (one multi-page TIFF), or a file-anchored jump

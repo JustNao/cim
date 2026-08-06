@@ -373,11 +373,35 @@ len)` grows length by one.
     on reload).
 
 **File-anchored jump (`media::fast_jump_to_file`)** — `fast_jump` addressed by *file and
-page* instead of by global index, returning the index it landed on. Same cost and the
-same validation; the difference is only what identifies the frame, which matters when the
-timeline itself moved under it (a re-listed folder, a file that changed length — §9's
-reload). Its no-I/O counterpart is `Media::locate_file`, the inverse of `local_file`,
-which answers from the file list and the discovered part of the map alone.
+page* instead of by global index, returning the index it landed on. Same validation; the
+difference is only what identifies the frame, which matters when the timeline itself moved
+under it (a re-listed folder, a file that changed length — §9's reload). Its no-I/O
+counterpart is `Media::locate_file`, the inverse of `local_file`, which answers from the
+file list and the discovered part of the map alone.
+
+**Landing a frame ≠ decoding it.** Everything above is stride prediction, which requires
+*uncompressed* pages — so on its own it left the common LZW/Deflate sequence with no fast
+path at all. But what a jump has to establish is the frame's **position**: once the known
+length (and, for a concatenation, the map) reaches it, the frame is seekable, and its
+pixels are fetched by the ordinary codec-aware decoder exactly as they are for any evicted
+frame. So the layout-free paths read *headers* and treat the raw decode as a bonus:
+
+- `FastScan::walk_to` pins a page from the IFD chain alone — it does **not** require
+  `raw_decodable`, since following next-IFD pointers works whatever the strips hold.
+- `FastScan::count_pages_by_walk` is `page_count`'s layout-free counterpart: count the
+  chain instead of binary-searching a stride. `scan_counts_batch` picks between them with
+  `Measure` — `Predict` for the **background scan on open** (an unscannable sequence is
+  left to lazy discovery rather than spending a walk the user may never need), `Walk` for
+  **reload** (it is landing on a frame already being watched, so walking the files before
+  it beats rediscovering them a probe per update).
+- `FastScan::decode_ifd` returns `None` — rather than the caller failing — when the raw
+  reader can't reproduce the page bit-exactly. `offset_jump` / `fast_jump_to_file` then
+  grow the length through the target and leave the slot non-resident.
+
+The invariant is unchanged: a page is only landed on once its position has been
+*validated* (chain walk, or an anchor that still matches in full), so the index can't
+drift onto a wrong frame — being unable to decode a page is simply not a reason to
+rediscover the pages before it.
 
 **Offset-anchored jump (`media::offset_jump` / `PageAnchor`)** — the layout-free
 sibling of all of the above, used by **reload** (§9). It pins *one* page's byte offset
@@ -982,19 +1006,27 @@ these that works —
    already knows, no I/O: a still run (`FileSeq`) knows its whole file list on open, so
    this is the whole story for a folder of PNGs;
 1. `media::fast_jump_to_file` — the file-addressed sibling of `fast_jump`, for a
-   `ConcatSeq`: the files **before** the named one are page-counted by binary search
-   (headers, no pixels), the global map is extended through the target and only that
-   page is decoded, from its own file. It returns the **global index it landed on**,
-   which becomes the frame the seek below restores;
+   `ConcatSeq`: the files **before** the named one are page-counted (binary search where
+   the layout allows it, else `Measure::Walk` follows their IFD chains — headers, no
+   pixels either way), the global map is extended through the target, and the target
+   page is located in its own file by prediction or, failing that, by the same
+   anchor/walk `offset_jump` uses. It returns the **global index it landed on**, which
+   becomes the frame the seek below restores, plus the anchor to remember. This is what
+   makes a **compressed** run land on the file being watched instead of restarting it:
+   the page's pixels may well not be raw-readable, and that no longer matters (§4);
 2. `media::fast_jump` — for a single multi-page TIFF (nothing to name a file with), or
    when the file-anchored jump can't be made: the layout is regular, so the frame's
    position is *predicted* arithmetically, validated and decoded, growing the known
    length through it in one step;
 3. `media::offset_jump` — **the frame's byte offset**, remembered from the last reload
    (`Pane.page_anchor`, a `media::PageAnchor`), re-validated against the fresh file and
-   decoded from there. Needs **no** regular layout, so this is what covers the files
-   `fast_jump` rejects (compressed or mixed-shape pages). An anchor is reused only when
-   the file still matches it in full — same length and first-IFD offset, a byte-identical
+   decoded from there **when it can be** — the walk needs no regular layout *and* no
+   readable codec, so this is what covers every file `fast_jump` rejects: mixed-shape
+   pages, and compressed ones, whose position is pinned here and whose pixels come from
+   the ordinary decoder (§4). An anchor is reused only when
+   it is for the same **page of the same file** (`PageAnchor::pins` — a concatenation
+   anchors a page of one of its files, and a byte offset means something else in another)
+   and the file still matches it in full — same length and first-IFD offset, a byte-identical
    page header still at that offset (same shape *and* strip positions), and the page chain
    still entering it through the same predecessor — which is exactly the in-place
    overwrite auto-reload exists for, at a cost of two header reads. Anything structurally

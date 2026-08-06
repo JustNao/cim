@@ -47,6 +47,23 @@ pub fn write_multipage_tiff_u16(path: &Path, sizes: &[[usize; 2]]) {
     }
 }
 
+/// Like [`write_multipage_tiff_u16`] but **LZW-compressed** — the case the raw
+/// fast-scan reader can never decode (strip bytes aren't samples) and stride
+/// prediction refuses outright, so it is what the layout-free paths (the chain
+/// walk, `offset_jump`, `fast_jump_to_file`) have to carry. Pages are otherwise
+/// identical to the uncompressed writer's, so the two can be compared.
+pub fn write_multipage_tiff_u16_lzw(path: &Path, sizes: &[[usize; 2]]) {
+    let mut file = File::create(path).expect("create tiff");
+    let mut enc = TiffEncoder::new(&mut file)
+        .expect("tiff encoder")
+        .with_compression(tiff::encoder::Compression::Lzw);
+    for (k, &[w, h]) in sizes.iter().enumerate() {
+        let data = gray16_page(w, h, (k as u16).wrapping_mul(1000));
+        enc.write_image::<colortype::Gray16>(w as u32, h as u32, &data)
+            .expect("write lzw tiff page");
+    }
+}
+
 /// Like [`write_multipage_tiff_u16`] but writes a **BigTIFF** (64-bit offsets,
 /// wider IFDs) via the encoder's `new_big`, so the fast-scan reader's BigTIFF
 /// path has ground truth to validate against.

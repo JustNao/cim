@@ -90,7 +90,11 @@ const MAX_ANCHOR_WALK: usize = 100_000;
 /// a wrong frame.
 #[derive(Clone)]
 pub struct PageAnchor {
-    /// The frame index this pins. An anchor is only reused for the same index.
+    /// The file it pins a page of. A concatenation anchors a page of *one* of its
+    /// files, so an anchor is only ever reused against the file it was taken from.
+    path: PathBuf,
+    /// The page this pins — the frame index for a lone TIFF, the page within its
+    /// own file for a concatenation. An anchor is only reused for the same page.
     idx: usize,
     /// Byte offset of the page's IFD.
     offset: u64,
@@ -104,12 +108,24 @@ pub struct PageAnchor {
     file_len: u64,
 }
 
+impl PageAnchor {
+    /// Whether this anchor is the one for page `idx` of `path`. Both halves
+    /// matter: a concatenation's anchor pins a page of one particular file, and
+    /// reusing it against another file (or another page) would validate a byte
+    /// offset that means something else there.
+    fn pins(&self, path: &Path, idx: usize) -> bool {
+        self.idx == idx && self.path == path
+    }
+}
+
 /// A measured regular layout plus its own file handle: page N's IFD is
 /// predicted at `ifd0 + N × stride` and validated against `template` before
 /// anything is trusted. Built by [`FastScan::open`]; the `Err(reason)` strings
 /// are user-facing (they ride the *Load offsets* hover text).
 pub struct FastScan {
     file: File,
+    /// The file this reads, carried so an anchor records which file it pins.
+    path: PathBuf,
     file_len: u64,
     big_endian: bool,
     /// BigTIFF (magic 43): 64-bit offsets, an 8-byte IFD entry count, 20-byte
@@ -240,6 +256,7 @@ impl FastScan {
 
         Ok(FastScan {
             file,
+            path: path.to_path_buf(),
             file_len,
             big_endian,
             big,
@@ -296,8 +313,12 @@ impl FastScan {
 
     /// Decode the page described by `p` from its **own** strip positions — the
     /// offset-anchored counterpart of `read_page` (which shifts the template's).
-    /// The caller must have checked `raw_decodable(p)`.
+    /// `None` when the raw reader can't reproduce this page bit-exactly (it is
+    /// compressed, tiled, planar…): the page's *position* is still known, so the
+    /// caller lands the frame anyway and leaves the pixels to the ordinary
+    /// codec-aware decoder rather than reading strip bytes that aren't samples.
     fn decode_ifd(&mut self, p: &PageIfd) -> Option<FrameData> {
+        raw_decodable(p).ok()?;
         let offsets = p.strip_offsets.clone();
         self.decode_strips(p, &offsets)
     }
@@ -383,10 +404,36 @@ impl FastScan {
         Ok(lo + 1)
     }
 
+    /// Count the file's pages by walking the IFD chain — the layout-free
+    /// counterpart of [`Self::page_count`]'s binary search, for the files whose
+    /// page positions can't be predicted (compressed, tiled, mixed-shape). O(pages)
+    /// *tiny header reads*, no strip data and no decode, so it works on any TIFF
+    /// the header parser can read whatever its pixels are encoded with.
+    fn count_pages_by_walk(&mut self) -> Result<usize, String> {
+        let mut off = self.ifd0;
+        let mut pages = 0usize;
+        while off != 0 {
+            let p = self.read_ifd(off).ok_or("unreadable page header")?;
+            pages += 1;
+            if pages > MAX_ANCHOR_WALK {
+                return Err("too many pages to walk the file's length".into());
+            }
+            off = p.next;
+        }
+        Ok(pages)
+    }
+
     /// Walk the IFD chain to page `idx` and pin where it lives, so a later
     /// reload can go straight back to it. O(idx) *tiny header reads* — no strip
     /// data, no decode — which is what makes it worth doing synchronously where
     /// riding the frontier one probe per update would take `idx` frames.
+    ///
+    /// Pinning a page is **not** the same as being able to read its pixels here:
+    /// the walk only follows headers, so it succeeds on a compressed or tiled
+    /// page too. Whether the raw reader can decode it is [`Self::decode_ifd`]'s
+    /// question, asked separately — a page that lands but can't be raw-decoded
+    /// still fixes the frame's *position*, which is what lets the sequence be
+    /// seeked there and the ordinary (codec-aware) decoder fetch it.
     fn walk_to(&mut self, idx: usize) -> Result<PageAnchor, String> {
         if idx > MAX_ANCHOR_WALK {
             return Err("too many pages to walk to the frame".into());
@@ -402,8 +449,8 @@ impl FastScan {
             off = p.next;
             p = self.read_ifd(off).ok_or("unreadable page header")?;
         }
-        raw_decodable(&p)?;
         Ok(PageAnchor {
+            path: self.path.clone(),
             idx,
             offset: off,
             prev,
@@ -746,7 +793,9 @@ pub fn scan_offset_counts(paths: &[PathBuf]) -> Result<Vec<usize>, String> {
     if paths.is_empty() {
         return Err("empty sequence".into());
     }
-    scan_counts_batch(paths).into_iter().collect()
+    scan_counts_batch(paths, Measure::Predict)
+        .into_iter()
+        .collect()
 }
 
 /// How many files a scan measures at once.
@@ -760,14 +809,33 @@ pub fn scan_offset_counts(paths: &[PathBuf]) -> Result<Vec<usize>, String> {
 /// of seconds with its timeline still undiscovered.
 const SCAN_FANOUT: usize = 8;
 
+/// How hard [`scan_counts_batch`] tries to count a file whose page positions
+/// can't be predicted.
+#[derive(Clone, Copy, PartialEq)]
+enum Measure {
+    /// Binary-search a regular layout, and give up on anything else. What the
+    /// **background scan on open** does: an unscannable sequence is left to lazy
+    /// discovery rather than spending a walk on a file the user may never seek in.
+    Predict,
+    /// Fall back to walking the IFD chain (headers only) when prediction is
+    /// refused. What **reload** does: it is landing on a frame the user is
+    /// already watching, and a walk of the files before it is far cheaper than
+    /// the alternative of rediscovering them a probe per update.
+    Walk,
+}
+
 /// Measure every file's page count, up to [`SCAN_FANOUT`] files at a time.
 ///
 /// Results stay **per file and in order**: each worker writes only its own slice
 /// of the output. Keeping the failures separate matters as much as the order —
 /// a caller that only needs a prefix (`fast_jump`, which stops at the file
 /// holding its target) must not be failed by some later file it never reaches.
-fn scan_counts_batch(paths: &[PathBuf]) -> Vec<Result<usize, String>> {
-    let measure = |p: &PathBuf| FastScan::open(p).and_then(|mut scan| scan.page_count());
+fn scan_counts_batch(paths: &[PathBuf], how: Measure) -> Vec<Result<usize, String>> {
+    let measure = |p: &PathBuf| match FastScan::open(p).and_then(|mut scan| scan.page_count()) {
+        Ok(n) => Ok(n),
+        Err(e) if how == Measure::Predict => Err(e),
+        Err(_) => FastScan::open_header(p)?.count_pages_by_walk(),
+    };
 
     let mut out: Vec<Result<usize, String>> =
         paths.iter().map(|_| Err("not measured".into())).collect();
@@ -844,7 +912,10 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
                 // the tail of the last batch can be surplus — and that surplus is
                 // a few header reads, not pixels.
                 let end = (at + SCAN_FANOUT).min(files.len());
-                for (k, measured) in scan_counts_batch(&files[at..end]).into_iter().enumerate() {
+                for (k, measured) in scan_counts_batch(&files[at..end], Measure::Predict)
+                    .into_iter()
+                    .enumerate()
+                {
                     // `?` here only ever fires for a file at or before the
                     // target: a later one in the same batch is never inspected,
                     // so an unscannable tail can't cancel a jump that lands
@@ -885,7 +956,12 @@ pub fn fast_jump(media: &mut Media, target: usize) -> Result<(), String> {
 /// extended through the target — verified against whatever prefix ordinary
 /// discovery already built — and only the target page is decoded. On `Err`
 /// **nothing changes** and the caller falls back to the global index.
-pub fn fast_jump_to_file(media: &mut Media, file: &Path, page: usize) -> Result<usize, String> {
+pub fn fast_jump_to_file(
+    media: &mut Media,
+    file: &Path,
+    page: usize,
+    last: Option<&PageAnchor>,
+) -> Result<(usize, Option<PageAnchor>), String> {
     let Media::ConcatSeq(c) = media else {
         // A `FileSeq` needs no I/O to locate a file (`Media::locate_file`); the
         // single-file kinds have no file to name.
@@ -898,17 +974,41 @@ pub fn fast_jump_to_file(media: &mut Media, file: &Path, page: usize) -> Result<
         .ok_or("the file is no longer part of the run")?;
     // Every file before it is needed (its pages are what `page` sits after on the
     // global timeline), so unlike `fast_jump` there is no surplus to bound: the
-    // whole prefix is measured in one fanned-out batch.
-    let counts: Vec<usize> = scan_counts_batch(&files[..at])
+    // whole prefix is measured in one fanned-out batch. `Measure::Walk` because
+    // this is the reload path — a file that can't be *predicted* is counted by
+    // walking its headers rather than failing the jump, which is what keeps a
+    // compressed run landing back on its file instead of on frame 0.
+    let counts: Vec<usize> = scan_counts_batch(&files[..at], Measure::Walk)
         .into_iter()
         .collect::<Result<_, _>>()?;
-    let frame = FastScan::open(&files[at])?
-        .read_page(page)
-        .ok_or("no page at the predicted position (the file lost pages, or is irregular)")?;
     let target = counts.iter().sum::<usize>() + page;
+
+    // The target page itself: predicted and read in one step when the file's
+    // layout allows it, else pinned by its byte offset (re-validating the anchor
+    // this pane left last time, so a file rewritten in place costs two header
+    // reads). Decoding is best-effort either way — see `offset_jump`: what has to
+    // hold is the frame's *position*, and a page the raw reader can't reproduce
+    // is left for the ordinary decoder to fetch.
+    let mut anchor = None;
+    let frame = match FastScan::open(&files[at]).map(|mut s| s.read_page(page)) {
+        Ok(Some(frame)) => Some(frame),
+        _ => {
+            let mut scan = FastScan::open_header(&files[at])?;
+            let a = match last.filter(|a| a.pins(&files[at], page) && scan.still_anchored(a)) {
+                Some(a) => a.clone(),
+                None => scan.walk_to(page)?,
+            };
+            let frame = scan.decode_ifd(&a.ifd);
+            anchor = Some(a);
+            frame
+        }
+    };
+
     c.extend_known(&counts, at, page)?;
-    c.frames.insert(target, Arc::new(frame));
-    Ok(target)
+    if let Some(frame) = frame {
+        c.frames.insert(target, Arc::new(frame));
+    }
+    Ok((target, anchor))
 }
 
 /// Jump to frame `target` by **byte offset**: decode the page straight from
@@ -918,33 +1018,41 @@ pub fn fast_jump_to_file(media: &mut Media, file: &Path, page: usize) -> Result<
 /// discovery.
 ///
 /// This is the reload path's second string, after `fast_jump`: it needs no
-/// regular layout, so it also covers the files stride prediction rejects
-/// (compressed or mixed-shape pages — the walk only reads headers, and only the
-/// *target* page must be raw-decodable). `last` is the anchor from the previous
+/// regular layout, so it covers every file stride prediction rejects — the walk
+/// only reads headers, so **compressed, tiled or mixed-shape** pages are found
+/// just as well as uncompressed ones. `last` is the anchor from the previous
 /// time this pane landed on this frame: when it still validates against the
 /// reloaded file (the in-place overwrite case) the jump costs **two header
 /// reads**; otherwise the chain is walked once to rebuild it, which still beats
 /// riding the frontier one probe per update — and makes the *next* reload O(1).
+///
+/// **Landing the frame and decoding it are separate.** What the jump must
+/// establish is the frame's *position*: the known length grows through `target`,
+/// so the sequence can be seeked there at once. Its pixels are read here only
+/// when the raw reader can reproduce them bit-exactly; for anything else (an LZW
+/// page, say) the slot is simply left non-resident and the ordinary codec-aware
+/// decoder fills it on the next stage, exactly as it does for any frame that was
+/// evicted. Being unable to *decode* a page is therefore no reason to fall back
+/// to rediscovering the pages before it, which is what it used to cost.
 pub fn offset_jump(
     media: &mut Media,
     target: usize,
     last: Option<&PageAnchor>,
 ) -> Result<PageAnchor, String> {
     let Media::TiffSeq(t) = media else {
-        // A ConcatSeq spans files (`fast_jump` handles the regular case); a
+        // A ConcatSeq spans files — `fast_jump_to_file` is its equivalent; a
         // still / file run / video has nothing to walk.
         return Err("offset jump only applies to a single multi-page TIFF".into());
     };
     let mut scan = FastScan::open_header(&t.path)?;
-    let anchor = match last.filter(|a| a.idx == target && scan.still_anchored(a)) {
+    let anchor = match last.filter(|a| a.pins(&t.path, target) && scan.still_anchored(a)) {
         Some(a) => a.clone(),
         None => scan.walk_to(target)?,
     };
-    let frame = scan
-        .decode_ifd(&anchor.ifd)
-        .ok_or("the page's pixels couldn't be read from its recorded position")?;
     t.frames.note_len_to(target + 1);
-    t.frames.insert(target, Arc::new(frame));
+    if let Some(frame) = scan.decode_ifd(&anchor.ifd) {
+        t.frames.insert(target, Arc::new(frame));
+    }
     Ok(anchor)
 }
 
@@ -1277,7 +1385,8 @@ mod tests {
             None,
             "a freshly opened concatenation knows only its first page"
         );
-        let landed = fast_jump_to_file(&mut after, &file, page).expect("file-anchored jump");
+        let (landed, _) =
+            fast_jump_to_file(&mut after, &file, page, None).expect("file-anchored jump");
         assert_eq!(landed, 7);
         assert_eq!(after.frame_count(), 8); // known through the target, no further
         assert_eq!(after.local_file(landed), Some((b.as_path(), 2)));
@@ -1296,10 +1405,109 @@ mod tests {
         // A file dropped from the folder, or a page it no longer has: refused,
         // nothing mutated, and the caller falls back to the global index.
         let mut shrunk = load_sequence(&[a.clone(), inserted.clone()], "run".into()).unwrap();
-        assert!(fast_jump_to_file(&mut shrunk, &file, page).is_err());
+        assert!(fast_jump_to_file(&mut shrunk, &file, page, None).is_err());
         assert_eq!(shrunk.frame_count(), 1);
-        assert!(fast_jump_to_file(&mut after, &b, 99).is_err());
+        assert!(fast_jump_to_file(&mut after, &b, 99, None).is_err());
         assert_eq!(after.frame_count(), 8);
+    }
+
+    /// The reload of a **compressed** sequence — the case none of the raw paths
+    /// can decode. Landing the frame and decoding it are separate: the walk pins
+    /// the page from its headers, the known length grows through it so it is
+    /// seekable at once, and the pixels are left to the ordinary codec-aware
+    /// decoder instead of the whole thing falling back to rediscovery.
+    #[test]
+    fn a_compressed_sequence_still_lands_on_its_frame() {
+        use crate::testutil::{gray16_page, write_multipage_tiff_u16_lzw};
+
+        let dir = fixture_dir("offset_lzw");
+        let path = dir.join("lzw.tif");
+        write_multipage_tiff_u16_lzw(&path, &[[9, 7]; 6]);
+
+        // Neither stride prediction nor the raw reader can touch this file.
+        assert!(
+            FastScan::open(&path).is_err(),
+            "LZW must not be predictable"
+        );
+
+        let mut media = load(&path).unwrap();
+        assert_eq!(media.frame_count(), 1);
+        assert!(fast_jump(&mut media, 4).is_err(), "no layout to predict");
+
+        // ...but the frame still lands: the length grows through it, and it is
+        // the *position* that is established — the page stays non-resident.
+        let anchor = offset_jump(&mut media, 4, None).expect("the walk pins a compressed page");
+        assert_eq!(media.frame_count(), 5);
+        assert!(
+            media.resident(4).is_none(),
+            "a compressed page must not be raw-read"
+        );
+        assert!(media.resident(1).is_none(), "nor anything in between");
+
+        // The ordinary decoder is what reads it, and it is the right page.
+        let decoded = SeqReader::open(&path).unwrap().decode(4).unwrap().unwrap();
+        assert_eq!(u16s(&decoded), &gray16_page(9, 7, 4000)[..]);
+
+        // The anchor round-trips: the same page of the same file re-validates
+        // (two header reads, no walk), and it is refused for anything else.
+        let mut again = load(&path).unwrap();
+        offset_jump(&mut again, 4, Some(&anchor)).expect("anchored jump");
+        assert_eq!(again.frame_count(), 5);
+        assert!(!anchor.pins(&path, 3), "an anchor is per page");
+        assert!(!anchor.pins(&dir.join("other.tif"), 4), "and per file");
+    }
+
+    /// The same, across a **compressed concatenation**: the files before the one
+    /// being watched are counted by walking their headers (prediction is refused
+    /// for every one of them), so the reload lands on the current file instead of
+    /// starting the run over from its first page.
+    #[test]
+    fn a_compressed_concatenation_lands_on_the_watched_file() {
+        use crate::testutil::{gray16_page, write_multipage_tiff_u16_lzw};
+
+        let dir = fixture_dir("concat_lzw");
+        let a = dir.join("run_000.tif");
+        let b = dir.join("run_001.tif");
+        let c = dir.join("run_002.tif");
+        write_multipage_tiff_u16_lzw(&a, &[[9, 7]; 3]);
+        write_multipage_tiff_u16_lzw(&b, &[[9, 7]; 2]);
+        write_multipage_tiff_u16_lzw(&c, &[[9, 7]; 4]);
+
+        let mut media = load_sequence(&[a.clone(), b.clone(), c.clone()], "run".into()).unwrap();
+        assert!(
+            fast_jump(&mut media, 6).is_err(),
+            "an LZW run is not fast-scannable"
+        );
+
+        // Page 1 of the third file is global 6 (3 + 2 before it).
+        let (landed, anchor) =
+            fast_jump_to_file(&mut media, &c, 1, None).expect("walked file-anchored jump");
+        assert_eq!(landed, 6);
+        assert_eq!(media.frame_count(), 7);
+        assert_eq!(media.local_file(6), Some((c.as_path(), 1)));
+        let (_, map) = media.concat_layout().unwrap();
+        assert_eq!(
+            map,
+            vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (2, 0), (2, 1)]
+        );
+        assert_eq!(media.resident_count(), 1, "only page 0, loaded on open");
+
+        // The frame the pane will show is that file's page, via the ordinary
+        // decoder — the concatenation maps global 6 to (file 2, page 1).
+        let decoded = SeqReader::open(&c).unwrap().decode(1).unwrap().unwrap();
+        assert_eq!(u16s(&decoded), &gray16_page(9, 7, 1000)[..]);
+
+        // The anchor it left pins that page of that file, and re-validates on the
+        // next reload instead of walking again.
+        let anchor = anchor.expect("a walked jump leaves an anchor");
+        assert!(anchor.pins(&c, 1));
+        let mut again = load_sequence(&[a, b, c.clone()], "run".into()).unwrap();
+        let (landed, _) = fast_jump_to_file(&mut again, &c, 1, Some(&anchor)).expect("anchored");
+        assert_eq!(landed, 6);
+
+        // A page the file doesn't have is refused, and nothing is mutated.
+        assert!(fast_jump_to_file(&mut again, &c, 99, None).is_err());
+        assert_eq!(again.frame_count(), 7);
     }
 
     /// A numbered **still** run resolves a file to its frame with no I/O at all —
