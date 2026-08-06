@@ -1529,13 +1529,14 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 - `--complete <word>` lists loadable completions (collapses numbered runs into the
   token — videos are listed literally, never collapsed); `--completions
   <bash|powershell>` prints a completer. A folder candidate ends with **one**
-  `MAIN_SEPARATOR`, and the bash completer deliberately does **not** set `compopt -o
-  filenames`: readline would then quote each candidate as a filename and escape that
-  separator (`imgs\` → `imgs\\`), while giving nothing back (it trims a candidate's
-  display at the last *forward* slash, so a backslash path showed in full either way).
-  The completer escapes spaces itself on the way out and un-escapes them on the way
-  back in, and keeps the manual `nospace` for a lone folder candidate so it can be
-  descended. `LOADABLE_EXTS =
+  `MAIN_SEPARATOR`, and the bash completer sets `compopt -o filenames -o noquote` — the
+  two are a pair. `filenames` is what makes the list readable (readline then shows only
+  each candidate's **last component**, not the whole path we emit for substitution);
+  `noquote` stops it *quoting* those candidates on insertion, which escaped the
+  separator a folder ends with and put `imgs\\` on the command line. Spaces are then
+  escaped by the completer itself on the way out and un-escaped on the way in (the word
+  being completed carries them from a previous Tab), and the manual `nospace` for a lone
+  folder candidate lets it be descended. `LOADABLE_EXTS =
   [tif,tiff,png,jpg,jpeg,bmp,webp]` + `VIDEO_EXTS` is shared by the dialog and
   the filter.
 
