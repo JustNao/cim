@@ -93,6 +93,25 @@ pub struct FrameData {
     /// path otherwise re-scans the whole image on every redraw.
     bounds_full: OnceLock<(f32, f32)>,
     bounds_clip: OnceLock<(f32, f32)>,
+    /// The whole-image percentile histogram and its sample total, memoized for
+    /// the same reason the bounds above are — it is content-invariant — but for
+    /// a different caller: the *non-default* clip percentile.
+    ///
+    /// `bounds_clip` only covers 0.01%; any other percentile is computed fresh,
+    /// and each one re-scanned the whole image. The histogram, though, does not
+    /// depend on the percentile at all — only the walk over it does. So dragging
+    /// the clip slider was re-binning 16.7 M samples per update to answer a
+    /// question a 64 Ki-bin walk answers, on the UI thread, in both CPU and GPU
+    /// modes. See [`FrameData::full_hist_int`].
+    ///
+    /// Filled lazily and **only for frames big enough to be worth it** (see
+    /// [`HIST_CACHE_RATIO`]), so this is never a large fraction of a frame's
+    /// footprint and the frame cache's accounting stays honest.
+    hist_int: OnceLock<Option<(Vec<u32>, u32)>>,
+    /// The float counterpart, binned over the frame's own value extent. Always
+    /// worth memoizing — [`percentile::FLOAT_BINS`] is 4096, so the table is
+    /// 16 KiB whatever the image size.
+    hist_float: OnceLock<Option<(Vec<u32>, u32)>>,
     /// Decoded from a 1-bit bilevel TIFF: a boolean mask. Rendered as pure
     /// black/white (false/true) rather than through the tone mapping, and
     /// available to tint another pane as an overlay.
@@ -155,6 +174,8 @@ impl FrameData {
             uid: NEXT_FRAME_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             bounds_full: OnceLock::new(),
             bounds_clip: OnceLock::new(),
+            hist_int: OnceLock::new(),
+            hist_float: OnceLock::new(),
             mask: false,
         }
     }

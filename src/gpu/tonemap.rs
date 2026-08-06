@@ -614,7 +614,11 @@ mod tests {
         let gpu = gpu_or_skip!();
         // 8-bit mono at an odd width, 16-bit mono, 16-bit RGB, a 1-row frame,
         // and a 4-channel frame (whose alpha the render ignores).
-        let mono8 = FrameData::new([37, 21], 1, Samples::U8((0..37 * 21).map(|i| i as u8).collect()));
+        let mono8 = FrameData::new(
+            [37, 21],
+            1,
+            Samples::U8((0..37 * 21).map(|i| i as u8).collect()),
+        );
         let mono16 = FrameData::new(
             [40, 30],
             1,
@@ -682,7 +686,11 @@ mod tests {
     fn colormap_tone_map_matches_cpu_exactly() {
         let gpu = gpu_or_skip!();
         let pal = crate::palette::Palette::Viridis;
-        let u8f = FrameData::new([31, 5], 1, Samples::U8((0..31 * 5).map(|i| i as u8).collect()));
+        let u8f = FrameData::new(
+            [31, 5],
+            1,
+            Samples::U8((0..31 * 5).map(|i| i as u8).collect()),
+        );
         let u16f = FrameData::new(
             [31, 5],
             1,
@@ -756,7 +764,9 @@ mod tests {
         assert_eq!(after_first, 64 * 64 * 2);
 
         let retone = plain(2000.0, 50000.0);
-        mapper.tone(&gpu, 1, &frame, retone, &mut out, None).unwrap();
+        mapper
+            .tone(&gpu, 1, &frame, retone, &mut out, None)
+            .unwrap();
         assert_eq!(
             mapper.resident_bytes(),
             after_first,
@@ -831,7 +841,9 @@ mod tests {
             .collect();
         let mut out = None;
         for f in &frames {
-            mapper.tone(&gpu, 1, f, plain(0.0, 10.0), &mut out, None).unwrap();
+            mapper
+                .tone(&gpu, 1, f, plain(0.0, 10.0), &mut out, None)
+                .unwrap();
         }
         assert!(
             mapper.resident_bytes() <= mapper.budget,

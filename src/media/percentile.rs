@@ -9,7 +9,21 @@ use rayon::prelude::*;
 use super::{merge_hist, scan_band, FrameData, PAR_MIN_SCAN_PX};
 
 /// Float histogram resolution for the arithmetic (non-integer) percentile scan.
-const FLOAT_BINS: usize = 4096;
+pub(super) const FLOAT_BINS: usize = 4096;
+
+/// A whole-image histogram is memoized only when it is at most this fraction of
+/// the frame's own sample bytes.
+///
+/// The table is fixed-size (64 Ki `u32` = 256 KiB for 16-bit data, 1 KiB for
+/// 8-bit), so its *relative* cost is entirely a question of how big the image
+/// is — and so is the benefit, since the scan it replaces is O(pixels) while the
+/// walk is O(bins). Both point the same way: cache it for the large frames where
+/// the scan is expensive and the table is noise, skip it for the small ones
+/// where the scan is already cheap and the table would be a meaningful addition
+/// to a frame the cache budget is accounting for. At 1/16 the worst case is a
+/// 6.25% overshoot of `cache_budget_mb`, and only for frames whose bounds have
+/// actually been asked for at a non-default percentile.
+const HIST_CACHE_RATIO: usize = 16;
 
 impl FrameData {
     /// Fold `take` over the rows of `[x0,x1) × [y0,y1)`, into a `(histogram,
@@ -63,20 +77,19 @@ impl FrameData {
         fallback: (f32, f32),
     ) -> (f32, f32) {
         let nb = self.max_possible() as usize + 1;
-        let cc = self.color_channels();
-        let w = self.size[0];
-        let empty = || (vec![0u32; nb], 0u32);
-        let take = |(mut hist, mut total): (Vec<u32>, u32), y: usize| {
-            for x in x0..x1 {
-                let base = (y * w + x) * self.channels;
-                for c in 0..cc {
-                    hist[self.sample(base + c) as usize] += 1;
-                    total += 1;
-                }
+        // A whole-image rectangle can reuse the memoized histogram; a region
+        // (right-drag stats selection) bins its own pixels, and is small.
+        let cached = self
+            .covers_frame(x0, y0, x1, y1)
+            .then(|| self.full_hist_int());
+        let owned;
+        let (hist, total) = match &cached {
+            Some(Some((h, t))) => (&h[..], *t),
+            _ => {
+                owned = self.bin_rect_int(x0, y0, x1, y1, nb);
+                (&owned.0[..], owned.1)
             }
-            (hist, total)
         };
-        let (hist, total) = self.scan_rows(x0, y0, x1, y1, empty, take);
         if total == 0 {
             return fallback;
         }
@@ -108,24 +121,69 @@ impl FrameData {
         }
     }
 
-    /// Float percentile bounds over the pixel rectangle, binned across `extent`
-    /// (the rectangle's own min/max — floats can't index a per-value histogram
-    /// like integers do). `extent` is returned when it is degenerate or the
-    /// percentiles collapse.
-    pub(super) fn percentile_rect_float(
+    /// Whether `[x0,x1) × [y0,y1)` is the whole image — the case whose histogram
+    /// is memoized, since it is the one recomputed on every repaint.
+    fn covers_frame(&self, x0: usize, y0: usize, x1: usize, y1: usize) -> bool {
+        x0 == 0 && y0 == 0 && x1 == self.size[0] && y1 == self.size[1]
+    }
+
+    /// The per-value histogram of the rectangle's colour samples, and their
+    /// count. Split out of [`percentile_rect_int`](Self::percentile_rect_int) so
+    /// the *binning* (O(pixels)) can be memoized independently of the *walk*
+    /// (O(bins)), which is what the percentile actually varies.
+    fn bin_rect_int(
         &self,
         x0: usize,
         y0: usize,
         x1: usize,
         y1: usize,
-        p: f32,
-        extent: (f32, f32),
-    ) -> (f32, f32) {
-        let (min, max) = extent;
-        if max <= min {
-            return (min, max);
-        }
-        let span = max - min;
+        nb: usize,
+    ) -> (Vec<u32>, u32) {
+        let cc = self.color_channels();
+        let w = self.size[0];
+        let empty = || (vec![0u32; nb], 0u32);
+        let take = |(mut hist, mut total): (Vec<u32>, u32), y: usize| {
+            for x in x0..x1 {
+                let base = (y * w + x) * self.channels;
+                for c in 0..cc {
+                    hist[self.sample(base + c) as usize] += 1;
+                    total += 1;
+                }
+            }
+            (hist, total)
+        };
+        self.scan_rows(x0, y0, x1, y1, empty, take)
+    }
+
+    /// The memoized whole-image integer histogram, or `None` for a frame too
+    /// small to be worth caching one for (see [`HIST_CACHE_RATIO`]).
+    ///
+    /// This is the fix for the clip-percentile slider: `bounds_clip` memoizes
+    /// only the 0.01% default, so every other value re-binned the entire image
+    /// on the UI thread, once per update, while the user dragged. The histogram
+    /// is a function of the frame alone, so it is computed once and every
+    /// percentile after that is a walk over 64 Ki bins instead of a scan over
+    /// however many million samples.
+    fn full_hist_int(&self) -> &Option<(Vec<u32>, u32)> {
+        self.hist_int.get_or_init(|| {
+            let nb = self.max_possible() as usize + 1;
+            let [w, h] = self.size;
+            (nb * std::mem::size_of::<u32>() <= self.byte_len() / HIST_CACHE_RATIO)
+                .then(|| self.bin_rect_int(0, 0, w, h, nb))
+        })
+    }
+
+    /// The float counterpart of [`bin_rect_int`](Self::bin_rect_int): bin the
+    /// rectangle's colour samples across `[min, min + span]`, skipping NaN.
+    fn bin_rect_float(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        min: f32,
+        span: f32,
+    ) -> (Vec<u32>, u32) {
         let last = (FLOAT_BINS - 1) as f32;
         let cc = self.color_channels();
         let w = self.size[0];
@@ -145,7 +203,57 @@ impl FrameData {
             }
             (hist, total)
         };
-        let (hist, total) = self.scan_rows(x0, y0, x1, y1, empty, take);
+        self.scan_rows(x0, y0, x1, y1, empty, take)
+    }
+
+    /// The memoized whole-image float histogram, over the frame's own value
+    /// extent. Unconditionally worth keeping — [`FLOAT_BINS`] fixes it at 16 KiB
+    /// however large the image — so the only `None` here is the degenerate
+    /// (empty-extent) frame, which has no bins to walk.
+    fn full_hist_float(&self) -> &Option<(Vec<u32>, u32)> {
+        self.hist_float.get_or_init(|| {
+            let (min, max) = self.value_extent();
+            if max <= min {
+                return None;
+            }
+            let [w, h] = self.size;
+            Some(self.bin_rect_float(0, 0, w, h, min, max - min))
+        })
+    }
+
+    /// Float percentile bounds over the pixel rectangle, binned across `extent`
+    /// (the rectangle's own min/max — floats can't index a per-value histogram
+    /// like integers do). `extent` is returned when it is degenerate or the
+    /// percentiles collapse.
+    pub(super) fn percentile_rect_float(
+        &self,
+        x0: usize,
+        y0: usize,
+        x1: usize,
+        y1: usize,
+        p: f32,
+        extent: (f32, f32),
+    ) -> (f32, f32) {
+        let (min, max) = extent;
+        if max <= min {
+            return (min, max);
+        }
+        let span = max - min;
+        let last = (FLOAT_BINS - 1) as f32;
+        // As in the integer path: a whole-image rectangle reuses the memoized
+        // histogram, a region bins its own pixels. Binning depends on `extent`
+        // as well as the pixels, and the memoized one is built over the frame's
+        // own extent — so it is only reusable when this call uses that too.
+        let cached = (self.covers_frame(x0, y0, x1, y1) && extent == self.value_extent())
+            .then(|| self.full_hist_float());
+        let owned;
+        let (hist, total) = match &cached {
+            Some(Some((h, t))) => (&h[..], *t),
+            _ => {
+                owned = self.bin_rect_float(x0, y0, x1, y1, min, span);
+                (&owned.0[..], owned.1)
+            }
+        };
         if total == 0 {
             return (min, max);
         }
@@ -254,5 +362,77 @@ mod tests {
             // the fallback comes back — proof the scan saw only the right half.
             assert_eq!(got, (7.0, 7.0), "{threads} threads");
         }
+    }
+
+    /// Memoizing the histogram must not change a single bound. The cache stores
+    /// the *binning*, which is a function of the frame alone; the percentile
+    /// only ever varied the walk. So a frame asked for many percentiles in a row
+    /// (a slider drag — the case this exists for) has to give exactly what a
+    /// freshly built frame gives for each one, and the first call must not be
+    /// privileged over the rest either.
+    #[test]
+    fn the_memoized_histogram_changes_no_bounds() {
+        // 256x256 u8: 64 KiB of samples against a 1 KiB table, so it is over
+        // `HIST_CACHE_RATIO` and really is cached (asserted below).
+        let vals: Vec<u8> = (0..256 * 256).map(|i| (i * 7 % 251) as u8).collect();
+        let reused = FrameData::new([256, 256], 1, Samples::U8(vals.clone()));
+        assert!(
+            reused.full_hist_int().is_some(),
+            "this frame is meant to exercise the cached path"
+        );
+        for p in [0.0, 0.005, 0.01, 0.1, 0.5, 1.0, 5.0, 12.5, 49.9] {
+            // A frame that has never been asked anything: the uncached answer.
+            let fresh = FrameData::new([256, 256], 1, Samples::U8(vals.clone()));
+            assert_eq!(
+                reused.percentile_bounds(p),
+                fresh.percentile_bounds(p),
+                "p={p}"
+            );
+        }
+
+        // Same for floats, where the table is a fixed 16 KiB and always kept.
+        let fvals: Vec<f32> = (0..64 * 64).map(|i| i as f32 * 0.25 - 300.0).collect();
+        let reused = FrameData::new([64, 64], 1, Samples::F32(fvals.clone()));
+        assert!(reused.full_hist_float().is_some());
+        for p in [0.0, 0.01, 0.2, 2.0, 20.0, 49.9] {
+            let fresh = FrameData::new([64, 64], 1, Samples::F32(fvals.clone()));
+            assert_eq!(
+                reused.percentile_bounds_float(p),
+                fresh.percentile_bounds_float(p),
+                "p={p}"
+            );
+        }
+    }
+
+    /// The cache is for the **whole image** only. A region percentile bins its
+    /// own pixels, so pinning one must not leak into the other in either
+    /// direction — which is the bug a "just memoize the histogram" version of
+    /// this would have: the region's answer served from the frame's table.
+    #[test]
+    fn a_region_percentile_ignores_the_whole_image_cache() {
+        // Left half 0, right half 1000, as in the region test above.
+        let v: Vec<u16> = (0..DIM * DIM)
+            .map(|i| if i % DIM < DIM / 2 { 0 } else { 1000 })
+            .collect();
+        let f = FrameData::new([DIM, DIM], 1, Samples::U16(v));
+        // Warm the whole-image path first, so a leak would have something to leak.
+        let whole = f.percentile_rect_int(0, 0, DIM, DIM, 1.0, (7.0, 7.0));
+        let right = f.percentile_rect_int(DIM / 2, 0, DIM, DIM, 1.0, (7.0, 7.0));
+        // The right half is all 1000 -> collapses to the fallback; the whole
+        // image spans both values and does not.
+        assert_eq!(right, (7.0, 7.0));
+        assert_ne!(whole, right);
+    }
+
+    /// A frame small enough that the table would be a real share of its
+    /// footprint keeps no table — the scan it would save is cheap there anyway,
+    /// and the frame cache's byte accounting stays honest. 16x16 u16 is 512 B of
+    /// samples against a 256 KiB table.
+    #[test]
+    fn a_small_frame_caches_no_histogram() {
+        let f = FrameData::new([16, 16], 1, Samples::U16(vec![3; 16 * 16]));
+        assert!(f.full_hist_int().is_none());
+        // And still answers correctly, through the uncached path.
+        assert_eq!(f.percentile_bounds(1.0), (0.0, f.max_possible() as f32));
     }
 }

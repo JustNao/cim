@@ -161,6 +161,20 @@ use crate::watcher::FileSig;
 /// How many frames ahead of the shown one playback pre-decodes for each on-screen
 /// pane (`prefetch_playback`), so it overlaps decode with display instead of
 /// stalling on decode latency when it reaches a not-yet-resident frame.
+/// Ceiling on the playback rate offered by the frame bar's fps slider.
+///
+/// Playback is gated by the lock-step commit, not by this — a sequence whose
+/// frames can't be decoded and rendered that fast simply runs slower — so the
+/// cap is only there to bound the slider. It is well above any real frame rate
+/// because the transport doubles as a *skim* control: with a fast-forward stride
+/// or a fully resident sequence, running far past display rate is the point.
+const MAX_PLAY_FPS: f32 = 160.0;
+
+/// Shortest interval `update` will ask to be woken after while playing — the
+/// repaint-pacing floor behind [`MAX_PLAY_FPS`], with headroom so the cap is set
+/// by the slider rather than silently by this.
+const MIN_PLAY_WAIT: f32 = 1.0 / (MAX_PLAY_FPS * 1.5);
+
 const PLAY_PREFETCH: usize = 3;
 
 /// How many undiscovered pages the frontier is probed for at once
@@ -2271,7 +2285,7 @@ impl eframe::App for CimApp {
                 // Wake when the *next* frame is due: the time left for the
                 // accumulator to reach one step. A fixed `step` interval would
                 // drift late whenever a gate already consumed part of it.
-                let remaining = (step - self.playback.accum).clamp(1.0 / 120.0, 0.1);
+                let remaining = (step - self.playback.accum).clamp(MIN_PLAY_WAIT, 0.1);
                 std::time::Duration::from_secs_f32(remaining)
             };
             ctx.request_repaint_after(wait);

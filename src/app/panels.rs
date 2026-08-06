@@ -244,7 +244,7 @@ impl CimApp {
 
             // --- rate / load group ---
             ui.add(
-                egui::Slider::new(&mut self.playback.fps, 1.0..=60.0)
+                egui::Slider::new(&mut self.playback.fps, 1.0..=MAX_PLAY_FPS)
                     .suffix(" fps")
                     .fixed_decimals(0),
             );
@@ -1121,23 +1121,28 @@ impl CimApp {
                         rayon = rayon
                     ));
                 });
-                ui.horizontal(|ui| {
-                    ui.checkbox(
-                        &mut self.config.hardware_accel,
-                        t!("settings.hardware_accel"),
-                    )
-                    .on_hover_text(t!("settings.hardware_accel_hover"));
-                    // What the toggle resolves to on *this* machine — which it
-                    // can't say on its own, since asking for the GPU means
-                    // nothing until you know whether there is a card to find.
-                    let status = self.gpu_status();
-                    ui.weak(status)
+                // Shelved: offered only under `CIM_GPU=1`. The path is kept
+                // compiled and tested, but it measured as a loss over VNC — see
+                // `crate::gpu::exposed` for what was measured and why.
+                if crate::gpu::exposed() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(
+                            &mut self.config.hardware_accel,
+                            t!("settings.hardware_accel"),
+                        )
                         .on_hover_text(t!("settings.hardware_accel_hover"));
-                    // The renderer is chosen once, before the window exists.
-                    if self.config.hardware_accel != self.gpu_accel_active {
-                        ui.weak(t!("settings.hardware_accel_restart"));
-                    }
-                });
+                        // What the toggle resolves to on *this* machine — which it
+                        // can't say on its own, since asking for the GPU means
+                        // nothing until you know whether there is a card to find.
+                        let status = self.gpu_status();
+                        ui.weak(status)
+                            .on_hover_text(t!("settings.hardware_accel_hover"));
+                        // The renderer is chosen once, before the window exists.
+                        if self.config.hardware_accel != self.gpu_accel_active {
+                            ui.weak(t!("settings.hardware_accel_restart"));
+                        }
+                    });
+                }
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
                     .on_hover_text(t!("settings.cursor_dot_hover"));
                 ui.add_space(8.0);

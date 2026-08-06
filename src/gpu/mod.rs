@@ -381,18 +381,58 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     }
 }
 
+/// Whether the *Hardware acceleration* setting is offered at all this run, read
+/// once from `CIM_GPU=1` (as `crate::debug::enabled` reads `CIM_DEBUG`).
+///
+/// **The path is shelved, not deleted.** It is kept compiled, tested and
+/// documented so the work can be picked back up, but on the deployment it was
+/// built for — an NVIDIA card driven over VNC — it measured as a loss on every
+/// axis that matters, so it should not be reachable by a user who wanders into
+/// Settings. What was measured, and why the conclusion is about the display
+/// stack rather than about this module:
+///
+/// * The tone map itself is **excellent**: re-toning a resident frame is under a
+///   millisecond, against ~7 ms on the CPU. Residency does exactly what it was
+///   designed to do.
+/// * But the wgpu renderer costs more per frame than glow does there, whatever
+///   the tone map does, so the win never reaches the frame rate.
+/// * And it **tears** — a seam between two halves of the window showing
+///   different frames. That happens while merely panning a still frame, when no
+///   render is dispatched at all, so it is the Vulkan → X → VNC presentation
+///   path, not anything this module writes. `PresentMode` is already FIFO and
+///   `desired_maximum_frame_latency: Some(1)` changed nothing.
+/// * Moving the tone map to a background thread — the obvious fix for it sitting
+///   on the UI thread — made a 4.5 ms render take 170 ms, on a single pane: the
+///   device is monopolised by a presentation slow enough that any concurrent use
+///   of it queues behind. (That change was reverted; see the history.)
+///
+/// None of this rules the path out on a **local display**, which is where it
+/// should be evaluated next, and is what the env var is for.
+pub fn exposed() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CIM_GPU").as_deref() == Ok("1"))
+}
+
 /// Whether this run should use the GPU, and hence whether eframe is asked for
 /// the wgpu renderer. Resolved once, before the window exists, because the
 /// renderer can only be chosen at startup.
 ///
-/// Two conditions, both required: the user asked for hardware acceleration
-/// (`config.hardware_accel`, **off** by default), and this machine actually has
-/// a **hardware** adapter. The probe is why a GPU-less machine can carry the
-/// setting on without anything changing, and why a software rasteriser
-/// (llvmpipe / lavapipe) doesn't count — it is slower than the CPU path it would
-/// replace, so accepting it would make the toggle a pessimisation.
+/// Three conditions, all required: the path is [`exposed`] this run (`CIM_GPU=1`),
+/// the user asked for hardware acceleration (`config.hardware_accel`, **off** by
+/// default), and this machine actually has a **hardware** adapter. The probe is
+/// why a GPU-less machine can carry the setting on without anything changing, and
+/// why a software rasteriser (llvmpipe / lavapipe) doesn't count — it is slower
+/// than the CPU path it would replace, so accepting it would make the toggle a
+/// pessimisation.
+///
+/// The env gate is checked **here** rather than only in Settings on purpose: a
+/// config left with `hardware_accel: true` from before the setting was hidden
+/// must not go on selecting the wgpu renderer with no visible control to turn it
+/// off. Hiding the switch and leaving the wiring live is how a user ends up
+/// stuck.
 pub fn wants_gpu(hardware_accel: bool) -> bool {
-    hardware_accel && adapter_summary().is_some()
+    exposed() && hardware_accel && adapter_summary().is_some()
 }
 
 /// The hardware adapter this machine offers, described for the Settings readout,

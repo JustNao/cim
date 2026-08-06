@@ -734,8 +734,7 @@ impl CimApp {
         // A full-resolution render of a large frame: too expensive to do on the
         // UI thread, and so the render this app pushes elsewhere — to the render
         // pool on the CPU, or to the graphics card in GPU mode.
-        let bulk =
-            !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+        let bulk = !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
 
         // GPU mode takes those renders itself, Colormap included. It is
         // synchronous but not expensive: the dispatch is queued rather than

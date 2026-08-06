@@ -89,7 +89,7 @@ src/
                  sequence's page counts on open/reload (§4) without hitching paint.
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
                  PaneOps::render_display) for heavy panes so the UI never blocks.
-  gpu/           Optional GPU display path (§7.1), only when Hardware acceleration is on:
+  gpu/           Optional GPU display path (§7.1), **shelved** behind CIM_GPU=1 (§7.2):
     mod.rs         GpuContext (wraps eframe's wgpu device), GpuTex (a texture egui
                    samples directly), toggle resolution + adapter probe.
     tonemap.rs     Resident VRAM sample buffers keyed by FrameData::uid, the
@@ -698,10 +698,12 @@ minification (`TextureOptions::NEAREST`). The tool is pixel-accurate — an on-s
 pixel must be a true source sample, never a blend — so there is no interpolation option
 anywhere (display or export).
 
-### 7.1 GPU display path (`gpu/`, optional)
+### 7.1 GPU display path (`gpu/`, optional — **shelved**, see 7.2)
 
-**What it is.** The path is **opt-in**: `config.hardware_accel` (the *Hardware
-acceleration* checkbox in Settings) is **off by default**, so an ordinary run is the CPU
+**What it is.** The path is **opt-in and currently hidden**: `config.hardware_accel` (the
+*Hardware acceleration* checkbox in Settings) is off by default, and the checkbox is only
+shown — and `wants_gpu` only ever returns true — when the app was launched with
+**`CIM_GPU=1`** (`gpu::exposed`). An ordinary run is the CPU
 path exactly as it was before this module existed. When it is on *and* the machine has a
 hardware adapter (`gpu::wants_gpu`), `main` asks eframe for the **wgpu** renderer
 instead of glow, `CimApp` wraps eframe's own device
@@ -768,6 +770,57 @@ Any failure — a frame past the device's buffer limits, a lost device —
 drops `CimApp.gpu` for the rest of the session, logs under `CIM_DEBUG`, and falls through
 to the CPU render *in the same call*. **glow remains the default renderer** and is what
 every run with the toggle off — the default — uses, unchanged.
+
+### 7.2 Why the GPU path is shelved (and what was measured)
+
+Kept compiled, tested and documented rather than deleted, behind `CIM_GPU=1`, so the work
+can be picked back up. On the deployment it was built for — an **NVIDIA card driven over
+VNC** — it measured as a loss on every axis that matters. What was actually found, because
+the conclusion is about the *display stack*, not about the tone map:
+
+- **The tone map itself is excellent.** Re-toning a frame already resident in VRAM is
+  **under 1 ms**, against ~7 ms for the CPU render. Residency does exactly what §7.1 claims.
+- **The frame rate never sees it.** The wgpu renderer costs more per frame than glow does
+  there whatever the tone map does, so the win doesn't reach the update.
+- **It tears.** A seam between two halves of the window showing different frames — and it
+  happens while merely *panning a still frame*, where `stage` early-outs and no render is
+  dispatched at all. So it is the Vulkan → X → VNC presentation path, not anything this
+  module writes. `PresentMode` is already `AutoVsync` (FIFO) and
+  `desired_maximum_frame_latency: Some(1)` changed nothing.
+- **It cannot be moved off the UI thread there.** Running the tone map on the pane's render
+  worker — the obvious fix for it being synchronous — made a 4.5 ms render take **170 ms**,
+  on a *single* pane. The device is monopolised by a presentation slow enough that any
+  concurrent use of it queues behind. (Committed and reverted; the reverted commit is worth
+  reading before trying it again.)
+
+None of this rules the path out on a **local display**, which is where it should be
+evaluated next; that is what the env var is for. Note also that the interaction the path
+exists to accelerate — dragging the clip percentile — turned out to be gated by a CPU
+percentile scan in front of the render, in *both* modes (§7.3), so the GPU's sub-millisecond
+re-tone was never what the user was waiting on.
+
+### 7.3 Percentile histogram memoization (`media/percentile.rs`)
+
+`stage` calls `tone_bounds` → `own_tone_bounds` **on the UI thread** every update, and
+`clip_bounds` memoizes only the default 0.01% — "any other percentile is computed fresh".
+Fresh meant re-binning the whole image, so dragging the clip slider scanned ~16.7 M samples
+per update on a 4096² frame: ~12 ms of `update`, in CPU and GPU modes alike.
+
+The histogram is a function of the **frame alone**; only the walk over it depends on the
+percentile. So the binning is split out (`bin_rect_int` / `bin_rect_float`) and memoized
+per frame (`FrameData::hist_int` / `hist_float`, `OnceLock` beside `bounds_full`/`bounds_clip`),
+turning every percentile after the first into a walk over 64 Ki bins instead of a scan over
+however many million samples. **Whole-image rectangles only** (`covers_frame`) — a right-drag
+region bins its own pixels, and is small; the float table is additionally only reused when the
+call's `extent` is the frame's own, since the bin edges depend on it.
+
+Bounded on purpose: the integer table is kept only when it is ≤ 1/`HIST_CACHE_RATIO` (1/16) of
+the frame's sample bytes, so it is noise for the large frames where the scan is expensive and
+skipped for the small ones where the scan is already cheap — worst case a 6.25% overshoot of
+`cache_budget_mb`. The float table is a flat 16 KiB (`FLOAT_BINS` = 4096) and always kept.
+Results are **identical, not close**: both paths call the same binner, and
+`the_memoized_histogram_changes_no_bounds` holds a reused frame against a freshly built one
+across a spread of percentiles.
 
 ---
 
@@ -1422,9 +1475,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 `Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, cursor_dot,
 cpp_lib_dir, hardware_accel, keybindings }` (`hardware_accel` = build display pixels on
-the GPU — §7.1 — **off by default**, so the CPU path is what a run gets unless it is asked
-for; a checkbox in Settings, read **once at startup** since it also picks eframe's
-renderer, so Settings shows a "restart to apply" note. An old config's `render_backend`
+the GPU — §7.1 — **off by default**, and the checkbox is shown only under `CIM_GPU=1`
+(§7.2); read **once at startup** since it also picks eframe's renderer, so Settings shows a
+"restart to apply" note. An old config's `render_backend`
 — the retired `Auto | Cpu | Gpu` dropdown — is an unknown field and ignored, so an
 instance that had it on `Auto` comes back on the CPU) (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
