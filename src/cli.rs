@@ -41,6 +41,9 @@ pub enum Cli {
 /// One thing to open. A bare path becomes a single media; a compact
 /// `PREFIX%0Xu SUFFIX,START,END` token that names two or more files becomes **one**
 /// image sequence (a single pane), not a pane per file.
+///
+/// `Clone` so `main` can retry the whole run on a second renderer (see `main::run`).
+#[derive(Clone)]
 pub enum Input {
     Single(PathBuf),
     /// A numbered still sequence: `token` is the original compact argument (so
@@ -94,7 +97,7 @@ pub enum ClipSpec {
 /// Every field is optional: only the flags actually present on the command line
 /// override the app's defaults. Produced by the "View command" panel and parsed
 /// back here so a shared command reopens the same files at the same view.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ViewState {
     pub mode: Option<ViewMode>,
     pub cols: Option<usize>,

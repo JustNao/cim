@@ -310,47 +310,6 @@ impl Keybindings {
     }
 }
 
-/// Which processor builds a pane's display pixels — the tone map that turns
-/// native samples into the 8-bit RGBA texture (and, for a Compute pane, its
-/// reduction). Chosen in Settings; changing it takes effect on **restart**,
-/// because GPU mode also swaps eframe's renderer (see `crate::gpu`).
-///
-/// The GPU path is not merely "the same work, elsewhere": it keeps the decoded
-/// frame resident in VRAM and writes the toned pixels straight into a texture
-/// egui samples, so re-toning a resident frame (dragging the contrast slider on
-/// a big image) costs a small table upload and a dispatch instead of a
-/// full-image CPU map plus a full-image texture upload. That is the whole point;
-/// everything else is roughly a wash.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
-pub enum RenderBackend {
-    /// Use the GPU when a **hardware** adapter is present, else the CPU. The
-    /// default, and the only value that inspects the machine.
-    #[default]
-    Auto,
-    /// Always the CPU. Leaves the renderer on glow (OpenGL) — byte-for-byte the
-    /// behaviour of a build without any GPU support, for a machine whose driver
-    /// or remote-desktop stack doesn't get on with the GPU path.
-    Cpu,
-    /// Use the GPU, including a software adapter (llvmpipe / lavapipe) that
-    /// `Auto` would reject. Falls back to the CPU when there is no adapter at
-    /// all — the app never fails to start over this.
-    Gpu,
-}
-
-impl RenderBackend {
-    /// The modes in dropdown order.
-    pub const ORDER: [RenderBackend; 3] =
-        [RenderBackend::Auto, RenderBackend::Cpu, RenderBackend::Gpu];
-
-    pub fn label(self) -> String {
-        match self {
-            RenderBackend::Auto => t!("settings.backend_auto").into_owned(),
-            RenderBackend::Cpu => t!("settings.backend_cpu").into_owned(),
-            RenderBackend::Gpu => t!("settings.backend_gpu").into_owned(),
-        }
-    }
-}
-
 /// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
 /// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
 /// `crate::imageproc`); `Linear` is the built-in full-range map, with an
@@ -466,11 +425,21 @@ pub struct Config {
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
     #[serde(default)]
     pub cpp_lib_dir: String,
-    /// Which processor builds display pixels (see [`RenderBackend`]). Read once
-    /// at startup — it also selects eframe's renderer — so a change needs a
-    /// restart, which the Settings panel says.
+    /// Build a pane's display pixels on the GPU when the machine has a hardware
+    /// adapter (see `crate::gpu`). **Off by default:** the CPU path is what every
+    /// run used before this existed, it is the one tested on every machine, and
+    /// the GPU only wins on a specific interaction (re-toning a big resident
+    /// frame) — so it is opt-in rather than something a driver or a
+    /// remote-desktop stack gets to surprise a user with.
+    ///
+    /// Read once at startup — it also selects eframe's renderer — so a change
+    /// needs a restart, which the Settings panel says.
+    ///
+    /// An old config's `render_backend` (the former Auto/CPU/GPU dropdown) is an
+    /// unknown field and simply ignored, so an instance that had it on `Auto`
+    /// comes back on the CPU, which is the point of the change.
     #[serde(default)]
-    pub render_backend: RenderBackend,
+    pub hardware_accel: bool,
     pub keybindings: Keybindings,
 }
 
@@ -504,7 +473,7 @@ impl Default for Config {
             cpu_budget: default_cpu_budget(),
             cursor_dot: true,
             cpp_lib_dir: String::new(),
-            render_backend: RenderBackend::default(),
+            hardware_accel: false,
             keybindings: Keybindings::default(),
         }
     }
@@ -670,25 +639,32 @@ mod tests {
         apply_locale(DEFAULT_LANGUAGE);
     }
 
-    /// A config saved before the render backend existed keeps working and comes
-    /// back on `Auto` — the value that probes the machine — rather than on
-    /// whichever variant happens to be listed first. The setting also has to
-    /// survive a save/load round trip, since it is only read at startup and a
-    /// silently dropped value would look like the toggle doing nothing.
+    /// Hardware acceleration is **opt-in**: a config saved before it existed, and
+    /// one saved while the old Auto/CPU/GPU dropdown was on `Auto`, must both come
+    /// back on the CPU rather than silently swapping the renderer under a user who
+    /// never asked for it. The toggle also has to survive a save/load round trip,
+    /// since it is only read at startup and a silently dropped value would look
+    /// like the checkbox doing nothing.
     #[test]
-    fn render_backend_defaults_to_auto_and_round_trips() {
+    fn hardware_accel_defaults_off_and_round_trips() {
         let old: Config = serde_json::from_str("{\"max_columns\":3,\"keybindings\":{}}").unwrap();
-        assert_eq!(old.render_backend, RenderBackend::Auto);
-        assert_eq!(Config::default().render_backend, RenderBackend::Auto);
+        assert!(!old.hardware_accel);
+        assert!(!Config::default().hardware_accel);
 
-        for backend in RenderBackend::ORDER {
+        // The retired dropdown's value is an unknown field now, so it is ignored
+        // rather than carried over as an enabled GPU.
+        let legacy = "{\"max_columns\":3,\"render_backend\":\"Auto\",\"keybindings\":{}}";
+        let legacy: Config = serde_json::from_str(legacy).unwrap();
+        assert!(!legacy.hardware_accel);
+
+        for on in [false, true] {
             let c = Config {
-                render_backend: backend,
+                hardware_accel: on,
                 ..Default::default()
             };
             let json = serde_json::to_string(&c).unwrap();
             let back: Config = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.render_backend, backend);
+            assert_eq!(back.hardware_accel, on);
         }
     }
 

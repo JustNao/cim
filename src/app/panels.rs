@@ -1122,24 +1122,20 @@ impl CimApp {
                     ));
                 });
                 ui.horizontal(|ui| {
-                    ui.label(t!("settings.render_backend"));
-                    let before = self.config.render_backend;
-                    egui::ComboBox::from_id_salt("render_backend")
-                        .selected_text(before.label())
-                        .show_ui(ui, |ui| {
-                            for b in RenderBackend::ORDER {
-                                ui.selectable_value(&mut self.config.render_backend, b, b.label());
-                            }
-                        });
-                    // What the setting resolves to on *this* machine — which the
-                    // three abstract choices can't say on their own, since "Auto"
-                    // means nothing until you know whether there is a card to find.
+                    ui.checkbox(
+                        &mut self.config.hardware_accel,
+                        t!("settings.hardware_accel"),
+                    )
+                    .on_hover_text(t!("settings.hardware_accel_hover"));
+                    // What the toggle resolves to on *this* machine — which it
+                    // can't say on its own, since asking for the GPU means
+                    // nothing until you know whether there is a card to find.
                     let status = self.gpu_status();
                     ui.weak(status)
-                        .on_hover_text(t!("settings.render_backend_hover"));
+                        .on_hover_text(t!("settings.hardware_accel_hover"));
                     // The renderer is chosen once, before the window exists.
-                    if self.config.render_backend != self.gpu_backend_active {
-                        ui.weak(t!("settings.render_backend_restart"));
+                    if self.config.hardware_accel != self.gpu_accel_active {
+                        ui.weak(t!("settings.hardware_accel_restart"));
                     }
                 });
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))

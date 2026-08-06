@@ -89,9 +89,9 @@ src/
                  sequence's page counts on open/reload (§4) without hitching paint.
   renderer.rs    Off-thread tone-render pool: builds the display RGBA (via
                  PaneOps::render_display) for heavy panes so the UI never blocks.
-  gpu/           Optional GPU display path (§7.1), used only in GPU mode:
+  gpu/           Optional GPU display path (§7.1), only when Hardware acceleration is on:
     mod.rs         GpuContext (wraps eframe's wgpu device), GpuTex (a texture egui
-                   samples directly), backend resolution + adapter probe.
+                   samples directly), toggle resolution + adapter probe.
     tonemap.rs     Resident VRAM sample buffers keyed by FrameData::uid, the
                    uploaded display table, and the compute dispatch.
     tone.wgsl      The u8 / u16 / f32 tone-map kernels.
@@ -700,8 +700,11 @@ anywhere (display or export).
 
 ### 7.1 GPU display path (`gpu/`, optional)
 
-**What it is.** When `config.render_backend` resolves to GPU, `main` asks eframe for the
-**wgpu** renderer instead of glow, `CimApp` wraps eframe's own device
+**What it is.** The path is **opt-in**: `config.hardware_accel` (the *Hardware
+acceleration* checkbox in Settings) is **off by default**, so an ordinary run is the CPU
+path exactly as it was before this module existed. When it is on *and* the machine has a
+hardware adapter (`gpu::wants_gpu`), `main` asks eframe for the **wgpu** renderer
+instead of glow, `CimApp` wraps eframe's own device
 (`gpu::GpuContext::from_render_state`), and `stage` hands the large full-resolution
 renders to `gpu::GpuToneMapper` instead of the render pool. The toned pixels are written
 into a `wgpu::Texture` registered with egui (`gpu::GpuTex`, `CachedTex.image ==
@@ -734,12 +737,37 @@ pane's render thread). Decode, the export composite and the Compute reductions a
 notably that Mean/Std accumulate in `f64` (which WGSL has no equivalent for) and that
 Add/Sub would lose on the readback, their float result being larger than the inputs.
 
+**Backends: `PRIMARY`, never GL** (`gpu::BACKENDS`, handed to *both* the startup probe and
+eframe's `WgpuConfiguration`, so the two cannot disagree). A run without acceleration is
+already on **glow**, eframe's own OpenGL renderer and the tested path for every VNC /
+software-GL machine — wgpu's GLES backend would be a second, worse OpenGL, and it
+`unwrap()`s `eglMakeCurrent`, so a display that answers `BadAccess` takes the process down
+inside eframe's setup before any fallback here can run. No Vulkan adapter is therefore the
+same outcome as no card at all: the CPU path.
+
+**The probe can be wrong, so the start is retried.** The probe has no window, so it can
+only answer "this machine has a Vulkan device", not "that device can present to the window
+this app is about to open" — a remote / VNC / headless-X session is where those differ. And
+eframe does **not** fall back on its own: `run_native` dispatches to `run_wgpu` and returns
+its error. So `main::run` is a function taking the renderer, called twice: the wgpu attempt
+first and, on `Err`, the whole run again on glow (a line on stderr, and under `CIM_DEBUG` a
+log). Hence `cli::Input` / `cli::ViewState` are `Clone` — eframe's app creator is `FnOnce`,
+so the second attempt needs its own copy.
+
+**The toned texture is `Rgba8UnormSrgb`** (`GpuTex::FORMAT`), which
+`register_native_texture` requires: egui's own managed textures are sRGB and its shader
+assumes what it samples is already linear. A plain `Rgba8Unorm` holds the identical bytes
+and still draws, but they are then read as linear and gamma-encoded a second time — the
+GPU pane looks lighter and flatter than the CPU render of the same pixels, i.e. like a
+different tone window, and only above the decimation threshold where the GPU takes over.
+
 **Falling back is the normal case, not the error case.** A machine with no adapter never
-builds a context; `Auto` refuses a software adapter (llvmpipe is slower than the CPU path
-it would replace). Any failure — a frame past the device's buffer limits, a lost device —
+builds a context, and a software adapter (llvmpipe) is refused outright — it is slower
+than the CPU path it would replace, so taking it would make the toggle a pessimisation.
+Any failure — a frame past the device's buffer limits, a lost device —
 drops `CimApp.gpu` for the rest of the session, logs under `CIM_DEBUG`, and falls through
 to the CPU render *in the same call*. **glow remains the default renderer** and is what
-every CPU-mode run uses, unchanged.
+every run with the toggle off — the default — uses, unchanged.
 
 ---
 
@@ -1393,9 +1421,12 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, cursor_dot,
-cpp_lib_dir, render_backend, keybindings }` (`render_backend` = `Auto | Cpu | Gpu`,
-which processor builds display pixels — §7.1; read **once at startup**, since it also
-picks eframe's renderer, so Settings shows a "restart to apply" note) (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
+cpp_lib_dir, hardware_accel, keybindings }` (`hardware_accel` = build display pixels on
+the GPU — §7.1 — **off by default**, so the CPU path is what a run gets unless it is asked
+for; a checkbox in Settings, read **once at startup** since it also picks eframe's
+renderer, so Settings shows a "restart to apply" note. An old config's `render_backend`
+— the retired `Auto | Cpu | Gpu` dropdown — is an unknown field and ignored, so an
+instance that had it on `Auto` comes back on the CPU) (`language` = the UI locale, §12.1; `cpp_lib_dir` = the folder holding the proprietary
 operator libraries, loaded at startup and auto-loaded when the folder changes
 — §7 — with a Browse/paste field plus found/not-found and loaded indicators in
 Settings; empty = the `LIBS` folder next to the cim executable, else by name via `LD_LIBRARY_PATH`. `cpu_budget` = total

@@ -45,7 +45,7 @@ use crate::export::{
     LabelBitmap, LabelStyle, SourceInput,
 };
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
-use crate::settings::{Action, Chord, Config, ContrastMode, RenderBackend, ToneOptions};
+use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
 use crate::tone::pixel_bounds;
 use crate::view::ViewTransform;
 use export_ui::ExportRun;
@@ -1067,14 +1067,14 @@ pub struct CimApp {
     /// refuses a frame, which sends every later render back to the CPU — see
     /// [`GpuState`] and `crate::gpu`.
     gpu: Option<GpuState>,
-    /// The `render_backend` this run actually started with. The renderer can
-    /// only be chosen before the window exists, so Settings compares against
+    /// The `hardware_accel` setting this run actually started with. The renderer
+    /// can only be chosen before the window exists, so Settings compares against
     /// this to say when a change needs a restart.
-    gpu_backend_active: RenderBackend,
-    /// Cached answer to "what adapter would the current setting find?", with the
-    /// setting it was asked for. Probed lazily by `gpu_status`, because opening a
-    /// device costs enough not to do it on every repaint of the Settings window.
-    gpu_probe: Option<(bool, Option<String>)>,
+    gpu_accel_active: bool,
+    /// Cached answer to "is there a hardware adapter on this machine?". Probed
+    /// lazily by `gpu_status`, because opening a device costs enough not to do it
+    /// on every repaint of the Settings window.
+    gpu_probe: Option<Option<String>>,
     /// Windows: the main window's Win32 handle while it is still DWM-cloaked
     /// against the startup white flash; `tick` uncloaks and clears it once the
     /// first maximized frame has been presented (see `set_window_cloak`).
@@ -1158,7 +1158,7 @@ impl CimApp {
         let cpp_dir = cpp_lib_dir(&config);
         crate::imageproc::init(cpp_dir.as_deref());
         let cpp_dir_active = config.cpp_lib_dir.clone();
-        let backend_active = config.render_backend;
+        let accel_active = config.hardware_accel;
 
         // eframe shows the window right after the first frame is *painted* but
         // just before it is *presented* (`set_visible` runs before
@@ -1269,7 +1269,7 @@ impl CimApp {
             // Present exactly when `main` resolved this run to GPU mode and
             // eframe actually gave us the wgpu renderer.
             gpu: GpuState::new(cc),
-            gpu_backend_active: backend_active,
+            gpu_accel_active: accel_active,
             gpu_probe: None,
             #[cfg(windows)]
             cloaked_hwnd,
@@ -1284,26 +1284,23 @@ impl CimApp {
         }
         app
     }
-    /// What the render-backend setting means on *this* machine, for the readout
-    /// beside the Settings dropdown — the three abstract choices say nothing on
-    /// their own, since "Auto" depends entirely on whether there is a card to
-    /// find. Reports the running state first, and only probes for an adapter
-    /// when there isn't one to report; the probe opens a throwaway device, so
-    /// its answer is remembered until the setting changes.
+    /// What the acceleration toggle means on *this* machine, for the readout
+    /// beside the Settings checkbox — the toggle says nothing on its own, since
+    /// enabling it depends entirely on whether there is a card to find. Reports
+    /// the running state first, and only probes for an adapter when there isn't
+    /// one to report; the probe opens a throwaway device, so its answer is
+    /// remembered.
     pub(super) fn gpu_status(&mut self) -> String {
         if let Some(g) = &self.gpu {
             return t!("settings.backend_using", gpu = g.describe()).into_owned();
         }
-        if self.config.render_backend == RenderBackend::Cpu {
+        if !self.config.hardware_accel {
             return t!("settings.backend_cpu_only").into_owned();
         }
-        // `Gpu` accepts a software adapter where `Auto` insists on real
-        // hardware, so the answer differs between them — key the cache on it.
-        let software = self.config.render_backend == RenderBackend::Gpu;
-        if self.gpu_probe.as_ref().is_none_or(|(s, _)| *s != software) {
-            self.gpu_probe = Some((software, crate::gpu::adapter_summary(software)));
-        }
-        match &self.gpu_probe.as_ref().expect("just filled").1 {
+        let probe = self
+            .gpu_probe
+            .get_or_insert_with(crate::gpu::adapter_summary);
+        match probe {
             Some(name) => t!("settings.backend_found", gpu = name).into_owned(),
             None => t!("settings.backend_none").into_owned(),
         }

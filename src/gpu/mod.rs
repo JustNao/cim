@@ -1,5 +1,5 @@
 //! Optional GPU display path — tone mapping (and Compute-pane reductions) on
-//! the graphics card, behind the `render_backend` setting.
+//! the graphics card, behind the `hardware_accel` setting.
 //!
 //! # Why this exists, and what it is actually worth
 //!
@@ -73,8 +73,6 @@ pub use tonemap::{GpuOutput, GpuToneMapper, Tone};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::settings::RenderBackend;
-
 /// What the GPU path can fail with. Every variant means the same thing to the
 /// caller — render this on the CPU instead — so the payload is only ever used
 /// for the `CIM_DEBUG` log line.
@@ -102,14 +100,52 @@ impl std::fmt::Display for GpuError {
     }
 }
 
+/// The graphics backends this app will accept, for **both** the startup probe
+/// and the renderer eframe builds — they have to agree, or the probe green-lights
+/// a backend the renderer then falls over on.
+///
+/// `PRIMARY` is "everything except OpenGL/GLES". Excluding GL is deliberate and
+/// is not about performance:
+///
+/// * OpenGL is already covered, and better — a run without hardware acceleration
+///   uses **glow**, eframe's own OpenGL renderer, which is the tested path for
+///   every VNC / software-GL machine this tool runs on. wgpu's GLES backend would
+///   be a second, worse OpenGL implementation of the same thing.
+/// * It crashes rather than declining. `wgpu-hal`'s GLES backend `unwrap()`s
+///   `eglMakeCurrent` (`gles/egl.rs`), so a display that refuses the context —
+///   `BadAccess`, which is what an X/VNC session hands back once a context is
+///   current elsewhere — takes the process down inside eframe's setup, before
+///   any of this module's own fallbacks can run.
+/// * The GPU path's value is compute residency (see the module docs), and GLES
+///   compute needs ES 3.1 anyway, which the software stacks in question are
+///   exactly the ones not to have.
+///
+/// So the shape of the fallback is: no Vulkan (or Metal / DX12) adapter → no GPU
+/// → the CPU path on glow, which is the same outcome as a machine with no card
+/// at all, and a supported state rather than an error.
+pub const BACKENDS: wgpu::Backends = wgpu::Backends::PRIMARY;
+
+/// An instance limited to [`BACKENDS`].
+fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: BACKENDS,
+        ..Default::default()
+    })
+}
+
+/// Human-readable adapter summary for the Settings readout, e.g.
+/// `NVIDIA GeForce RTX 3060 (Vulkan)`.
+fn describe(info: &wgpu::AdapterInfo) -> String {
+    format!("{} ({:?})", info.name, info.backend)
+}
+
 /// A device the compute passes run on, plus the facts the rest of the app needs
 /// to size its work to it.
 ///
 /// In the running app this **wraps eframe's own device** rather than creating a
 /// second one ([`from_render_state`](Self::from_render_state)): sharing it is
 /// what lets a toned texture be handed to egui without ever leaving the card.
-/// The standalone constructor exists for the settings probe (which only wants
-/// the adapter's name) and for the tests.
+/// The standalone constructor exists for the tests.
 pub struct GpuContext {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
@@ -136,14 +172,16 @@ impl GpuContext {
         ))
     }
 
-    /// Open a device of our own, with no surface — used by the Settings adapter
-    /// probe and by the tests, never by the display path.
+    /// Open a device of our own, with no surface — **the tests only**, never the
+    /// app: the display path shares eframe's device, and the Settings probe
+    /// ([`adapter_summary`]) stops at the adapter without opening anything.
     ///
     /// `accept_software` admits a CPU adapter (llvmpipe / lavapipe). The tests
-    /// want that, since CI has no real GPU; `RenderBackend::Auto` does not,
-    /// because a software "GPU" is slower than the CPU path it would replace.
+    /// want that, since CI has no real GPU; the app never does, because a
+    /// software "GPU" is slower than the CPU path it would replace.
+    #[cfg(test)]
     pub fn new_standalone(accept_software: bool) -> Option<Arc<Self>> {
-        let instance = wgpu::Instance::default();
+        let instance = instance();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -202,7 +240,7 @@ impl GpuContext {
     /// Human-readable adapter summary for the Settings readout, e.g.
     /// `NVIDIA GeForce RTX 3060 (Vulkan)`.
     pub fn describe(&self) -> String {
-        format!("{} ({:?})", self.info.name, self.info.backend)
+        describe(&self.info)
     }
 
     /// Reject a buffer this device can't bind, before wgpu would raise it as an
@@ -240,6 +278,25 @@ pub struct GpuTex {
 }
 
 impl GpuTex {
+    /// The format egui samples a registered native texture as.
+    ///
+    /// **It must be sRGB**, and this is not a preference: `egui-wgpu` builds its
+    /// own managed textures as `Rgba8UnormSrgb` (so the sampler decodes to linear)
+    /// and its fragment shader assumes what it samples is already linear, doing
+    /// the linear→gamma step itself on the way to the framebuffer.
+    /// `register_native_texture` is documented to require the same format.
+    ///
+    /// A plain `Rgba8Unorm` here is byte-for-byte the same texture and still
+    /// *draws* — which is why this was easy to miss — but the sampler then hands
+    /// egui the display-encoded byte as though it were linear, and the shader
+    /// gamma-encodes it a second time. The image comes out visibly lighter and
+    /// flatter than the CPU render of the same pixels: it reads as a different
+    /// tone window even though `[lo, hi]` and every mapped byte are identical.
+    /// Since the GPU takes only full-resolution renders of large frames, that
+    /// showed up as the *same pane changing tone* as it was zoomed past the
+    /// decimation threshold and the CPU handed the render over.
+    pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
     /// Allocate a `size` texture and register it with egui, **NEAREST**-filtered
     /// like every other texture the tool shows: a displayed texel must be a true
     /// source sample, never a blend of neighbours, at any zoom.
@@ -265,7 +322,7 @@ impl GpuTex {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: Self::FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -328,64 +385,91 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
 /// the wgpu renderer. Resolved once, before the window exists, because the
 /// renderer can only be chosen at startup.
 ///
-/// `Auto` probes for a hardware adapter and quietly stays on the CPU when there
-/// isn't one — the case every GPU-less machine takes, and the reason this is a
-/// probe rather than a compile-time choice.
-pub fn wants_gpu(backend: RenderBackend) -> bool {
-    match backend {
-        RenderBackend::Cpu => false,
-        RenderBackend::Auto => adapter_summary(false).is_some(),
-        RenderBackend::Gpu => adapter_summary(true).is_some(),
-    }
+/// Two conditions, both required: the user asked for hardware acceleration
+/// (`config.hardware_accel`, **off** by default), and this machine actually has
+/// a **hardware** adapter. The probe is why a GPU-less machine can carry the
+/// setting on without anything changing, and why a software rasteriser
+/// (llvmpipe / lavapipe) doesn't count — it is slower than the CPU path it would
+/// replace, so accepting it would make the toggle a pessimisation.
+pub fn wants_gpu(hardware_accel: bool) -> bool {
+    hardware_accel && adapter_summary().is_some()
 }
 
-/// The adapter `backend` would pick, described for the Settings readout, or
-/// `None` when this machine has none to offer. Opens a throwaway device, so
-/// call it once and remember the answer.
-pub fn adapter_summary(accept_software: bool) -> Option<String> {
-    GpuContext::new_standalone(accept_software).map(|g| g.describe())
+/// The hardware adapter this machine offers, described for the Settings readout,
+/// or `None` when it has none — a software rasteriser included, since accepting
+/// one would make the toggle slower than leaving it off.
+///
+/// **Stops at the adapter**: it reads the name and nothing more, rather than
+/// opening a device it would immediately throw away. That matters at startup,
+/// where this runs *before* eframe builds the renderer — a probe device is a
+/// second driver context on the same display for no reason, and the GL backends
+/// that go wrong when two exist are exactly the ones [`BACKENDS`] excludes.
+/// Still not free (it initialises the driver), so callers remember the answer.
+pub fn adapter_summary() -> Option<String> {
+    let instance = instance();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))?;
+    let info = adapter.get_info();
+    (info.device_type != wgpu::DeviceType::Cpu).then(|| describe(&info))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The backend setting resolves the same way on every machine, which is what
-    /// makes "works without a GPU" a property rather than a hope. Written as
+    /// The setting resolves the same way on every machine, which is what makes
+    /// "works without a GPU" a property rather than a hope. Written as
     /// invariants rather than expected values, since the answer legitimately
     /// differs between a workstation with a card, a laptop without one, and CI.
     #[test]
     fn backend_resolution_never_forces_a_gpu() {
-        // Choosing CPU is absolute: no probing, no adapter, no wgpu renderer —
-        // the machine behaves as it did before this option existed.
-        assert!(!wants_gpu(RenderBackend::Cpu));
-        // Auto is the strictly more cautious of the two GPU choices: it rejects
-        // a software adapter that `Gpu` would take. So anything Auto accepts,
-        // `Gpu` accepts too — never the reverse.
-        if wants_gpu(RenderBackend::Auto) {
-            assert!(
-                wants_gpu(RenderBackend::Gpu),
-                "Auto must not accept an adapter that an explicit Gpu would refuse"
-            );
-        }
+        // The default (toggle off) is absolute: no probing, no adapter, no wgpu
+        // renderer — the machine behaves as it did before this option existed.
+        assert!(!wants_gpu(false));
         // And whatever this machine is, asking twice gives the same answer.
-        assert_eq!(wants_gpu(RenderBackend::Auto), wants_gpu(RenderBackend::Auto));
+        assert_eq!(wants_gpu(true), wants_gpu(true));
     }
 
-    /// `Auto` must never pick a software rasteriser: llvmpipe is slower than the
-    /// CPU path it would be replacing, so silently "finding a GPU" there would
-    /// make the default setting a pessimisation. An explicit `Gpu` may have it —
-    /// that is how these tests run at all.
+    /// The texture egui samples must be sRGB-encoded, because egui's own
+    /// managed textures are and its shader assumes what it samples has already
+    /// been decoded to linear. A plain `Rgba8Unorm` here still draws — it is the
+    /// same bytes — but they are read as linear and gamma-encoded a second time,
+    /// which shows up as the GPU-rendered pane being lighter and flatter than
+    /// the CPU render of the identical pixels. Cheap to assert, and it is the
+    /// kind of thing a refactor "simplifies" back to `Rgba8Unorm`.
     #[test]
-    fn auto_refuses_a_software_adapter() {
+    fn the_texture_egui_samples_is_srgb() {
+        assert!(GpuTex::FORMAT.is_srgb());
+    }
+
+    /// GL is deliberately not in [`BACKENDS`]: a run without acceleration is
+    /// already on eframe's own OpenGL renderer, and wgpu's GLES backend panics
+    /// (rather than declining) on a display that refuses `eglMakeCurrent`. The
+    /// probe and eframe's renderer are handed this same set, so the probe can
+    /// never green-light a backend the renderer then fails on.
+    #[test]
+    fn opengl_is_not_an_accepted_backend() {
+        assert!(!BACKENDS.contains(wgpu::Backends::GL));
+        assert!(BACKENDS.contains(wgpu::Backends::VULKAN));
+    }
+
+    /// The toggle must never pick a software rasteriser: llvmpipe is slower than
+    /// the CPU path it would be replacing, so silently "finding a GPU" there
+    /// would make enabling acceleration a pessimisation. The tests reach one
+    /// through `new_standalone(true)` directly — that is how they run at all.
+    #[test]
+    fn hardware_accel_refuses_a_software_adapter() {
         let Some(gpu) = GpuContext::new_standalone(true) else {
             eprintln!("skipped: no wgpu adapter on this machine");
             return;
         };
         if gpu.info.device_type == wgpu::DeviceType::Cpu {
             assert!(
-                !wants_gpu(RenderBackend::Auto),
-                "the only adapter here is software, so Auto must stay on the CPU"
+                !wants_gpu(true),
+                "the only adapter here is software, so the app must stay on the CPU"
             );
         }
     }

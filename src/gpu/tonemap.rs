@@ -45,10 +45,12 @@ impl GpuOutput {
         self.row_words * 4
     }
 
-    /// Copy the toned pixels into `tex`, which must be `Rgba8Unorm` at
+    /// Copy the toned pixels into `tex`, which must be [`GpuTex::FORMAT`] at
     /// [`size`](Self::size). A byte copy, so the texture holds exactly the bytes
     /// the shader wrote — no float quantisation between the tone map and the
-    /// screen (see `tone.wgsl`).
+    /// screen (see `tone.wgsl`). The format is sRGB because that is how egui
+    /// samples it; the copy itself is untouched by that, since a copy moves
+    /// bytes and the encoding only decides how the sampler reads them.
     fn copy_to_texture(&self, enc: &mut wgpu::CommandEncoder, tex: &wgpu::Texture) {
         enc.copy_buffer_to_texture(
             wgpu::ImageCopyBuffer {
@@ -132,7 +134,14 @@ struct LutBuf {
 }
 
 /// What a display table is a function of — the same inputs `ToneLut` keys on,
-/// plus the entry count (which the sample type fixes).
+/// plus the entry count and the sample type.
+///
+/// The **sample type** is not implied by the entry count, which is why it is
+/// here: `tone_table_rgba` builds a u8 frame's 256 entries as *mapped values
+/// indexed by the raw sample*, and a float frame's 256 entries as the flat ramp
+/// (or palette) *indexed by the level the shader computes*. Same length, opposite
+/// meanings — so without this a pane whose frame changed width between the two
+/// would reuse the other's table and render a tone window it was never given.
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct TableKey {
     lo: u32,
@@ -140,6 +149,7 @@ struct TableKey {
     mask: bool,
     palette: Option<u8>,
     entries: usize,
+    kernel: Kernel,
 }
 
 /// Which kernel a frame's samples need.
@@ -148,6 +158,17 @@ enum Kernel {
     U8,
     U16,
     F32,
+}
+
+impl Kernel {
+    /// The kernel `frame`'s samples need.
+    fn of(frame: &FrameData) -> Self {
+        match &frame.samples {
+            Samples::U8(_) => Kernel::U8,
+            Samples::U16(_) => Kernel::U16,
+            Samples::F32(_) => Kernel::F32,
+        }
+    }
 }
 
 /// Uniform block matching `Params` in `tone.wgsl`. Field order and padding are
@@ -308,10 +329,11 @@ impl GpuToneMapper {
         }
         self.tick += 1;
 
-        let (kernel, bytes) = match &frame.samples {
-            Samples::U8(v) => (Kernel::U8, bytemuck::cast_slice::<u8, u8>(v)),
-            Samples::U16(v) => (Kernel::U16, bytemuck::cast_slice::<u16, u8>(v)),
-            Samples::F32(v) => (Kernel::F32, bytemuck::cast_slice::<f32, u8>(v)),
+        let kernel = Kernel::of(frame);
+        let bytes = match &frame.samples {
+            Samples::U8(v) => bytemuck::cast_slice::<u8, u8>(v),
+            Samples::U16(v) => bytemuck::cast_slice::<u16, u8>(v),
+            Samples::F32(v) => bytemuck::cast_slice::<f32, u8>(v),
         };
         gpu.check_binding(bytes.len() as u64)?;
 
@@ -423,6 +445,7 @@ impl GpuToneMapper {
             mask: frame.is_mask(),
             palette: tone.palette.map(|p| p.id()),
             entries: frame.tone_table_entries(),
+            kernel: Kernel::of(frame),
         };
         if self.luts.get(&pane_id).is_some_and(|l| l.key == key) {
             return;
@@ -740,6 +763,60 @@ mod tests {
             "re-toning must not upload the samples again"
         );
         assert_eq!(out.unwrap().read_back(&gpu), cpu_render(&frame, retone));
+    }
+
+    /// The display table is cached per pane, so the *reuse* has to be as correct
+    /// as the build: a pane that goes on rendering with one mapper must get the
+    /// right table for each frame, not the one its predecessor left behind.
+    ///
+    /// The trap this pins is that a u8 frame and a float frame both want a
+    /// 256-entry table with opposite meanings — mapped values indexed by the raw
+    /// sample, versus a flat ramp indexed by a computed level. At a matching tone
+    /// every other part of the key agrees, so a key blind to the sample type
+    /// hands the second frame the first's table and renders it as though no tone
+    /// window had been applied at all.
+    #[test]
+    fn cached_table_follows_the_sample_type() {
+        let gpu = gpu_or_skip!();
+        let tone = plain(40.0, 200.0);
+        // The same values, one frame per sample width, all rendered by one
+        // mapper into one pane id — the app's steady state.
+        let u8f = FrameData::new(
+            [16, 16],
+            1,
+            Samples::U8((0..256).map(|i| i as u8).collect()),
+        );
+        let f32f = FrameData::new(
+            [16, 16],
+            1,
+            Samples::F32((0..256).map(|i| i as f32).collect()),
+        );
+        let u16f = FrameData::new(
+            [16, 16],
+            1,
+            Samples::U16((0..256).map(|i| i as u16).collect()),
+        );
+        let mut mapper = GpuToneMapper::new(&gpu);
+        let mut out = None;
+        // Twice around, so each frame is rendered both first (building the
+        // table) and after the others (reusing or rebuilding it).
+        for _ in 0..2 {
+            for frame in [&u8f, &f32f, &u16f] {
+                mapper.tone(&gpu, 1, frame, tone, &mut out, None).unwrap();
+                let got = out.as_ref().unwrap().read_back(&gpu);
+                let want = cpu_render(frame, tone);
+                // The float path is the ±1 one (see the test above); comparing
+                // channel-wise covers all three uniformly.
+                for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                    for c in 0..4 {
+                        assert!(
+                            g[c].abs_diff(w[c]) <= 1,
+                            "pixel {i} channel {c}: gpu {g:?} cpu {w:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The resident set is bounded: past its budget the least recently toned

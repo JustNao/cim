@@ -46,26 +46,62 @@ fn main() -> eframe::Result<()> {
     // Which renderer this run gets, decided here because eframe can only be told
     // once — hence the "takes effect after restart" note in Settings.
     //
-    // **glow (OpenGL) stays the default and the fallback.** It is what every CPU
-    // -mode run and every machine without a usable adapter uses, unchanged from
-    // before this option existed, which is the point: adding a GPU path must not
-    // change the graphics stack under users who aren't asking for one. GPU mode
-    // takes wgpu instead, because sharing its device is what lets the tone map
-    // write into a texture egui samples without a readback (see `crate::gpu`).
-    // If wgpu then fails to start, eframe falls back on its own and `CimApp`
-    // finds no render state, which is simply CPU mode.
-    let gpu = gpu::wants_gpu(config.render_backend);
+    // **glow (OpenGL) stays the default and the fallback.** It is what every run
+    // with hardware acceleration off — the default — and every machine without a
+    // usable adapter uses, unchanged from before this option existed, which is
+    // the point: adding a GPU path must not change the graphics stack under
+    // users who aren't asking for one. Accelerated runs take wgpu instead,
+    // because sharing its device is what lets the tone map write into a texture
+    // egui samples without a readback (see `crate::gpu`).
+    if gpu::wants_gpu(config.hardware_accel) {
+        // The adapter probe has no window, so it can only answer "this machine
+        // has a Vulkan device" — not "that device can present to the window this
+        // app is about to open". A remote / VNC / headless-X session is exactly
+        // where those two answers differ, so **wgpu starting is not guaranteed
+        // by the probe succeeding**, and eframe does not fall back on its own:
+        // `run_native` dispatches straight to `run_wgpu` and returns its error,
+        // which would mean no window at all rather than a slower one.
+        //
+        // So take the error and run the whole thing again on glow. The user gets
+        // the app, on the CPU path, exactly as if the machine had no card —
+        // which beats an accelerated run they cannot start and cannot turn off
+        // without hand-editing the config.
+        match run(&inputs, &view, eframe::Renderer::Wgpu) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                crate::debug::log(&format!("gpu: wgpu renderer failed to start ({e})"));
+                eprintln!("cim: hardware acceleration unavailable ({e}); using the CPU renderer");
+            }
+        }
+    }
+    run(&inputs, &view, eframe::Renderer::Glow)
+}
+
+/// Open the window and run the app on `renderer`.
+///
+/// Takes its inputs by reference and clones them per attempt because it may be
+/// called twice: eframe's creator is `FnOnce`, and the wgpu attempt above has to
+/// leave a second, glow-rendered attempt possible. The clone is a list of paths.
+fn run(
+    inputs: &[cli::Input],
+    view: &cli::ViewState,
+    renderer: eframe::Renderer,
+) -> eframe::Result<()> {
+    let (inputs, view) = (inputs.to_vec(), view.clone());
     let native_options = eframe::NativeOptions {
-        renderer: if gpu {
-            eframe::Renderer::Wgpu
-        } else {
-            eframe::Renderer::Glow
-        },
+        renderer,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             // Ask for the adapter's real limits, not wgpu's portable defaults —
             // a 4096² RGBA 16-bit frame needs a storage binding four times the
             // default ceiling (see `gpu::device_descriptor`).
             device_descriptor: std::sync::Arc::new(gpu::device_descriptor),
+            // The **same** backend set the probe resolved against. egui-wgpu
+            // would otherwise default to `PRIMARY | GL`, so a machine whose
+            // Vulkan device can't drive the surface would fall through to wgpu's
+            // GLES backend, which panics on `eglMakeCurrent` rather than
+            // declining — a crash instead of the fallback above. See
+            // `gpu::BACKENDS` for why GL has no business being here.
+            supported_backends: gpu::BACKENDS,
             ..Default::default()
         },
         viewport: egui::ViewportBuilder::default()

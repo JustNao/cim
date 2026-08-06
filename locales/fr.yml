@@ -315,22 +315,20 @@ settings.cpu_budget_hover: >-
   plusieurs instances partagent un serveur / hôte VNC ; augmentez-le
   temporairement pour un export lourd, puis remettez-le. Chaque panneau garde en
   plus son propre thread de rendu. Appliqué immédiatement.
-settings.render_backend: Rendu
-settings.backend_auto: Auto
-settings.backend_cpu: CPU
-settings.backend_gpu: GPU
+settings.hardware_accel: Accélération matérielle
 settings.backend_using: "sur %{gpu}"
 settings.backend_found: "GPU disponible : %{gpu}"
 settings.backend_none: aucun GPU détecté
 settings.backend_cpu_only: CPU uniquement
-settings.render_backend_restart: (redémarrer pour appliquer)
-settings.render_backend_hover: >-
-  Quel processeur construit l'image affichée. Sur le GPU, une grande image reste
-  en mémoire vidéo : changer la fenêtre de contraste la retraite donc presque
-  instantanément, au lieu de recalculer et retransférer toute l'image ; les
-  pixels sont identiques dans les deux cas. Auto utilise le GPU si la machine en
-  a un. Les panneaux utilisant les opérateurs C++ restent toujours sur le CPU.
-  Prend effet au redémarrage.
+settings.hardware_accel_restart: (redémarrer pour appliquer)
+settings.hardware_accel_hover: >-
+  Construire l'image affichée sur le GPU plutôt que sur le CPU. Une grande image
+  reste alors en mémoire vidéo : changer la fenêtre de contraste la retraite donc
+  presque instantanément, au lieu de recalculer et retransférer toute l'image ;
+  les pixels sont identiques dans les deux cas. Désactivé par défaut : le CPU est
+  utilisé tant que vous ne demandez pas cette option, et c'est aussi ce vers quoi
+  une machine sans carte graphique se replie. Les panneaux utilisant les
+  opérateurs C++ restent toujours sur le CPU. Prend effet au redémarrage.
 settings.cursor_dot: Point du curseur sur les autres panneaux
 settings.cursor_dot_hover: >-
   Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour
