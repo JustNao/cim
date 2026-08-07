@@ -1,0 +1,73 @@
+#
+# Offline build environment for cim — **Windows** release binary (x86_64),
+# cross-compiled with mingw-w64 (GNU ABI).
+#
+# Separate from Dockerfile.linux, and on a **newer base**, because the two have
+# opposite requirements: the Linux binary must link against an *old* glibc
+# (2.28 → debian:buster), while the Windows cross-link needs a *recent*
+# mingw-w64 + binutils. Buster's pair (mingw-w64 6.0.0, binutils 2.31) cannot
+# link this project since eframe's `wgpu` feature pulled in wgpu/naga:
+#
+#   * mingw 6.0.0's `libntdll.a` duplicates the CRT math import stubs that
+#     `libmsvcrt.a` defines, so `naga`'s `f64::atan` call fails the link with
+#     ``multiple definition of `__imp_atan'`` (fixed upstream in mingw-w64
+#     8.0.0), and
+#   * binutils 2.31's `ld` then dies with SIGSEGV on the much larger object set
+#     those crates add — which `--allow-multiple-definition` does nothing for.
+#
+# Bookworm carries mingw-w64 10.0.0 and binutils 2.40, which have neither
+# problem. A Windows binary has no glibc constraint, so nothing is lost by
+# moving this half forward.
+#
+# Everything (Debian packages, the pinned Rust toolchain + the windows-gnu
+# target, and every crate from Cargo.lock) is pulled while BUILDING this image,
+# so the resulting image builds the project with NO network access. See
+# build_utils/README.md.
+#
+# Build (needs internet), FROM THE REPO ROOT so the COPY paths resolve:
+#   docker build -f build_utils/Dockerfile.windows -t cim-build-windows:latest .
+#
+
+FROM debian:bookworm
+
+# The Windows cross toolchain (mingw-w64: gcc, binutils, windres — the last is
+# what build.rs's `winresource` invokes to embed the .exe icon), plus the host
+# build-script toolchain and helpers used by the build script (file).
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      curl ca-certificates git build-essential pkg-config file binutils \
+      mingw-w64 \
+ && rm -rf /var/lib/apt/lists/* \
+ && x86_64-w64-mingw32-gcc --version | head -1 \
+ && x86_64-w64-mingw32-ld --version | head -1
+
+# Pinned Rust (matches CI), isolated from any host install. Only the
+# windows-gnu target is needed here; the host toolchain still compiles build
+# scripts and proc macros.
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain 1.96.0 \
+        --target x86_64-pc-windows-gnu \
+ && rustc --version
+
+# Link the Windows target with the mingw-w64 gcc (its dlltool/windres/etc. are
+# found on PATH). rustc uses its own bundled archiver, so only the linker is set.
+RUN printf '[target.x86_64-pc-windows-gnu]\nlinker = "x86_64-w64-mingw32-gcc"\n' \
+      > /opt/cargo/config.toml
+
+# Pre-fetch every crate from the pinned lockfile into CARGO_HOME so builds run
+# fully offline. Only the manifest + lock are needed to resolve the graph (a
+# dummy target keeps cargo happy); the real sources are bind-mounted at run
+# time. Plain `cargo fetch` (no --target) fetches the closure for **all** target
+# platforms — a `--target` filter drops platform-gated transitive deps and can
+# leave the offline build short a crate.
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+ && cargo fetch --locked \
+ && cd / && rm -rf /build
+
+# The project source is bind-mounted here at run time (see build_utils/build.sh).
+WORKDIR /work
