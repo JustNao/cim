@@ -1121,6 +1121,27 @@ impl CimApp {
                         rayon = rayon
                     ));
                 });
+                ui.horizontal(|ui| {
+                    ui.label(t!("settings.jp2_detail"));
+                    ui.add(
+                        egui::Slider::new(&mut self.config.jp2_max_mp, 0..=512)
+                            .suffix(" MP")
+                            .logarithmic(true)
+                            .custom_formatter(|n, _| {
+                                if n < 1.0 {
+                                    t!("settings.jp2_detail_full").into_owned()
+                                } else {
+                                    format!("{n:.0}")
+                                }
+                            }),
+                    )
+                    .on_hover_text(t!("settings.jp2_detail_hover"));
+                    // A megapixel ceiling doesn't say what it does to the file in
+                    // front of you; name the level the open panes landed on.
+                    if let Some(note) = self.jp2_level_note() {
+                        ui.weak(note);
+                    }
+                });
                 // Shelved: offered only under `CIM_GPU=1`. The path is kept
                 // compiled and tested, but it measured as a loss over VNC — see
                 // `crate::gpu::exposed` for what was measured and why.

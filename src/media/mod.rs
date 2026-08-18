@@ -9,7 +9,7 @@
 //! accessors ([`Media::resident`] / [`Media::insert`]).
 
 mod fastscan;
-mod jp2;
+pub mod jp2;
 mod loader;
 mod percentile;
 mod render;

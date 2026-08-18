@@ -13,14 +13,129 @@
 //! Lossless files decode bit-exactly (the tests pin that); a lossy (9/7)
 //! file's reconstruction is real-valued and can land just outside the nominal
 //! range, so samples are rounded and clamped to the component's own depth.
+//!
+//! # Resolution levels — why a `.jp2` is not always decoded whole
+//!
+//! JPEG 2000 is a wavelet codec, so the codestream *contains* a pyramid: asking
+//! for half, quarter, … resolution decodes fewer subbands rather than decoding
+//! everything and throwing it away. That is the difference between opening a
+//! 25000² satellite tile and not, measured on a comparable file:
+//!
+//! | level | decode | peak RSS |
+//! |-------|--------|----------|
+//! | full  | 2.2 s  | 972 MB   |
+//! | 1/4   | 294 ms | 72 MB    |
+//! | 1/32  | 21 ms  | 12 MB    |
+//!
+//! (8192², ~1.1 bit/px; a 25000² tile is ~9× that — some 25 s and ~9 GB whole.)
+//! So a file whose full size exceeds [`budget_px`] is decoded at the finest
+//! level that fits, and **the pane is then that smaller image**: its size, its
+//! cursor readout, its histogram and its export all describe what was loaded,
+//! and the media's name carries the reduction (`tile.jp2 (1/8)`) so it is never
+//! a silent substitution. The samples are the wavelet's lowpass — averages, not
+//! a decimation of true samples — which is why this is opt-out-able and why the
+//! reduction is stated rather than hidden.
+//!
+//! The **codestream is kept** beside the decoded frame (91 MB against the
+//! gigabytes the full image would cost), so changing the budget re-levels every
+//! open pane without touching the disk — see [`Jp2Cache`] and `relevel`.
 
 use rust_i18n::t;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
 
 use super::{FrameData, Samples};
+
+/// The decoded-pixel ceiling for one JPEG 2000 image, in **pixels** (not
+/// megapixels): `Config::jp2_max_mp` × 1e6, or 0 for "decode whole".
+///
+/// Process-global on purpose. Every decode path — opening a pane, a numbered
+/// run's frames, the export worker's own reader — must agree on the level, or
+/// an exported frame would not be the frame on screen (§10's parity rule).
+/// Threading a config value through all of them is exactly the drift that rule
+/// exists to prevent.
+static BUDGET_PX: AtomicUsize = AtomicUsize::new(DEFAULT_BUDGET_PX);
+
+/// Default ceiling: 32 MP (≈5657², 64 MB as `u16`) — comfortably more detail
+/// than a 4K screen shows, and about a second of decode on a big tile.
+pub const DEFAULT_BUDGET_PX: usize = 32_000_000;
+
+/// Set the decoded-pixel ceiling (from `Config::jp2_max_mp`).
+pub fn set_budget_px(px: usize) {
+    BUDGET_PX.store(px, Ordering::Relaxed);
+}
+
+/// The current ceiling; 0 = decode at full resolution.
+pub fn budget_px() -> usize {
+    BUDGET_PX.load(Ordering::Relaxed)
+}
+
+/// The resolution level to decode `native` at under a `budget` of decoded
+/// pixels: 0 = full, 1 = half each way (a quarter of the pixels), 2 = a
+/// sixteenth, … Chosen as the **finest** level that fits, so an image already
+/// under the budget is never reduced.
+pub fn level_for(native: [usize; 2], budget: usize) -> u32 {
+    if budget == 0 {
+        return 0;
+    }
+    let mut level = 0u32;
+    // Deliberately `>>` per step rather than solving it in one go: this is the
+    // same halving the codec does, so the predicted size matches what comes back.
+    while level < MAX_LEVEL && level_size(native, level).iter().product::<usize>() > budget {
+        level += 1;
+    }
+    level
+}
+
+/// The decode target for `native` under `budget` — `None` when it already fits
+/// (decode whole), else the reduced level's size.
+fn target_for(native: [usize; 2], budget: usize) -> Option<[usize; 2]> {
+    match level_for(native, budget) {
+        0 => None,
+        l => Some(level_size(native, l)),
+    }
+}
+
+/// Never reduce past this, however small the budget — beyond it the image is a
+/// thumbnail and the pane would be showing nothing useful.
+const MAX_LEVEL: u32 = 8;
+
+/// The pixel size `native` decodes to at `level` (each level halves, rounding
+/// up, which is what the codec's own shrink factor does).
+pub fn level_size(native: [usize; 2], level: u32) -> [usize; 2] {
+    let d = 1usize << level.min(MAX_LEVEL);
+    [native[0].div_ceil(d).max(1), native[1].div_ceil(d).max(1)]
+}
+
+/// The codestream kept beside a decoded JPEG 2000 still, so the image can be
+/// re-levelled without re-reading (and re-parsing) the file. The bytes are a
+/// fraction of the decoded frame — the whole point of holding them.
+pub struct Jp2Cache {
+    /// The file's bytes, shared so a re-level clones no data.
+    pub bytes: Arc<[u8]>,
+    /// Full-resolution size from the header, whatever level is decoded.
+    pub native: [usize; 2],
+    /// The level the resident frame was decoded at (0 = full).
+    pub level: u32,
+    /// The media's name without the level suffix, so it can be rebuilt.
+    pub base_name: String,
+}
+
+impl Jp2Cache {
+    /// The name a pane shows: the file, plus the reduction when there is one.
+    /// Never silent — a reduced image says so wherever the media is named.
+    pub fn display_name(&self) -> String {
+        if self.level == 0 {
+            self.base_name.clone()
+        } else {
+            format!("{} (1/{})", self.base_name, 1usize << self.level)
+        }
+    }
+}
 
 /// The extensions this module claims: the JP2 container and the raw
 /// codestream forms (the decoder sniffs which one it was handed).
@@ -82,21 +197,91 @@ pub fn shape_for(cs: &ColorSpace, has_alpha: bool, comps: usize) -> Option<Shape
     })
 }
 
-/// Decode a JPEG 2000 file into a `FrameData` at native bit depth.
+/// Decode a JPEG 2000 file into a `FrameData` at native bit depth, reduced to
+/// the current [`budget_px`] (see the module docs). Used by the standalone-file
+/// paths — a numbered run's frames and the export reader — which share the
+/// budget so they land on the same image the pane shows.
 pub fn decode_jp2(path: &Path) -> Result<FrameData> {
-    let data = std::fs::read(path)
-        .map_err(|e| anyhow!(t!("error.jp2_read", path = path.display(), err = e).into_owned()))?;
-    decode_jp2_bytes(&data, path)
+    let data = read_file(path)?;
+    let target = match probe_native(&data, path) {
+        Ok(native) => target_for(native, budget_px()),
+        Err(_) => None, // let the decode below report the real problem
+    };
+    decode_jp2_bytes(&data, path, target)
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path)
+        .map_err(|e| anyhow!(t!("error.jp2_read", path = path.display(), err = e).into_owned()))
+}
+
+/// The image's **full-resolution** size, from the main header alone — no
+/// packets are decoded, so this is cheap enough to do before choosing a level.
+fn probe_native(data: &[u8], path: &Path) -> Result<[usize; 2]> {
+    let image = Image::new(data, &DecodeSettings::default()).map_err(|e| {
+        anyhow!(t!(
+            "error.jp2_decode",
+            path = path.display(),
+            err = format!("{e:?}")
+        )
+        .into_owned())
+    })?;
+    Ok([image.width() as usize, image.height() as usize])
+}
+
+/// Open a `.jp2` as a still: decode it at the level the budget allows and keep
+/// the codestream beside it ([`Jp2Cache`]) so the level can be changed later
+/// without re-reading the file.
+pub(super) fn open_jp2(path: &Path, name: String) -> Result<(FrameData, Jp2Cache)> {
+    let data = read_file(path)?;
+    let native = probe_native(&data, path)?;
+    let level = level_for(native, budget_px());
+    let frame = decode_jp2_bytes(&data, path, target_for(native, budget_px()))?;
+    Ok((
+        frame,
+        Jp2Cache {
+            bytes: Arc::from(data.into_boxed_slice()),
+            native,
+            level,
+            base_name: name,
+        },
+    ))
+}
+
+/// Re-decode a cached codestream at the level `budget` now implies, updating
+/// the cache. `Ok(None)` = the level didn't change, so nothing was decoded.
+pub(super) fn relevel(cache: &mut Jp2Cache, budget: usize) -> Result<Option<FrameData>> {
+    let level = level_for(cache.native, budget);
+    if level == cache.level {
+        return Ok(None);
+    }
+    // No file read: this is what keeping the codestream buys.
+    let frame = decode_jp2_bytes(
+        &cache.bytes,
+        Path::new(&cache.base_name),
+        target_for(cache.native, budget),
+    )?;
+    cache.level = level;
+    Ok(Some(frame))
 }
 
 /// The body of [`decode_jp2`], split off so the tests can decode an embedded
-/// fixture without a file. `path` is only used to name the file in errors.
-fn decode_jp2_bytes(data: &[u8], path: &Path) -> Result<FrameData> {
+/// fixture without a file. `path` is only used to name the file in errors;
+/// `target` is the level's pixel size (`None` = decode at full resolution —
+/// see the module docs).
+fn decode_jp2_bytes(data: &[u8], path: &Path, target: Option<[usize; 2]>) -> Result<FrameData> {
     let fail = |err: String| {
         anyhow!(t!("error.jp2_decode", path = path.display(), err = err).into_owned())
     };
 
-    let image = Image::new(data, &DecodeSettings::default()).map_err(|e| fail(format!("{e:?}")))?;
+    let mut settings = DecodeSettings::default();
+    // The crate takes a target *size* and turns it into a count of skipped
+    // resolution levels (a power of two), so handing it the level's own size
+    // asks for exactly that level.
+    if let Some([tw, th]) = target {
+        settings.target_resolution = Some((tw as u32, th as u32));
+    }
+    let image = Image::new(data, &settings).map_err(|e| fail(format!("{e:?}")))?;
     let mut ctx = DecoderContext::default();
     let decoded = image.decode(&mut ctx).map_err(|e| fail(format!("{e:?}")))?;
     let comps = decoded.components();
@@ -177,7 +362,7 @@ mod tests {
     const RGB8: &[u8] = include_bytes!("../testdata/rgb8.jp2");
 
     fn decode(data: &[u8]) -> FrameData {
-        decode_jp2_bytes(data, Path::new("fixture.jp2")).expect("decode")
+        decode_jp2_bytes(data, Path::new("fixture.jp2"), None).expect("decode")
     }
 
     #[test]
@@ -235,7 +420,7 @@ mod tests {
 
     #[test]
     fn garbage_is_an_error_not_a_panic() {
-        let err = decode_jp2_bytes(b"not a jpeg 2000 file at all", Path::new("bad.jp2"));
+        let err = decode_jp2_bytes(b"not a jpeg 2000 file at all", Path::new("bad.jp2"), None);
         assert!(err.is_err());
     }
 
@@ -311,5 +496,72 @@ mod tests {
         let mut out = vec![0u8; plane.len()];
         interleave(&[(&plane, max_value(8))], &mut out, |v| v as u8);
         assert_eq!(out, vec![0, 0, 128, 255, 255]);
+    }
+
+    #[test]
+    fn the_level_is_the_finest_one_that_fits_the_budget() {
+        let tile = [25000usize, 25000];
+        // 625 MP against the 32 MP default: 1/4 is still 39 MP, so 1/8.
+        assert_eq!(level_for(tile, 32_000_000), 3);
+        assert_eq!(level_size(tile, 3), [3125, 3125]);
+        assert!(level_size(tile, 3).iter().product::<usize>() <= 32_000_000);
+        // One level finer would not have fit — "finest that fits", not "safest".
+        assert!(level_size(tile, 2).iter().product::<usize>() > 32_000_000);
+        // An image already under the budget is never reduced.
+        assert_eq!(level_for([4096, 4096], 32_000_000), 0);
+        assert_eq!(level_for([5000, 5000], 32_000_000), 0);
+        // 0 = decode whole, whatever the size.
+        assert_eq!(level_for(tile, 0), 0);
+        // A tiny budget stops at the thumbnail floor rather than reducing forever.
+        assert_eq!(level_for(tile, 1), MAX_LEVEL);
+    }
+
+    #[test]
+    fn the_level_always_brings_the_image_under_the_budget() {
+        for &budget in &[1_000_000usize, 8_000_000, 32_000_000, 256_000_000] {
+            for &side in &[512usize, 5000, 25000, 100_000] {
+                let native = [side, side / 2 + 1];
+                let level = level_for(native, budget);
+                let out = level_size(native, level);
+                assert!(
+                    out.iter().product::<usize>() <= budget || level == MAX_LEVEL,
+                    "{side} at {budget}: level {level} -> {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reduced_image_says_so_in_its_name() {
+        let cache = |level| Jp2Cache {
+            bytes: Arc::from(Vec::new().into_boxed_slice()),
+            native: [25000, 25000],
+            level,
+            base_name: "tile.jp2".into(),
+        };
+        assert_eq!(cache(0).display_name(), "tile.jp2");
+        assert_eq!(cache(3).display_name(), "tile.jp2 (1/8)");
+    }
+
+    /// The point of keeping the codestream: a level change is a decode, not a
+    /// file read — and it really does change the frame's size.
+    #[test]
+    fn releveling_uses_the_kept_codestream() {
+        let mut cache = Jp2Cache {
+            bytes: Arc::from(MONO16.to_vec().into_boxed_slice()),
+            native: [64, 32],
+            level: 0,
+            base_name: "mono16.jp2".into(),
+        };
+        // 64×32 = 2048 px; a 512-pixel budget forces one halving.
+        let frame = relevel(&mut cache, 512).expect("relevel").expect("changed");
+        assert_eq!(cache.level, 1);
+        assert_eq!(frame.size, [32, 16]);
+        assert_eq!(cache.display_name(), "mono16.jp2 (1/2)");
+        // Asking again for the same budget decodes nothing.
+        assert!(relevel(&mut cache, 512).expect("relevel").is_none());
+        // Back to whole.
+        let frame = relevel(&mut cache, 0).expect("relevel").expect("changed");
+        assert_eq!((cache.level, frame.size), (0, [64, 32]));
     }
 }

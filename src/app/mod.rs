@@ -1028,6 +1028,9 @@ pub struct CimApp {
     pending_view: Option<cli::ViewState>,
 
     decoder: BackgroundDecoder,
+    /// The `jp2_max_mp` the open JPEG 2000 panes were decoded at, so a change
+    /// re-levels them once (see `relevel_jp2_panes`).
+    jp2_max_mp_active: usize,
     /// The `cpu_budget` the live `decoder` pool and rayon pool were built for.
     /// When the Settings budget changes, both are rebuilt to match (`update`).
     cpu_budget_active: usize,
@@ -1171,6 +1174,11 @@ impl CimApp {
         let cpu_budget = config.cpu_budget;
         let (threads, _) = crate::cpu::split(cpu_budget);
         crate::cpu::set_budget(cpu_budget);
+        // Likewise the JPEG 2000 detail budget: every decode path reads it from
+        // one process-global (see `media::jp2`), so it must be set before the
+        // startup files open.
+        let jp2_max_mp = config.jp2_max_mp;
+        crate::media::jp2::set_budget_px(jp2_max_mp.saturating_mul(1_000_000));
         // Load the optional proprietary operator libraries from the configured
         // folder (or, when unset, by their hard-coded names via LD_LIBRARY_PATH).
         // Each operator is independent; a missing library just leaves its feature
@@ -1264,6 +1272,7 @@ impl CimApp {
             pending_view: None,
             decoder: BackgroundDecoder::new(threads, cc.egui_ctx.clone()),
             cpu_budget_active: cpu_budget,
+            jp2_max_mp_active: jp2_max_mp,
             cpp_dir_active,
             inflight: HashSet::new(),
             // One render worker: serialises the proprietary operators (whose
@@ -1829,6 +1838,30 @@ impl CimApp {
         Some((self.cache_budget_bytes() / per_position).max(1))
     }
 
+    /// What the JPEG 2000 detail budget did to the open images, for the
+    /// Settings row: the coarsest level any pane landed on and the native size
+    /// it came from. `None` when no JPEG 2000 image is open, so the note is
+    /// simply absent rather than saying "n/a".
+    pub(super) fn jp2_level_note(&self) -> Option<String> {
+        let (level, native) = self
+            .panes
+            .iter()
+            .filter_map(|p| p.media.jp2_level())
+            .max_by_key(|(level, _)| *level)?;
+        Some(if level == 0 {
+            t!("settings.jp2_detail_whole").into_owned()
+        } else {
+            let [w, h] = crate::media::jp2::level_size(native, level);
+            t!(
+                "settings.jp2_detail_level",
+                div = 1usize << level,
+                w = w,
+                h = h
+            )
+            .into_owned()
+        })
+    }
+
     /// Human-readable size of one timeline position — the frames counted by
     /// [`Self::cache_budget_frames`], summed across the open media.
     pub(super) fn frame_size_label(&self) -> String {
@@ -1972,6 +2005,14 @@ impl CimApp {
             self.decoder = BackgroundDecoder::new(self.resolve_decode_threads(), ctx.clone());
             self.inflight.clear();
             self.cpu_budget_active = self.config.cpu_budget;
+        }
+
+        // A changed JPEG 2000 detail budget re-levels the open panes. Cheap
+        // because each such pane kept its codestream (`media::jp2`): this is a
+        // decode, not a file read — which is the whole reason the bytes are held.
+        if self.config.jp2_max_mp != self.jp2_max_mp_active {
+            self.jp2_max_mp_active = self.config.jp2_max_mp;
+            self.relevel_jp2_panes();
         }
 
         // Auto-load the proprietary operator libraries when the configured folder

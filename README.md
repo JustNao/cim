@@ -36,6 +36,14 @@ Supported: `tif`, `tiff`, `png`, `jpg`, `jpeg`, `bmp`, `webp`, and JPEG 2000
 `ffmpeg` CLI, which must be on the `PATH` for videos and for export; images —
 JPEG 2000 included — need no external tool.
 
+Very large JPEG 2000 images (satellite tiles) are decoded at a **reduced
+resolution level** so they open in about a second instead of half a minute: the
+codec stores a pyramid, and cim decodes the finest level that fits the
+**JPEG 2000 detail** budget in Settings. Such a pane says so in its name
+(`tile.jp2 (1/8)`) — it is the smaller image, so its readout and export describe
+what was loaded. Set the budget to *whole* to always decode at full resolution;
+changing it re-levels the open images immediately.
+
 `cim --help` lists everything, including the `--mode` / `--zoom` / `--frame` /
 `--tone` / … _view-state_ flags. You normally don't type those by hand: the in-app
 **View cmd** panel copies a ready-made command line that reopens exactly the

@@ -416,6 +416,15 @@ pub struct Config {
     /// instance comes back at the default budget rather than its former cap.
     #[serde(default = "default_cpu_budget")]
     pub cpu_budget: usize,
+    /// Most **megapixels** to decode from one JPEG 2000 image; a larger file is
+    /// decoded at a reduced resolution level instead (see `media::jp2`), which
+    /// is what makes a 25000² satellite tile open in about a second rather than
+    /// half a minute and gigabytes. `0` = always decode whole.
+    ///
+    /// Live: changing it re-levels every open JPEG 2000 pane from its kept
+    /// codestream, without re-reading the file.
+    #[serde(default = "default_jp2_max_mp")]
+    pub jp2_max_mp: usize,
     /// Replicate the hovered pixel onto the other panes as a red dot (the pane
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
@@ -463,6 +472,10 @@ fn default_cpu_budget() -> usize {
     crate::cpu::DEFAULT
 }
 
+fn default_jp2_max_mp() -> usize {
+    crate::media::jp2::DEFAULT_BUDGET_PX / 1_000_000
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -471,6 +484,7 @@ impl Default for Config {
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
             cpu_budget: default_cpu_budget(),
+            jp2_max_mp: default_jp2_max_mp(),
             cursor_dot: true,
             cpp_lib_dir: String::new(),
             hardware_accel: false,

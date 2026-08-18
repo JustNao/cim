@@ -306,6 +306,16 @@ settings.frame_cache_frames_hover: >-
   chacun des %{media} médias ouverts (%{size} chacune). Les images libérées ici
   sont relues depuis le disque à leur prochain affichage — bien plus lent sur
   un montage réseau que de les garder en mémoire.
+settings.jp2_detail: Détail JPEG 2000
+settings.jp2_detail_full: entier
+settings.jp2_detail_hover: >-
+  Nombre maximal de mégapixels à décoder d'une image JPEG 2000. Un fichier plus
+  grand est décodé à une résolution réduite — bien plus rapide et léger (une
+  tuile 25000×25000 prend environ une seconde au lieu d'une demi-minute), au prix
+  d'échantillons moyennés plutôt qu'originaux. « entier » décode toujours à
+  pleine résolution. S'applique immédiatement aux images ouvertes.
+settings.jp2_detail_whole: décodée entièrement
+settings.jp2_detail_level: "réduite à 1/%{div} (%{w}×%{h})"
 settings.cpu_budget: Threads CPU
 settings.cpu_budget_split: (%{decode} décodage + %{rayon} rendu)
 settings.cpu_budget_hover: >-

@@ -31,6 +31,9 @@ pub fn load(path: &Path) -> Result<Media> {
     match ext.as_str() {
         "tif" | "tiff" => open_tiff(path, name),
         "mp4" | "avi" => super::video::open_video(path, name),
+        // JPEG 2000 opens through its own path: it may be decoded at a reduced
+        // resolution level, and it keeps its codestream (see `media::jp2`).
+        e if super::jp2::handles(e) => open_jp2_still(path, name),
         _ => open_still(path, name),
     }
 }
@@ -42,6 +45,20 @@ fn open_still(path: &Path, name: String) -> Result<Media> {
         name,
         frame: Arc::new(frame),
         hi_depth,
+        jp2: None,
+    }))
+}
+
+/// A JPEG 2000 still: decoded at the level the detail budget allows, holding on
+/// to its codestream so the level can change later without re-reading the file.
+fn open_jp2_still(path: &Path, name: String) -> Result<Media> {
+    let (frame, cache) = super::jp2::open_jp2(path, name)?;
+    let hi_depth = frame.hi_depth();
+    Ok(Media::Still(super::source::Still {
+        name: cache.display_name(),
+        frame: Arc::new(frame),
+        hi_depth,
+        jp2: Some(cache),
     }))
 }
 

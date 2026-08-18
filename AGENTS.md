@@ -70,8 +70,10 @@ src/
     video.rs     Video via the ffmpeg CLI: ffprobe metadata (probe_video) and
                  VideoReader (persistent streaming ffmpeg child; §3).
     jp2.rs       JPEG 2000 stills, decoded in-process (§3): the component ->
-                 FrameData shape (shape_for) and the native-depth decode
-                 (decode_jp2); EXTS/handles name the formats it claims.
+                 FrameData shape (shape_for), the native-depth decode
+                 (decode_jp2), and the **resolution level** a large image is
+                 decoded at (budget_px / level_for / relevel + Jp2Cache, which
+                 keeps the codestream); EXTS/handles name the formats it claims.
     fastscan.rs  Fast scan (§4): measure a regular page stride from the first
                  two IFDs, then predict + validate + raw-decode page N in O(1)
                  (never trusted unvalidated; falls back to the chain walk).
@@ -241,6 +243,38 @@ The crate is pure Rust with **no transitive dependencies**, so it costs the buil
 nothing but a Cargo entry; the openjpeg-backed crates would have needed a C
 toolchain, and the pure-Rust *port* of OpenJPEG (`openjp2`) decodes correctly and
 then aborts the process in its own cleanup path.
+
+**A large image is decoded at a reduced resolution level.** JPEG 2000 is a wavelet
+codec, so the codestream *is* a pyramid: asking for half or quarter resolution decodes
+fewer subbands rather than decoding everything and throwing it away. Measured on an
+8192² file at ~1.1 bit/px: **2.2 s / 972 MB** whole, **294 ms / 72 MB** at 1/4, **21 ms /
+12 MB** at 1/32 — and that floor is flat (a 50% larger, higher-entropy codestream decoded
+*faster* at 1/32), so the deep levels are setup-bound, not stream-bound. A 25000²
+satellite tile is ~9× the 8192² one: some 25 s and ~9 GB whole, against about a second
+and tens of MB reduced.
+
+So a file whose full size exceeds `jp2::budget_px()` (`Config::jp2_max_mp`, default
+**32 MP**, `0` = always whole) is decoded at the **finest level that fits**, and **the
+pane is then that smaller image** — `media.size()`, the cursor readout, the histogram and
+the export all describe what was loaded, and the name carries the reduction
+(`tile.jp2 (1/8)`) so it is never a silent substitution. That honesty is the point: the
+samples are the wavelet's lowpass — *averages*, not a decimation of true samples — so
+this is the one place in cim where a displayed pixel isn't a source sample, and it says
+so. It is opt-out (`whole`), and it applies to **every** decode path — the pane, a
+numbered run's frames, the export reader — because the budget is one process-global
+`AtomicUsize` rather than a value threaded through three call sites, which is precisely
+the drift §10's parity rule exists to prevent.
+
+**The codestream is kept, not the gigabytes** (`Jp2Cache`): the compressed bytes sit
+beside the decoded frame, so changing the detail budget re-levels every open pane
+(`Media::jp2_relevel` ← `CimApp::relevel_jp2_panes`, live-applied in `update` like
+`cpu_budget`) with **no file read** — a decode, not I/O. They are counted in
+`resident_bytes` (§6): stills never evict, so this only ever *reports*, but a budget
+that ignored 91 MB per pane would make the frame-cache slider's frame count a lie. Note
+the balance inverts for a heavily compressed tile: ~20 MB of frame against ~91 MB of
+codestream — still an order of magnitude under the 1.25 GB the whole image costs.
+Re-levelling changes the image's pixel size, so it drops the pane's texture and re-fits,
+exactly as a reload does.
 
 The decoder hands back one `f32` plane per component plus that component's
 precision, which is what keeps the native-depth invariant: a 12-bit image stays
@@ -1607,8 +1641,10 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, cursor_dot,
-cpp_lib_dir, hardware_accel, keybindings }` (`hardware_accel` = build display pixels on
+`Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
+cursor_dot, cpp_lib_dir, hardware_accel, keybindings }` (`jp2_max_mp` = the most
+megapixels to decode from one JPEG 2000 image, default 32, `0` = whole — §3; live, and
+the Settings row names the level the open panes landed on) (`hardware_accel` = build display pixels on
 the GPU — §7.1 — **off by default**, and the checkbox is shown only under `CIM_GPU=1`
 (§7.2); read **once at startup** since it also picks eframe's renderer, so Settings shows a
 "restart to apply" note. An old config's `render_backend`
@@ -1939,7 +1975,12 @@ unterminated marker stays literal); **localisation** (§12.1 — `en.yml` and `f
 carry identical, duplicate-free key sets; every literal `t!` key in the source is
 defined; every bindable `Action` has an `action.<id>` entry — the three gaps that
 otherwise show up only as English text or a raw key at runtime); `palette` endpoints /
-diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing;
+diverging-centre / token round-trip; `cli` **`--share-clip` / `--tone colormap`** parsing; **JPEG 2000 levels** (the chosen
+level is the *finest* that fits the budget and always brings the image under it across a
+spread of budgets and sizes, an image already under it is never reduced, `0` means whole,
+a tiny budget stops at the thumbnail floor rather than reducing forever, a reduced image
+says so in its name, and a re-level decodes **from the kept codestream** — changing the
+frame's size and no-oping when the level is unchanged);
 `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated), **multi-row grid labels anchored inside
 their own cell** (the output-fraction the panel's label preview scales by), **a Computed source recomputed per
@@ -1992,7 +2033,10 @@ of the prefix, each make the relevant test fail.
 - **Video limitations (§3):** frames are 8-bit (higher-depth sources tone-mapped
   down by ffmpeg) and frame↔time assumes CFR — a VFR file may land ±1 frame on
   seeks.
-- **JPEG 2000 (§3):** decoded in-process, at native depth, with no external tool —
-  but it is an expensive codec (~175 ms for 2048²×16-bit), so it behaves like a
-  slow TIFF page: fine on the background decode pool, not something to decode on
-  the UI thread.
+- **JPEG 2000 (§3):** decoded in-process, at native depth, with no external tool — but
+  it is an expensive codec, so a large image is decoded at a **reduced resolution
+  level** (`Config::jp2_max_mp`) and the pane *is* that smaller image, named
+  accordingly. This is the only place a displayed pixel is not a source sample
+  (the wavelet's lowpass is an average), which is why it is stated in the media's
+  name and switchable off. Opening still runs on the UI thread, so the budget is
+  also what keeps an open from freezing it for half a minute.

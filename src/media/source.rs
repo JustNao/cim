@@ -49,6 +49,11 @@ pub struct Still {
     pub(super) name: String,
     pub(super) frame: Arc<FrameData>,
     pub(super) hi_depth: bool,
+    /// A JPEG 2000 still keeps its **codestream** here (see `media::jp2`): a
+    /// fraction of the decoded frame's size, and what lets the image be
+    /// re-levelled when the detail budget changes without re-reading the file.
+    /// `None` for every other still (an ordinary image, a Compute result).
+    pub(super) jp2: Option<super::jp2::Jp2Cache>,
 }
 
 /// Frame residency plus LRU / memory-budget bookkeeping, shared by both
@@ -253,7 +258,40 @@ impl Media {
             name,
             frame: Arc::new(frame),
             hi_depth,
+            jp2: None,
         })
+    }
+
+    /// Re-decode a JPEG 2000 still at the level `budget` (decoded pixels) now
+    /// implies, from the **kept codestream** — no file read. `Ok(false)` = not
+    /// a JPEG 2000 still, or already at the right level, so nothing changed.
+    /// Any other media is untouched.
+    pub fn jp2_relevel(&mut self, budget: usize) -> anyhow::Result<bool> {
+        let Media::Still(s) = self else {
+            return Ok(false);
+        };
+        let Some(cache) = s.jp2.as_mut() else {
+            return Ok(false);
+        };
+        match super::jp2::relevel(cache, budget)? {
+            None => Ok(false),
+            Some(frame) => {
+                s.name = cache.display_name();
+                s.hi_depth = frame.hi_depth();
+                s.frame = Arc::new(frame);
+                Ok(true)
+            }
+        }
+    }
+
+    /// For a JPEG 2000 still, the reduction it was decoded at: `(level, native
+    /// size)`, level 0 meaning full resolution. `None` for anything else — the
+    /// UI uses it to say what the detail budget did to the open images.
+    pub fn jp2_level(&self) -> Option<(u32, [usize; 2])> {
+        match self {
+            Media::Still(s) => s.jp2.as_ref().map(|c| (c.level, c.native)),
+            _ => None,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -436,7 +474,11 @@ impl Media {
     /// Sample bytes currently resident, for the memory budget.
     pub fn resident_bytes(&self) -> usize {
         match self {
-            Media::Still(s) => s.frame.byte_len(),
+            // A JPEG 2000 still's kept codestream counts too: it is real
+            // resident memory, and hiding it from the budget would make the
+            // slider's frame count a lie (stills never evict, so this only
+            // ever *reports* — it can't be reclaimed).
+            Media::Still(s) => s.frame.byte_len() + s.jp2.as_ref().map_or(0, |c| c.bytes.len()),
             Media::TiffSeq(t) => t.frames.resident_bytes,
             Media::FileSeq(f) => f.frames.resident_bytes,
             Media::ConcatSeq(c) => c.frames.resident_bytes,

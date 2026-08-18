@@ -565,6 +565,29 @@ impl CimApp {
     /// keeping its current frame (via a fastscan offset jump, else riding the
     /// frontier). Files are opened read-only with shared access, so a persistent
     /// reader never blocks another program from writing them.
+    /// Re-decode every open JPEG 2000 pane at the level `config.jp2_max_mp` now
+    /// implies, from its **kept codestream** — no file is re-read (see
+    /// `media::jp2`). The image's pixel size changes with the level, so the
+    /// pane is re-fitted and its texture dropped, exactly as a reload would.
+    pub(super) fn relevel_jp2_panes(&mut self) {
+        crate::media::jp2::set_budget_px(self.config.jp2_max_mp.saturating_mul(1_000_000));
+        let budget = crate::media::jp2::budget_px();
+        for i in 0..self.panes.len() {
+            match self.panes[i].media.jp2_relevel(budget) {
+                Ok(false) => {}
+                Ok(true) => {
+                    // The frame *data* changed, not just its tone, and it
+                    // changed size — so unlike a Compute recompute this drops
+                    // the texture and re-fits rather than keeping the old view.
+                    self.panes[i].tex.clear();
+                    self.panes[i].error = None;
+                    self.view_mut(i).needs_fit = true;
+                }
+                Err(e) => self.panes[i].error = Some(e.to_string()),
+            }
+        }
+    }
+
     pub(super) fn reload(&mut self, i: usize) {
         if i >= self.panes.len() {
             return;

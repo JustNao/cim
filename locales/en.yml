@@ -291,6 +291,16 @@ settings.frame_cache_frames_hover: >-
   How many timeline positions fit, counting one frame from each of the %{media}
   open media (%{size} each). Frames evicted here are re-read from disk when
   shown again — much slower over a network mount than keeping them resident.
+settings.jp2_detail: JPEG 2000 detail
+settings.jp2_detail_full: whole
+settings.jp2_detail_hover: >-
+  Most megapixels to decode from one JPEG 2000 image. A larger file is decoded
+  at a reduced resolution level instead — much faster and smaller (a 25000×25000
+  tile takes about a second instead of half a minute), at the cost of showing
+  averaged rather than original samples. Set to “whole” to always decode at full
+  resolution. Applies to the open images immediately.
+settings.jp2_detail_whole: decoded whole
+settings.jp2_detail_level: "reduced to 1/%{div} (%{w}×%{h})"
 settings.cpu_budget: CPU threads
 settings.cpu_budget_split: (%{decode} decode + %{rayon} render)
 settings.cpu_budget_hover: >-
