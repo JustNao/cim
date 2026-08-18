@@ -47,11 +47,11 @@ struct PartialMeta {
 
 /// Hint appended to a "tool not found" error; built per call so it follows the
 /// UI language (a `const` would freeze it at compile time).
-pub(super) fn ffmpeg_hint() -> String {
+fn ffmpeg_hint() -> String {
     t!("error.ffmpeg_hint").into_owned()
 }
 
-pub(super) fn ffprobe_stream(path: &Path, entries: &str) -> Result<String> {
+fn ffprobe_stream(path: &Path, entries: &str) -> Result<String> {
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
         .arg(entries)
@@ -124,7 +124,7 @@ fn count_packets(path: &Path) -> Option<usize> {
     field(&text, "nb_read_packets").and_then(|v| v.parse().ok())
 }
 
-pub(super) fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines()
         .filter_map(|l| l.split_once('='))
         .find(|(k, _)| k.trim() == key)

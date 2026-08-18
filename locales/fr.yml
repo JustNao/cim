@@ -434,9 +434,16 @@ error.short_tiff: "tampon TIFF trop court : %{got} < %{expected}"
 error.tiff_color_type: "type de couleur TIFF non pris en charge : %{kind}"
 error.tiff_sample_format: "format d'échantillon TIFF non pris en charge : %{kind}"
 error.save_extension: "format « .%{ext} » non pris en charge — utilisez %{exts}"
+error.jp2_read: "impossible de lire %{path} : %{err}"
+error.jp2_decode: "impossible de décoder l'image JPEG 2000 %{path} : %{err}"
+error.jp2_color_space: >-
+  espace colorimétrique JPEG 2000 non pris en charge dans %{path} : %{kind},
+  %{n} composantes
+error.jp2_geometry: >-
+  les composantes JPEG 2000 ne couvrent pas l'image %{w}×%{h} %{path}
 error.ffmpeg_hint: >-
-  La lecture des vidéos et des images JPEG 2000 nécessite les outils en ligne
-  de commande ffmpeg (ffmpeg.org) accessibles dans le PATH
+  La lecture de vidéos nécessite les outils en ligne de commande ffmpeg
+  (ffmpeg.org) accessibles dans le PATH
 error.tool_not_found: "%{tool} introuvable. %{hint}"
 error.tool_failed: "échec du lancement de %{tool} : %{err}"
 error.ffprobe_failed: "échec de ffprobe sur %{path} : %{err}"

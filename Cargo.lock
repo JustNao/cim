@@ -822,6 +822,7 @@ dependencies = [
  "bytemuck",
  "directories",
  "eframe",
+ "hayro-jpeg2000",
  "ico",
  "image",
  "libloading",
@@ -1842,6 +1843,12 @@ dependencies = [
  "widestring",
  "winapi",
 ]
+
+[[package]]
+name = "hayro-jpeg2000"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bab0c77d09c0d9b144d429d0bf0fcd4c63c01d5f6c33f9b8ed501283e0f1ef76"
 
 [[package]]
 name = "hermit-abi"

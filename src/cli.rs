@@ -19,7 +19,9 @@ use rust_i18n::t;
 
 /// File extensions the app can open (stills + multi-page TIFF). Shared by the
 /// file dialog and the completion filter so they never drift apart.
-pub const LOADABLE_EXTS: &[&str] = &["tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp", "jp2"];
+pub const LOADABLE_EXTS: &[&str] = &[
+    "tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp", "jp2", "j2k", "j2c", "jpc",
+];
 
 /// Video containers, each opened as **one pane of its own** — never grouped
 /// into a numbered-run sequence or a directory concatenation (a video already

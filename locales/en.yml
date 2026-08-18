@@ -412,9 +412,14 @@ error.short_tiff: "short TIFF buffer: %{got} < %{expected}"
 error.tiff_color_type: "unsupported TIFF color type: %{kind}"
 error.tiff_sample_format: "unsupported TIFF sample format: %{kind}"
 error.save_extension: "unsupported format '.%{ext}' — use %{exts}"
+error.jp2_read: "cannot read %{path}: %{err}"
+error.jp2_decode: "cannot decode the JPEG 2000 image %{path}: %{err}"
+error.jp2_color_space: >-
+  unsupported JPEG 2000 color space in %{path}: %{kind}, %{n} components
+error.jp2_geometry: "JPEG 2000 components do not cover the %{w}×%{h} image %{path}"
 error.ffmpeg_hint: >-
-  Video and JPEG 2000 loading requires the ffmpeg command line tools
-  (ffmpeg.org) available on the PATH
+  Video loading requires the ffmpeg command line tools (ffmpeg.org) available
+  on the PATH
 error.tool_not_found: "%{tool} not found. %{hint}"
 error.tool_failed: "failed to run %{tool}: %{err}"
 error.ffprobe_failed: "ffprobe failed on %{path}: %{err}"

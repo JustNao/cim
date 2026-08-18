@@ -16,6 +16,13 @@ eframe = { version = "0.29", default-features = true, features = ["wgpu"] }
 raw-window-handle = "0.6"
 image = "0.25"
 tiff = "0.11"
+# JPEG 2000 (.jp2 / raw codestreams). Pure Rust and `#![forbid(unsafe_code)]`,
+# with **no transitive dependencies** at these features — the point being that
+# cim keeps building with nothing but a Rust toolchain (the openjpeg-backed
+# crates compile C, and the pure-Rust port of OpenJPEG aborts the process in its
+# own cleanup path). `simd` is left off on purpose: it measured ~6% on a
+# 2048x2048 16-bit image and pulls in a dependency for it.
+hayro-jpeg2000 = { version = "0.4", default-features = false, features = ["std"] }
 # Row-parallel tone mapping for full-resolution renders (see media::render).
 # Already in the tree via `image`'s AVIF encoder, so this pins no new package —
 # but it *is* a direct dependency now, so Cargo.lock changes and the offline

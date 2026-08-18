@@ -1,341 +1,315 @@
-//! JPEG 2000 (`.jp2`) stills, decoded through the **ffmpeg CLI** — the same
-//! external tool video loading (`media::video`) and export already use, so
-//! adding the format costs no decode crate and no build-time C dependency.
+//! JPEG 2000 stills (`.jp2` and raw `.j2k`/`.j2c`/`.jpc` codestreams).
 //!
-//! `ffprobe` reports the image's size and decoded pixel format; `ffmpeg` then
-//! writes the single frame as rawvideo on a pipe. The output pixel format is
-//! chosen to **preserve native values wherever ffmpeg can**: a mono image is
-//! asked for at its own bit depth (`gray12le` stays 12-bit data in a `u16`),
-//! so the readout, histograms and export see the samples the file holds. The
-//! one place that isn't possible is a **colour** image deeper than 8 bits:
-//! ffmpeg's packed RGB formats only come in 8 and 16 bits, so a 12-bit RGB
-//! source is scaled up to 16 (documented, like the video path's CFR
-//! assumption).
+//! Decoding is **in-process** (`hayro-jpeg2000`), not a shell-out like video:
+//! the machines cim runs on don't all have ffmpeg, and the crate is pure Rust
+//! with no transitive dependencies, so supporting the format costs the build
+//! nothing but a Cargo entry — no C toolchain, which the openjpeg-backed
+//! crates would have needed.
+//!
+//! What matters here is the same thing as everywhere else in `media`: samples
+//! come out at **native bit depth**. The decoder hands back one `f32` plane
+//! per component plus that component's precision, so a 12-bit image stays
+//! 12-bit values in a `u16` and the readout shows the numbers the file holds.
+//! Lossless files decode bit-exactly (the tests pin that); a lossy (9/7)
+//! file's reconstruction is real-valued and can land just outside the nominal
+//! range, so samples are rounded and clamped to the component's own depth.
 
 use rust_i18n::t;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
+use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
 
-use super::video::{ffmpeg_hint, ffprobe_stream, field};
 use super::{FrameData, Samples};
 
-/// How one decoded JPEG 2000 image is asked for and read back: the rawvideo
-/// pixel format handed to ffmpeg plus the `FrameData` shape it yields.
+/// The extensions this module claims: the JP2 container and the raw
+/// codestream forms (the decoder sniffs which one it was handed).
+pub const EXTS: &[&str] = &["jp2", "j2k", "j2c", "jpc"];
+
+/// Does this lowercased extension name a JPEG 2000 file?
+pub fn handles(ext: &str) -> bool {
+    EXTS.contains(&ext)
+}
+
+/// How the decoded components map onto a `FrameData`: how many of them to
+/// keep, and the channel count that produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixLayout {
-    /// The `-pix_fmt` ffmpeg writes on the pipe.
-    pub fmt: &'static str,
-    /// Samples per pixel in that format (1 mono, 3 RGB, 4 RGBA).
+pub struct Shape {
+    /// Components to read, in order (the leading colour ones, plus alpha).
+    pub used: usize,
+    /// `FrameData` channels — 1, 3 or 4, the shapes the rest of cim renders.
     pub channels: usize,
-    /// Samples are 16-bit little-endian rather than bytes.
-    pub wide: bool,
 }
 
-impl PixLayout {
-    fn bytes_per_pixel(&self) -> usize {
-        self.channels * if self.wide { 2 } else { 1 }
-    }
-}
-
-/// What `probe_jp2` learns from ffprobe.
-pub struct Jp2Meta {
-    pub size: [usize; 2],
-    pub layout: PixLayout,
-}
-
-/// Choose the output format for a source pixel format, keeping native values
-/// where ffmpeg's rawvideo formats allow it.
+/// Decide the frame shape from the image's colour space.
 ///
-/// * mono (`gray*`, and `ya*` — grey + alpha, whose alpha is dropped exactly
-///   as the `image` still path drops `La8`'s) keeps its own depth, byte-swapped
-///   to little-endian when needed, so a 10/12/14-bit file stays 10/12/14-bit;
-/// * anything else is colour: 8-bit sources → `rgb24`/`rgba`, deeper ones →
-///   `rgb48le`/`rgba64le` (ffmpeg has no packed 12-bit RGB, so those samples
-///   are rescaled to 16 bits by the conversion).
-///
-/// An unrecognised format falls in the colour branch, whose depth then comes
-/// from the trailing bit count in the name (`yuv444p12le` → 12).
-pub fn layout_for(pix_fmt: &str) -> PixLayout {
-    let fmt = pix_fmt.trim();
-    let bits = component_bits(fmt);
-    let alpha = has_alpha(fmt);
-    if fmt.starts_with("gray") || fmt.starts_with("ya") {
-        return PixLayout {
-            fmt: match bits {
-                ..=8 => "gray",
-                9 => "gray9le",
-                10 => "gray10le",
-                12 => "gray12le",
-                14 => "gray14le",
-                _ => "gray16le",
-            },
-            channels: 1,
-            wide: bits > 8,
-        };
-    }
-    match (bits > 8, alpha) {
-        (false, false) => PixLayout {
-            fmt: "rgb24",
-            channels: 3,
-            wide: false,
-        },
-        (false, true) => PixLayout {
-            fmt: "rgba",
-            channels: 4,
-            wide: false,
-        },
-        (true, false) => PixLayout {
-            fmt: "rgb48le",
-            channels: 3,
-            wide: true,
-        },
-        (true, true) => PixLayout {
-            fmt: "rgba64le",
-            channels: 4,
-            wide: true,
-        },
-    }
-}
-
-/// Bits per component, read from the trailing digits of a pixel-format name
-/// (`gray12le` → 12, `yuv420p10be` → 10). The packed byte-per-component names
-/// carry no number (`rgb24` is 24 *per pixel*), so anything without a trailing
-/// count is 8-bit — as are the packed 16-bit-per-pixel oddities (`rgb565le`),
-/// whose components are narrower still. The two packed names that *are* 16 bits
-/// per component (`rgb48*`, `rgba64*`) state a per-pixel total, and are read as
-/// such below.
-fn component_bits(fmt: &str) -> u32 {
-    let digits: String = fmt
-        .trim_end_matches(['l', 'b', 'e'])
-        .chars()
-        .rev()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    // A count only means "per component" when the name ends in an endianness
-    // marker; `rgb24`/`bgr0` and friends are per-pixel totals.
-    if !(fmt.ends_with("le") || fmt.ends_with("be")) {
-        return 8;
-    }
-    match digits.chars().rev().collect::<String>().parse::<u32>() {
-        Ok(n) if (9..=16).contains(&n) => n,
-        // The packed 16-bit-per-component names state a per-*pixel* total even
-        // though they carry an endianness marker (`rgb48le`, `rgba64le`).
-        Ok(48) | Ok(64) => 16,
-        _ => 8,
-    }
-}
-
-/// Whether a pixel format carries an alpha channel (ffmpeg's names all mark it
-/// with an `a`: `rgba`, `argb`, `yuva444p`, `gbrap12le`…). Only the colour
-/// branch asks — grey + alpha is handled as mono above.
-fn has_alpha(fmt: &str) -> bool {
-    let base = fmt
-        .trim_end_matches("le")
-        .trim_end_matches("be")
-        .trim_end_matches(|c: char| c.is_ascii_digit());
-    ["rgba", "bgra", "argb", "abgr", "yuva", "gbrap"]
-        .iter()
-        .any(|a| base.starts_with(a))
-}
-
-/// Extract the image's geometry and pixel format from ffprobe's `key=value`
-/// lines. Pure, so the parsing is unit-testable without ffprobe installed.
-fn parse_jp2_probe(text: &str) -> Result<Jp2Meta> {
-    let dim = |key| {
-        field(text, key)
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .ok_or_else(|| anyhow!("missing {key}"))
+/// Grey + alpha keeps only the grey plane, exactly as the `image` still path
+/// drops `La8`'s alpha; RGB keeps its alpha when there is one. A colour space
+/// cim has no rendering for (CMYK, or an ICC/unknown space with a component
+/// count that isn't 1 or 3) is refused rather than guessed at — passing four
+/// CMYK planes off as RGBA would show a wrong image, which is worse than an
+/// error in a tool whose whole point is pixel accuracy.
+pub fn shape_for(cs: &ColorSpace, has_alpha: bool, comps: usize) -> Option<Shape> {
+    let colour = match cs {
+        ColorSpace::Gray => 1,
+        ColorSpace::RGB => 3,
+        // An unknown / ICC space is usable when it has a shape we can draw.
+        ColorSpace::Unknown { num_channels } | ColorSpace::Icc { num_channels, .. } => {
+            match num_channels {
+                1 => 1,
+                3 => 3,
+                _ => return None,
+            }
+        }
+        ColorSpace::CMYK => return None,
     };
-    let pix_fmt = field(text, "pix_fmt").ok_or_else(|| anyhow!("missing pix_fmt"))?;
-    Ok(Jp2Meta {
-        size: [dim("width")?, dim("height")?],
-        layout: layout_for(pix_fmt),
+    if comps < colour {
+        return None;
+    }
+    Some(match (colour, has_alpha && comps > colour) {
+        (1, _) => Shape {
+            used: 1,
+            channels: 1,
+        },
+        (_, false) => Shape {
+            used: 3,
+            channels: 3,
+        },
+        (_, true) => Shape {
+            used: 4,
+            channels: 4,
+        },
     })
 }
 
-/// Read a JPEG 2000 image's size and pixel format with `ffprobe`.
-pub fn probe_jp2(path: &Path) -> Result<Jp2Meta> {
-    let text = ffprobe_stream(path, "stream=width,height,pix_fmt")?;
-    parse_jp2_probe(&text)
-        .with_context(|| format!("unsupported JPEG 2000 image in {}", path.display()))
+/// Decode a JPEG 2000 file into a `FrameData` at native bit depth.
+pub fn decode_jp2(path: &Path) -> Result<FrameData> {
+    let data = std::fs::read(path)
+        .map_err(|e| anyhow!(t!("error.jp2_read", path = path.display(), err = e).into_owned()))?;
+    decode_jp2_bytes(&data, path)
 }
 
-/// Decode a `.jp2` into a `FrameData` at its native depth (see the module
-/// docs for the one colour case that is rescaled).
-pub fn decode_jp2(path: &Path) -> Result<FrameData> {
-    let meta = probe_jp2(path)?;
-    let [w, h] = meta.size;
-    let layout = meta.layout;
+/// The body of [`decode_jp2`], split off so the tests can decode an embedded
+/// fixture without a file. `path` is only used to name the file in errors.
+fn decode_jp2_bytes(data: &[u8], path: &Path) -> Result<FrameData> {
+    let fail = |err: String| {
+        anyhow!(t!("error.jp2_decode", path = path.display(), err = err).into_owned())
+    };
 
-    // `-v error` + a discarded stderr: ffmpeg can never block on an unread
-    // stderr pipe; a failure surfaces as a short read plus the exit status.
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-nostdin", "-i"])
-        .arg(path)
-        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", layout.fmt])
-        .arg("pipe:1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => anyhow!(t!(
-                "error.tool_not_found",
-                tool = "ffmpeg",
-                hint = ffmpeg_hint()
+    let image = Image::new(data, &DecodeSettings::default()).map_err(|e| fail(format!("{e:?}")))?;
+    let mut ctx = DecoderContext::default();
+    let decoded = image.decode(&mut ctx).map_err(|e| fail(format!("{e:?}")))?;
+    let comps = decoded.components();
+
+    let shape =
+        shape_for(image.color_space(), image.has_alpha(), comps.len()).ok_or_else(|| {
+            anyhow!(t!(
+                "error.jp2_color_space",
+                path = path.display(),
+                kind = format!("{:?}", image.color_space()),
+                n = comps.len()
             )
-            .into_owned()),
-            _ => anyhow!(t!("error.tool_failed", tool = "ffmpeg", err = e).into_owned()),
+            .into_owned())
         })?;
 
-    let mut child = out;
-    let mut buf = Vec::with_capacity(w * h * layout.bytes_per_pixel());
-    let read = child
-        .stdout
-        .as_mut()
-        .expect("piped stdout")
-        .read_to_end(&mut buf);
-    let status = child.wait().ok();
-    read.map_err(|e| {
-        anyhow!(t!("error.ffmpeg_read", n = 0, path = path.display(), err = e).into_owned())
-    })?;
-
-    let want = w * h * layout.bytes_per_pixel();
-    if buf.len() < want {
+    // The decoder resolves sub-sampling itself, so every component should span
+    // the image grid — but the frame's size and its sample count have to agree
+    // or every later index (readout, stats, export) is off, so check rather
+    // than assume.
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let px = w * h;
+    let used = &comps[..shape.used];
+    if px == 0 || used.iter().any(|c| c.samples().len() != px) {
         return Err(anyhow!(t!(
-            "error.ffmpeg_stopped",
-            n = 0,
+            "error.jp2_geometry",
             path = path.display(),
-            status = status
-                .filter(|s| !s.success())
-                .map(|s| format!(" ({s})"))
-                .unwrap_or_default()
+            w = w,
+            h = h
         )
         .into_owned()));
     }
-    buf.truncate(want);
 
-    let samples = if layout.wide {
-        Samples::U16(
-            buf.chunks_exact(2)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                .collect(),
-        )
+    // A component's own precision bounds its values; the widest one decides
+    // whether the frame is 8- or 16-bit.
+    let depth = used.iter().map(|c| c.bit_depth()).max().unwrap_or(8);
+    let planes: Vec<(&[f32], f32)> = used
+        .iter()
+        .map(|c| (c.samples(), max_value(c.bit_depth())))
+        .collect();
+
+    let samples = if depth <= 8 {
+        let mut out = vec![0u8; px * shape.channels];
+        interleave(&planes, &mut out, |v| v as u8);
+        Samples::U8(out)
     } else {
-        Samples::U8(buf)
+        let mut out = vec![0u16; px * shape.channels];
+        interleave(&planes, &mut out, |v| v as u16);
+        Samples::U16(out)
     };
-    Ok(FrameData::new([w, h], layout.channels, samples))
+    Ok(FrameData::new([w, h], shape.channels, samples))
+}
+
+/// Largest value a component of `bits` precision can hold.
+fn max_value(bits: u8) -> f32 {
+    ((1u32 << bits.clamp(1, 16)) - 1) as f32
+}
+
+/// Interleave the component planes into one buffer, rounding each sample and
+/// clamping it into its component's range (a lossy reconstruction overshoots).
+fn interleave<T: Copy>(planes: &[(&[f32], f32)], out: &mut [T], to: impl Fn(f32) -> T) {
+    let n = planes.len();
+    for (c, (plane, max)) in planes.iter().enumerate() {
+        for (i, &v) in plane.iter().enumerate() {
+            out[i * n + c] = to(v.round().clamp(0.0, *max));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    #[test]
-    fn mono_keeps_its_native_depth() {
-        assert_eq!(
-            layout_for("gray"),
-            PixLayout {
-                fmt: "gray",
-                channels: 1,
-                wide: false
-            }
-        );
-        for (src, want) in [
-            ("gray10le", "gray10le"),
-            ("gray12be", "gray12le"),
-            ("gray16be", "gray16le"),
-            ("gray14le", "gray14le"),
-        ] {
-            let l = layout_for(src);
-            assert_eq!((l.fmt, l.channels, l.wide), (want, 1, true), "{src}");
-        }
+    /// Lossless 64×32 fixtures, decoded back to the exact values they were
+    /// written from (see `src/testdata/README.md`). JPEG 2000 has no encoder
+    /// in the tree, so unlike the TIFF/PNG fixtures these are checked in
+    /// rather than generated — they are a few hundred bytes each.
+    const MONO16: &[u8] = include_bytes!("../testdata/mono16.jp2");
+    const RGB8: &[u8] = include_bytes!("../testdata/rgb8.jp2");
+
+    fn decode(data: &[u8]) -> FrameData {
+        decode_jp2_bytes(data, Path::new("fixture.jp2")).expect("decode")
     }
 
     #[test]
-    fn grey_with_alpha_is_still_mono() {
-        assert_eq!(layout_for("ya8").channels, 1);
-        let l = layout_for("ya16le");
-        assert_eq!((l.fmt, l.channels), ("gray16le", 1));
-    }
-
-    #[test]
-    fn colour_picks_packed_rgb_by_depth_and_alpha() {
-        for (src, fmt, ch, wide) in [
-            ("rgb24", "rgb24", 3, false),
-            ("yuv420p", "rgb24", 3, false),
-            ("rgba", "rgba", 4, false),
-            ("gbrp12le", "rgb48le", 3, true),
-            ("rgb48be", "rgb48le", 3, true),
-            ("gbrap10le", "rgba64le", 4, true),
-            ("yuva444p12le", "rgba64le", 4, true),
-        ] {
-            let l = layout_for(src);
-            assert_eq!((l.fmt, l.channels, l.wide), (fmt, ch, wide), "{src}");
-        }
-    }
-
-    #[test]
-    fn packed_per_pixel_counts_are_not_read_as_depth() {
-        // `rgb24`/`bgr0` state bits *per pixel*, not per component.
-        assert!(!layout_for("rgb24").wide);
-        assert!(!layout_for("bgr0").wide);
-        assert!(!layout_for("rgb565le").wide);
-    }
-
-    #[test]
-    fn probe_parsing_needs_a_real_stream() {
-        let m = parse_jp2_probe("width=64\nheight=32\npix_fmt=gray12le\n").unwrap();
-        assert_eq!(m.size, [64, 32]);
-        assert_eq!(m.layout.fmt, "gray12le");
-        assert!(parse_jp2_probe("width=0\nheight=32\npix_fmt=gray\n").is_err());
-        assert!(parse_jp2_probe("width=64\nheight=32\n").is_err());
-    }
-
-    // ---- integration test (needs the ffmpeg CLI; skips gracefully) -------
-
-    /// Encode a small `.jp2` from a known 16-bit grey ramp, or `None` when
-    /// ffmpeg isn't installed.
-    fn fixture_jp2(pix_fmt: &str, name: &str) -> Option<PathBuf> {
-        let path = crate::testutil::fixture_dir("jp2").join(name);
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
-            .arg("testsrc=size=64x32:rate=1:duration=1")
-            .args(["-frames:v", "1", "-pix_fmt", pix_fmt, "-c:v", "jpeg2000"])
-            .args(["-pred", "1"]) // lossless (reversible 5/3 wavelet)
-            .arg(&path)
-            .stdin(Stdio::null())
-            .status()
-            .ok()?;
-        status.success().then_some(path)
-    }
-
-    #[test]
-    fn decodes_a_mono_16_bit_jp2() {
-        let Some(path) = fixture_jp2("gray16le", "mono16.jp2") else {
-            return; // ffmpeg not installed
-        };
-        let f = decode_jp2(&path).expect("decode jp2");
+    fn mono_decodes_bit_exactly_at_native_depth() {
+        let f = decode(MONO16);
         assert_eq!(f.size, [64, 32]);
         assert_eq!(f.channels, 1);
-        assert!(matches!(f.samples, Samples::U16(_)), "native 16-bit kept");
-        assert!(f.hi_depth());
+        assert!(f.hi_depth(), "16-bit source stays 16-bit");
+        let Samples::U16(v) = &f.samples else {
+            panic!("expected u16 samples");
+        };
+        assert_eq!(v.len(), 64 * 32);
+        // The fixture holds `(y*64 + x) * 17 mod 65536`, losslessly coded.
+        for (i, &got) in v.iter().enumerate() {
+            assert_eq!(got as usize, (i * 17) % 65536, "pixel {i}");
+        }
     }
 
     #[test]
-    fn decodes_a_colour_jp2_through_media_load() {
-        let Some(path) = fixture_jp2("rgb24", "rgb8.jp2") else {
-            return; // ffmpeg not installed
+    fn rgb_decodes_bit_exactly_through_the_colour_transform() {
+        let f = decode(RGB8);
+        assert_eq!(f.size, [64, 32]);
+        assert_eq!(f.channels, 3);
+        assert!(!f.hi_depth());
+        let Samples::U8(v) = &f.samples else {
+            panic!("expected u8 samples");
         };
-        let media = crate::media::load(&path).expect("load jp2");
+        assert_eq!(v.len(), 64 * 32 * 3);
+        for i in 0..64 * 32 {
+            assert_eq!(
+                (v[i * 3], v[i * 3 + 1], v[i * 3 + 2]),
+                (
+                    (i % 256) as u8,
+                    ((i * 3) % 256) as u8,
+                    ((i * 7) % 256) as u8
+                ),
+                "pixel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_jp2_loads_as_a_still_media() {
+        let dir = crate::testutil::fixture_dir("jp2");
+        let path = dir.join("mono16.jp2");
+        std::fs::write(&path, MONO16).expect("write fixture");
+        let media = crate::media::load(&path).expect("load");
         assert_eq!(media.size(), [64, 32]);
         assert_eq!(media.frame_count(), 1);
-        let frame = media.resident(0).expect("still frame is resident");
-        assert_eq!(frame.channels, 3);
+        assert!(media.hi_depth());
+        // The same file through the sequence/export entry point.
+        let frame = crate::media::decode_file(&path).expect("decode_file");
+        assert_eq!(frame.size, [64, 32]);
+    }
+
+    #[test]
+    fn garbage_is_an_error_not_a_panic() {
+        let err = decode_jp2_bytes(b"not a jpeg 2000 file at all", Path::new("bad.jp2"));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn every_claimed_extension_is_loadable_and_recognised() {
+        for ext in EXTS {
+            assert!(handles(ext), "{ext}");
+            assert!(
+                crate::cli::LOADABLE_EXTS.contains(ext),
+                "{ext} missing from LOADABLE_EXTS"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_follows_the_colour_space() {
+        let gray = shape_for(&ColorSpace::Gray, false, 1).unwrap();
+        assert_eq!(
+            gray,
+            Shape {
+                used: 1,
+                channels: 1
+            }
+        );
+        // Grey + alpha drops the alpha, like the `image` path's `La8`.
+        let gray_a = shape_for(&ColorSpace::Gray, true, 2).unwrap();
+        assert_eq!(
+            gray_a,
+            Shape {
+                used: 1,
+                channels: 1
+            }
+        );
+        assert_eq!(
+            shape_for(&ColorSpace::RGB, false, 3).unwrap(),
+            Shape {
+                used: 3,
+                channels: 3
+            }
+        );
+        assert_eq!(
+            shape_for(&ColorSpace::RGB, true, 4).unwrap(),
+            Shape {
+                used: 4,
+                channels: 4
+            }
+        );
+        // Alpha claimed but not delivered: keep the colour planes.
+        assert_eq!(
+            shape_for(&ColorSpace::RGB, true, 3).unwrap(),
+            Shape {
+                used: 3,
+                channels: 3
+            }
+        );
+        // Shapes cim can't draw are refused rather than guessed at.
+        assert!(shape_for(&ColorSpace::CMYK, false, 4).is_none());
+        assert!(shape_for(&ColorSpace::Unknown { num_channels: 2 }, false, 2).is_none());
+        assert!(shape_for(&ColorSpace::RGB, false, 2).is_none());
+        // An unknown space with a drawable shape is fine.
+        assert_eq!(
+            shape_for(&ColorSpace::Unknown { num_channels: 3 }, false, 3).unwrap(),
+            Shape {
+                used: 3,
+                channels: 3
+            }
+        );
+    }
+
+    #[test]
+    fn lossy_overshoot_is_clamped_into_the_component_range() {
+        let plane = [-3.4f32, 0.4, 127.6, 255.49, 260.0];
+        let mut out = vec![0u8; plane.len()];
+        interleave(&[(&plane, max_value(8))], &mut out, |v| v as u8);
+        assert_eq!(out, vec![0, 0, 128, 255, 255]);
     }
 }

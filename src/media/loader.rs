@@ -137,8 +137,8 @@ fn load_concat(files: &[PathBuf], name: String) -> Result<Media> {
 
 /// Decode one standalone file (a still, or one frame of a numbered sequence) at
 /// native bit depth. Dispatches by extension like [`load`]: multi-page TIFFs
-/// go through the `tiff` crate (page 0), JPEG 2000 through the ffmpeg CLI
-/// (`media::jp2`), everything else through the `image` crate.
+/// go through the `tiff` crate (page 0), JPEG 2000 through `media::jp2`,
+/// everything else through the `image` crate.
 pub fn decode_file(path: &Path) -> Result<FrameData> {
     let ext = path
         .extension()
@@ -158,11 +158,11 @@ pub fn decode_file(path: &Path) -> Result<FrameData> {
 /// its colour type to native `Samples`.
 fn decode_still_frame(path: &Path) -> Result<FrameData> {
     use image::ColorType as C;
-    // JPEG 2000 is not an `image` format: it decodes through the ffmpeg CLI,
-    // like video (see `media::jp2`).
+    // JPEG 2000 is not an `image` crate format; it has its own decoder
+    // (see `media::jp2`).
     if path
         .extension()
-        .is_some_and(|e| e.to_string_lossy().to_lowercase() == "jp2")
+        .is_some_and(|e| super::jp2::handles(&e.to_string_lossy().to_lowercase()))
     {
         return super::jp2::decode_jp2(path);
     }
