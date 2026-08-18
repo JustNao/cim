@@ -412,6 +412,9 @@ error.short_tiff: "short TIFF buffer: %{got} < %{expected}"
 error.tiff_color_type: "unsupported TIFF color type: %{kind}"
 error.tiff_sample_format: "unsupported TIFF sample format: %{kind}"
 error.save_extension: "unsupported format '.%{ext}' — use %{exts}"
+error.image_too_large: >-
+  This image is %{w}×%{h}, larger than the %{limit}-pixel texture limit of this
+  display. Zoom out to view it, or turn off the per-pane operators.
 error.jp2_read: "cannot read %{path}: %{err}"
 error.jp2_decode: "cannot decode the JPEG 2000 image %{path}: %{err}"
 error.jp2_color_space: >-

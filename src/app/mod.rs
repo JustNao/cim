@@ -791,6 +791,12 @@ struct Pane {
     render_gen: u64,
     /// Last decode error for this sequence, shown centred over the pane.
     error: Option<String>,
+    /// Why this pane's image can't be made into a texture right now (too large
+    /// for the backend's limit — see `stage`), shown like `error`. Kept apart
+    /// from it deliberately: `stage` recomputes this every frame, so it clears
+    /// itself the moment the pane can be drawn again (zoomed out, operators
+    /// switched off), whereas `error` latches until a fresh frame decodes.
+    tex_error: Option<String>,
     /// Generation of the in-flight background offset scan for this pane (`None`
     /// when none is pending). A returning scan is applied only if it still
     /// matches — a reload re-requests under a new generation, so a scan started

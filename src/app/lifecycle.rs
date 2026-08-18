@@ -511,6 +511,7 @@ impl CimApp {
             compute: None,
             render_gen: 0,
             error: None,
+            tex_error: None,
             offset_scan: None,
             eager: Eager::Off,
             watch: Watch::default(),

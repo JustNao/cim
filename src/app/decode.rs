@@ -583,6 +583,17 @@ impl CimApp {
             if self.catching_up(idx) {
                 continue;
             }
+            // A pane whose view hasn't been fitted yet is still at the default
+            // zoom of 1, which stages the frame at **full resolution** — for a
+            // very large image, gigabytes of texture that the fit is about to
+            // make unnecessary. The fit happens in `draw_pane`, i.e. after this,
+            // so wait the one frame (and ask for it, since an idle app requests
+            // no repaint). Every pane in `displayed_indices` is drawn — and
+            // therefore fitted — so this can't spin.
+            if self.view_ref(idx).needs_fit {
+                ctx.request_repaint();
+                continue;
+            }
             let target = self.stage_target(idx);
             if !self.stage(ctx, idx, target, ppp) {
                 all_ready = false;
@@ -601,7 +612,7 @@ impl CimApp {
         // texture allocation during playback).
         for (idx, target) in staged {
             let sig = self.tone_sig(idx);
-            let step = self.want_step(idx, ppp);
+            let step = self.want_step(idx, target, ppp, max_side(ctx));
             self.panes[idx]
                 .tex
                 .commit(|t| t.shown == target && t.sig == sig && t.step == step);
@@ -659,12 +670,32 @@ impl CimApp {
     /// size-keyed instances, so those always render full-resolution). Read by both
     /// `stage` and the lock-step commit so a texture's `step` is compared against
     /// the one the pane wants right now.
-    fn want_step(&self, idx: usize, ppp: f32) -> usize {
-        let heavy = self.pane_ops_active(idx);
-        if heavy {
-            1
-        } else {
-            self.stage_step(idx, ppp)
+    ///
+    /// Zoom is not the only floor: a texture also has to **fit the backend's
+    /// limit** (`GL_MAX_TEXTURE_SIZE`, 16384 on the software GL these panes run
+    /// on over VNC), so an image wider than that is decimated however far in it
+    /// is zoomed — `texture_fit_step`. Without it a 25000² tile at 1:1 asked
+    /// egui for a 25000² texture and the upload asserted, taking the process
+    /// down. A heavy pane keeps `step 1` regardless (decimating changes what the
+    /// operator computes); `stage` refuses that upload instead of decimating it.
+    fn want_step(&self, idx: usize, target: usize, ppp: f32, max_side: usize) -> usize {
+        if self.pane_ops_active(idx) {
+            return 1;
+        }
+        let size = self.staged_size(idx, target);
+        self.stage_step(idx, ppp)
+            .max(texture_fit_step(size, max_side))
+    }
+
+    /// The pixel size of the frame `stage` is about to render for pane `idx` —
+    /// the frame itself when it is resident, else the pane's displayed size.
+    /// `want_step` reads it, so `stage` and the commit must agree on it: both
+    /// are called with the same `(idx, target)` within one `refresh_textures`,
+    /// where residency doesn't change.
+    fn staged_size(&self, idx: usize, target: usize) -> [usize; 2] {
+        match self.panes[idx].media.resident(target) {
+            Some(f) => f.size,
+            None => self.disp_size(idx),
         }
     }
 
@@ -691,7 +722,22 @@ impl CimApp {
         // Nearest-decimation factor for this pane's synchronous render (1 for a
         // heavy proprietary-operator pane, which never decimates). Part of the
         // texture identity so zooming below the full-resolution band re-renders.
-        let step = self.want_step(idx, ppp);
+        let max_side = max_side(ctx);
+        let step = self.want_step(idx, target, ppp, max_side);
+        // Last line of defence before the upload. `want_step` already decimates a
+        // large frame into the backend's limit, so this only fires where it
+        // *can't*: a heavy proprietary-operator pane, which must render at full
+        // resolution (decimating changes what the operator computes). Say so on
+        // the pane rather than handing egui a texture whose upload asserts and
+        // takes the process down. Recomputed before the early-outs below, so it
+        // clears itself as soon as the pane can be drawn again.
+        let size = self.staged_size(idx, target);
+        let out = decimated_size(size, step);
+        self.panes[idx].tex_error =
+            (out[0] > max_side || out[1] > max_side).then(|| too_large_msg(size, max_side));
+        if self.panes[idx].tex_error.is_some() {
+            return true; // like an errored pane: never stall the lock-step commit
+        }
         // Already committed to the target — nothing to stage.
         if let Some(t) = &self.panes[idx].tex.front {
             if t.shown == target && t.sig == sig && t.step == step {
@@ -865,6 +911,14 @@ impl CimApp {
     /// already did the `ColorImage` conversion copy, so the UI thread only
     /// queues the texture delta here (the recorded upload time reflects that).
     fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, img: ColorImage, f: usize, sig: u64) {
+        // The worker renders full-resolution, so a frame that outgrew the
+        // backend between the request and its landing is dropped here rather
+        // than uploaded (see `stage`).
+        let max_side = max_side(ctx);
+        if img.size[0] > max_side || img.size[1] > max_side {
+            self.panes[idx].tex_error = Some(too_large_msg(img.size, max_side));
+            return;
+        }
         let t = crate::debug::enabled().then(std::time::Instant::now);
         let name = format!("m{}", self.panes[idx].id);
         // Off-thread renders (operators, or a big plain LUT) run at full
@@ -1067,6 +1121,14 @@ impl CimApp {
         if frame.size != self.disp_size(idx) {
             return None;
         }
+        // An overlay is never decimated (it must line up 1:1 with the base
+        // image), so one too large for the backend simply isn't drawn — the
+        // same silent skip as the size mismatch above, rather than an assert
+        // inside the upload.
+        let side = max_side(ctx);
+        if frame.size[0] > side || frame.size[1] > side {
+            return None;
+        }
         self.panes[src].media.touch(f, self.clock); // keep it hot so it isn't evicted
 
         let rgb = [color.r(), color.g(), color.b()];
@@ -1102,6 +1164,48 @@ impl CimApp {
         }
         Some(self.panes[idx].overlay_tex.as_ref().unwrap().image.id())
     }
+}
+
+/// The largest texture side the render backend accepts — `GL_MAX_TEXTURE_SIZE`
+/// on the glow path (16384 on the software GL a VNC session runs on), as egui
+/// reports it. eframe refreshes it every frame from the painter; until it has,
+/// egui's own conservative default stands, which only ever over-decimates.
+fn max_side(ctx: &egui::Context) -> usize {
+    match ctx.input(|i| i.max_texture_side) {
+        0 => FALLBACK_MAX_TEXTURE_SIDE,
+        n => n,
+    }
+}
+
+/// Assumed texture limit should the backend report none at all. Every GL 3+ /
+/// WebGL2 implementation guarantees at least this.
+const FALLBACK_MAX_TEXTURE_SIDE: usize = 2048;
+
+/// The texel count a `step`-decimated render of `size` produces (`render_into_scaled`
+/// keeps every `step`-th sample on each axis, so a partial last step still lands).
+fn decimated_size(size: [usize; 2], step: usize) -> [usize; 2] {
+    let step = step.max(1);
+    [size[0].div_ceil(step), size[1].div_ceil(step)]
+}
+
+/// The smallest decimation step that brings `size` within `max_side` on both
+/// axes — 1 when it already fits.
+fn texture_fit_step(size: [usize; 2], max_side: usize) -> usize {
+    if max_side == 0 {
+        return 1;
+    }
+    size[0].max(size[1]).div_ceil(max_side).max(1)
+}
+
+/// The message a pane shows when its image can't be made into a texture at all.
+fn too_large_msg(size: [usize; 2], max_side: usize) -> String {
+    t!(
+        "error.image_too_large",
+        w = size[0],
+        h = size[1],
+        limit = max_side
+    )
+    .into_owned()
 }
 
 /// Set (or create) a cached texture slot from a freshly rendered image, tagging
@@ -1187,7 +1291,9 @@ fn interleave_prefetch(plans: &[(usize, Vec<usize>)]) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interleave_prefetch, prefetch_depth, PLAY_PREFETCH};
+    use super::{
+        decimated_size, interleave_prefetch, prefetch_depth, texture_fit_step, PLAY_PREFETCH,
+    };
 
     /// Depth is the floor until a latency is known, grows with slow decode / more
     /// panes, shrinks with more workers, and never leaves the `[floor, 8]` band.
@@ -1235,5 +1341,48 @@ mod tests {
     fn prefetch_interleave_handles_empty() {
         assert!(interleave_prefetch(&[]).is_empty());
         assert!(interleave_prefetch(&[(0, vec![]), (1, vec![])]).is_empty());
+    }
+
+    /// The whole point of the clamp: whatever the step, the texture the backend
+    /// is handed fits inside its limit. Checked across a spread of sizes rather
+    /// than the one that prompted it, since the arithmetic is the risk (a
+    /// `floor` here silently leaves the texture one texel too wide).
+    #[test]
+    fn the_fit_step_always_brings_a_frame_within_the_limit() {
+        for &limit in &[2048usize, 4096, 8192, 16384] {
+            for &side in &[
+                1usize, 100, 2047, 2048, 2049, 5000, 16384, 16385, 25000, 100_000,
+            ] {
+                let size = [side, side / 2 + 1];
+                let step = texture_fit_step(size, limit);
+                let out = decimated_size(size, step);
+                assert!(
+                    out[0] <= limit && out[1] <= limit,
+                    "{side} at limit {limit}: step {step} -> {out:?}"
+                );
+                // …and no more decimation than that needs.
+                if step > 1 {
+                    let looser = decimated_size(size, step - 1);
+                    assert!(
+                        looser[0] > limit || looser[1] > limit,
+                        "{side} at limit {limit}: step {step} is one more than needed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An image that already fits is left alone — crossing into the clamp must
+    /// not disturb the full-resolution band the display staging depends on.
+    #[test]
+    fn a_frame_within_the_limit_is_not_decimated() {
+        assert_eq!(texture_fit_step([16384, 16384], 16384), 1);
+        assert_eq!(texture_fit_step([5000, 5000], 16384), 1);
+        assert_eq!(texture_fit_step([1, 1], 16384), 1);
+        // 25000² over a 16384 limit: every other sample, ~12500² of texture.
+        assert_eq!(texture_fit_step([25000, 25000], 16384), 2);
+        assert_eq!(decimated_size([25000, 25000], 2), [12500, 12500]);
+        // A degenerate limit can't divide by zero.
+        assert_eq!(texture_fit_step([100, 100], 0), 1);
     }
 }

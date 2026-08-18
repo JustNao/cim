@@ -354,7 +354,8 @@ impl CimApp {
 
     /// If this sequence failed to decode, paint its message centred over `rect`.
     pub(super) fn draw_pane_error(&self, ui: &egui::Ui, idx: usize, rect: Rect) {
-        let Some(msg) = self.panes[idx].error.as_deref() else {
+        let pane = &self.panes[idx];
+        let Some(msg) = pane.error.as_deref().or(pane.tex_error.as_deref()) else {
             return;
         };
         let painter = ui.painter_at(rect);

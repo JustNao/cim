@@ -605,6 +605,36 @@ re-commits. `want_step` forces `step 1` for a **heavy** proprietary-operator pan
 decimating an operator's input would change its output and thrash the size-keyed instances —
 so those (and overlays, and the export path) always render full-resolution.
 
+**Zoom is not the only floor: the texture must fit the backend.** A texture side is capped
+by the driver (`GL_MAX_TEXTURE_SIZE`, reported by egui as `InputState::max_texture_side` —
+**16384** on the software GL a VNC session runs on, and it is *not* a number this app sets).
+`want_step` therefore also takes `texture_fit_step` = `ceil(max(w,h) / max_side)`, so an
+image wider than the limit is decimated however far it is zoomed in. Without it a 25000²
+satellite tile at `zoom ≥ 1` asked egui for a 25000² texture and `egui_glow`'s upload
+`assert!` **took the process down** — and it did so on *load*, since a pane's view starts at
+`zoom 1.0` with `needs_fit`, and the fit is applied in `draw_pane`, i.e. *after*
+`refresh_textures`. So `refresh_textures` now **skips a pane whose view hasn't been fitted
+yet** (requesting a repaint, since an idle app asks for none): every displayed pane is drawn
+and therefore fitted, so it costs one frame and stages at the fitted zoom instead of
+full-resolution.
+
+Two consequences worth stating. The pane is then **magnified from a decimated texture** at
+1:1 — every texel is still a true sample (§7's rule holds, and the readout reads
+`FrameData`), but you are no longer seeing *every* sample; that is inherent to holding a
+whole image in one texture, and the fix for it is region-of-interest staging, not a bigger
+number. And a `step > 1` render is **synchronous** (`bulk` requires `step == 1`, since the
+render worker only renders full-resolution), so 1:1 on a very large image trades the crash
+for a slow frame.
+
+Where it *can't* decimate — a heavy operator pane, which must stay at `step 1` — `stage`
+refuses the upload and reports it on the pane via **`Pane.tex_error`**, drawn by
+`draw_pane_error` like a decode error. It is deliberately **not** `Pane.error`: `stage`
+recomputes it ahead of its early-outs every frame, so it clears itself as soon as the pane
+can be drawn again (zoomed out, operators switched off), whereas `error` latches until a
+fresh frame decodes. `upload_tex` and `prepare_overlay` are guarded too — an overlay is
+never decimated (it must line up 1:1 with the base image), so one past the limit is simply
+not drawn, the same silent skip as a size mismatch.
+
 *Commit gotcha:* the commit swaps a pane **only when `pending` actually holds the target**
 (not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
 swapping the spent old texture back to the front and flicker between frames.
@@ -1757,6 +1787,11 @@ Deferred actions (`pending_remove`, `pending_reload(_all)`, `pending_compute_cre
   timeline at build time (press the export panel's **Load frames**, or a frame-bar
   "Load all" / "Load offsets", first for a full export — offsets suffices, since export
   only needs the discovered length).
+- **A texture side is bounded by the driver, not by us** (§7): `GL_MAX_TEXTURE_SIZE`, 16384
+  on software GL. Every upload path (`stage`, `upload_tex`, `prepare_overlay`) must keep
+  within `max_side(ctx)` — `egui_glow` `assert!`s, so an oversized image is a **process
+  crash**, not a bad frame. The GPU path (§7.1) checks its own `max_texture_dimension_2d`
+  and falls back to the CPU.
 - **Never time anything with `i.stable_dt`.** egui only reports the real elapsed
   time when the previous frame requested an *immediate* repaint; on a frame woken
   by `request_repaint_after` — i.e. every paced wake in this app — it substitutes
@@ -1894,7 +1929,10 @@ within the cap — counting the distinct workers that actually ran, since
 resize mid-job can't deadlock; the resizing tests share a `SERIAL` mutex because the
 pool is process-global);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
-`app::decode` **prefetch interleave order** + **adaptive depth**; **out-of-order probe
+`app::decode` **prefetch interleave order** + **adaptive depth**, the **texture-limit clamp**
+(`texture_fit_step` brings every size within the backend's limit across a spread of limits,
+and never decimates one step more than needed — a `floor` instead of a `div_ceil` leaves the
+texture a texel too wide, which is a crash, not a blemish); **out-of-order probe
 results can't truncate a sequence** (a batch's misses delivered before the hits ahead of
 them — the ordering `probe_ahead` can genuinely produce); `app::help` inline-span parsing (every character of a line survives, an
 unterminated marker stays literal); **localisation** (§12.1 — `en.yml` and `fr.yml`
