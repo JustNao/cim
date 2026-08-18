@@ -413,8 +413,8 @@ error.tiff_color_type: "unsupported TIFF color type: %{kind}"
 error.tiff_sample_format: "unsupported TIFF sample format: %{kind}"
 error.save_extension: "unsupported format '.%{ext}' — use %{exts}"
 error.ffmpeg_hint: >-
-  Video loading requires the ffmpeg command line tools (ffmpeg.org) available
-  on the PATH
+  Video and JPEG 2000 loading requires the ffmpeg command line tools
+  (ffmpeg.org) available on the PATH
 error.tool_not_found: "%{tool} not found. %{hint}"
 error.tool_failed: "failed to run %{tool}: %{err}"
 error.ffprobe_failed: "ffprobe failed on %{path}: %{err}"

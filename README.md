@@ -31,9 +31,9 @@ cim my_folder                   # one pane: every loadable file in it, alphabeti
 cim clip.mp4                    # one pane per video (never grouped)
 ```
 
-Supported: `tif`, `tiff`, `png`, `jpg`, `jpeg`, `bmp`, `webp`, plus `mp4`/`avi`
-videos (decoded through the `ffmpeg` CLI, which must be on the `PATH` — export
-needs it too).
+Supported: `tif`, `tiff`, `png`, `jpg`, `jpeg`, `bmp`, `webp`, plus `jp2`
+(JPEG 2000) images and `mp4`/`avi` videos — those two decode through the
+`ffmpeg` CLI, which must be on the `PATH` (export needs it too).
 
 `cim --help` lists everything, including the `--mode` / `--zoom` / `--frame` /
 `--tone` / … _view-state_ flags. You normally don't type those by hand: the in-app

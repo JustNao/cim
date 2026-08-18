@@ -19,17 +19,17 @@
 - **Tests:** `cargo test` (inline in `media/*.rs`/`export.rs`/`cli.rs`/`renderer.rs`).
   Fixtures are **generated synthetically** at test time by `src/testutil.rs`
   (multi-page u16 TIFFs, PNG runs, a hand-written 1-bit bilevel-mask TIFF), so the
-  suite runs anywhere; the ffmpeg-dependent tests (MP4 encode, video decode —
-  the latter generate a tiny `testsrc` clip with ffmpeg itself) skip gracefully
-  when `ffmpeg` is absent.
+  suite runs anywhere; the ffmpeg-dependent tests (MP4 encode, video decode, JPEG
+  2000 decode — the latter two generate a tiny `testsrc` clip / `.jp2` with ffmpeg
+  itself) skip gracefully when `ffmpeg` is absent.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
   `serde`/`serde_json`, `directories` 5, `anyhow`, `libloading` 0.8 (runtime load
   of the optional proprietary C++ operators — **no** C++ compiler needed to build
   cim; see `INTEGRATION_CPP.md`), `rust-i18n` 4 (UI translations, §12). Export
-  shells out to the **`ffmpeg` CLI**; video (mp4/avi) loading shells out to
-  **`ffprobe`/`ffmpeg`** the same way (§3).
+  shells out to the **`ffmpeg` CLI**; video (mp4/avi) **and JPEG 2000 (`.jp2`)**
+  loading shell out to **`ffprobe`/`ffmpeg`** the same way (§3).
 - **Embedded assets** (`assets/`, baked in via `include_bytes!`): `icon.png` (window
   icon) and `cimicons.ttf` (a Braille-block subset of DejaVu Sans, registered in
   `new` as a **fallback** font so glyphs the bundled faces lack — e.g. the `⠿`
@@ -66,6 +66,9 @@ src/
                  decoder), bilevel-mask bit handling.
     video.rs     Video via the ffmpeg CLI: ffprobe metadata (probe_video) and
                  VideoReader (persistent streaming ffmpeg child; §3).
+    jp2.rs       JPEG 2000 stills via the ffmpeg CLI (§3): ffprobe geometry +
+                 pixel format (probe_jp2), a native-depth output format
+                 (layout_for) and the one-frame rawvideo decode (decode_jp2).
     fastscan.rs  Fast scan (§4): measure a regular page stride from the first
                  two IFDs, then predict + validate + raw-decode page N in O(1)
                  (never trusted unvalidated; falls back to the chain walk).
@@ -223,6 +226,21 @@ file)`, `File(path)` decodes a standalone still); lazy length `at_end()` /
   assumes **CFR** (avg rate), so a VFR file may land ±1 frame on seeks. Missing
   ffmpeg/ffprobe → a clear open error / per-pane frame error, never a crash.
   `DecodeReq::Video { path, frame }` decodes via the pool's per-pane reader.
+
+**JPEG 2000 (`.jp2`, `media/jp2.rs`)** is a **still**, not a source kind of its own:
+`load`/`decode_file` dispatch on the extension and everything downstream (a `Still`
+pane, a `FileSeq` numbered run, a folder concatenation, export's `Files` source) is
+unchanged. Only the *decoder* differs — the `image` crate has no JPEG 2000, so like
+video it shells out to the **ffmpeg CLI** rather than adding a C-linked crate:
+`ffprobe` gives width/height/`pix_fmt`, then one `ffmpeg … -frames:v 1 -f rawvideo`
+pipe yields the samples. The output `-pix_fmt` (`jp2::layout_for`, a pure function
+so it is unit-testable without ffmpeg) is chosen to **keep native values**: a mono
+source is asked for at its own depth (`gray12le` stays 12-bit data in a `u16`, so
+the readout and histograms show the file's numbers), grey+alpha drops its alpha
+exactly as the `image` still path drops `La8`'s. The exception is **colour deeper
+than 8 bits**: ffmpeg's packed RGB formats are 8- or 16-bit only, so a 12-bit RGB
+source is rescaled to 16 — the JPEG 2000 counterpart of the video path's CFR
+assumption. Missing ffmpeg/ffprobe → a clear open error, never a crash.
 
 ### `SeqReader` — persistent per-sequence decoder
 `open(path)` holds one `tiff::Decoder`; `decode(idx)` returns `Ok(None)` past the
@@ -1537,7 +1555,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   escaped by the completer itself on the way out and un-escaped on the way in (the word
   being completed carries them from a previous Tab), and the manual `nospace` for a lone
   folder candidate lets it be descended. `LOADABLE_EXTS =
-  [tif,tiff,png,jpg,jpeg,bmp,webp]` + `VIDEO_EXTS` is shared by the dialog and
+  [tif,tiff,png,jpg,jpeg,bmp,webp,jp2]` + `VIDEO_EXTS` is shared by the dialog and
   the filter.
 
 ---
@@ -1833,9 +1851,12 @@ does after). The `⏱ Debug` window (`draw_debug`) tabulates them so the bottlen
 Inline `#[cfg(test)]`, run against **synthetic fixtures generated at test time**
 (`src/testutil.rs` — multi-page u16 TIFFs with varying page sizes, PNG runs, a
 hand-written 1-bit bilevel-mask TIFF); the ffmpeg-dependent tests (MP4 encode,
-`media::video` probe/decode/seek against a generated `testsrc` clip) skip when
-`ffmpeg` is absent, while the ffprobe-output parsing and seek math test without
-it. Coverage: `cli` token expansion/grouping (incl. **video dir/token/completion
+`media::video` probe/decode/seek against a generated `testsrc` clip, `media::jp2`
+decode of a generated `.jp2`) skip when `ffmpeg` is absent, while the
+ffprobe-output parsing, the seek math and the JPEG 2000 **pixel-format choice**
+(`layout_for`: mono keeps its native depth, grey+alpha stays mono, colour picks
+packed RGB(A) by depth, and a per-*pixel* bit total like `rgb24`/`rgb48le` isn't
+misread as a per-component one) test without it. Coverage: `cli` token expansion/grouping (incl. **video dir/token/completion
 exclusion**); `media` lazy length / probe
 discovery / eviction (incl. **LRU peek order + shown-frame protection**), **LUT render
 matches the float reference** bit-for-bit, **`ToneLut` reuse == uncached render** (and
@@ -1914,3 +1935,6 @@ of the prefix, each make the relevant test fail.
 - **Video limitations (§3):** frames are 8-bit (higher-depth sources tone-mapped
   down by ffmpeg) and frame↔time assumes CFR — a VFR file may land ±1 frame on
   seeks.
+- **JPEG 2000 limitations (§3):** decoding needs the `ffmpeg` CLI on the PATH, and a
+  colour source deeper than 8 bits is rescaled to 16-bit (mono keeps its native
+  depth exactly).
