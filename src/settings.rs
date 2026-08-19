@@ -429,6 +429,14 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// **Adaptive rendering**: when a pane is zoomed into a large image, render
+    /// only the visible region (plus margin) at full sharpness over a small
+    /// decimated whole-image base, instead of one huge whole-image texture (see
+    /// `app::roi`). Off by default — the whole-image path is the long-tested
+    /// behaviour, and adaptive mode changes what the proprietary operators see
+    /// (they run on the reduced visible region, by design).
+    #[serde(default)]
+    pub adaptive_render: bool,
     /// Directory holding the proprietary C++ operator shared libraries (`.so`).
     /// Empty = resolve them by bare name via the system loader search path
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
@@ -486,6 +494,7 @@ impl Default for Config {
             cpu_budget: default_cpu_budget(),
             jp2_max_mp: default_jp2_max_mp(),
             cursor_dot: true,
+            adaptive_render: false,
             cpp_lib_dir: String::new(),
             hardware_accel: false,
             keybindings: Keybindings::default(),

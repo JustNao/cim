@@ -1024,6 +1024,38 @@ impl CimApp {
         self.draw_label_preview(ui, &rows);
     }
 
+    /// Overlay pane `idx`'s adaptive viewport region on the label preview.
+    ///
+    /// `dest` is where the pane's image is drawn in the preview box and `shown`
+    /// the image-space rect it represents, so the region's own image rect maps
+    /// into `dest` by the same linear fit. Clipped to the intersection, so a
+    /// region that only partly covers the previewed rect (a crop reaching past
+    /// the viewport) leaves the base showing through the rest rather than
+    /// stretching over it. Axis-aligned: the preview shows the exported
+    /// composition, which is never drawn rotated.
+    fn paint_preview_region(&self, painter: &egui::Painter, idx: usize, dest: Rect, shown: Rect) {
+        let Some((tex, img)) = self.region_of(idx) else {
+            return;
+        };
+        let vis = img.intersect(shown);
+        if !vis.is_positive() || !shown.is_positive() {
+            return;
+        }
+        // Image space -> preview space, and image space -> the region's own UVs.
+        let map = |p: Pos2, from: Rect, to: Rect| {
+            Pos2::new(
+                to.min.x + (p.x - from.min.x) / from.width() * to.width(),
+                to.min.y + (p.y - from.min.y) / from.height() * to.height(),
+            )
+        };
+        let unit = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.add(egui::Shape::image(
+            tex,
+            Rect::from_min_max(map(vis.min, shown, dest), map(vis.max, shown, dest)),
+            Rect::from_min_max(map(vis.min, img, unit), map(vis.max, img, unit)),
+            Color32::WHITE,
+        ));
+    }
     /// A small mock of one exported cell: the media's own image with the label
     /// drawn over it, using the same anchor / margin / padding maths as
     /// `ExportPlan::draw_labels`, scaled to the preview. Not a re-run of the
@@ -1096,10 +1128,23 @@ impl CimApp {
         // output too (the A/B case), so show it as such rather than stretching.
         painter.rect_filled(rect, 0.0, Color32::from_gray(24));
         match self.pane_texture(idx) {
-            Some(tex) => painter.add(egui::Shape::image(tex, dest, uv, Color32::WHITE)),
+            Some(tex) => {
+                painter.add(egui::Shape::image(tex, dest, uv, Color32::WHITE));
+                // Under adaptive rendering the pane texture above is the
+                // `BASE_MAX`-capped base, so on its own the preview turned
+                // pixelated the moment the mode engaged — at a perfectly
+                // ordinary zoom, and for an export that is not pixelated at all
+                // (export renders whole-image, see `ExportPane::render`). Lay the
+                // sharp viewport region over it exactly as the canvas does. The
+                // previewed rect is the pane's visible content, which is what the
+                // region is sized to cover, so this is normally the whole box.
+                self.paint_preview_region(&painter, idx, dest, g.uv);
+            }
             // No committed texture yet (still decoding): a flat plate still shows
             // where the label lands.
-            None => painter.rect_filled(dest, 0.0, Color32::from_gray(60)),
+            None => {
+                painter.rect_filled(dest, 0.0, Color32::from_gray(60));
+            }
         };
 
         // Same geometry as the export, scaled by the preview's share of the

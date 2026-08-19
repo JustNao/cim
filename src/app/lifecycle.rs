@@ -513,6 +513,10 @@ impl CimApp {
             error: None,
             tex_error: None,
             offset_scan: None,
+            pan_vel: Default::default(),
+            cell: Rect::ZERO,
+            region_want: None,
+            region_show: None,
             eager: Eager::Off,
             watch: Watch::default(),
             fast_jump: None,
@@ -536,6 +540,14 @@ impl CimApp {
             g.forget_pane(removed_id); // drop its uploaded display table
         }
         self.render_inflight.remove(&removed_id);
+        // A region job in flight for this pane will never land now, and its
+        // guard would otherwise block that pane id's regions forever — which,
+        // with regions gating the lock-step commit, would stall playback.
+        self.roi_inflight.remove(&removed_id);
+        // Its cached regions can never be wanted again either: `retire_stale`
+        // only fires on a *later insert by the same pane*, so with the pane gone
+        // they would sit in the budget until the LRU got round to them.
+        self.regions.forget_pane(removed_id);
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
@@ -630,6 +642,11 @@ impl CimApp {
                     g.forget_pane(id); // its display table describes the old contents
                 }
                 self.render_inflight.remove(&id);
+                // Same reasoning as on close — except the pane id lives on, so a
+                // stranded guard would block its regions (and the timeline)
+                // forever, and the regions themselves describe the old contents.
+                self.roi_inflight.remove(&id);
+                self.regions.forget_pane(id);
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;

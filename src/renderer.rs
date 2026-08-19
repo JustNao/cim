@@ -29,6 +29,18 @@ use std::thread;
 
 use crate::media::FrameData;
 
+/// What a finished render becomes on the UI side — the app's routing decision,
+/// carried through the pool so a result never has to be re-classified.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    /// The pane's whole-image base texture (`app::decode::upload_tex`).
+    Base,
+    /// One adaptive viewport region (`app::roi`). It lands in the region cache
+    /// under the key the app filed in `roi_inflight` when it queued the job, so
+    /// the key never has to be reconstructed from the geometry on the way back.
+    Viewport,
+}
+
 pub struct RenderJob {
     pub id: u64,
     pub frame: usize,
@@ -36,13 +48,17 @@ pub struct RenderJob {
     /// to tell a still-current texture from a stale one (see `CimApp::tone_sig`).
     pub sig: u64,
     pub data: Arc<FrameData>,
-    /// Linear display bounds `[lo, hi] → [0, 255]`, computed on the UI thread.
-    pub lo: f32,
-    pub hi: f32,
-    /// Whether to run LUT_ALPHA on the render (non-LUT_ALPHA tones and masks
-    /// leave it off).
-    pub lut_alpha: bool,
-    pub details: bool,
+    /// How to map samples to pixels — window, Colormap palette, operators. The
+    /// pool renders **every** live tone, Colormap included; leaving the palette
+    /// out of the job is what made a large Colormap region come back grey.
+    pub tone: crate::imageproc::Display,
+    /// The sub-rect and decimation to render. A base job passes
+    /// `Region::whole(data.size, step)` — `step` is 1 outside adaptive mode, and
+    /// for an operator pane a decimated base means the operators run on the
+    /// reduced input, by design. The adaptive path passes its viewport region.
+    pub region: crate::media::Region,
+    /// Where the result goes (echoed back on [`RenderDone`]).
+    pub target: Target,
 }
 
 pub struct RenderDone {
@@ -53,6 +69,14 @@ pub struct RenderDone {
     /// on the worker (see [`RgbaSink`]), so neither the conversion copy nor the
     /// texture-delta queueing costs the UI thread anything but a move.
     pub image: eframe::egui::ColorImage,
+    /// The frame's native pixel size (the image above is smaller when decimated
+    /// or a region) — what the pane's on-screen geometry is sized from.
+    pub native: [usize; 2],
+    /// The job's region, echoed back: its `step` is the texture's identity, and
+    /// its `out` is `image.size`.
+    pub region: crate::media::Region,
+    /// The job's target, echoed back (see [`RenderJob::target`]).
+    pub target: Target,
     /// LUT / tone map time (the gray or 8-bit render), for the `CIM_DEBUG` profiler.
     pub lut_time: std::time::Duration,
     /// Proprietary-operator `apply` time (zero when no operator ran).
@@ -200,25 +224,28 @@ impl Worker {
     /// bits. Mirrors the live path in `app::decode::prepare` and the export path in
     /// `export::ensure_frame` so all three match pixel-for-pixel.
     fn render(&mut self, job: RenderJob) -> RenderDone {
-        let size = job.data.size;
+        let native = job.data.size;
         let mut pixels = Vec::new();
         // The one shared render tail (plain LUT, or operators on a full-precision
         // 16-bit render) — identical to the export path by construction, which
         // renders the same tail into a byte buffer instead (see `RgbaSink`).
-        let (lut_time, ops_time) = self.ops.render_display(
-            &job.data,
-            (job.lo, job.hi),
-            job.lut_alpha,
-            job.details,
-            &mut self.lut,
-            &mut pixels,
-        );
-        let image = eframe::egui::ColorImage { size, pixels };
+        // Whole image or region, full resolution or decimated, it is one call:
+        // `Region` carries the difference.
+        let (lut_time, ops_time) =
+            self.ops
+                .render_display(&job.data, job.tone, job.region, &mut self.lut, &mut pixels);
+        let image = eframe::egui::ColorImage {
+            size: job.region.out,
+            pixels,
+        };
         RenderDone {
             id: job.id,
             frame: job.frame,
             sig: job.sig,
             image,
+            native,
+            region: job.region,
+            target: job.target,
             lut_time,
             ops_time,
         }
@@ -228,7 +255,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::Samples;
+    use crate::media::{Region, Samples};
 
     /// The worker's output must equal the plain LUT render byte-for-byte when
     /// no proprietary library is loaded (the test environment) — including
@@ -256,16 +283,155 @@ mod tests {
                 frame: 0,
                 sig: 9,
                 data: frame.clone(),
-                lo,
-                hi,
-                lut_alpha,
-                details,
+                tone: crate::imageproc::Display {
+                    lo,
+                    hi,
+                    palette: None,
+                    ops: crate::imageproc::Ops { lut_alpha, details },
+                },
+                region: Region::whole([8, 4], 1),
+                target: Target::Base,
             });
             assert_eq!(done.image.size, [8, 4]);
             assert_eq!(
                 done.image, reference,
                 "lut_alpha={lut_alpha} details={details}"
             );
+        }
+    }
+
+    /// A decimated / region job renders exactly the plain region render (no
+    /// operator library in tests, so the documented fallback), with the result
+    /// sized to the region and the native size echoed alongside — the contract
+    /// the adaptive region cache and the base-commit identity both rely on.
+    #[test]
+    fn worker_region_render_matches_region_lut() {
+        use crate::media::ToneLut;
+        use eframe::egui::Color32;
+
+        let frame = Arc::new(FrameData::new(
+            [9, 6],
+            1,
+            Samples::U16(crate::testutil::gray16_page(9, 6, 11)),
+        ));
+        let (lo, hi) = (500.0, 60000.0);
+        let region = Region {
+            origin: [2, 2],
+            out: [3, 2],
+            step: 2,
+        };
+        let mut worker = Worker::default();
+        let done = worker.render(RenderJob {
+            id: 1,
+            frame: 0,
+            sig: 9,
+            data: frame.clone(),
+            tone: crate::imageproc::Display {
+                lo,
+                hi,
+                palette: None,
+                // Library absent → plain fallback, still the region path.
+                ops: crate::imageproc::Ops {
+                    lut_alpha: true,
+                    details: false,
+                },
+            },
+            region,
+            target: Target::Viewport,
+        });
+        assert_eq!(done.image.size, [3, 2]);
+        assert_eq!(done.native, [9, 6]);
+        assert_eq!((done.region, done.target), (region, Target::Viewport));
+
+        let mut reference = Vec::<Color32>::new();
+        frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut reference);
+        assert_eq!(done.image.pixels, reference);
+
+        // A decimated whole-image job (an adaptive base) sizes to the decimated
+        // grid and routes to the pane's base texture.
+        let base = Region::whole([9, 6], 2);
+        let done = worker.render(RenderJob {
+            id: 1,
+            frame: 0,
+            sig: 9,
+            data: frame.clone(),
+            tone: crate::imageproc::Display {
+                lo,
+                hi,
+                palette: None,
+                ops: crate::imageproc::Ops::default(),
+            },
+            region: base,
+            target: Target::Base,
+        });
+        assert_eq!(done.image.size, [5, 3]);
+        assert_eq!((done.native, done.region.step), ([9, 6], 2));
+        assert_eq!(done.target, Target::Base);
+    }
+
+    /// A **Colormap** job comes back false-coloured, whole-image or region.
+    ///
+    /// The reported bug: the pool carried no palette, so `render_display` fell
+    /// through to the plain grey LUT. The live paths worked around it by keeping
+    /// Colormap renders synchronous — but the adaptive region path had no such
+    /// guard, so a region large enough to go off-thread
+    /// (`ASYNC_RENDER_PIXELS`) rendered grey. That produced a *band* of zooms
+    /// where a Colormap pane lost its palette: wide enough for the region to
+    /// exceed 1 MP, but zoomed in enough for `roi_plan` to still engage. The band
+    /// moved with `COVER`, which is why pausing and playing gave different edges.
+    #[test]
+    fn worker_renders_the_colormap_palette() {
+        use crate::media::ToneLut;
+        use crate::palette::Palette;
+        use eframe::egui::Color32;
+
+        let frame = Arc::new(FrameData::new(
+            [9, 6],
+            1,
+            Samples::U16(crate::testutil::gray16_page(9, 6, 11)),
+        ));
+        let (lo, hi) = (500.0, 60000.0);
+        let pal = Palette::Viridis;
+        let tone = crate::imageproc::Display {
+            lo,
+            hi,
+            palette: Some(pal),
+            // A Colormap pane never runs operators; set them anyway to pin that
+            // the palette branch wins regardless.
+            ops: crate::imageproc::Ops {
+                lut_alpha: true,
+                details: true,
+            },
+        };
+        let mut worker = Worker::default();
+
+        for region in [
+            Region::whole([9, 6], 1),
+            Region::whole([9, 6], 2),
+            Region {
+                origin: [2, 2],
+                out: [3, 2],
+                step: 2,
+            },
+        ] {
+            let done = worker.render(RenderJob {
+                id: 1,
+                frame: 0,
+                sig: 9,
+                data: frame.clone(),
+                tone,
+                region,
+                target: Target::Viewport,
+            });
+            let mut want = Vec::<Color32>::new();
+            frame.render_cmap(lo, hi, region, pal, &mut ToneLut::default(), &mut want);
+            assert_eq!(done.image.pixels, want, "{region:?}");
+
+            // And it is genuinely not the grey render — otherwise this test
+            // would pass on the very bug it exists for.
+            let mut grey = Vec::<Color32>::new();
+            frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut grey);
+            assert_ne!(done.image.pixels, grey, "{region:?} rendered grey");
         }
     }
 
@@ -288,11 +454,12 @@ mod tests {
         let (lo, hi) = (700.0, 61000.0);
 
         // The byte sink has no parallel path, so it *is* the serial reference.
+        let whole = Region::whole(f.size, 1);
         let mut serial = Vec::<u8>::new();
-        f.render_into_lut(lo, hi, &mut ToneLut::default(), &mut serial);
+        f.render_lut(lo, hi, whole, &mut ToneLut::default(), &mut serial);
 
         let mut par = Vec::<Color32>::new();
-        f.render_into_lut(lo, hi, &mut ToneLut::default(), &mut par);
+        f.render_lut(lo, hi, whole, &mut ToneLut::default(), &mut par);
         assert_eq!(par.len() * 4, serial.len());
         for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
             assert_eq!(p.to_array(), s, "grey pixel {i}");
@@ -301,25 +468,9 @@ mod tests {
         // Same for the Colormap tone, which takes the `par_rgb` branch.
         let pal = crate::palette::Palette::Viridis;
         let mut serial = Vec::<u8>::new();
-        f.render_into_scaled_cmap(
-            lo,
-            hi,
-            1,
-            pal.table(),
-            pal.id(),
-            &mut ToneLut::default(),
-            &mut serial,
-        );
+        f.render_cmap(lo, hi, whole, pal, &mut ToneLut::default(), &mut serial);
         let mut par = Vec::<Color32>::new();
-        f.render_into_scaled_cmap(
-            lo,
-            hi,
-            1,
-            pal.table(),
-            pal.id(),
-            &mut ToneLut::default(),
-            &mut par,
-        );
+        f.render_cmap(lo, hi, whole, pal, &mut ToneLut::default(), &mut par);
         for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
             assert_eq!(p.to_array(), s, "colormap pixel {i}");
         }

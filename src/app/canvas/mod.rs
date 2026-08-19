@@ -9,7 +9,7 @@ mod options_popup;
 mod region_stats;
 mod transform;
 
-use transform::*;
+pub(in crate::app) use transform::*;
 
 use super::*;
 
@@ -209,6 +209,9 @@ impl CimApp {
         // top/bottom strips (when shown), so hiding them never moves the image.
         let img_area = cell;
         let size = self.panes[idx].media.size();
+        // Layout is authoritative here; the adaptive-render staging reads it a
+        // frame later (see `Pane::cell`) to size its region against the viewport.
+        self.panes[idx].cell = img_area;
 
         // Fit this pane's effective view on first draw / after a reset.
         {
@@ -230,6 +233,9 @@ impl CimApp {
             let rect = v.image_rect(self.disp_size(idx), img_area);
             let theta = self.pane_theta(idx);
             paint_rotated(&painter, id, rect, theta);
+            // The sharp adaptive viewport region, over the (possibly capped)
+            // base; the overlay stays on top of both.
+            self.paint_region(&painter, idx, img_area, rect.center(), theta);
             // The mask overlay shares the base image's rect (1:1 in image space).
             if let Some(ov) = overlay {
                 paint_rotated(&painter, ov, rect, theta);
@@ -362,6 +368,57 @@ impl CimApp {
         // The ctrl-drag reorder border is drawn in a separate pass over all
         // cells (`draw_reorder_borders`), after every pane, so it can't be
         // painted over by a later-drawn neighbour.
+    }
+
+    /// Pane `idx`'s committed adaptive viewport region — its texture and the
+    /// **image-space** rect it covers — or `None` when the pane has none.
+    ///
+    /// No check on the setting here on purpose. `region_show` is only ever
+    /// written by the lock-step commit, in the same breath as the base it
+    /// belongs to, so painting it is correct by construction — and *keeping* it
+    /// painted across a toggle matters: switching adaptive off re-renders the
+    /// base at full resolution, and dropping the region before that lands would
+    /// show the `BASE_MAX`-capped base bare for a frame or two. The same commit
+    /// that installs the full-resolution base clears this.
+    ///
+    /// Texel `(ox, oy)` shows source pixel `origin + [ox, oy] * step`, so the
+    /// rect is `[origin * step, (origin + dims) * step)`.
+    pub(in crate::app) fn region_of(&self, idx: usize) -> Option<(TextureId, Rect)> {
+        let k = self.panes[idx].region_show?;
+        let tex = self.regions.get(&k)?;
+        let s = k.step as f32;
+        let rect = Rect::from_min_max(
+            Pos2::new(k.origin[0] as f32 * s, k.origin[1] as f32 * s),
+            Pos2::new(
+                (k.origin[0] + k.dims[0]) as f32 * s,
+                (k.origin[1] + k.dims[1]) as f32 * s,
+            ),
+        );
+        Some((tex.id(), rect))
+    }
+
+    /// Paint pane `idx`'s adaptive viewport region (if the commit staged one)
+    /// over its base texture: the sharp sub-rect at its exact image-space rect,
+    /// rotated about the whole image's screen `pivot` (the base rect's centre —
+    /// rotating about its own centre would tear it off the base). Shared by the
+    /// grid/single pane and the A/B sides so all layouts composite identically.
+    fn paint_region(
+        &self,
+        painter: &egui::Painter,
+        idx: usize,
+        area: Rect,
+        pivot: Pos2,
+        theta: f32,
+    ) {
+        let Some((tex, img)) = self.region_of(idx) else {
+            return;
+        };
+        let v = self.view_ref(idx);
+        let rect = Rect::from_min_max(
+            v.img_to_screen(img.min.to_vec2(), area),
+            v.img_to_screen(img.max.to_vec2(), area),
+        );
+        paint_rotated_about(painter, tex, rect, theta, pivot);
     }
 
     /// Reorder feedback borders for the grid, drawn in one pass **after** every

@@ -25,6 +25,7 @@ mod help;
 mod input;
 mod panels;
 mod profile;
+mod roi;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -113,12 +114,12 @@ const TEXT_BUTTON_ACTIVE: Color32 = Color32::from_gray(230);
 /// the dominant idle cost over VNC / software rendering. ~30 fps.
 const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 
-/// Frames at least this many pixels render their plain LUT **off-thread** (on
-/// the pane's render worker) instead of synchronously in `stage`: a large
-/// full-resolution LUT render is tens of milliseconds, and doing it on the UI
-/// thread blocks that whole update — a visible hitch whenever playback steps
-/// while the user is interacting. Below this, the synchronous render is cheaper
-/// than the worker round-trip. ~1 MP.
+/// Renders producing at least this many **output texels** run their plain LUT
+/// **off-thread** (on the pane's render worker) instead of synchronously in
+/// `stage` / `render_region`: a large LUT render is tens of milliseconds, and
+/// doing it on the UI thread blocks that whole update — a visible hitch
+/// whenever playback steps while the user is interacting. Below this, the
+/// synchronous render is cheaper than the worker round-trip. ~1 MP.
 const ASYNC_RENDER_PIXELS: usize = 1 << 20;
 
 /// How long a transient status notification (top toolbar, far right) stays up
@@ -819,6 +820,29 @@ struct Pane {
     /// chain again. `None` until a reload builds one, or after one stops
     /// validating.
     page_anchor: Option<media::PageAnchor>,
+    /// Pan-velocity estimate for this pane's view centre, biasing the adaptive
+    /// render region toward where the view is heading (see [`roi::PanVel`]).
+    pan_vel: roi::PanVel,
+    /// The region key staged for the frame being brought up (`stage_region`),
+    /// promoted to `region_show` by the lock-step commit — the region half of
+    /// `PaneTex`'s `pending`/`front` pair, so a pane can never pair one frame's
+    /// base with another frame's region.
+    region_want: Option<roi::RegionKey>,
+    /// This pane's screen rect as of the last time it was drawn (its grid cell,
+    /// or the whole image area in Single / A-B). Captured at draw time because
+    /// that is where the layout is authoritative, and read one frame later by
+    /// the adaptive-render staging (`roi_plan` / region geometry), which runs
+    /// before layout — the same one-frame-stale convention as `last_area` and
+    /// `needs_fit`. Zero-sized until the pane has been drawn once, which simply
+    /// keeps adaptive rendering off for that first frame.
+    cell: Rect,
+    /// The adaptive-render region `draw_pane` paints over this pane's base — the
+    /// committed half of the pair, promoted from `region_want` by the lock-step
+    /// commit, so it always belongs to the frame the base is showing. It keeps
+    /// the *previous* origin while a newly wanted one renders, so a pan never
+    /// blanks the sharp layer. `None` when adaptive rendering is off or inactive
+    /// for this pane.
+    region_show: Option<roi::RegionKey>,
 }
 
 /// A pane's auto-reload file-watch state: watch the source file(s) on disk and
@@ -1044,6 +1068,16 @@ pub struct CimApp {
     /// at most one runs per pane at a time (rapid tone/frame changes coalesce).
     renderer: crate::renderer::RenderPool,
     render_inflight: HashSet<u64>,
+    /// Finished adaptive-render region textures, LRU'd across all panes — the
+    /// pan-back cache (see [`roi`]).
+    regions: roi::RegionCache,
+    /// The region render in flight per **pane id**, with the cache key it will
+    /// land under. Keyed by pane so at most one is queued per pane at a time (the
+    /// invariant `RenderPool` documents) — keying by region identity would never
+    /// dedupe during playback, where every frame wants a new one. Holding the key
+    /// here rather than echoing its parts through the render pool is what lets
+    /// `land_region` file the result without re-deriving it from the geometry.
+    roi_inflight: HashMap<u64, roi::RegionKey>,
     /// Off-UI-thread fast-offset scanner: on open/reload a fast-scannable
     /// sequence's whole length is discovered here instead of the UI thread.
     /// `offset_gen` tags each scan so a result returning after a reload (pane ids
@@ -1281,6 +1315,8 @@ impl CimApp {
             // known to be reentrant, to render several panes in parallel.
             renderer: crate::renderer::RenderPool::new(cc.egui_ctx.clone()),
             render_inflight: HashSet::new(),
+            regions: roi::RegionCache::default(),
+            roi_inflight: HashMap::new(),
             scanner: crate::offsets::OffsetScanner::new(cc.egui_ctx.clone()),
             offset_gen: 0,
             watcher: crate::watcher::FileWatcher::new(cc.egui_ctx.clone()),
@@ -1469,13 +1505,22 @@ impl CimApp {
     /// to gate both the off-thread render and the no-decimation rule.
     pub(super) fn pane_ops_active(&self, i: usize) -> bool {
         let f = self.frame_disp(i);
-        self.panes[i].media.resident(f).is_some_and(|fr| {
-            crate::imageproc::ops_active(
-                &fr,
-                self.contrast_of(i) == ContrastMode::LutAlpha,
-                self.details_of(i),
-            )
-        })
+        let ops = self.ops_of(i);
+        self.panes[i]
+            .media
+            .resident(f)
+            .is_some_and(|fr| crate::imageproc::ops_active(&fr, ops))
+    }
+
+    /// Which proprietary operators pane `i`'s tone asks for — what every render
+    /// of that pane passes down (`stage`, `render_region`, the render pool).
+    /// Whether they actually *run* additionally depends on the frame and the
+    /// loaded libraries: `imageproc::ops_active`.
+    pub(super) fn ops_of(&self, i: usize) -> crate::imageproc::Ops {
+        crate::imageproc::Ops {
+            lut_alpha: self.contrast_of(i) == ContrastMode::LutAlpha,
+            details: self.details_of(i),
+        }
     }
 
     pub(super) fn overlay_of(&self, i: usize) -> Option<OverlaySpec> {
@@ -1508,7 +1553,12 @@ impl CimApp {
         for p in &mut self.panes {
             p.tex.clear();
             p.overlay_tex = None;
+            p.region_show = None;
         }
+        // Cached viewport regions were rendered without the newly loaded
+        // operator, at unchanged keys (the tone signature doesn't see library
+        // availability) — drop them all so they re-render with it.
+        self.regions.clear();
         self.status.set(match after {
             (true, true) => "Operator libraries loaded",
             (true, false) => "LUT_ALPHA operator loaded",
@@ -2074,6 +2124,10 @@ impl CimApp {
         // them (and commit a playback step) together. Runs last so it sees the
         // settled frame/tone state, just before drawing reads the textures.
         self.refresh_textures(ctx);
+
+        // The regions themselves were staged with the bases above; all that is
+        // left is holding the region cache inside its byte budget.
+        self.enforce_region_budget();
     }
 
     /// The centred modal popups drawn on top of everything: the per-app error

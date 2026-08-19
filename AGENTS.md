@@ -619,11 +619,11 @@ texture back in `pending` for handle reuse — no per-frame allocation). `pane_t
 (read by drawing) returns the committed `tex`, falling back to `pending` only before the
 first commit so a pane isn't blank while its siblings load. **No spinner:** a pane holds
 its last committed frame until the group flips. The single-pane render pipeline: bounds →
-`render_into_scaled(lo, hi, step, &mut render_scratch)` (a reused buffer) →
-`ColorImage::from_rgba_unmultiplied` → texture `set`/`load`.
+`render_lut(lo, hi, Region::whole(size, step), lut, &mut pixels)` — rendered straight
+into egui's `Color32` (`RgbaSink`), no conversion pass → texture `set`/`load`.
 
 **Display-resolution staging (minified panes).** The synchronous LUT render is done at a
-**nearest-decimation** `step` (`render_into_scaled`) so a minified pane doesn't render, copy
+**nearest-decimation** `step` (`Region::whole`) so a minified pane doesn't render, copy
 and upload far more pixels than the screen can show — the dominant CPU cost when several
 sequences play in a grid over VNC / software GL, where the texture upload is a plain memcpy.
 `stage_step` picks `step` from the pane's **physical** scale `zoom × pixels_per_point`
@@ -637,7 +637,8 @@ the texture, so it is unaffected. `step` is part of the texture identity
 (`CachedTex.step`, alongside `(shown, sig)`) so a zoom change that alters it re-renders and
 re-commits. `want_step` forces `step 1` for a **heavy** proprietary-operator pane —
 decimating an operator's input would change its output and thrash the size-keyed instances —
-so those (and overlays, and the export path) always render full-resolution.
+so those (and overlays, and the export path) always render full-resolution. (**Adaptive
+rendering** deliberately relaxes the operator rule — see §7.1.)
 
 **Zoom is not the only floor: the texture must fit the backend.** A texture side is capped
 by the driver (`GL_MAX_TEXTURE_SIZE`, reported by egui as `InputState::max_texture_side` —
@@ -655,10 +656,11 @@ full-resolution.
 Two consequences worth stating. The pane is then **magnified from a decimated texture** at
 1:1 — every texel is still a true sample (§7's rule holds, and the readout reads
 `FrameData`), but you are no longer seeing *every* sample; that is inherent to holding a
-whole image in one texture, and the fix for it is region-of-interest staging, not a bigger
-number. And a `step > 1` render is **synchronous** (`bulk` requires `step == 1`, since the
-render worker only renders full-resolution), so 1:1 on a very large image trades the crash
-for a slow frame.
+whole image in one texture, and the fix for it is region-of-interest staging — which is
+exactly what the opt-in **Adaptive rendering** mode does (§7.1). And such a render is
+still large in absolute terms (a 25000² image at `step 2` is a 12500² texture), so it
+goes **off-thread** like any other big render — the `bulk` gate counts output texels and
+no longer demands `step == 1`.
 
 Where it *can't* decimate — a heavy operator pane, which must stay at `step 1` — `stage`
 refuses the upload and reports it on the pane via **`Pane.tex_error`**, drawn by
@@ -673,6 +675,146 @@ not drawn, the same silent skip as a size mismatch.
 (not merely `pending.is_some()`) — otherwise an idle repaint (cursor move / pan) would keep
 swapping the spent old texture back to the front and flicker between frames.
 
+### 7.1 Adaptive rendering (viewport regions) — `app/roi.rs`
+
+The opt-in **Adaptive rendering** setting (`Config.adaptive_render`, off by default —
+default behaviour stays byte-identical) is the region-of-interest staging §7 promises. Its
+target is **frame rate while playing a zoomed-in sequence**: the classic path re-renders and
+re-uploads the whole image every frame even when a few percent is on screen, and for the
+sizes this tool compares (~1000–4000 px) that is the frame-rate ceiling. Two layers per pane:
+
+- **Base**: the whole-image `PaneTex` texture, capped at **`BASE_MAX` (256)** while the
+  region path is active. It is deliberately tiny because it is **fully occluded** — a region
+  always spans at least the visible rect, and `visible_span` uses the *rotated* AABB, so even
+  a turned pane is covered. Its remaining jobs are the pane's geometry/identity (`disp_size`,
+  `CachedTex`) and the letterbox around an edge-clamped image. It re-renders every frame of a
+  playing sequence, which is why the cap is aggressive: at 512 an invisible base was still 43%
+  of a 1000² pane's budget, enough to keep the mode below its own engagement threshold.
+- **Region**: one view-centred sub-rect at the zoom band's step, painted over the base
+  (`paint_region`, between base and overlay).
+
+**Engagement is a cost comparison, not a sharpness test.** `roi_plan` is the single
+predicate, planned **once per pane per update** in `refresh_textures` and handed to everything
+downstream — the base's `want_step`, `stage_region`, and the commit's step check — so they
+cannot disagree about whether a pane is adaptive (a capped base with no region over it is
+exactly the "permanently blurry pane" failure). It weighs `region + base` texels against
+`decimated_size(size, stage_step)` — what the classic path would render — and engages only at
+`MIN_GAIN` (2×) or better. The arithmetic is the pure `roi::gain`, which the activation test
+calls directly rather than re-deriving. **Playing is the target case, not an exclusion**: it
+only shortens the pan runway (`COVER_PLAYING`). This is what lets it cover the whole target range (the earlier
+`roi_step < texture_fit_step` rule was arithmetically dead for any image ≤ 2048 px, i.e. half
+of it) while guaranteeing the mode can never cost more than the path it replaces. Zoomed out,
+the region approaches the whole image, the ratio collapses and the pane returns to classic.
+It also declines a region larger than the backend accepts — with the commit now waiting on
+regions, that would stall a pane rather than merely look blurry.
+
+**Geometry** (pure, unit-tested): coordinates in output-texel space at `step`
+(`decode::decimated_size`, i.e. `media::Region::whole`'s sizing).
+Dims = `COVER` × the rotation-aware visible span (`COVER_PAUSED` 2 for interactive pan
+runway; **`COVER_PLAYING` 1** — runway is worthless when every frame needs a new region
+anyway) plus `2 * QUANTUM`, rounded up to **`QUANTUM` (128)**-texel multiples, clamped to the
+image. The `2 * QUANTUM` allowance is not optional: snapping the origin down displaces the
+region centre by up to `QUANTUM`, so covering the viewport needs that margin on *each* side —
+one `QUANTUM` left the far edge landing at the view centre, blurring half the pane
+(`region_covers_the_viewport`). `QUANTUM` also sets the floor region (384², vs 768² at 256).
+Origin snaps down to the grid and *slides* inside the image at the edges (dims never shrink).
+Pan velocity (`PanVel`) only **biases the origin**, clamped by `bias_limit` so the unbiased
+viewport stays covered even if the estimate freezes between paced repaints.
+
+**The centre is `roi::view_center`, not `view.center`.** A pane rotates about the *image*
+centre's screen position, so on a rotated pane panned away from that centre the view centre is
+**not** what the middle of the cell shows — it is displaced by `2·sin(θ/2)` times the distance
+from the image centre, and the displacement *turns with the angle*. Centring the region on
+`view.center` therefore left patches of a rotated pane on the blurry base, wandering as the
+image was turned (`rotated_pane_centres_on_what_it_shows`). `view_center` is
+`canvas::unrotate_screen_to_img` of the cell's midpoint — literally the inverse of the
+`paint_rotated_about` that draws the region — so the two cannot drift.
+
+**Staging rides the lock-step commit.** `stage_region` is called from `refresh_textures`
+beside `stage`, so a pane is ready only when **both** layers are, and the group flips them
+together: `Pane::region_want` → `region_show` mirrors `pending` → `front`. This is required,
+not decorative — with a 256-capped base, a region one frame late would flash a heavily
+blurred frame mid-playback, and a comparison tool must not flicker between sharp and blurry.
+Pacing playback on the work it takes is what decode and the heavy operators already do. A
+non-adaptive pane, or one whose frame isn't decoded (already reported by `stage`), reports
+ready with no region.
+
+**Rendering** routes like `stage`: operators (whose instances belong to the pane's worker) and
+any output ≥ `ASYNC_RENDER_PIXELS` go off-thread as a `RenderJob` carrying the region and
+`Target::Viewport`; a small plain region renders inline. `roi_inflight` is a map keyed by
+**pane id**, not region identity — during playback the key changes every frame, so an
+identity-keyed guard never deduped and jobs piled up in the worker queue behind the pane's
+base render, violating `RenderPool`'s "at most one job per pane" invariant. It holds the
+**`RegionKey`** the job will land under, so `land_region` files the result straight from the
+map instead of reconstructing the key by inverting the job's geometry; a result with no entry
+belongs to a pane closed or reloaded mid-flight and is dropped.
+
+**Cache**: `RegionCache` on `CimApp` — the `SeqCache` idiom (`BTreeSet<(tick, key)>` LRU +
+byte accounting over `CimApp.clock`), 256 MiB of texture bytes. Keys carry the **pane id**, and
+every insert first `retire_stale`s that pane's entries for a *different frame or tone*, handing
+one back to recycle its texture handle. That single rule covers both regimes: paused, the frame
+and tone hold still so a pane's regions at other origins accumulate and *are* the pan-back
+cache; playing, each frame supersedes the last, so the cache stays small and a pane writes into
+a live texture instead of allocating one per frame (the reason `set_cached_tex` reuses handles).
+**Do not "recycle the LRU entry" instead** — that let each pane's insert evict the *previous
+pane's* region, so a multi-pane grid held one entry total, every pane missed every frame and,
+since regions gate the commit, playback stopped dead (`insert_retires_only_the_pane_s_own_stale_regions`).
+`load_cpp_libs` clears the cache (library availability isn't in `tone_sig`); `CIM_DEBUG` reports
+resident bytes.
+
+**A live region is never dropped.** Both `retire_stale` and `enforce` take the keys the panes
+are showing **or about to show** (`live_regions` = `region_show` + `region_want`) and skip them — the rule `SeqCache::lru_evictable` already follows
+for the shown frame. Staging runs ahead of the commit, so between an async region landing for
+frame N+1 and the group flipping to it, `region_show` still points at frame N's; retiring that
+out from under the painter dropped the pane to its bare `BASE_MAX` base for a frame, which read
+as flickering between low and high resolution in the band where regions are large enough to
+render off-thread (`a_region_being_shown_is_never_dropped`). For the same reason `paint_region`
+does **not** check the setting: `region_show` is written only by the commit, alongside the base
+it belongs to, so it stays correct across a toggle and the commit that installs the
+full-resolution base is the one that clears it. Protecting `region_want` too costs nothing and
+stops a staged region being evicted while the group waits on a slower pane, only to be asked
+for again next update. Closing or reloading a pane calls `RegionCache::forget_pane`:
+`retire_stale` only ever fires on that pane's *own next insert*, so without it a dead pane's
+regions would sit in the budget until the LRU got round to them.
+
+**Nothing may stall the commit.** Regions gating it means any pane that cannot produce one has
+to stand aside rather than freeze the timeline: an errored / `tex_error` pane, a pane whose
+frame isn't resident, and a plan whose region would exceed the backend limit all report ready
+with no region. A synchronous region render reports ready in the same update (it is already in
+the cache). `roi_inflight` is cleared alongside `render_inflight` on close and reload, or a
+pane's stranded guard would block its regions — and so the timeline — forever.
+
+**Operators take reduced input — by design.** The ops `step 1` rule is dropped in adaptive
+mode: the base renders from the pow2-decimated image (`roi::base_step` with `ops` — which also
+fixes the huge-image ops `tex_error` case, previously undisplayable), and the region path feeds
+them the cropped, decimated visible region (one `PaneOps::render_display`, taking a
+`media::Region`). `base_step` is the **single** definition of the base's size — `want_step`
+renders at it and `gain` weighs it — so the mode can't cost itself something different from
+what it charges. Note the asymmetry in `want_step`: a **plain** pane takes the capped base only
+while `roi_plan` engages, but an **operator** pane takes it whenever the *setting* is on,
+region or not, because at `step 1` `stage` would refuse the upload outright. The price is that
+an operator pane zoomed out past the engagement threshold sits on a bare `BASE_MAX` base — a
+displayable pane beats an undisplayable one, and it is part of why the setting is opt-in. So
+LUT_ALPHA's
+auto-contrast becomes **view-dependent**, and the **export — still whole-image ops — differs**
+from the adaptive display; both are accepted and the Settings hover says so. `PaneOps` keeps a
+per-size instance LRU (`INSTANCES_PER_OP` = 3) so base/region size alternation can't thrash
+the heavy C++ `create`/`destroy`.
+
+**Painting**: `region_of(idx)` hands back the committed region's texture and the **image-space**
+rect it covers; `paint_region` maps that through the view and rotates it about the **whole
+image's** screen pivot (`paint_rotated_about` — its own centre would tear it off the base).
+Tone bounds are the **pane's**, never region-local, so a region is byte-identical to the
+matching crop of a full render (`region_render_matches_full_subrect`).
+
+**Anything that draws a pane's texture must composite the region too.** The export label
+preview drew `pane_texture(idx)` alone, so the moment adaptive engaged it showed the
+`BASE_MAX`-capped base — a preview that turned pixelated at an ordinary zoom for an export that
+is not pixelated at all (export renders whole-image at full resolution). It now overlays
+`region_of` through the same image-space fit (`paint_preview_region`), clipped to the
+intersection so a region that only partly covers the previewed rect leaves the base showing
+through the rest instead of stretching over it.
+
 `render_into` (`media/render.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki)
 then table-look-up per pixel; **F32** maps arithmetically. Mono replicates grey
 across R/G/B; alpha = 255. The LUT is a reusable **`ToneLut`** (keyed on
@@ -680,9 +822,9 @@ across R/G/B; alpha = 255. The LUT is a reusable **`ToneLut`** (keyed on
 playback run **reuses one table across frames** instead of rebuilding 64 Ki entries
 each frame (the dominant per-frame CPU on a large integer image). Each pane owns its
 `ToneLut`: the synchronous stage (`PaneTex.lut`), the render worker (`renderer::Worker`),
-and export (`ExportPane`) each reuse one via the `_lut` render variants; a heavily
-**decimated** small output skips the table and maps arithmetically. The plain
-`render_into`/`_scaled` are convenience wrappers building a throwaway `ToneLut`.
+and export (`ExportPane`) each reuse one; a small **output** skips the table and maps
+arithmetically (bit-identically — see above). `render_into` is a convenience wrapper building
+a throwaway `ToneLut` over `Region::whole(size, 1)`.
 
 **Display bounds:** full range for integers; data extent for floats; with `clip`, a
 per-tail percentile stretch (default **0.01%**). Bounds are content-invariant per
@@ -699,8 +841,9 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   (no options; ignores the clip). Knobs slot in via `draw_tone_options`.
 - **Colormap** — false-colour a **mono** frame through a palette (`crate::palette`:
   viridis / turbo / diverging), using the **same window/clip bounds as Linear**; a
-  display-only tone (no operators), rendered synchronously via `render_into_scaled_cmap`
-  (a per-value RGB table in the pane's `ToneLut`). Multi-channel frames fall back to the
+  display-only tone (no operators), rendered via `FrameData::render_cmap` (a per-value
+  RGB table in the pane's `ToneLut`) — synchronously when small, on the render pool when
+  not, like any other tone. Multi-channel frames fall back to the
   plain render; each texel is still one true source sample (only its colour is the
   palette). The diverging ramp suits a signed **Sub** Compute pane (zero → white).
 
@@ -740,21 +883,52 @@ otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
 The heavy render **tail** (gray16 render → operators → expand to RGBA, else plain
 LUT) is itself a **single function, `imageproc::PaneOps::render_display`**, so the
 paths that use it match pixel-for-pixel by construction rather than by discipline.
+It takes a **`media::Region`** (`origin`, `out`, `step`) rather than a whole frame, and so
+do the three renders under it (`FrameData::render_lut` / `render_cmap` /
+`render_gray_u16_lut`). One descriptor covers all three shapes — the whole image
+(`Region::whole(size, 1)`), a decimated whole image for a minified pane, and adaptive
+mode's viewport region — which is what keeps them **one** function each instead of a
+whole-image and a region copy that would have to be kept byte-identical by hand.
+`Grid::contiguous()` still recognises the full-image case, so the parallel fast path is
+unaffected. The small-output shortcut (map arithmetically instead of building a 64 Ki
+table) keys off the **output** size alone: it is bit-identical to the table either way
+(the table's entries *are* `map_u8` of their index), which is what lets a region and the
+whole-image render it must match sit on opposite sides of the threshold.
 It runs in two places: the **export worker** (`export.rs::ExportPane::render` — on
 the **cropped region only**, §10) and, for live view, the off-UI-thread
 `renderer.rs` `RenderPool` (`renderer::Worker::render`). `stage` splits by weight:
-**small or decimated plain-LUT renders (Linear, masks, Colormap) stay synchronous**
-(cheap `render_into_scaled`), while **LUT_ALPHA / details on a single-channel U16
-frame — and any plain-LUT render of a large (`ASYNC_RENDER_PIXELS`, ~1 MP)
-full-resolution (`step == 1`) non-Colormap frame** — go off-thread to
+**small renders stay synchronous**
+(cheap `render_lut`), while **LUT_ALPHA / details on a single-channel U16
+frame — and any render producing ≥ `ASYNC_RENDER_PIXELS`
+(~1 MP) of *output texels*** — go off-thread to
 `render_display` (the worker's plain-LUT path is pixel-identical by test): a big
 synchronous LUT render is itself tens of milliseconds, and on the UI thread it
 blocked a whole update — a visible hitch whenever playback stepped while the user
 panned. The worker also does the `ColorImage::from_rgba_unmultiplied` conversion (a
 full-buffer copy, several ms on a large frame) and hands back a ready `ColorImage`
-(`RenderDone.image`), so the UI thread only queues the texture delta (`tex.set`). The off-thread route is
-gated to `step == 1` because the worker renders full-resolution only — a `step > 1`
-result would never match the commit's step check. The export worker honours the pane's **clip toggle and
+(`RenderDone.image`), so the UI thread only queues the texture delta (`tex.set`).
+The threshold counts **output** texels, not source pixels: a heavily minified pane
+stays synchronous because its output really is small, while a lightly decimated
+render of a very large frame is still tens of megapixels and belongs off-thread.
+`step` is **not** part of the gate — the worker renders at the job's `region`
+(`RenderJob::region`, whose `step` `upload_tex` tags the result with), so a decimated
+result commits like any other. (Requiring `step == 1` here is what put an adaptive pane's
+capped base render back on the UI thread every playback frame, where it also lost
+`fill_lut`'s parallel path — see §7.1.) **GPU mode still requires `step == 1`**,
+because `tone_into` always maps the whole frame at full resolution and tags the
+texture `step: 1`, which a decimated pane's commit could never match.
+
+**The job carries the whole tone (`imageproc::Display`: window, palette, operators), not
+just the window.** It used to carry only `(lo, hi)` and the operator flags, so a Colormap
+job would have come back grey — which the live path papered over by keeping *all* Colormap
+renders synchronous. The adaptive region path had no such guard, so a Colormap region past
+`ASYNC_RENDER_PIXELS` rendered in plain grey: a **band** of zooms, wide enough for the
+region to exceed 1 MP but zoomed in enough for `roi_plan` to still engage, whose edges moved
+between paused and playing because `COVER` sizes the region
+(`worker_renders_the_colormap_palette`). The palette rides in the job now and the `!cmap`
+exclusion is gone from both dispatch sites — a big false-coloured frame goes off-thread like
+anything else.
+The export worker honours the pane's **clip toggle and
 percentile** too (`ExportPane.clip: Option<f32>` → `clip_bounds`/`display_bounds`),
 so an exported frame matches the live view's tone exactly.
 
@@ -781,10 +955,11 @@ companion of the same frame: the **current view LUT output** (the 16-bit buffer
 after any LUT_ALPHA, else the linear/clip map, downscaled to 8 bits, built in
 `PaneOps::apply`) — so it sees whatever tone the pane is actually showing, not
 just the raw 16-bit data.
-`imageproc::PaneOps` holds one pane's instances, created lazily and **rebuilt when
-the frame dimensions change**, so heavy construction is paid once per size; it is
-owned by the pane's render worker thread (and by each export pane), so an instance
-is only ever touched by one thread. Each operator is independent: a missing library
+`imageproc::PaneOps` holds one pane's instances, created lazily and kept in a small
+**per-size LRU list** (`INSTANCES_PER_OP` = 3), so heavy construction is paid once per
+input size — and adaptive rendering's base/region size alternation (§7.1) reuses both
+instead of rebuilding twice a frame; it is owned by the pane's render worker thread
+(and by each export pane), so an instance is only ever touched by one thread. Each operator is independent: a missing library
 disables only its own feature (`lut_alpha_available` / `details_available`). See
 `INTEGRATION_CPP.md` for the contract and how to build the `.so`.
 

@@ -62,7 +62,7 @@ impl CimApp {
     }
 
     /// Pane `idx`'s effective display rotation in radians (0 when unrotated).
-    pub(super) fn pane_theta(&self, idx: usize) -> f32 {
+    pub(in crate::app) fn pane_theta(&self, idx: usize) -> f32 {
         self.rotation_of(idx).to_radians()
     }
 
@@ -73,27 +73,59 @@ impl CimApp {
     /// screen point about the image-centre's screen position — so the drawn mesh
     /// (which rotates the image rect's corners) and every overlay stay aligned.
     pub(super) fn rot_img_to_screen(&self, idx: usize, p: Vec2, area: Rect) -> Pos2 {
-        let v = self.view_ref(idx);
-        let s = v.img_to_screen(p, area);
-        let theta = self.pane_theta(idx);
-        if theta == 0.0 {
-            return s;
-        }
-        let pivot = v.img_to_screen(center_vec(self.disp_size(idx)), area);
-        rotate_around(s, pivot, theta)
+        rotate_img_to_screen(
+            self.view_ref(idx),
+            self.disp_size(idx),
+            area,
+            p,
+            self.pane_theta(idx),
+        )
     }
 
     /// Which image pixel is under screen point `s` for pane `idx`, undoing the
     /// pane's rotation. Inverse of [`rot_img_to_screen`].
     pub(super) fn rot_screen_to_img(&self, idx: usize, s: Pos2, area: Rect) -> Vec2 {
-        let v = self.view_ref(idx);
-        let theta = self.pane_theta(idx);
-        if theta == 0.0 {
-            return v.screen_to_img(s, area);
-        }
-        let pivot = v.img_to_screen(center_vec(self.disp_size(idx)), area);
-        v.screen_to_img(rotate_around(s, pivot, -theta), area)
+        unrotate_screen_to_img(
+            self.view_ref(idx),
+            self.disp_size(idx),
+            area,
+            s,
+            self.pane_theta(idx),
+        )
     }
+}
+
+/// [`CimApp::rot_img_to_screen`] without the app — see
+/// [`unrotate_screen_to_img`], of which this is the inverse.
+pub(in crate::app) fn rotate_img_to_screen(
+    v: &crate::view::ViewTransform,
+    disp: [usize; 2],
+    area: Rect,
+    p: Vec2,
+    theta: f32,
+) -> Pos2 {
+    let s = v.img_to_screen(p, area);
+    if theta == 0.0 {
+        return s;
+    }
+    rotate_around(s, v.img_to_screen(center_vec(disp), area), theta)
+}
+
+/// [`CimApp::rot_screen_to_img`] without the app — the pure mapping, so the
+/// geometry that depends on it (`roi::view_center`) can be unit-tested
+/// headlessly and cannot drift from what the painter does.
+pub(in crate::app) fn unrotate_screen_to_img(
+    v: &crate::view::ViewTransform,
+    disp: [usize; 2],
+    area: Rect,
+    s: Pos2,
+    theta: f32,
+) -> Vec2 {
+    if theta == 0.0 {
+        return v.screen_to_img(s, area);
+    }
+    let pivot = v.img_to_screen(center_vec(disp), area);
+    v.screen_to_img(rotate_around(s, pivot, -theta), area)
 }
 
 /// Rotate screen point `p` about `pivot` by `theta` radians (screen y is down,
@@ -116,11 +148,24 @@ pub(super) fn center_vec(size: [usize; 2]) -> Vec2 {
 /// textured mesh with the four corners rotated (clipped by the painter's clip rect,
 /// so the image still can't spill past its pane).
 pub(super) fn paint_rotated(painter: &egui::Painter, id: TextureId, rect: Rect, theta: f32) {
+    paint_rotated_about(painter, id, rect, theta, rect.center());
+}
+
+/// [`paint_rotated`] with an explicit rotation `pivot`: what a **sub-rect** of
+/// the image (the adaptive viewport region) needs — rotating it about its own
+/// centre would tear it away from the base underneath, so it rotates about the
+/// whole image's screen pivot (the base rect's centre) and stays contiguous.
+pub(super) fn paint_rotated_about(
+    painter: &egui::Painter,
+    id: TextureId,
+    rect: Rect,
+    theta: f32,
+    pivot: Pos2,
+) {
     if theta == 0.0 {
         painter.image(id, rect, uv(), Color32::WHITE);
         return;
     }
-    let pivot = rect.center();
     let corners = [
         rect.left_top(),
         rect.right_top(),

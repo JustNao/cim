@@ -608,6 +608,16 @@ impl CimApp {
                         row(ui, t!("debug.stage_upload"), &m.upload);
                         row(ui, t!("debug.stage_update"), &m.frame);
                     });
+
+                // Adaptive rendering: how much texture memory the cached
+                // viewport regions hold (the pan-back cache).
+                if self.config.adaptive_render {
+                    ui.add_space(6.0);
+                    ui.label(t!(
+                        "debug.regions",
+                        mb = self.regions.resident_bytes() >> 20
+                    ));
+                }
             });
         self.show_debug = open;
     }
@@ -1166,6 +1176,11 @@ impl CimApp {
                 }
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
                     .on_hover_text(t!("settings.cursor_dot_hover"));
+                ui.checkbox(
+                    &mut self.config.adaptive_render,
+                    t!("settings.adaptive_render"),
+                )
+                .on_hover_text(t!("settings.adaptive_render_hover"));
                 ui.add_space(8.0);
                 ui.separator();
                 ui.heading(t!("settings.operators"));

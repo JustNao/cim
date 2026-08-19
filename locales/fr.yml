@@ -283,6 +283,7 @@ debug.stage_render: Rendu
 debug.stage_operators: Opérateurs externes
 debug.stage_upload: Envoi de la texture
 debug.stage_update: Mise à jour globale
+debug.regions: "Régions adaptatives : %{mb} Mio de textures en cache"
 help.title: Aide
 help.reload: Recharger
 help.reload_hover: Relire help.md depuis le disque
@@ -309,11 +310,8 @@ settings.frame_cache_frames_hover: >-
 settings.jp2_detail: Détail JPEG 2000
 settings.jp2_detail_full: entier
 settings.jp2_detail_hover: >-
-  Nombre maximal de mégapixels à décoder d'une image JPEG 2000. Un fichier plus
-  grand est décodé à une résolution réduite — bien plus rapide et léger (une
-  tuile 25000×25000 prend environ une seconde au lieu d'une demi-minute), au prix
-  d'échantillons moyennés plutôt qu'originaux. « entier » décode toujours à
-  pleine résolution. S'applique immédiatement aux images ouvertes.
+  Nombre maximal de mégapixels à décoder d'une image JPEG 2000.
+  S'applique immédiatement aux images ouvertes.
 settings.jp2_detail_whole: décodée entièrement
 settings.jp2_detail_level: "réduite à 1/%{div} (%{w}×%{h})"
 settings.cpu_budget: Threads CPU
@@ -343,6 +341,10 @@ settings.cursor_dot: Point du curseur sur les autres panneaux
 settings.cursor_dot_hover: >-
   Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour
   comparer le même endroit d'un panneau à l'autre.
+settings.adaptive_render: Rendu adaptatif
+settings.adaptive_render_hover: >-
+  En zoomant dans une grande image, ne rendre à pleine netteté que la région
+  visible (plus une marge de déplacement) par-dessus une base entière réduite.
 settings.operators: Opérateurs d'image (C++)
 settings.library_folder: Dossier des bibliothèques
 settings.library_folder_hover: >-
@@ -369,7 +371,6 @@ settings.reset_hover: >-
   Rétablir tous les réglages ci-dessus — raccourcis clavier compris — à leur
   valeur par défaut.
 settings.autosave_note: Les modifications sont enregistrées automatiquement.
-
 # ---- actions assignables (clé = action.<id>) -------------------------------
 action.toggle_view: Basculer entre les vues grille / unique / A-B
 action.view_grid: Passer en vue grille

@@ -49,6 +49,12 @@ impl CimApp {
             self.cursor_pane = self.cursor_img.map(|_| side);
         }
 
+        // Both sides share the full image area as their coordinate frame; the
+        // clip rect only narrows which half is visible. Recording the shared
+        // area (not the half) keeps each side's adaptive region covering the
+        // whole wipe, so dragging the divider never uncovers an unrendered strip.
+        self.panes[a].cell = img;
+        self.panes[b].cell = img;
         self.draw_ab_side(ui, a, ta, oa, img, left, true, top_in);
         self.draw_ab_side(ui, b, tb, ob, img, right, false, top_in);
         self.draw_pane_error(ui, a, left);
@@ -152,6 +158,9 @@ impl CimApp {
             let rect = self.view_ref(idx).image_rect(self.disp_size(idx), area);
             let theta = self.pane_theta(idx);
             paint_rotated(&painter, id, rect, theta);
+            // The sharp adaptive viewport region — the wipe's clip rect trims
+            // it to this side along with everything else.
+            self.paint_region(&painter, idx, area, rect.center(), theta);
             // The mask overlay shares the base image's rect (1:1 in image space).
             if let Some(ov) = overlay {
                 paint_rotated(&painter, ov, rect, theta);

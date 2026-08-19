@@ -81,70 +81,51 @@ impl FrameData {
         self.render_into_lut(lo, hi, &mut ToneLut::default(), out);
     }
 
-    /// Render the 8-bit RGBA display buffer into `out`, reusing `lut` for the
-    /// value→display table. Integer sources map through the table (256 or 64 Ki
-    /// entries), rebuilt only when `(lo, hi, mask)` change — so a run of frames at
-    /// a fixed tone reuses one table instead of rebuilding it each frame. Float
-    /// sources have no bounded domain to tabulate and map arithmetically (the
-    /// `lut` is left untouched).
+    /// Render the display RGBA of `region` — a nearest-decimated sub-rect of the
+    /// frame — into `out` (resized to fit), reusing `lut` for the value→display
+    /// table.
     ///
-    /// The full-resolution case of
-    /// [`render_into_scaled_lut`](Self::render_into_scaled_lut).
-    pub fn render_into_lut<S: RgbaSink>(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut S) {
-        self.render_into_scaled_lut(lo, hi, 1, lut, out);
-    }
-
-    /// Render the display RGBA at a **nearest-decimated** resolution — every
-    /// `step`-th source pixel along each axis — into `out` (resized to fit),
-    /// returning the decimated pixel size `[w', h']`. `step <= 1` is the
-    /// full-size render, identical to (and delegating to) [`render_into`].
+    /// This is the one RGBA render every live path goes through: the whole image
+    /// at full resolution ([`Region::whole`] at step 1), a decimated whole image
+    /// (a minified pane — see `CimApp::stage_step`), or the adaptive mode's
+    /// viewport region (`app::roi`). Integer sources map through the table (256
+    /// or 64 Ki entries), rebuilt only when `(lo, hi, mask)` change, so a run of
+    /// frames at a fixed tone reuses one table instead of rebuilding it each
+    /// frame; float sources have no bounded domain to tabulate and map
+    /// arithmetically, leaving `lut` untouched. A small output skips the 64 Ki
+    /// table and maps arithmetically too — cheaper than tabulating for a few
+    /// thousand pixels, and bit-identical because the table's entries *are*
+    /// [`map_u8`] of their index.
     ///
-    /// A minified pane (physical scale < 1 screen pixel per source pixel) can't
-    /// show every source pixel anyway, so building, copying and uploading the
-    /// full-resolution texture is wasted work — worst over VNC / software GL,
-    /// where the upload is a CPU memcpy and every extra pane multiplies the cost.
-    /// Decimation only **drops** whole samples and never blends, so each texel is
-    /// still a true source value (the pixel-accuracy invariant holds); the texture
-    /// is drawn stretched to the same on-screen rect with NEAREST filtering, as
-    /// before. The caller chooses `step` from the pane's zoom (see
-    /// `CimApp::stage_step`) and passes a reused `lut` (see
-    /// [`render_into_lut`](Self::render_into_lut)); a small decimated output skips
-    /// the table entirely and maps arithmetically, which is cheaper than building
-    /// a 64 Ki-entry LUT for a few thousand pixels.
-    pub fn render_into_scaled_lut<S: RgbaSink>(
+    /// Decimation only **drops** whole samples and never blends, so every output
+    /// texel is still a true source value (the pixel-accuracy invariant holds);
+    /// the texture is drawn stretched to the same on-screen rect with NEAREST
+    /// filtering. A region renders exactly the sub-rect the same whole-image
+    /// render would produce, byte for byte (`region_render_matches_full_subrect`
+    /// locks it down), so it can be composed over a whole-image texture without a
+    /// visible boundary.
+    ///
+    /// `lo`/`hi` must be the **pane's** display bounds (whole-image or region
+    /// statistics chosen by the tone policy), never bounds derived from the
+    /// region itself — a region-local window would change contrast as the view
+    /// pans. `region` must lie inside the frame (see [`Region::whole`] and
+    /// `app::roi`, which clamps).
+    pub fn render_lut<S: RgbaSink>(
         &self,
         lo: f32,
         hi: f32,
-        step: usize,
+        region: Region,
         lut: &mut ToneLut,
         out: &mut S,
-    ) -> [usize; 2] {
-        let [w, h] = self.size;
-        let decim = step > 1;
-        let (ow, oh) = if decim {
-            (w.div_ceil(step), h.div_ceil(step)) // ceil: cover the whole image
-        } else {
-            (w, h)
-        };
-        let grid = Grid {
-            w,
-            ch: self.channels,
-            cc: self.color_channels(),
-            ow,
-            oh,
-            step: step.max(1),
-        };
-        let opx = ow * oh;
-
+    ) {
+        let grid = region.grid(self, self.color_channels());
         match &self.samples {
-            // 256-entry table is always cheaper than a per-pixel map.
+            // A 256-entry table is always cheaper than a per-pixel map.
             Samples::U8(v) => {
                 let tab = lut.map8(lo, hi, self.mask, 256);
                 fill_lut(out, v, grid, |s| tab[s as usize]);
             }
-            // For a small decimated output, building a 64 Ki table costs more than
-            // mapping each output pixel arithmetically — so skip the table then.
-            Samples::U16(v) if decim && opx < (1 << 16) => {
+            Samples::U16(v) if region.texels() < (1 << 16) => {
                 if self.mask {
                     fill_lut(out, v, grid, |s| if s != 0 { 255 } else { 0 });
                 } else {
@@ -164,106 +145,102 @@ impl FrameData {
                 fill_lut(out, v, grid, map_f);
             }
         }
-        [ow, oh]
     }
 
-    /// Render the display RGBA of a **mono** frame through a colour `palette`
-    /// (the Colormap tone): each source sample is toned to an 8-bit index via
-    /// `[lo, hi]` then looked up in the 256-entry palette. Nearest-decimated at
-    /// `step` like [`render_into_scaled_lut`](Self::render_into_scaled_lut) — each
-    /// output texel is still a single true source sample, only its *colour* comes
-    /// from the palette, so pixel-accuracy holds (the readout still reads native
-    /// values). The caller ensures the frame is single-channel and non-mask.
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_into_scaled_cmap<S: RgbaSink>(
+    /// [`render_lut`](Self::render_lut) through a colour `palette` (the Colormap
+    /// tone): each source sample is toned to an 8-bit index via `[lo, hi]` then
+    /// looked up in the palette's 256 entries. Each output texel is still a
+    /// single true source sample — only its *colour* comes from the palette, so
+    /// pixel-accuracy holds and the readout still reports native values. The
+    /// caller ensures the frame is single-channel and non-mask.
+    pub fn render_cmap<S: RgbaSink>(
         &self,
         lo: f32,
         hi: f32,
-        step: usize,
-        palette: &[[u8; 3]; 256],
-        palette_id: u8,
+        region: Region,
+        palette: crate::palette::Palette,
         lut: &mut ToneLut,
         out: &mut S,
-    ) -> [usize; 2] {
-        let [w, h] = self.size;
-        let decim = step > 1;
-        let (ow, oh) = if decim {
-            (w.div_ceil(step), h.div_ceil(step))
-        } else {
-            (w, h)
-        };
+    ) {
         // Mono source (the caller guarantees it): only the first channel is read,
         // so the grid's colour-channel count is 1.
-        let grid = Grid {
-            w,
-            ch: self.channels,
-            cc: 1,
-            ow,
-            oh,
-            step: step.max(1),
-        };
-        let opx = ow * oh;
-
-        // `rgb` yields the colour for one source sample; `fill_cmap` fans it out
-        // over the full or decimated grid.
+        let grid = region.grid(self, 1);
+        let (tab_src, id) = (palette.table(), palette.id());
         match &self.samples {
             Samples::U8(v) => {
-                let tab = lut.map_rgb(lo, hi, palette, palette_id, 256);
+                let tab = lut.map_rgb(lo, hi, tab_src, id, 256);
                 fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
-            // Small decimated output maps arithmetically (skip the 64 Ki table).
-            Samples::U16(v) if decim && opx < (1 << 16) => {
+            Samples::U16(v) if region.texels() < (1 << 16) => {
                 let map_f = map_u8(lo, hi);
-                fill_cmap(out, v, grid, |s| palette[map_f(s as f32) as usize]);
+                fill_cmap(out, v, grid, |s| tab_src[map_f(s as f32) as usize]);
             }
             Samples::U16(v) => {
-                let tab = lut.map_rgb(lo, hi, palette, palette_id, 1 << 16);
+                let tab = lut.map_rgb(lo, hi, tab_src, id, 1 << 16);
                 fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) => {
                 let map_f = map_u8(lo, hi);
-                fill_cmap(out, v, grid, |s| palette[map_f(s) as usize]);
+                fill_cmap(out, v, grid, |s| tab_src[map_f(s) as usize]);
             }
         }
-        [ow, oh]
     }
 
-    /// Render a **single-channel 16-bit** buffer into `out` (resized to
-    /// `width*height`), mapping native samples through `[lo, hi] → [0, 65535]`.
+    /// Render a **single-channel 16-bit** buffer for `region` into `out` (cleared
+    /// and refilled with `region.texels()` samples), mapping native samples
+    /// through `[lo, hi] → [0, 65535]`.
+    ///
     /// This is the input the proprietary operators receive (`crate::imageproc`):
     /// one 16-bit sample per pixel, at genuine 16-bit precision, expanded back to
     /// RGBA (and downscaled to 8 bits) for the texture only after the operators
-    /// have run. Only called for single-channel frames (see [`is_op_input`]);
-    /// the first channel is taken for any wider source. Mirrors [`render_into`].
-    pub fn render_into_gray_u16_lut(
+    /// have run. Only called for single-channel frames (see [`is_op_input`]); the
+    /// first channel is taken for any wider source. Under adaptive rendering the
+    /// region is cropped and decimated **before** the operators run, so their
+    /// output reflects the visible region rather than the whole image — by
+    /// design (see `app::roi`).
+    pub fn render_gray_u16_lut(
         &self,
         lo: f32,
         hi: f32,
+        region: Region,
         lut: &mut ToneLut,
         out: &mut Vec<u16>,
     ) {
-        let px = self.size[0] * self.size[1];
-        let ch = self.channels;
+        let grid = region.grid(self, 1);
         out.clear();
-        out.resize(px, u16::MAX);
+        out.reserve(region.texels());
+
+        // First channel of each sampled pixel, row-wise over the grid.
+        fn fill<T: Copy>(out: &mut Vec<u16>, v: &[T], grid: Grid, map: impl Fn(T) -> u16) {
+            for oy in 0..grid.oh {
+                out.extend(grid.row(v, oy).map(|s| map(s[0])));
+            }
+        }
 
         match &self.samples {
             Samples::U8(v) => {
                 let tab = lut.map16(lo, hi, self.mask, 256);
-                fill_gray(out, v, ch, px, |s| tab[s as usize]);
+                fill(out, v, grid, |s| tab[s as usize]);
             }
             Samples::U16(v) => {
                 let tab = lut.map16(lo, hi, self.mask, 1 << 16);
-                fill_gray(out, v, ch, px, |s| tab[s as usize]);
+                fill(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) if self.mask => {
-                fill_gray(out, v, ch, px, |s| if s != 0.0 { u16::MAX } else { 0 })
+                fill(out, v, grid, |s| if s != 0.0 { u16::MAX } else { 0 });
             }
             Samples::F32(v) => {
                 let map_f = map_u16(lo, hi);
-                fill_gray(out, v, ch, px, map_f)
+                fill(out, v, grid, map_f);
             }
         }
+    }
+
+    /// [`render_lut`](Self::render_lut) over the whole image at full resolution,
+    /// reusing `lut`. The common case, spelled out so callers that never crop
+    /// don't have to build a [`Region`].
+    pub fn render_into_lut<S: RgbaSink>(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut S) {
+        self.render_lut(lo, hi, Region::whole(self.size, 1), lut, out);
     }
 
     /// The display table the GPU tone map indexes (`gpu/tone.wgsl`), one opaque
@@ -275,13 +252,13 @@ impl FrameData {
     /// value of that native sample — mask rule and Colormap palette already
     /// folded in — so the shader does no arithmetic at all and has nothing to
     /// drift from. A float source has no bounded domain to tabulate (the same
-    /// reason [`render_into_scaled_lut`](Self::render_into_scaled_lut) maps it
+    /// reason [`render_lut`](Self::render_lut) maps it
     /// per pixel), so its table is indexed by the toned 8-bit level the shader
     /// computes itself, mirroring [`map_u8`], and supplies only the colour.
     ///
     /// Entry count is therefore the sample domain for integers (256 / 64 Ki) and
     /// a flat 256 for floats. `palette` is the Colormap tone's table and id, as
-    /// [`render_into_scaled_cmap`](Self::render_into_scaled_cmap) takes them.
+    /// [`render_cmap`](Self::render_cmap) takes them.
     pub fn tone_table_rgba(
         &self,
         lo: f32,
@@ -562,10 +539,71 @@ impl RgbaSink for Vec<u8> {
     // `extend` — the per-pixel default is what this sink wants.
 }
 
+/// The sub-rect and sampling rate one render covers: output texel `(ox, oy)` is
+/// source pixel `origin + [ox, oy] * step`.
+///
+/// One descriptor for all three shapes the live paths render — the whole image
+/// (`whole(size, 1)`), a decimated whole image for a minified pane
+/// (`whole(size, step)`), and the adaptive mode's viewport region (`app::roi`,
+/// which owns the geometry that picks `origin`/`out`). Carrying them together
+/// is what lets [`FrameData::render_lut`] and friends be a single function
+/// instead of a whole-image and a region copy that must be kept identical.
+///
+/// The last sampled pixel must lie inside the frame; `whole` guarantees it and
+/// `app::roi` clamps for regions (`debug_assert`ed in [`Region::grid`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Region {
+    /// First source pixel sampled — the region's top-left, in source pixels.
+    pub origin: [usize; 2],
+    /// Output size in texels.
+    pub out: [usize; 2],
+    /// Source pixels per output texel, on both axes (1 = full resolution).
+    pub step: usize,
+}
+
+impl Region {
+    /// The whole `size` image nearest-decimated at `step`. `div_ceil` so a
+    /// partial last step still lands — the same sizing `app::decode`'s
+    /// `decimated_size` reports, which the texture identity depends on.
+    pub fn whole(size: [usize; 2], step: usize) -> Self {
+        let step = step.max(1);
+        Self {
+            origin: [0, 0],
+            out: [size[0].div_ceil(step), size[1].div_ceil(step)],
+            step,
+        }
+    }
+
+    /// Output texels this region produces.
+    pub fn texels(&self) -> usize {
+        self.out[0] * self.out[1]
+    }
+
+    /// The sampling grid over `frame`, reading `cc` colour channels per pixel
+    /// (1 for a mono or operator-input render, else the frame's own count).
+    fn grid(&self, frame: &FrameData, cc: usize) -> Grid {
+        let [ow, oh] = self.out;
+        debug_assert!(ow > 0 && oh > 0);
+        debug_assert!(self.origin[0] + (ow - 1) * self.step < frame.size[0]);
+        debug_assert!(self.origin[1] + (oh - 1) * self.step < frame.size[1]);
+        Grid {
+            w: frame.size[0],
+            ch: frame.channels,
+            cc,
+            ow,
+            oh,
+            step: self.step.max(1),
+            origin: self.origin,
+        }
+    }
+}
+
 /// The source→output sampling grid shared by the fill helpers: an `ow × oh`
 /// output taking every `step`-th pixel per axis from a `w`-wide interleaved
-/// source of `ch` channels, of which `cc` carry colour (1 = mono, replicated).
-/// `step == 1` is the full-resolution render.
+/// source of `ch` channels, of which `cc` carry colour (1 = mono, replicated),
+/// starting at source pixel `origin`. `step == 1`, `origin == [0, 0]` with the
+/// output spanning the source is the full-resolution render; a nonzero origin
+/// (or an output narrower than the source) is a region render.
 #[derive(Clone, Copy)]
 struct Grid {
     w: usize,
@@ -574,16 +612,26 @@ struct Grid {
     ow: usize,
     oh: usize,
     step: usize,
+    origin: [usize; 2],
 }
 
 impl Grid {
     /// The source samples of output row `oy`, in output order.
     #[inline]
     fn row<'a, T>(&self, v: &'a [T], oy: usize) -> impl Iterator<Item = &'a [T]> {
-        v[oy * self.step * self.w * self.ch..]
+        v[((self.origin[1] + oy * self.step) * self.w + self.origin[0]) * self.ch..]
             .chunks_exact(self.ch)
             .step_by(self.step)
             .take(self.ow)
+    }
+
+    /// Whether output pixel `i` is source pixel `i` — the whole image as one
+    /// contiguous run, which is what the vectorised / parallel fast paths in
+    /// [`fill_lut`] / [`fill_cmap`] assume. A decimated or region grid must take
+    /// the row-wise path instead.
+    #[inline]
+    fn contiguous(&self) -> bool {
+        self.step == 1 && self.origin == [0, 0] && self.ow == self.w
     }
 }
 
@@ -602,7 +650,7 @@ fn fill_lut<S: RgbaSink, T: Copy + Sync>(
 ) {
     let px = grid.ow * grid.oh;
     // The hot path: an undecimated single-channel image, samples 1:1 with pixels.
-    if grid.step == 1 && grid.ch == 1 {
+    if grid.contiguous() && grid.ch == 1 {
         let src = &v[..px];
         if px >= PAR_MIN_PX && out.par_gray(src.par_iter().map(|&s| map(s))) {
             return;
@@ -612,7 +660,7 @@ fn fill_lut<S: RgbaSink, T: Copy + Sync>(
         return;
     }
     // Undecimated colour: rows are contiguous, so the image is one strided run.
-    if grid.step == 1 && grid.cc == 3 {
+    if grid.contiguous() && grid.cc == 3 {
         let src = &v[..px * grid.ch];
         let rgb = |s: &[T]| [map(s[0]), map(s[1]), map(s[2])];
         if px >= PAR_MIN_PX && out.par_rgb(src.par_chunks_exact(grid.ch).map(rgb)) {
@@ -641,7 +689,7 @@ fn fill_cmap<S: RgbaSink, T: Copy + Sync>(
     rgb: impl Fn(T) -> [u8; 3] + Sync,
 ) {
     let px = grid.ow * grid.oh;
-    if grid.step == 1 && grid.ch == 1 {
+    if grid.contiguous() && grid.ch == 1 {
         let src = &v[..px];
         if px >= PAR_MIN_PX && out.par_rgb(src.par_iter().map(|&s| rgb(s))) {
             return;
@@ -656,17 +704,9 @@ fn fill_cmap<S: RgbaSink, T: Copy + Sync>(
     }
 }
 
-/// Write the first channel of each interleaved pixel into a single-channel
-/// buffer through `map`. `out` must already be `px` long.
-fn fill_gray<T: Copy, U: Copy>(out: &mut [U], v: &[T], ch: usize, px: usize, map: impl Fn(T) -> U) {
-    for i in 0..px {
-        out[i] = map(v[i * ch]);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::media::{FrameData, Samples};
+    use crate::media::{FrameData, Region, Samples};
 
     /// A boolean mask renders as pure black/white regardless of the tone
     /// window, and its overlay buffer tints true pixels while leaving false
@@ -761,28 +801,25 @@ mod tests {
         let mut full = Vec::new();
         f.render_into(lo, hi, &mut full);
         let mut one = Vec::<u8>::new();
-        assert_eq!(
-            f.render_into_scaled_lut(lo, hi, 1, &mut lut, &mut one),
-            [4, 2]
-        );
+        let r = Region::whole([4, 2], 1);
+        assert_eq!(r.out, [4, 2]);
+        f.render_lut(lo, hi, r, &mut lut, &mut one);
         assert_eq!(one, full);
 
         // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
         let mut half = Vec::<u8>::new();
-        assert_eq!(
-            f.render_into_scaled_lut(lo, hi, 2, &mut lut, &mut half),
-            [2, 1]
-        );
+        let r = Region::whole([4, 2], 2);
+        assert_eq!(r.out, [2, 1]);
+        f.render_lut(lo, hi, r, &mut lut, &mut half);
         assert_eq!(half.len(), 2 * 4); // 2x1 RGBA
         assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
 
         // step 3 -> ceil(4/3) x ceil(2/3) = 2x1, sampling (0,0) and (3,0): 0, 30.
         let mut third = Vec::<u8>::new();
-        assert_eq!(
-            f.render_into_scaled_lut(lo, hi, 3, &mut lut, &mut third),
-            [2, 1]
-        );
+        let r = Region::whole([4, 2], 3);
+        assert_eq!(r.out, [2, 1]);
+        f.render_lut(lo, hi, r, &mut lut, &mut third);
         assert_eq!([third[0], third[4]], [0, 30]);
     }
 
@@ -792,9 +829,16 @@ mod tests {
     fn tone_lut_caches_and_matches_plain_render() {
         use crate::media::ToneLut;
         // Two "frames" at a fixed tone: bytes must match the uncached render, and
-        // the shared table must be reused (same key) across both.
-        let a = FrameData::new([4, 1], 1, Samples::U16(vec![0, 1000, 30000, 65535]));
-        let b = FrameData::new([4, 1], 1, Samples::U16(vec![65535, 30000, 1000, 0]));
+        // the shared table must be reused (same key) across both. Sized past the
+        // 64 Ki-texel shortcut, since a smaller output deliberately skips the
+        // table and maps arithmetically instead (`render_lut`).
+        let px: Vec<u16> = (0..256 * 256).map(|i| (i * 7 % 65536) as u16).collect();
+        let a = FrameData::new([256, 256], 1, Samples::U16(px.clone()));
+        let b = FrameData::new(
+            [256, 256],
+            1,
+            Samples::U16(px.iter().rev().copied().collect()),
+        );
         let (lo, hi) = (1000.0, 60000.0);
 
         let mut lut = ToneLut::default();
@@ -802,7 +846,7 @@ mod tests {
             let mut plain = Vec::new();
             f.render_into(lo, hi, &mut plain);
             let mut cached = Vec::<u8>::new();
-            f.render_into_lut(lo, hi, &mut lut, &mut cached);
+            f.render_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut cached);
             assert_eq!(cached, plain, "cached render must equal the plain render");
         }
         // The table was built once and reused (key unchanged across both frames).
@@ -811,7 +855,13 @@ mod tests {
 
         // Changing the window rebuilds the table (new key).
         let mut cached = Vec::<u8>::new();
-        a.render_into_lut(500.0, 40000.0, &mut lut, &mut cached);
+        a.render_lut(
+            500.0,
+            40000.0,
+            Region::whole(a.size, 1),
+            &mut lut,
+            &mut cached,
+        );
         assert_eq!(
             lut.key8,
             Some((500f32.to_bits(), 40000f32.to_bits(), false, 1 << 16))
@@ -821,10 +871,12 @@ mod tests {
         assert_eq!(cached, plain);
     }
 
-    /// The decimated small-output micro-win (arithmetic map instead of a 64 Ki
-    /// table) is bit-identical to the tabulated full render at `step 1`.
+    /// The small-output micro-win (arithmetic map instead of a 64 Ki table) is
+    /// bit-identical to the tabulated mapping. Bit-identity is what lets the
+    /// shortcut key off the *output* size alone — a region and the whole-image
+    /// render it must match can land on opposite sides of the threshold.
     #[test]
-    fn scaled_lut_small_output_matches_table() {
+    fn small_output_matches_table() {
         use crate::media::ToneLut;
         // 8x8 u16 ramp; a large step yields a tiny output (< 65536 px) that takes
         // the arithmetic path, which must still equal the table-based mapping.
@@ -834,8 +886,9 @@ mod tests {
 
         let mut lut = ToneLut::default();
         let mut scaled = Vec::<u8>::new();
-        let size = f.render_into_scaled_lut(lo, hi, 4, &mut lut, &mut scaled);
-        assert_eq!(size, [2, 2]); // 4 px < 65536 → arithmetic path
+        let r = Region::whole([8, 8], 4);
+        assert_eq!(r.out, [2, 2]); // 4 px < 65536 → arithmetic path
+        f.render_lut(lo, hi, r, &mut lut, &mut scaled);
 
         // Reference: same decimation, but forced through the table via render_into.
         let mut reference = ToneLut::default();
@@ -846,6 +899,151 @@ mod tests {
             let o = (oy * 2 + ox) * 4;
             assert_eq!(scaled[o], full_tab[value]);
         }
+    }
+
+    /// A region render is byte-identical to the matching sub-rect of the full
+    /// render at the same `step` — the invariant that lets a region texture sit
+    /// over the whole-image texture without a visible boundary. Exercised over
+    /// every sample type, mono and RGB, steps 1 and 2, and regions touching the
+    /// image edges.
+    #[test]
+    fn region_render_matches_full_subrect() {
+        use crate::media::ToneLut;
+
+        // Extract the RGBA bytes of an `[ow, oh]` output-space sub-rect at
+        // `(ox0, oy0)` from a full render `full` of output width `fw`.
+        fn subrect(
+            full: &[u8],
+            fw: usize,
+            ox0: usize,
+            oy0: usize,
+            ow: usize,
+            oh: usize,
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            for oy in 0..oh {
+                let start = ((oy0 + oy) * fw + ox0) * 4;
+                out.extend_from_slice(&full[start..start + ow * 4]);
+            }
+            out
+        }
+
+        // 7x5 frames of each sample type (odd sizes so step 2 clips at edges).
+        let px = 7 * 5;
+        let frames = [
+            FrameData::new(
+                [7, 5],
+                1,
+                Samples::U8((0..px as u8 * 3).step_by(3).collect()),
+            ),
+            FrameData::new(
+                [7, 5],
+                1,
+                Samples::U16((0..px).map(|i| (i * 1873) as u16).collect()),
+            ),
+            FrameData::new(
+                [7, 5],
+                1,
+                Samples::F32((0..px).map(|i| i as f32 * 0.37 - 2.0).collect()),
+            ),
+            FrameData::new(
+                [7, 5],
+                3,
+                Samples::U16((0..px * 3).map(|i| (i * 613) as u16).collect()),
+            ),
+        ];
+        let (lo, hi) = (3.0, 40.0);
+
+        for f in &frames {
+            for step in [1usize, 2] {
+                let mut lut = ToneLut::default();
+                let mut full = Vec::<u8>::new();
+                let [fw, fh] = Region::whole(f.size, step).out;
+                f.render_lut(lo, hi, Region::whole(f.size, step), &mut lut, &mut full);
+
+                // Interior region, plus regions pinned to each far edge.
+                for (ox0, oy0) in [(0, 0), (1, 1), (fw - 2, fh - 2)] {
+                    let (ow, oh) = (2.min(fw - ox0), 2.min(fh - oy0));
+                    let mut region = Vec::<u8>::new();
+                    let r = Region {
+                        origin: [ox0 * step, oy0 * step],
+                        out: [ow, oh],
+                        step,
+                    };
+                    f.render_lut(lo, hi, r, &mut lut, &mut region);
+                    assert_eq!(
+                        region,
+                        subrect(&full, fw, ox0, oy0, ow, oh),
+                        "step {step} region at ({ox0},{oy0})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`region_render_matches_full_subrect`] for the Colormap tone and the
+    /// 16-bit operator-input region render.
+    #[test]
+    fn region_cmap_and_gray_match_full() {
+        use crate::media::ToneLut;
+        use crate::palette::Palette;
+
+        let px = 7 * 5;
+        let f = FrameData::new(
+            [7, 5],
+            1,
+            Samples::U16((0..px).map(|i| (i * 1873) as u16).collect()),
+        );
+        let (lo, hi) = (100.0, 60000.0);
+        let pal = Palette::Viridis;
+
+        for step in [1usize, 2] {
+            let mut lut = ToneLut::default();
+            let mut full = Vec::<u8>::new();
+            let [fw, fh] = Region::whole(f.size, step).out;
+            f.render_cmap(
+                lo,
+                hi,
+                Region::whole(f.size, step),
+                pal,
+                &mut lut,
+                &mut full,
+            );
+            let mut region = Vec::<u8>::new();
+            let (ow, oh) = (fw - 1, fh - 1);
+            let r = Region {
+                origin: [step, step],
+                out: [ow, oh],
+                step,
+            };
+            f.render_cmap(lo, hi, r, pal, &mut lut, &mut region);
+            let mut want = Vec::new();
+            for oy in 0..oh {
+                let start = ((1 + oy) * fw + 1) * 4;
+                want.extend_from_slice(&full[start..start + ow * 4]);
+            }
+            assert_eq!(region, want, "cmap step {step}");
+        }
+
+        // Gray u16: the step-1 full render is the reference; a step-2 region
+        // must pick every other sample of it.
+        let mut lut = ToneLut::default();
+        let mut full16 = Vec::new();
+        f.render_gray_u16_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut full16);
+        let mut region16 = Vec::new();
+        let r = Region {
+            origin: [1, 1],
+            out: [3, 2],
+            step: 2,
+        };
+        f.render_gray_u16_lut(lo, hi, r, &mut lut, &mut region16);
+        let mut want16 = Vec::new();
+        for oy in 0..2 {
+            for ox in 0..3 {
+                want16.push(full16[(1 + oy * 2) * 7 + 1 + ox * 2]);
+            }
+        }
+        assert_eq!(region16, want16);
     }
 
     /// The Colormap render maps each sample through its toned index into the
@@ -861,7 +1059,15 @@ mod tests {
         let f = FrameData::new([3, 1], 1, Samples::U8(vec![0, 128, 255]));
         let mut lut = ToneLut::default();
         let mut out = Vec::<u8>::new();
-        let size = f.render_into_scaled_cmap(0.0, 255.0, 1, tab, pal.id(), &mut lut, &mut out);
+        let size = Region::whole(f.size, 1).out;
+        f.render_cmap(
+            0.0,
+            255.0,
+            Region::whole(f.size, 1),
+            pal,
+            &mut lut,
+            &mut out,
+        );
         assert_eq!(size, [3, 1]);
         // Each pixel's RGB is palette[value], with alpha preserved (255).
         for (i, &v) in [0u8, 128, 255].iter().enumerate() {
@@ -875,7 +1081,7 @@ mod tests {
 
         // A flat window (lo == hi) collapses every sample to one palette colour.
         let mut flat = Vec::<u8>::new();
-        f.render_into_scaled_cmap(5.0, 5.0, 1, tab, pal.id(), &mut lut, &mut flat);
+        f.render_cmap(5.0, 5.0, Region::whole(f.size, 1), pal, &mut lut, &mut flat);
         assert_eq!([flat[0], flat[1], flat[2]], [flat[4], flat[5], flat[6]]);
         assert_eq!([flat[4], flat[5], flat[6]], [flat[8], flat[9], flat[10]]);
     }

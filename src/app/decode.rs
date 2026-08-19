@@ -538,17 +538,46 @@ impl CimApp {
     pub(super) fn pump_render(&mut self, ctx: &egui::Context) {
         let debug = crate::debug::enabled();
         for d in self.renderer.drain() {
-            self.render_inflight.remove(&d.id);
             if debug {
                 self.metrics.lut.record(d.lut_time);
                 if !d.ops_time.is_zero() {
                     self.metrics.operators.record(d.ops_time);
                 }
             }
-            if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
-                self.upload_tex(ctx, idx, d.image, d.frame, d.sig);
+            // A viewport-region render lands in the region cache (it decorates
+            // the base, never replacing it); a whole-image render is the pane's
+            // next base texture.
+            match d.target {
+                crate::renderer::Target::Viewport => self.land_region(ctx, d),
+                crate::renderer::Target::Base => {
+                    self.render_inflight.remove(&d.id);
+                    if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
+                        self.upload_tex(ctx, idx, d);
+                    }
+                }
             }
         }
+    }
+
+    /// Store a finished viewport-region render in the region cache under the key
+    /// `render_region` filed when it queued the job. The pane may be gone or the
+    /// view moved on — the cache keeps it regardless; a stale region simply stops
+    /// being painted and ages out by LRU.
+    fn land_region(&mut self, ctx: &egui::Context, d: crate::renderer::RenderDone) {
+        // One region render per pane at a time (`render_region`), so the guard —
+        // and the key — are keyed on the pane, not on the region's identity. A
+        // result with no entry belongs to a pane closed or reloaded mid-flight.
+        let Some(key) = self.roi_inflight.remove(&d.id) else {
+            return;
+        };
+        // `roi_plan` refuses a region larger than the backend accepts, so this
+        // can only differ if the limit shrank mid-flight; drop it rather than
+        // assert inside the upload, and the next update re-plans.
+        let side = max_side(ctx);
+        if d.image.size[0] > side || d.image.size[1] > side {
+            return;
+        }
+        self.upload_region(ctx, key, d.image);
     }
 
     /// Bring every on-screen pane's texture up to date and, once they are **all**
@@ -573,8 +602,13 @@ impl CimApp {
         // Physical pixels per point (OS DPI × UI-scale zoom factor), so decimation
         // is judged against real screen resolution, not view-space points.
         let ppp = ctx.pixels_per_point();
+        let now = ctx.input(|i| i.time);
+        let max_side = max_side(ctx);
         let mut all_ready = true;
-        let mut staged: Vec<(usize, usize)> = Vec::with_capacity(panes.len());
+        // `(pane, frame, adaptive)` — the commit re-derives each pane's step and
+        // must reach the same answer `stage` did, so it reuses the plan's verdict
+        // rather than re-planning against state that may have moved.
+        let mut staged: Vec<(usize, usize, bool)> = Vec::with_capacity(panes.len());
         for &idx in &panes {
             // A pane discovering toward a far target holds its last committed
             // frame (keeps `tex`) instead of flipping through the pages in
@@ -595,10 +629,23 @@ impl CimApp {
                 continue;
             }
             let target = self.stage_target(idx);
-            if !self.stage(ctx, idx, target, ppp) {
+            // Planned **once** per pane per update and handed to everything that
+            // needs it: the base's `want_step` (which caps and decimates only for
+            // an adaptive pane), the region staging, and the commit below. They
+            // would each reach the same answer on their own, but only by
+            // recomputing the same geometry three times and staying in step by
+            // discipline.
+            let plan = self.roi_plan(idx, target, ppp, max_side);
+            if !self.stage(ctx, idx, target, ppp, plan.is_some()) {
                 all_ready = false;
             }
-            staged.push((idx, target));
+            // The adaptive viewport region is staged with the base and gates the
+            // same commit, so the two layers a pane draws always come from one
+            // frame (§7.1). A non-adaptive pane reports ready immediately.
+            if !self.stage_region(ctx, idx, target, plan, now) {
+                all_ready = false;
+            }
+            staged.push((idx, target, plan.is_some()));
         }
         if !all_ready {
             return;
@@ -610,12 +657,15 @@ impl CimApp {
         // and making the image flicker between frames. The swap keeps the old
         // texture in `pending` so its handle is reused next frame (no per-frame
         // texture allocation during playback).
-        for (idx, target) in staged {
+        for (idx, target, adaptive) in staged {
             let sig = self.tone_sig(idx);
-            let step = self.want_step(idx, target, ppp, max_side(ctx));
+            let step = self.want_step(idx, target, ppp, max_side, adaptive);
             self.panes[idx]
                 .tex
                 .commit(|t| t.shown == target && t.sig == sig && t.step == step);
+            // Promote the staged region alongside its base, so drawing never
+            // pairs a freshly committed base with the previous frame's region.
+            self.panes[idx].region_show = self.panes[idx].region_want;
         }
         // A committed playback step advances the shared timeline to the frame we
         // just showed — so the counter and the image stay on the same frame.
@@ -635,7 +685,7 @@ impl CimApp {
     /// The frame `refresh_textures` should stage for pane `idx`. Synced panes chase
     /// the playback prefetch (the candidate next shared frame) if one is in flight,
     /// else the committed shared frame; unsynced panes use their own frame.
-    fn stage_target(&self, idx: usize) -> usize {
+    pub(super) fn stage_target(&self, idx: usize) -> usize {
         crate::tone::synced_index(
             self.playback.prefetch.unwrap_or(self.shared_frame),
             self.panes[idx].media.frame_count(),
@@ -655,7 +705,7 @@ impl CimApp {
     /// 1× never changes what's on screen. It rises to 2, 3, … only as the pane is
     /// minified further, where full-resolution pixels the screen can't show would
     /// be pure waste.
-    fn stage_step(&self, idx: usize, ppp: f32) -> usize {
+    pub(super) fn stage_step(&self, idx: usize, ppp: f32) -> usize {
         let phys = self.view_ref(idx).zoom * ppp.max(1e-3);
         if phys >= 1.0 {
             1
@@ -678,13 +728,46 @@ impl CimApp {
     /// egui for a 25000² texture and the upload asserted, taking the process
     /// down. A heavy pane keeps `step 1` regardless (decimating changes what the
     /// operator computes); `stage` refuses that upload instead of decimating it.
-    fn want_step(&self, idx: usize, target: usize, ppp: f32, max_side: usize) -> usize {
-        if self.pane_ops_active(idx) {
-            return 1;
-        }
+    ///
+    /// **Adaptive rendering** changes both rules for the pane's *base* texture,
+    /// since the sharp pixels then come from the viewport region
+    /// (`roi::stage_region`). [`roi::base_step`] is the single definition of the
+    /// result, and `roi_plan` weighs the mode's cost with that very same
+    /// function, so the step this renders at and the step the plan was costed
+    /// against cannot disagree.
+    ///
+    /// Two different triggers, deliberately:
+    ///
+    /// - A **plain** pane is capped at [`roi::BASE_MAX`] only while `adaptive`
+    ///   says the region path is actually carrying it. Its role shrinks to the
+    ///   blurry pan fallback, so a 12000² image stops costing a 12000² upload.
+    /// - An **operator** pane takes the reduced base whenever the *setting* is
+    ///   on, region or no region — that is what lets it show a huge image at all
+    ///   (at `step 1` `stage` refuses the upload outright and the pane shows
+    ///   `tex_error`). The price is that an operator pane zoomed out far enough
+    ///   for `roi_plan` to decline sits on a `BASE_MAX` base with nothing over
+    ///   it, i.e. blurrier than the classic path. A displayable pane was judged
+    ///   better than an undisplayable one; it is the reason the setting is
+    ///   opt-in.
+    fn want_step(
+        &self,
+        idx: usize,
+        target: usize,
+        ppp: f32,
+        max_side: usize,
+        adaptive: bool,
+    ) -> usize {
         let size = self.staged_size(idx, target);
-        self.stage_step(idx, ppp)
-            .max(texture_fit_step(size, max_side))
+        let stage_step = self.stage_step(idx, ppp);
+        match (self.pane_ops_active(idx), self.config.adaptive_render) {
+            // Decimating an operator's input changes its output, so outside
+            // adaptive mode a heavy pane stays at full resolution and `stage`
+            // refuses an oversized upload rather than decimating it.
+            (true, false) => 1,
+            (true, true) => roi::base_step(stage_step, size, max_side, true),
+            (false, _) if adaptive => roi::base_step(stage_step, size, max_side, false),
+            (false, _) => stage_step.max(texture_fit_step(size, max_side)),
+        }
     }
 
     /// The pixel size of the frame `stage` is about to render for pane `idx` —
@@ -692,7 +775,7 @@ impl CimApp {
     /// `want_step` reads it, so `stage` and the commit must agree on it: both
     /// are called with the same `(idx, target)` within one `refresh_textures`,
     /// where residency doesn't change.
-    fn staged_size(&self, idx: usize, target: usize) -> [usize; 2] {
+    pub(super) fn staged_size(&self, idx: usize, target: usize) -> [usize; 2] {
         match self.panes[idx].media.resident(target) {
             Some(f) => f.size,
             None => self.disp_size(idx),
@@ -711,7 +794,14 @@ impl CimApp {
     /// milliseconds — render on the [`RenderPool`] and land in `pending` via
     /// `pump_render`, so neither a slow operator nor a big frame blocks the UI
     /// thread. An errored pane reports ready so it can't stall a lockstep commit.
-    fn stage(&mut self, ctx: &egui::Context, idx: usize, target: usize, ppp: f32) -> bool {
+    fn stage(
+        &mut self,
+        ctx: &egui::Context,
+        idx: usize,
+        target: usize,
+        ppp: f32,
+        adaptive: bool,
+    ) -> bool {
         if self.panes[idx].error.is_some() {
             return true; // can't produce a frame; keep the last texture
         }
@@ -723,7 +813,7 @@ impl CimApp {
         // heavy proprietary-operator pane, which never decimates). Part of the
         // texture identity so zooming below the full-resolution band re-renders.
         let max_side = max_side(ctx);
-        let step = self.want_step(idx, target, ppp, max_side);
+        let step = self.want_step(idx, target, ppp, max_side, adaptive);
         // Last line of defence before the upload. `want_step` already decimates a
         // large frame into the backend's limit, so this only fires where it
         // *can't*: a heavy proprietary-operator pane, which must render at full
@@ -763,33 +853,41 @@ impl CimApp {
         // The proprietary operators only run on single-channel 16-bit frames with
         // the library loaded; otherwise LUT_ALPHA / Details fall back to a plain
         // render, so there's nothing heavy to push off-thread.
-        let heavy = !cmap
-            && crate::imageproc::ops_active(
-                &frame,
-                contrast == ContrastMode::LutAlpha,
-                self.details_of(idx),
-            );
-        // A plain LUT render of a *large* full-resolution frame is itself tens of
-        // milliseconds — done synchronously it blocks this whole update, which
-        // reads as a regular hitch when playback steps while the user pans at
-        // 60 Hz. Push it to the render pool too (the worker's plain-LUT path is
-        // pixel-identical by test), leaving only the texture upload on the UI
-        // thread. Only at `step == 1`: a decimated (minified) render is small and
-        // cheap, and the worker renders full-resolution only, so its result would
-        // never match a `step > 1` commit.
-        // A full-resolution render of a large frame: too expensive to do on the
-        // UI thread, and so the render this app pushes elsewhere — to the render
-        // pool on the CPU, or to the graphics card in GPU mode.
-        let bulk = !heavy && step == 1 && frame.size[0] * frame.size[1] >= ASYNC_RENDER_PIXELS;
+        let ops = self.ops_of(idx);
+        let heavy = !cmap && crate::imageproc::ops_active(&frame, ops);
+        // A plain LUT render of a *large* frame is itself tens of milliseconds —
+        // done synchronously it blocks this whole update, which reads as a
+        // regular hitch when playback steps while the user pans at 60 Hz. Push
+        // it to the render pool (the worker's plain-LUT path is pixel-identical
+        // by test), leaving only the texture upload on the UI thread.
+        //
+        // Measured on the **output** texel count, which is what the render
+        // actually writes: a heavily minified pane stays synchronous because its
+        // output is genuinely small, while a lightly decimated render of a very
+        // large frame is still tens of megapixels and belongs off-thread. This
+        // deliberately does *not* require `step == 1` — the worker renders at the
+        // job's region (`renderer::RenderJob::region`) and `upload_tex` tags the
+        // result with its step, so a decimated result commits like any other. Demanding
+        // `step == 1` here put an **adaptive** pane's `BASE_MAX`-capped base
+        // render (§7.1) back on the UI thread on every playback frame, where it
+        // also lost `fill_lut`'s parallel path (which needs a contiguous grid) —
+        // panning while playing went sluggish for exactly that reason.
+        let bulk = !heavy && out[0] * out[1] >= ASYNC_RENDER_PIXELS;
 
-        // GPU mode takes those renders itself, Colormap included. It is
+        // GPU mode takes those renders itself, Colormap included (as does the
+        // CPU render pool now — see below). It is
         // synchronous but not expensive: the dispatch is queued rather than
         // awaited, and a frame already resident in VRAM (the pane is being
         // re-toned rather than stepped) uploads nothing at all — which is the
         // interaction the whole path exists for. Heavy panes are excluded
         // outright: the proprietary operators are CPU code owned by the pane's
         // render thread and cannot be part of this.
-        if bulk && self.gpu.is_some() {
+        //
+        // `step == 1` **is** required here, unlike `bulk` itself: `tone_into`
+        // always tone-maps the whole frame at full resolution and tags the
+        // texture `step: 1`, so handing it a decimated pane would stage a
+        // texture the commit can never match — re-rendering it every frame.
+        if bulk && step == 1 && self.gpu.is_some() {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             let tone = crate::gpu::Tone {
                 lo,
@@ -824,25 +922,32 @@ impl CimApp {
             }
         }
 
-        let big = !cmap && bulk;
-
-        if heavy || big {
+        // Colormap used to be excluded here — the pool had no palette, so a
+        // Colormap job would have come back grey. It carries one now
+        // (`imageproc::Display`), so a big false-coloured frame goes off-thread
+        // like any other.
+        if heavy || bulk {
             // Render off-thread. One render per pane at a time, so rapid tone /
             // frame changes coalesce instead of piling up jobs.
             let id = self.panes[idx].id;
             if !self.render_inflight.contains(&id) {
                 let (lo, hi) = self.tone_bounds(idx, &frame);
-                let lut_alpha = contrast == ContrastMode::LutAlpha;
-                let details = self.details_of(idx);
                 self.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: target,
                     sig,
                     data: frame.clone(),
-                    lo,
-                    hi,
-                    lut_alpha,
-                    details,
+                    tone: crate::imageproc::Display {
+                        lo,
+                        hi,
+                        palette: cmap.then(|| self.tone_of(idx).palette),
+                        ops,
+                    },
+                    // The whole image; `step` is 1 except for an adaptive pane's
+                    // capped base (`want_step` — an operator pane then runs on
+                    // the reduced input, by design).
+                    region: media::Region::whole(frame.size, step),
+                    target: crate::renderer::Target::Base,
                 });
                 self.render_inflight.insert(id);
             }
@@ -868,27 +973,23 @@ impl CimApp {
             // on the UI thread, so it must draw from the instance's share rather
             // than rayon's machine-sized global pool (`crate::cpu`).
             let palette = cmap.then(|| self.tone_of(idx).palette);
+            let region = media::Region::whole(frame.size, step);
             let lut = &mut self.panes[idx].tex.lut;
-            let size = crate::cpu::install(|| match palette {
+            crate::cpu::install(|| match palette {
                 // Colormap: false-colour the mono frame through the palette.
-                Some(pal) => frame.render_into_scaled_cmap(
-                    lo,
-                    hi,
-                    step,
-                    pal.table(),
-                    pal.id(),
-                    lut,
-                    &mut pixels,
-                ),
-                None => frame.render_into_scaled_lut(lo, hi, step, lut, &mut pixels),
+                Some(pal) => frame.render_cmap(lo, hi, region, pal, lut, &mut pixels),
+                None => frame.render_lut(lo, hi, region, lut, &mut pixels),
             });
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
             }
             let t = debug.then(std::time::Instant::now);
-            let img = ColorImage { size, pixels };
+            let img = ColorImage {
+                size: region.out,
+                pixels,
+            };
             let name = format!("m{}", self.panes[idx].id);
-            let native = frame.size; // `size` above is the decimated texel count
+            let native = frame.size; // `region.out` above is the decimated texel count
             set_cached_tex(
                 &mut self.panes[idx].tex.pending,
                 ctx,
@@ -907,33 +1008,29 @@ impl CimApp {
     }
 
     /// Stage a worker-rendered image as pane `idx`'s **pending** texture, tagged
-    /// `(f, sig)` (committed to the front by `refresh_textures`). The worker
-    /// already did the `ColorImage` conversion copy, so the UI thread only
-    /// queues the texture delta here (the recorded upload time reflects that).
-    fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, img: ColorImage, f: usize, sig: u64) {
-        // The worker renders full-resolution, so a frame that outgrew the
-        // backend between the request and its landing is dropped here rather
-        // than uploaded (see `stage`).
+    /// with the result's `(frame, sig, step)` identity (committed to the front by
+    /// `refresh_textures`). The worker already did the `ColorImage` conversion
+    /// copy, so the UI thread only queues the texture delta here (the recorded
+    /// upload time reflects that).
+    fn upload_tex(&mut self, ctx: &egui::Context, idx: usize, d: crate::renderer::RenderDone) {
+        // A frame that outgrew the backend between the request and its landing
+        // is dropped here rather than uploaded (see `stage`).
         let max_side = max_side(ctx);
-        if img.size[0] > max_side || img.size[1] > max_side {
-            self.panes[idx].tex_error = Some(too_large_msg(img.size, max_side));
+        if d.image.size[0] > max_side || d.image.size[1] > max_side {
+            self.panes[idx].tex_error = Some(too_large_msg(d.image.size, max_side));
             return;
         }
         let t = crate::debug::enabled().then(std::time::Instant::now);
         let name = format!("m{}", self.panes[idx].id);
-        // Off-thread renders (operators, or a big plain LUT) run at full
-        // resolution (step 1) — see `stage` — so the image's own size is the
-        // frame's native size.
-        let native = img.size;
         set_cached_tex(
             &mut self.panes[idx].tex.pending,
             ctx,
             name,
-            img,
-            f,
-            native,
-            sig,
-            1,
+            d.image,
+            d.frame,
+            d.native,
+            d.sig,
+            d.region.step,
         );
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());
@@ -1010,7 +1107,7 @@ impl CimApp {
     /// region-tone is pinned — the shared stats region's bounds. With "Share
     /// clip" on, the Control media's bounds are used instead so panes lock to
     /// identical bounds.
-    fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
+    pub(super) fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
         let contrast = self.contrast_of(idx);
         let tone = self.tone_of(idx);
         // "Share clip" locks the bounds to the Control media's own bounds (but
@@ -1170,7 +1267,7 @@ impl CimApp {
 /// on the glow path (16384 on the software GL a VNC session runs on), as egui
 /// reports it. eframe refreshes it every frame from the painter; until it has,
 /// egui's own conservative default stands, which only ever over-decimates.
-fn max_side(ctx: &egui::Context) -> usize {
+pub(super) fn max_side(ctx: &egui::Context) -> usize {
     match ctx.input(|i| i.max_texture_side) {
         0 => FALLBACK_MAX_TEXTURE_SIDE,
         n => n,
@@ -1181,16 +1278,16 @@ fn max_side(ctx: &egui::Context) -> usize {
 /// WebGL2 implementation guarantees at least this.
 const FALLBACK_MAX_TEXTURE_SIDE: usize = 2048;
 
-/// The texel count a `step`-decimated render of `size` produces (`render_into_scaled`
-/// keeps every `step`-th sample on each axis, so a partial last step still lands).
-fn decimated_size(size: [usize; 2], step: usize) -> [usize; 2] {
-    let step = step.max(1);
-    [size[0].div_ceil(step), size[1].div_ceil(step)]
+/// The texel count a `step`-decimated render of `size` produces — the app-side
+/// name for [`media::Region::whole`]'s sizing, which is where the rule lives
+/// (every `step`-th sample on each axis, so a partial last step still lands).
+pub(super) fn decimated_size(size: [usize; 2], step: usize) -> [usize; 2] {
+    media::Region::whole(size, step).out
 }
 
 /// The smallest decimation step that brings `size` within `max_side` on both
 /// axes — 1 when it already fits.
-fn texture_fit_step(size: [usize; 2], max_side: usize) -> usize {
+pub(super) fn texture_fit_step(size: [usize; 2], max_side: usize) -> usize {
     if max_side == 0 {
         return 1;
     }

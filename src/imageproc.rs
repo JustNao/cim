@@ -229,10 +229,41 @@ pub fn details_available() -> bool {
 /// otherwise the render falls back to the plain LUT. This is the one predicate
 /// the three render paths (live sync `stage`, the render worker, and export)
 /// share, so "when do operators run" is decided in a single place.
-pub fn ops_active(frame: &crate::media::FrameData, lut_alpha: bool, details: bool) -> bool {
+pub fn ops_active(frame: &crate::media::FrameData, ops: Ops) -> bool {
     frame.is_op_input()
         && !frame.is_mask()
-        && ((lut_alpha && lut_alpha_available()) || (details && details_available()))
+        && ((ops.lut_alpha && lut_alpha_available()) || (ops.details && details_available()))
+}
+
+/// How to turn a frame's samples into display pixels: the window, the optional
+/// Colormap palette, and which proprietary operators to run.
+///
+/// One value rather than four loose parameters because every render path needs
+/// the whole set and they must stay together — `palette` going missing on the
+/// way to the render pool is exactly how a Colormap pane came back grey.
+#[derive(Clone, Copy, Debug)]
+pub struct Display {
+    /// Display bounds `[lo, hi] -> [0, 255]`, computed on the UI thread.
+    pub lo: f32,
+    pub hi: f32,
+    /// The Colormap tone: false-colour through this palette instead of grey.
+    /// Mutually exclusive with the operators in practice — `uses_colormap` and
+    /// `ops_active` can't both hold for one pane — and [`PaneOps::render_display`]
+    /// takes the palette branch first regardless.
+    pub palette: Option<crate::palette::Palette>,
+    pub ops: Ops,
+}
+
+/// Which proprietary operators a render should run. The two travel together
+/// everywhere — the pane's tone decides both, `ops_active` weighs both, and a
+/// render job carries both — so they travel as one value rather than as a pair
+/// of bare bools that can be swapped at a call site without complaint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Ops {
+    /// Run LUT_ALPHA (only a LUT_ALPHA-tone pane sets it; masks never do).
+    pub lut_alpha: bool,
+    /// Run the detail enhancement.
+    pub details: bool,
 }
 
 /// One live proprietary operator instance: the opaque C++ handle from `create`,
@@ -262,15 +293,25 @@ impl Drop for Instance {
 // raw handle is opaque and never shared.
 unsafe impl Send for Instance {}
 
+/// How many differently-sized instances of one operator a pane keeps alive at
+/// once. Adaptive rendering makes a pane alternate between two input sizes —
+/// its decimated whole-image base and its viewport region — every frame; with a
+/// single slot that alternation would destroy/create the heavy C++ object twice
+/// per frame. Small, because instances are heavy: enough for base + region +
+/// one transitional size, evicted least-recently-used.
+const INSTANCES_PER_OP: usize = 3;
+
 /// The proprietary operator instances for **one pane**, owned by that pane's
-/// render worker thread (`renderer::Worker`) or its export pane. Each operator's
-/// instance is created lazily on first use and rebuilt when the frame dimensions
-/// change (construction is heavy and size-dependent), so the heavy work is paid
-/// once per size and reused across that pane's frames.
+/// render worker thread (`renderer::Worker`) or its export pane. Each operator
+/// keeps a small most-recent-first list of instances keyed by input size
+/// ([`INSTANCES_PER_OP`]): one is created lazily the first time a size is
+/// rendered and reused across that pane's frames, so the heavy size-dependent
+/// construction is paid once per size — and a pane alternating between its
+/// adaptive base and region sizes reuses both instead of rebuilding.
 #[derive(Default)]
 pub struct PaneOps {
-    lut_alpha: Option<Instance>,
-    details: Option<Instance>,
+    lut_alpha: Vec<Instance>,
+    details: Vec<Instance>,
 }
 
 impl PaneOps {
@@ -279,7 +320,7 @@ impl PaneOps {
     /// (when `lut_alpha` is set) followed by the optional details enhancement. Each
     /// stage is a no-op when its library isn't loaded (callers also gate on
     /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
-    /// instances, rebuilding one only if `width`/`height` changed since last call.
+    /// instances, building one only for a `(width, height)` it doesn't hold.
     ///
     /// DETAILS_ENHANCED additionally receives the **after-LUT 8-bit companion** of
     /// the frame — the current view's tone output. That is exactly `gray` as it
@@ -292,59 +333,73 @@ impl PaneOps {
     /// wraps it (render the 16-bit input, `apply`, expand to RGBA) and is what the
     /// live render worker and the export worker both call, so the two match
     /// pixel-for-pixel.
-    pub fn apply(
-        &mut self,
-        gray: &mut [u16],
-        width: usize,
-        height: usize,
-        lut_alpha: bool,
-        details: bool,
-    ) {
-        if lut_alpha && Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
-            run(self.lut_alpha.as_ref().unwrap(), gray);
+    pub fn apply(&mut self, gray: &mut [u16], width: usize, height: usize, ops: Ops) {
+        if ops.lut_alpha {
+            if let Some(inst) = Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
+                run(inst, gray);
+            }
         }
-        if details && Self::ensure(&mut self.details, &DETAILS, width, height) {
-            // The 8-bit companion is the current view LUT output: `gray` (post
-            // LUT_ALPHA if used, else the linear/clip map) downscaled to 8 bits.
-            let companion: Vec<u8> = gray.iter().map(|&s| (s >> 8) as u8).collect();
-            run_details(self.details.as_ref().unwrap(), gray, &companion);
+        if ops.details {
+            if let Some(inst) = Self::ensure(&mut self.details, &DETAILS, width, height) {
+                // The 8-bit companion is the current view LUT output: `gray`
+                // (post LUT_ALPHA if used, else the linear/clip map) downscaled
+                // to 8 bits.
+                let companion: Vec<u8> = gray.iter().map(|&s| (s >> 8) as u8).collect();
+                run_details(inst, gray, &companion);
+            }
         }
     }
 
-    /// Build a frame's 8-bit display RGBA into `out` for the display window
-    /// `(lo, hi)`, running the proprietary
-    /// operators when they're active for this frame/tone (`ops_active`): render a
-    /// single-channel 16-bit buffer at full precision, `apply` the operators in
-    /// place, then expand the grey back to RGBA. When they're not active, fall
-    /// back to the plain LUT render (`FrameData::render_into`).
+    /// Build the 8-bit display RGBA of `region` into `out` for the display
+    /// `tone`, running the proprietary operators when they're active for this
+    /// frame/tone (`ops_active`): render a single-channel 16-bit buffer at full
+    /// precision, `apply` the operators in place, then expand the grey back to
+    /// RGBA. A Colormap `tone` false-colours through its palette; otherwise, with
+    /// no operator active, this is the plain LUT render.
     ///
     /// Returns `(lut_time, ops_time)` for the `CIM_DEBUG` profiler (`ops_time`
     /// is zero on the plain path). This is the **one** implementation of the
     /// heavy render tail, shared by the live render worker
     /// (`renderer::Worker::render`) and export (`export::ExportPane::render`), so
     /// the two produce identical pixels.
+    ///
+    /// The crop and decimation happen **before** the operators run, so under
+    /// adaptive rendering they see the visible region rather than the whole
+    /// image and their output (e.g. LUT_ALPHA's auto-contrast) adapts to the
+    /// view. Their instance is keyed on `region.out`, which the region geometry
+    /// deliberately keeps stable while panning (see `app::roi`). Export renders
+    /// whole-image regions, so the two are expected to differ under adaptive
+    /// rendering — the Settings hover says so.
     pub fn render_display<S: crate::media::RgbaSink>(
         &mut self,
         frame: &crate::media::FrameData,
-        (lo, hi): (f32, f32),
-        lut_alpha: bool,
-        details: bool,
+        tone: Display,
+        region: crate::media::Region,
         lut: &mut crate::media::ToneLut,
         out: &mut S,
     ) -> (std::time::Duration, std::time::Duration) {
         use std::time::{Duration, Instant};
-        if !ops_active(frame, lut_alpha, details) {
+        let Display { lo, hi, ops, .. } = tone;
+        // Colormap first: it is a display-only tone, so no operator runs under
+        // it. The caller has already checked `uses_colormap` (mono, non-mask),
+        // which is what `render_cmap` requires.
+        if let Some(pal) = tone.palette {
             let t = Instant::now();
-            frame.render_into_lut(lo, hi, lut, out);
+            frame.render_cmap(lo, hi, region, pal, lut, out);
             return (t.elapsed(), Duration::ZERO);
         }
-        let [w, h] = frame.size;
+        if !ops_active(frame, ops) {
+            let t = Instant::now();
+            frame.render_lut(lo, hi, region, lut, out);
+            return (t.elapsed(), Duration::ZERO);
+        }
+        let [w, h] = region.out;
         let mut gray = Vec::new();
         let t = Instant::now();
-        frame.render_into_gray_u16_lut(lo, hi, lut, &mut gray);
+        frame.render_gray_u16_lut(lo, hi, region, lut, &mut gray);
         let lut_time = t.elapsed();
         let t = Instant::now();
-        self.apply(&mut gray, w, h, lut_alpha, details);
+        self.apply(&mut gray, w, h, ops);
         let ops_time = t.elapsed();
         // Expand the processed grey back to 8-bit RGBA for the texture.
         out.begin(gray.len());
@@ -354,39 +409,49 @@ impl PaneOps {
         (lut_time, ops_time)
     }
 
-    /// Ensure `slot` holds an instance of `op` built for `(w, h)`, creating it (or
-    /// rebuilding after a size change) as needed. Returns whether a usable instance
-    /// is present — `false` if the library is absent or `create` returned null.
-    fn ensure(
-        slot: &mut Option<Instance>,
+    /// The instance of `op` built for `(w, h)`, reusing a cached one (moved to
+    /// the front, most recently used) or creating it — evicting the
+    /// least-recently-used instance beyond [`INSTANCES_PER_OP`] *before* the
+    /// build, so a heavy rebuild never holds an extra instance. `None` if the
+    /// library is absent or `create` returned null.
+    fn ensure<'a>(
+        slot: &'a mut Vec<Instance>,
         op: &RwLock<Option<Operator>>,
         w: usize,
         h: usize,
-    ) -> bool {
-        if slot.as_ref().map(|i| i.dims) != Some((w, h)) {
-            // Drop the old instance first (frees it on this thread) so a heavy
-            // rebuild never holds two instances at once.
-            *slot = None;
-            if let Some(operator) = op.read().unwrap().as_ref() {
-                // Serialise construction across all panes: two worker threads must
-                // not enter a vendor `create` at once (see `CONSTRUCT`). This is
-                // the one-time, size-dependent build, not the per-frame `apply`, so
-                // parallel steady-state rendering is unaffected.
-                let _guard = CONSTRUCT.lock().unwrap_or_else(PoisonError::into_inner);
-                // SAFETY: `create` per the documented ABI; the returned handle is
-                // freed exactly once in `Instance::drop`.
-                let handle = unsafe { (operator.create)(w, h) };
-                if !handle.is_null() {
-                    *slot = Some(Instance {
+    ) -> Option<&'a Instance> {
+        if let Some(pos) = slot.iter().position(|i| i.dims == (w, h)) {
+            // Cache hit: move to the front (most recently used).
+            let inst = slot.remove(pos);
+            slot.insert(0, inst);
+            return slot.first();
+        }
+        if let Some(operator) = op.read().unwrap().as_ref() {
+            // Make room first (frees on this thread) so the build below never
+            // holds more than the cap's worth of heavy instances.
+            slot.truncate(INSTANCES_PER_OP.saturating_sub(1));
+            // Serialise construction across all panes: two worker threads must
+            // not enter a vendor `create` at once (see `CONSTRUCT`). This is
+            // the one-time, size-dependent build, not the per-frame `apply`, so
+            // parallel steady-state rendering is unaffected.
+            let _guard = CONSTRUCT.lock().unwrap_or_else(PoisonError::into_inner);
+            // SAFETY: `create` per the documented ABI; the returned handle is
+            // freed exactly once in `Instance::drop`.
+            let handle = unsafe { (operator.create)(w, h) };
+            if !handle.is_null() {
+                slot.insert(
+                    0,
+                    Instance {
                         dims: (w, h),
                         handle,
                         apply: operator.apply,
                         destroy: operator.destroy,
-                    });
-                }
+                    },
+                );
+                return slot.first();
             }
         }
-        slot.is_some()
+        None
     }
 }
 

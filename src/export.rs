@@ -475,38 +475,34 @@ impl ExportPane {
             },
         };
         let mut rgba = Vec::new();
+        // Export always renders the whole (already cropped) sub-frame at full
+        // resolution — the adaptive display's decimated regions never apply here,
+        // which is why an operator's output can differ between the two.
+        let whole = crate::media::Region::whole(sub.size, 1);
         // Colormap is a plain mono-only palette render (mirrors the live sync
         // path); everything else goes through the shared operator render tail.
         // Same mono-only gate as the live view, so a multi-channel or mask frame
         // falls back to the plain render on both sides.
-        match self
-            .palette
-            .filter(|_| crate::tone::uses_colormap(self.contrast, sub))
-        {
-            Some(pal) => {
-                sub.render_into_scaled_cmap(
-                    lo,
-                    hi,
-                    1,
-                    pal.table(),
-                    pal.id(),
-                    &mut self.lut,
-                    &mut rgba,
-                );
-            }
-            None => {
-                // The one shared render tail (plain LUT, or operators on a full-
-                // precision 16-bit render) — identical to the live view by construction.
-                self.ops.render_display(
-                    sub,
-                    (lo, hi),
-                    self.contrast == ContrastMode::LutAlpha,
-                    self.details,
-                    &mut self.lut,
-                    &mut rgba,
-                );
-            }
-        }
+        // The one shared render tail (Colormap palette, plain LUT, or operators
+        // on a full-precision 16-bit render) — identical to the live view by
+        // construction, which is the whole point of it being one function.
+        self.ops.render_display(
+            sub,
+            crate::imageproc::Display {
+                lo,
+                hi,
+                palette: self
+                    .palette
+                    .filter(|_| crate::tone::uses_colormap(self.contrast, sub)),
+                ops: crate::imageproc::Ops {
+                    lut_alpha: self.contrast == ContrastMode::LutAlpha,
+                    details: self.details,
+                },
+            },
+            whole,
+            &mut self.lut,
+            &mut rgba,
+        );
         self.cur_display = Some(rgba);
         self.cur_origin = [x0, y0];
         self.cur_render_size = [cw, ch];

@@ -23,7 +23,7 @@ pub struct Tone {
     pub lo: f32,
     pub hi: f32,
     /// The Colormap palette, or `None` for the plain grey render. Mono frames
-    /// only, exactly as `render_into_scaled_cmap` requires.
+    /// only, exactly as `FrameData::render_cmap` requires.
     pub palette: Option<Palette>,
 }
 
@@ -570,18 +570,11 @@ mod tests {
     fn cpu_render(frame: &FrameData, tone: Tone) -> Vec<[u8; 4]> {
         let mut out = Vec::<u8>::new();
         let mut lut = ToneLut::default();
-        let _ = match tone.palette {
-            Some(p) => frame.render_into_scaled_cmap(
-                tone.lo,
-                tone.hi,
-                1,
-                p.table(),
-                p.id(),
-                &mut lut,
-                &mut out,
-            ),
-            None => frame.render_into_scaled_lut(tone.lo, tone.hi, 1, &mut lut, &mut out),
-        };
+        let whole = crate::media::Region::whole(frame.size, 1);
+        match tone.palette {
+            Some(p) => frame.render_cmap(tone.lo, tone.hi, whole, p, &mut lut, &mut out),
+            None => frame.render_lut(tone.lo, tone.hi, whole, &mut lut, &mut out),
+        }
         out.chunks_exact(4)
             .map(|p| [p[0], p[1], p[2], p[3]])
             .collect()
