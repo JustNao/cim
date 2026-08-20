@@ -166,6 +166,7 @@ stats.show: Stats
 stats.show_hover: Afficher les statistiques de la région
 
 # ---- profil de ligne -------------------------------------------------------
+preview.linear: linéaire (opérateurs désactivés)
 profile.title: Profil de ligne
 profile.clear_line: Effacer la ligne
 profile.position_axis: position (px)
@@ -341,6 +342,13 @@ settings.cursor_dot: Point du curseur sur les autres panneaux
 settings.cursor_dot_hover: >-
   Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour
   comparer le même endroit d'un panneau à l'autre.
+settings.timeline_preview: Aperçu au survol de la timeline
+settings.timeline_preview_hover: >-
+  Survoler la barre de lecture affiche un petit aperçu de l'image sous le
+  curseur, avec les options de visualisation du média sélectionné (les opérateurs
+  C++ sont remplacés par une vue linéaire simple). Une image déjà en mémoire
+  s'affiche immédiatement ; sinon elle n'est lue qu'après un arrêt du curseur, et
+  jamais pendant la lecture.
 settings.adaptive_render: Rendu adaptatif
 settings.adaptive_render_hover: >-
   En zoomant dans une grande image, ne rendre à pleine netteté que la région

@@ -103,6 +103,8 @@ src/
     tonemap.rs     Resident VRAM sample buffers keyed by FrameData::uid, the
                    uploaded display table, and the compute dispatch.
     tone.wgsl      The u8 / u16 / f32 tone-map kernels.
+  thumbs.rs      Off-UI-thread thumbnail renderer for the timeline hover preview
+                 (§8.1): one shared worker + the capacity-LRU ThumbCache.
   watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
                  (sign_paths / FileWatcher, §9) — file I/O off the paint path.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
@@ -143,6 +145,8 @@ src/
       region_stats.rs   Right-drag stats region + panel.
       line_profile.rs   Shift+right-drag profile line overlay.
       compute_ui.rs     In-pane Compute controls.
+    preview.rs   Timeline hover preview: which pane/frame, the substituted tone,
+                 the cold-frame dwell policy, and the box above the scrubber (§8.1).
     panels.rs    Toolbar, media manager (drag the ⠿ handle to reorder rows via
                  `drop_target` + `remap_move`), settings, view-command, frame bar.
     profile.rs   The Line-profile plot window.
@@ -1207,6 +1211,63 @@ ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
 pause, any manual next/prev/seek, and length clamping; unsynced panes advance their own
 frame in step, staged the same way.
 
+### 8.1 Timeline hover preview (`app/preview.rs`, `thumbs.rs`)
+
+Hovering the frame bar's scrubber shows a thumbnail of the frame under the cursor plus
+its index, floating above the bar. On by default (`Config.timeline_preview`).
+
+**Which frame, and with what tone.** The pane is `preview_pane()` — the **focused** pane
+(`current`), since that is the media whose visualization options the preview honours,
+falling back to `loop_control()` when `current` is a still or temporally unsynced (neither
+tracks the scrubber, so its frame wouldn't move as the cursor did). The frame is
+`tone::synced_index` of the hovered index, exactly as `frame_disp` picks it. The tone is
+the pane's live one (`tone_bounds`'s inputs — clip percentile, Share clip, `tone_region`),
+**except** when the frame would run the proprietary operators: those are heavy,
+dimension-keyed C++ instances owned by the pane's render thread, and a thumbnail is not
+worth a second set, so the preview substitutes plain **Linear at the default clip** and
+says so under the image. That is a genuinely different tone, hence the salt in
+`preview_key` — filing both under the pane's `tone_sig` would show one as the other.
+
+**Where the work runs.** A dedicated `thumbs::ThumbPool` worker, *not* the `RenderPool`:
+that pool is one worker per pane capped at one job each, and its results **gate the
+lock-step commit** (§7), so a preview queued there would sit behind the pane's own renders
+and could stall the timeline. Being operator-free, a preview has no reason to be pinned to
+the pane's thread either. The job carries a `thumbs::Window` rather than a resolved
+`(lo, hi)`: a frame the user has never displayed has no memoized bounds, so computing them
+is a whole-image percentile scan (§7.3) that must not land on the UI thread mid-sweep —
+only the Share-clip case (the Control's *shown* frame, already memoized) resolves up front.
+The render is the same `render_lut`/`render_cmap` over `Region::whole(size, step)` with
+`step` from `thumbs::step_for` (longest side ≤ `THUMB_PX`, 240), so a preview is a
+*decimation of the pane's own render*, pinned by `a_thumbnail_is_the_decimated_pane_render`.
+Finished thumbnails go in `ThumbCache`, a plain 128-entry capacity LRU (~29 MiB worst
+case), dropped per pane on close/reload like `regions`.
+
+**The cold-frame policy** is the whole design problem: a resident frame costs one decimated
+render, but a non-resident one costs a real read (~150 ms/page on a shared mount, §15) and
+the cursor crosses hundreds of frames on its way anywhere. Four rules bound it:
+
+1. **Dwell** (`PREVIEW_DWELL`, 200 ms) — a cold frame is fetched only once the cursor has
+   *rested* on it. A resident frame previews with no delay at all, so sweeping the loaded
+   span (which the scrubber already shades) stays free. `drive_preview` requests its own
+   `request_repaint_after` for the remaining dwell, since a resting cursor wakes nothing.
+2. **One decode in flight**, superseded rather than cancelled — the decode pool has no
+   cancellation — so a stale request simply stops being waited on.
+3. **The ordinary decode path** (`request`/`inflight`/`SeqCache`), so a previewed frame is
+   resident afterwards (hover-then-click is instant) and evicts under the same LRU. No
+   second decode path to keep in step with the first.
+4. **Resident-only while playing, and always for video.** Playback owns the decode pool
+   (`prefetch_playback`) and a preview competing with it would slow the thing that gates
+   the commit; a `VideoReader` is worse, since a non-sequential index kills and respawns
+   its ffmpeg child (§3) and would throw away the streaming position playback depends on.
+
+**Split across the frame** so neither half hitches the paint: `draw_scrubber` only *records*
+`Preview.hover`, `drive_preview` (from `tick`, on the previous frame's record) decides what
+to fetch and render, and `draw_preview` paints whatever the cache holds — in an
+`Order::Foreground` `Area` after the frame bar, so it floats over the images instead of
+being clipped to the bar. `tick` clears `hover` after reading it, so it is `None` whenever
+the pointer is off the track or the bar isn't drawn at all (the `line_hover` idiom). A
+preview one frame behind the cursor is invisible next to the dwell.
+
 ---
 
 ## 9. Modes & central drawing (`app/canvas/`)
@@ -1824,7 +1885,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
-cursor_dot, cpp_lib_dir, hardware_accel, keybindings }` (`jp2_max_mp` = the most
+cursor_dot, timeline_preview, cpp_lib_dir, hardware_accel, keybindings }` (`jp2_max_mp` = the most
 megapixels to decode from one JPEG 2000 image, default 32, `0` = whole — §3; live, and
 the Settings row names the level the open panes landed on) (`hardware_accel` = build display pixels on
 the GPU — §7.1 — **off by default**, and the checkbox is shown only under `CIM_GPU=1`
@@ -2147,7 +2208,9 @@ within the cap — counting the distinct workers that actually ran, since
 resize mid-job can't deadlock; the resizing tests share a `SERIAL` mutex because the
 pool is process-global);
 `renderer` **worker output == plain LUT render** when no operator library is loaded;
-`app::decode` **prefetch interleave order** + **adaptive depth**, the **texture-limit clamp**
+`thumbs` **a thumbnail is the decimated pane render** (the preview is a
+decimation of `render_lut`, not a second tone path) and `step_for` bringing every size under
+`THUMB_PX` without over-decimating; `app::decode` **prefetch interleave order** + **adaptive depth**, the **texture-limit clamp**
 (`texture_fit_step` brings every size within the backend's limit across a spread of limits,
 and never decimates one step more than needed — a `floor` instead of a `div_ceil` leaves the
 texture a texel too wide, which is a crash, not a blemish); **out-of-order probe

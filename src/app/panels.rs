@@ -476,6 +476,16 @@ impl CimApp {
         );
         painter.circle_filled(Pos2::new(px, rect.center().y), 6.0, Color32::from_gray(240));
 
+        // Record what the cursor is over for the hover preview (`app::preview`).
+        // Only recorded here — the fetching/rendering decisions run next update
+        // from `tick`, and the box itself is drawn in a foreground layer after
+        // this bar, so neither can be clipped to it or hitch this paint.
+        if let Some(p) = resp.hover_pos() {
+            let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let k = ((t * span).round() as usize).min(len.saturating_sub(1));
+            self.preview.hover = Some((k, Pos2::new(p.x, rect.top())));
+        }
+
         // Interaction: a drag that starts on a bracket moves it (sets the loop
         // range); otherwise a click/drag seeks.
         if len <= 1 {
@@ -1176,6 +1186,11 @@ impl CimApp {
                 }
                 ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
                     .on_hover_text(t!("settings.cursor_dot_hover"));
+                ui.checkbox(
+                    &mut self.config.timeline_preview,
+                    t!("settings.timeline_preview"),
+                )
+                .on_hover_text(t!("settings.timeline_preview_hover"));
                 ui.checkbox(
                     &mut self.config.adaptive_render,
                     t!("settings.adaptive_render"),

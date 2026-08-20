@@ -429,6 +429,11 @@ pub struct Config {
     /// under the cursor is skipped — its own cursor marks the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// Show a thumbnail of the hovered frame above the frame bar's scrubber
+    /// (see `app::preview`). On by default; worth turning off on a busy shared
+    /// mount, where previewing a frame that isn't in memory costs a real read.
+    #[serde(default = "default_true")]
+    pub timeline_preview: bool,
     /// **Adaptive rendering**: when a pane is zoomed into a large image, render
     /// only the visible region (plus margin) at full sharpness over a small
     /// decimated whole-image base, instead of one huge whole-image texture (see
@@ -494,6 +499,7 @@ impl Default for Config {
             cpu_budget: default_cpu_budget(),
             jp2_max_mp: default_jp2_max_mp(),
             cursor_dot: true,
+            timeline_preview: true,
             adaptive_render: false,
             cpp_lib_dir: String::new(),
             hardware_accel: false,

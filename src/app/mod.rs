@@ -24,6 +24,7 @@ mod export_ui;
 mod help;
 mod input;
 mod panels;
+mod preview;
 mod profile;
 mod roi;
 
@@ -182,6 +183,16 @@ const PLAY_PREFETCH: usize = 3;
 /// (`CimApp::probe_ahead`). Matches the prefetch cap, since the point is to keep
 /// the known length far enough ahead that `prefetch_playback` always has frames
 /// to queue. Header-only reads, so over-probing costs a few hundred bytes.
+/// How long the cursor must rest on a **non-resident** frame before the timeline
+/// hover preview decodes it. A frame already in memory previews with no delay at
+/// all; a cold one costs a real read (~150 ms for one page on a shared mount),
+/// and sweeping the scrubber crosses hundreds of frames, so it is only fetched
+/// once the user has actually stopped on it. See [`preview`].
+const PREVIEW_DWELL: f64 = 0.2;
+/// Side of the empty plate drawn in the preview box while a thumbnail is still
+/// being fetched, so the box doesn't resize under the cursor when it lands.
+const PREVIEW_PLACEHOLDER: f32 = 200.0;
+
 const FRONTIER_PROBES: usize = 8;
 
 /// Opening more sequences than this at once triggers a resource-warning
@@ -538,6 +549,27 @@ impl Default for Export {
             label_preview: None,
         }
     }
+}
+
+/// Timeline hover-preview state (see [`preview`]).
+#[derive(Default)]
+struct Preview {
+    /// The timeline index under the cursor and the screen point to anchor the
+    /// box above — recorded by `draw_scrubber` each frame, cleared by `tick`
+    /// after `drive_preview` has read it, so it is `None` whenever the pointer
+    /// is off the track (or the frame bar isn't drawn at all).
+    hover: Option<(usize, Pos2)>,
+    /// The `(pane, frame)` the dwell is currently timing, and when it started.
+    /// Moving to another frame restarts it.
+    at: Option<(usize, usize)>,
+    since: f64,
+    /// The one cold-frame decode a preview is allowed to have outstanding,
+    /// `(pane id, frame)`. Superseded rather than cancelled — the decode pool has
+    /// no cancellation — so a stale one simply stops being waited on.
+    decoding: Option<(u64, usize)>,
+    /// Thumbnail renders queued but not yet landed, so a job isn't sent twice
+    /// while the cursor rests on the same frame.
+    inflight: HashSet<crate::thumbs::ThumbKey>,
 }
 
 /// Playback transport state for the control sequence.
@@ -1092,6 +1124,13 @@ pub struct CimApp {
     watcher: crate::watcher::FileWatcher,
     watch_gen: u64,
     watch_polled_at: f64,
+    /// Off-UI-thread renderer for the timeline hover preview's thumbnails, its
+    /// finished textures, and the hover/dwell bookkeeping that drives both. A
+    /// pool of its own rather than the per-pane `renderer`, whose results gate
+    /// the lock-step commit — see [`crate::thumbs`].
+    thumbs: crate::thumbs::ThumbPool,
+    thumb_cache: crate::thumbs::ThumbCache,
+    preview: Preview,
     /// Pipeline timing profiler and its window toggle — only populated / shown
     /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
     metrics: crate::debug::Metrics,
@@ -1321,6 +1360,9 @@ impl CimApp {
             offset_gen: 0,
             watcher: crate::watcher::FileWatcher::new(cc.egui_ctx.clone()),
             watch_gen: 0,
+            thumbs: crate::thumbs::ThumbPool::new(cc.egui_ctx.clone()),
+            thumb_cache: crate::thumbs::ThumbCache::default(),
+            preview: Preview::default(),
             watch_polled_at: f64::NEG_INFINITY,
             metrics: crate::debug::Metrics::default(),
             decode_ema_secs: 0.0,
@@ -2120,6 +2162,12 @@ impl CimApp {
         // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
         self.refresh_auto_compute();
 
+        // Timeline hover preview: act on what the scrubber recorded last frame,
+        // then clear the record so it stays `None` whenever the pointer is off
+        // the track — or the frame bar isn't drawn at all (see `preview`).
+        self.drive_preview(ctx);
+        self.preview.hover = None;
+
         // Stage the on-screen panes' textures and, when they're all ready, flip
         // them (and commit a playback step) together. Runs last so it sees the
         // settled frame/tone state, just before drawing reads the textures.
@@ -2315,6 +2363,11 @@ impl eframe::App for CimApp {
                 self.framebar_h = fb.response.rect.height();
             }
         }
+
+        // The hover preview sits above the scrubber, in a foreground layer, so it
+        // floats over the images rather than being clipped to the frame bar.
+        // Drawn after it, since `draw_scrubber` is what records the hover.
+        self.draw_preview(ctx);
 
         // The image area always spans the whole window; the bars above overlay
         // its top/bottom edges.

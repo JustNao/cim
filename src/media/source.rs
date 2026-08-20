@@ -383,6 +383,15 @@ impl Media {
         }
     }
 
+    /// Backed by a streaming `VideoReader`. Worth knowing about because a
+    /// non-sequential decode makes that reader kill and respawn its ffmpeg child
+    /// with a new `-ss`, so an *opportunistic* decode (the timeline hover
+    /// preview) must not issue one — it would throw away the streaming position
+    /// playback depends on.
+    pub fn is_video(&self) -> bool {
+        matches!(self, Media::Video(_))
+    }
+
     /// A boolean-mask media (1-bit bilevel TIFF): rendered black/white and
     /// available to tint another pane as an overlay. Only TIFFs are masks.
     pub fn is_mask(&self) -> bool {

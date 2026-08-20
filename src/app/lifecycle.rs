@@ -548,6 +548,8 @@ impl CimApp {
         // only fires on a *later insert by the same pane*, so with the pane gone
         // they would sit in the budget until the LRU got round to them.
         self.regions.forget_pane(removed_id);
+        // Same reasoning for its timeline-preview thumbnails.
+        self.thumb_cache.forget_pane(removed_id);
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
@@ -647,6 +649,8 @@ impl CimApp {
                 // forever, and the regions themselves describe the old contents.
                 self.roi_inflight.remove(&id);
                 self.regions.forget_pane(id);
+                // Its preview thumbnails describe the old contents too.
+                self.thumb_cache.forget_pane(id);
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;

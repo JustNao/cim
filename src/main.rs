@@ -15,6 +15,7 @@ mod renderer;
 mod settings;
 #[cfg(test)]
 mod testutil;
+mod thumbs;
 mod tone;
 mod view;
 mod watcher;
