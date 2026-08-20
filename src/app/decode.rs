@@ -741,14 +741,18 @@ impl CimApp {
     /// - A **plain** pane is capped at [`roi::BASE_MAX`] only while `adaptive`
     ///   says the region path is actually carrying it. Its role shrinks to the
     ///   blurry pan fallback, so a 12000² image stops costing a 12000² upload.
-    /// - An **operator** pane takes the reduced base whenever the *setting* is
-    ///   on, region or no region — that is what lets it show a huge image at all
-    ///   (at `step 1` `stage` refuses the upload outright and the pane shows
-    ///   `tex_error`). The price is that an operator pane zoomed out far enough
-    ///   for `roi_plan` to decline sits on a `BASE_MAX` base with nothing over
-    ///   it, i.e. blurrier than the classic path. A displayable pane was judged
-    ///   better than an undisplayable one; it is the reason the setting is
-    ///   opt-in.
+    /// - An **operator** pane takes the reduced base while `adaptive` carries it
+    ///   *or* when the full-resolution texture would not fit the backend at all
+    ///   — the latter is what lets it show a huge image (at `step 1` `stage`
+    ///   refuses the upload outright and the pane shows `tex_error`), and a
+    ///   `BASE_MAX` base with nothing over it still beats an undisplayable pane.
+    ///   Where full resolution *does* fit, an operator pane whose plan declined
+    ///   falls back to the classic `step 1` render exactly as it does with the
+    ///   setting off. It used to take the cap on the setting alone, which left
+    ///   any ordinary-sized operator pane (e.g. 3000x4096, well inside the
+    ///   16384 limit) showing a 188x256 base magnified over the whole cell as
+    ///   soon as the zoom dropped below `roi_plan`'s engagement point — the
+    ///   permanently-blurry failure, and only for the operator tones.
     fn want_step(
         &self,
         idx: usize,
@@ -757,17 +761,14 @@ impl CimApp {
         max_side: usize,
         adaptive: bool,
     ) -> usize {
-        let size = self.staged_size(idx, target);
-        let stage_step = self.stage_step(idx, ppp);
-        match (self.pane_ops_active(idx), self.config.adaptive_render) {
-            // Decimating an operator's input changes its output, so outside
-            // adaptive mode a heavy pane stays at full resolution and `stage`
-            // refuses an oversized upload rather than decimating it.
-            (true, false) => 1,
-            (true, true) => roi::base_step(stage_step, size, max_side, true),
-            (false, _) if adaptive => roi::base_step(stage_step, size, max_side, false),
-            (false, _) => stage_step.max(texture_fit_step(size, max_side)),
-        }
+        base_texture_step(
+            self.staged_size(idx, target),
+            self.stage_step(idx, ppp),
+            max_side,
+            self.pane_ops_active(idx),
+            self.config.adaptive_render,
+            adaptive,
+        )
     }
 
     /// The pixel size of the frame `stage` is about to render for pane `idx` —
@@ -1285,6 +1286,40 @@ pub(super) fn decimated_size(size: [usize; 2], step: usize) -> [usize; 2] {
     media::Region::whole(size, step).out
 }
 
+/// The decimation step for a pane's whole-image texture — `want_step`'s decision
+/// as a pure function, so it can be pinned headlessly (see the doc comment there
+/// for why the two operator arms differ).
+///
+/// `ops` is whether the proprietary operators run on this pane, `setting` the
+/// **Adaptive rendering** config flag, and `adaptive` whether `roi_plan` actually
+/// engaged for this pane this update — i.e. whether a viewport region is being
+/// staged over the base.
+pub(super) fn base_texture_step(
+    size: [usize; 2],
+    stage_step: usize,
+    max_side: usize,
+    ops: bool,
+    setting: bool,
+    adaptive: bool,
+) -> usize {
+    match (ops, setting) {
+        // Decimating an operator's input changes its output, so outside adaptive
+        // mode a heavy pane stays at full resolution and `stage` refuses an
+        // oversized upload rather than decimating it.
+        (true, false) => 1,
+        // A region is carrying the sharp pixels: take the cheap base.
+        (true, true) if adaptive => roi::base_step(stage_step, size, max_side, true),
+        // No region over it. Only accept a reduced base where full resolution
+        // could not be uploaded at all; otherwise this pane renders classically.
+        (true, true) if texture_fit_step(size, max_side) > 1 => {
+            roi::base_step(stage_step, size, max_side, true)
+        }
+        (true, true) => 1,
+        (false, _) if adaptive => roi::base_step(stage_step, size, max_side, false),
+        (false, _) => stage_step.max(texture_fit_step(size, max_side)),
+    }
+}
+
 /// The smallest decimation step that brings `size` within `max_side` on both
 /// axes — 1 when it already fits.
 pub(super) fn texture_fit_step(size: [usize; 2], max_side: usize) -> usize {
@@ -1389,8 +1424,37 @@ fn interleave_prefetch(plans: &[(usize, Vec<usize>)]) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        decimated_size, interleave_prefetch, prefetch_depth, texture_fit_step, PLAY_PREFETCH,
+        base_texture_step, decimated_size, interleave_prefetch, prefetch_depth, texture_fit_step,
+        PLAY_PREFETCH,
     };
+
+    /// An operator pane whose `roi_plan` declined must fall back to the classic
+    /// full-resolution render, not sit on the `BASE_MAX`-capped base with nothing
+    /// over it. Taking the cap on the *setting* alone left a 3000x4096 LUT_ALPHA /
+    /// details pane showing a 188x256 base magnified over the whole cell for every
+    /// zoom below the engagement point, while the same pane on Linear was perfect.
+    #[test]
+    fn an_operator_pane_without_a_region_renders_full_resolution() {
+        let fits = [3000, 4096]; // well inside a 16384 backend
+        let huge = [25000, 25000]; // cannot be uploaded at step 1
+
+        // Setting on, plan declined, image fits: the classic full-resolution
+        // render, exactly as with the setting off.
+        assert_eq!(base_texture_step(fits, 1, 16384, true, true, false), 1);
+        assert_eq!(base_texture_step(fits, 1, 16384, true, false, false), 1);
+
+        // The one case the reduced base exists for: full resolution could not be
+        // uploaded at all, so a blurry pane beats an undisplayable one.
+        assert!(texture_fit_step(huge, 16384) > 1);
+        assert!(base_texture_step(huge, 1, 16384, true, true, false) > 1);
+
+        // With a region carrying the sharp pixels, the cheap base is taken.
+        assert!(base_texture_step(fits, 1, 16384, true, true, true) > 1);
+
+        // A plain pane is unaffected either way, and was never blurry here.
+        assert_eq!(base_texture_step(fits, 1, 16384, false, true, false), 1);
+        assert_eq!(base_texture_step(fits, 1, 16384, false, false, false), 1);
+    }
 
     /// Depth is the floor until a latency is known, grows with slow decode / more
     /// panes, shrinks with more workers, and never leaves the `[floor, 8]` band.

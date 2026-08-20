@@ -790,11 +790,18 @@ fixes the huge-image ops `tex_error` case, previously undisplayable), and the re
 them the cropped, decimated visible region (one `PaneOps::render_display`, taking a
 `media::Region`). `base_step` is the **single** definition of the base's size — `want_step`
 renders at it and `gain` weighs it — so the mode can't cost itself something different from
-what it charges. Note the asymmetry in `want_step`: a **plain** pane takes the capped base only
-while `roi_plan` engages, but an **operator** pane takes it whenever the *setting* is on,
-region or not, because at `step 1` `stage` would refuse the upload outright. The price is that
-an operator pane zoomed out past the engagement threshold sits on a bare `BASE_MAX` base — a
-displayable pane beats an undisplayable one, and it is part of why the setting is opt-in. So
+what it charges. The whole decision is the pure `decode::base_texture_step`, which `want_step`
+is a thin wrapper over. Note the asymmetry in it: a **plain** pane takes the capped base only
+while `roi_plan` engages, and an **operator** pane takes it either while `roi_plan` engages
+**or** when full resolution wouldn't fit the backend at all (`texture_fit_step > 1`) — the
+latter being the only reason the arm exists, since at `step 1` `stage` refuses that upload
+outright and the pane shows `tex_error`. It used to key on the *setting* alone, region or not,
+which meant any ordinary-sized operator pane — 3000x4096, nowhere near the 16384 limit — dropped
+to a 188x256 base magnified over the whole cell the moment the zoom fell below the engagement
+point, playing or paused, while the identical pane on Linear was perfect
+(`an_operator_pane_without_a_region_renders_full_resolution`). An operator pane whose plan
+declines now renders classically, exactly as with the setting off; only a huge one still sits on
+a bare `BASE_MAX` base, where a displayable pane beats an undisplayable one. So
 LUT_ALPHA's
 auto-contrast becomes **view-dependent**, and the **export — still whole-image ops — differs**
 from the adaptive display; both are accepted and the Settings hover says so. `PaneOps` keeps a
