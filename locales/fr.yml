@@ -132,7 +132,7 @@ transform.op_missing_lib: "Bibliothèque de l'opérateur %{lib} introuvable"
 transform.op_needs_u16: Disponible uniquement pour les images 16 bits monocanal (uint16)
 transform.overlay: Superposition
 transform.overlay_none: Aucune
-transform.overlay_none_available: aucun média monocanal
+transform.overlay_none_available: aucun média compatible
 transform.palette: Palette
 transform.clip: Écrêtage
 transform.clip_hover: Écrêter un percentile de chaque extrémité avant l'étirement

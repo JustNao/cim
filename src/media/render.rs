@@ -348,6 +348,39 @@ impl FrameData {
             }
         }
     }
+
+    /// Build an RGBA overlay from this **colour (RGB)** frame: every pixel keeps
+    /// its own colour — toned through the frame's full display range, as the pane
+    /// itself would show it — at `alpha`, except pure black `(0, 0, 0)` pixels,
+    /// which are fully transparent. This is the colour counterpart of
+    /// [`render_intensity_rgba`](Self::render_intensity_rgba): a mono source is
+    /// tinted with the chosen palette colour, a colour source carries its own
+    /// (§9). Transparency tests the **stored samples**, not the toned look, so an
+    /// author's black stays black regardless of the display range. `out` is
+    /// resized to `w*h*4`.
+    pub fn render_color_rgba(&self, alpha: u8, out: &mut Vec<u8>) {
+        let px = self.size[0] * self.size[1];
+        let ch = self.channels;
+        let (lo, hi) = self.display_bounds(false);
+        let map = map_u8(lo, hi);
+        out.clear();
+        out.resize(px * 4, 0); // transparent by default
+        for i in 0..px {
+            let s = [
+                self.sample_f(i * ch),
+                self.sample_f(i * ch + 1),
+                self.sample_f(i * ch + 2),
+            ];
+            if s == [0.0, 0.0, 0.0] {
+                continue; // (0, 0, 0) is the transparent key
+            }
+            let o = i * 4;
+            for k in 0..3 {
+                out[o + k] = map(s[k]);
+            }
+            out[o + 3] = alpha;
+        }
+    }
 }
 
 /// The arithmetic `[lo, hi] → [0, 255]` map, shared by the float path and by
@@ -740,6 +773,34 @@ mod tests {
         f.render_intensity_rgba([10, 20, 30], 200, &mut ov);
         // 0 → transparent; 128/255*200 ≈ 100; 255 → full 200. Tint constant.
         assert_eq!(ov, vec![0, 0, 0, 0, 10, 20, 30, 100, 10, 20, 30, 200]);
+    }
+
+    /// A colour (RGB) frame overlays with its **own** colours at the given alpha,
+    /// and pure black `(0, 0, 0)` is keyed out as transparent.
+    #[test]
+    fn color_overlay_keeps_own_colors_and_keys_black() {
+        // 3x1 RGB 8-bit: black, mid red, white.
+        let f = FrameData::new(
+            [3, 1],
+            3,
+            Samples::U8(vec![0, 0, 0, 128, 0, 0, 255, 255, 255]),
+        );
+
+        let mut ov = Vec::new();
+        f.render_color_rgba(200, &mut ov);
+        #[rustfmt::skip]
+        let want = vec![
+            0, 0, 0, 0,          // black → transparent
+            128, 0, 0, 200,      // own colour at the overlay alpha
+            255, 255, 255, 200,
+        ];
+        assert_eq!(ov, want);
+
+        // A near-black pixel is *not* keyed out — only exact (0, 0, 0) is.
+        let g = FrameData::new([1, 1], 3, Samples::U8(vec![0, 0, 1]));
+        let mut ov2 = Vec::new();
+        g.render_color_rgba(255, &mut ov2);
+        assert_eq!(ov2, vec![0, 0, 1, 255]);
     }
 
     /// The LUT render path must produce exactly what the straightforward

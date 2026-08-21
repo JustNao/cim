@@ -123,7 +123,7 @@ transform.op_missing_lib: "%{lib} operator library not found"
 transform.op_needs_u16: Only available for single-channel 16-bit (uint16) images
 transform.overlay: Overlay
 transform.overlay_none: None
-transform.overlay_none_available: no single-channel media
+transform.overlay_none_available: no compatible media
 transform.palette: Palette
 transform.clip: Clip
 transform.clip_hover: Clip a percentile off each tail before the stretch

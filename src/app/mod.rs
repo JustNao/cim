@@ -1798,10 +1798,21 @@ impl CimApp {
 
     /// Pixel size of pane `i` if it can serve as an overlay source — i.e. its
     /// current frame is **single-channel** (a boolean mask or a grayscale image /
-    /// sequence). `None` if the frame isn't resident yet or has multiple channels.
+    /// sequence) or **colour** (RGB, tinting with its own colours and keying
+    /// `(0, 0, 0)` out as transparent). `None` if the frame isn't resident yet.
     pub(super) fn overlay_source_size(&self, i: usize) -> Option<[usize; 2]> {
         let fr = self.panes[i].media.resident(self.frame_disp(i))?;
-        (fr.channels == 1).then_some(fr.size)
+        (fr.channels == 1 || fr.color_channels() == 3).then_some(fr.size)
+    }
+
+    /// Whether pane `i`'s current frame is a **colour** overlay source (RGB). Such
+    /// a source paints its own colours, so the Overlay row hides the tint picker
+    /// for it and only the opacity applies (§9).
+    pub(super) fn overlay_src_is_color(&self, i: usize) -> bool {
+        self.panes[i]
+            .media
+            .resident(self.frame_disp(i))
+            .is_some_and(|fr| fr.color_channels() == 3)
     }
 
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a

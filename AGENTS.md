@@ -191,9 +191,10 @@ being one level deeper). Many CimApp fields are grouped into sub-structs —
 - **Boolean masks:** a frame from a **1-bit bilevel TIFF** is flagged `mask`
   (`new_mask`/`is_mask`). `render_into` paints false→black/true→white (bypassing
   tone), and `render_mask_rgba(rgb, alpha)` builds a tinted overlay buffer; any
-  non-mask single-channel frame instead tints by intensity (`render_intensity_rgba`)
-  when used as an overlay (§9). Only TIFFs are masks; any single-channel media can
-  be an overlay source.
+  non-mask single-channel frame instead tints by intensity (`render_intensity_rgba`),
+  and a **colour (RGB)** frame paints its own colours with pure `(0, 0, 0)` keyed out
+  (`render_color_rgba(alpha)`), when used as an overlay (§9). Only TIFFs are masks;
+  any single-channel **or** colour media can be an overlay source.
   Mask truth is the **stored sample bit** (what the author set — e.g. `numpy`
   `True`), *not* the pixel's black/white look: `mask_bits` reads
   `PhotometricInterpretation` and un-inverts WhiteIsZero pages (the TIFF default,
@@ -1481,14 +1482,21 @@ is per-pane so it unsyncs Visualization, `--rotate` unsyncs Geometry, then `--ts
 
 **Overlays.** A pane may carry an `OverlaySpec { src_id, color, opacity }` — **any
 single-channel media** (a boolean mask **or** a grayscale image/sequence) tinted over
-it. The source list (`overlay_source_size`, single-channel resident frame, excluding
-the pane itself) is offered in the panel's **Overlay** row. The spec is **config only**
+it, **or any colour (RGB) media** drawn in its own colours. The source list
+(`overlay_source_size`, single-channel or RGB resident frame, excluding the pane
+itself) is offered in the panel's **Overlay** row; for a colour source the row hides
+the tint picker (`overlay_src_is_color`) since only the opacity applies to it — the
+stored `color` is kept untouched so switching back to a mono source restores it.
+The spec is **config only**
 so it rides the Visualization sync; the tinted texture is cached separately per pane in
 `overlay_tex`. `prepare_overlay` builds it from the source's shown frame (decoded on
 demand, so it works even when the source pane isn't drawn) and returns `None` on a mask
 pane itself; a **boolean mask** tints where true (`render_mask_rgba`), any **other
 single-channel** image tints by normalised intensity (`render_intensity_rgba`, alpha ∝
-value through the frame's display range). `draw_pane` **and `draw_ab_side`** paint it at
+value through the frame's display range), and a **colour (RGB)** image keeps its own
+toned colours at the chosen opacity with pure black transparent (`render_color_rgba`
+— the key tests the **stored samples**, not the toned look, so the display range never
+turns black opaque or a dark pixel invisible). `draw_pane` **and `draw_ab_side`** paint it at
 the base image's rect (1:1), so overlays show in Grid, Single and A/B alike; cleared when
 its source closes. **Sizes must match:** a newly selected source whose pixel size differs
 from the target is rejected with an `error_popup`, and `prepare_overlay` skips drawing

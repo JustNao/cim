@@ -1239,8 +1239,11 @@ impl CimApp {
         if need {
             let mut buf = Vec::new();
             // A boolean mask tints where true; any other single-channel image
-            // tints by normalised intensity (§9).
-            if frame.is_mask() {
+            // tints by normalised intensity; a colour image draws its own colours
+            // with pure black keyed out (§9).
+            if frame.color_channels() == 3 {
+                frame.render_color_rgba(alpha, &mut buf);
+            } else if frame.is_mask() {
                 frame.render_mask_rgba(rgb, alpha, &mut buf);
             } else {
                 frame.render_intensity_rgba(rgb, alpha, &mut buf);

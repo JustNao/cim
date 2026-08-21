@@ -58,15 +58,23 @@ impl CimApp {
             t!("transform.op_needs_u16")
         };
 
-        // Overlay: the single-channel media available to tint over this pane — a
-        // boolean mask or a grayscale image / sequence — plus the current
+        // Overlay: the media available to tint over this pane — a boolean mask, a
+        // grayscale image / sequence, or a colour (RGB) one — plus the current
         // selection/colour/alpha. Excludes the pane itself; not offered on a mask.
-        let sources: Vec<(u64, String)> = self
+        // The flag marks a **colour** source: it carries its own colours, so the
+        // tint picker is meaningless for it and the row hides it (§9).
+        let sources: Vec<(u64, String, bool)> = self
             .panes
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != idx && self.overlay_source_size(*i).is_some())
-            .map(|(_, p)| (p.id, p.media.name().to_string()))
+            .map(|(i, p)| {
+                (
+                    p.id,
+                    p.media.name().to_string(),
+                    self.overlay_src_is_color(i),
+                )
+            })
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
         let (mut ov_src, mut ov_color, mut ov_alpha) = match self.overlay_of(idx) {
@@ -201,8 +209,8 @@ impl CimApp {
                                 );
                             } else {
                                 let sel = ov_src
-                                    .and_then(|id| sources.iter().find(|(m, _)| *m == id))
-                                    .map(|(_, n)| ellipsize(n, 12))
+                                    .and_then(|id| sources.iter().find(|(m, ..)| *m == id))
+                                    .map(|(_, n, _)| ellipsize(n, 12))
                                     .unwrap_or_else(|| t!("transform.overlay_none").into_owned());
                                 egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
                                     .selected_text(sel)
@@ -213,7 +221,7 @@ impl CimApp {
                                             None,
                                             t!("transform.overlay_none"),
                                         );
-                                        for (mid, mname) in &sources {
+                                        for (mid, mname, _) in &sources {
                                             ui.selectable_value(
                                                 &mut ov_src,
                                                 Some(*mid),
@@ -223,9 +231,15 @@ impl CimApp {
                                     });
                             }
                         });
-                        if ov_src.is_some() {
+                        if let Some(sid) = ov_src {
+                            // A colour source supplies its own colours (black keyed
+                            // out), so only the opacity applies to it.
+                            let src_is_color =
+                                sources.iter().any(|(m, _, color)| *m == sid && *color);
                             ui.horizontal(|ui| {
-                                ui.color_edit_button_srgba(&mut ov_color);
+                                if !src_is_color {
+                                    ui.color_edit_button_srgba(&mut ov_color);
+                                }
                                 ui.add(
                                     egui::DragValue::new(&mut ov_alpha)
                                         .speed(0.02)
