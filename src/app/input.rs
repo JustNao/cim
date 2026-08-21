@@ -34,33 +34,35 @@ impl CimApp {
                 self.pending_seek = None; // manual step cancels an automatic seek
                 self.playback.prefetch = None; // …and any in-flight playback step
                                                // Step within the active loop window (the same one playback
-                                               // obeys), not the whole timeline.
-                let tl = self.timeline_len();
+                                               // obeys), not the whole timeline — and on the timeline the
+                                               // transport drives, which is the focused pane's own when it is
+                                               // temporally unsynced (§8).
+                let tl = self.transport_len();
                 let (lo, hi) = self.loop_bounds(tl);
                 let full = self.playback.loop_range.is_none();
-                let f = self.shared_frame;
+                let f = self.transport_frame();
                 if lo <= f && f < hi {
-                    self.shared_frame += 1;
+                    self.set_transport_frame(f + 1);
                 } else if !full {
-                    self.shared_frame = lo; // sub-range: wrap at its edges
-                } else if self.current_at_end() {
-                    self.shared_frame = lo; // full range: wrap once length is known
+                    self.set_transport_frame(lo); // sub-range: wrap at its edges
+                } else if self.transport_at_end() {
+                    self.set_transport_frame(lo); // full range: wrap once length is known
                 }
                 // else hold at the frontier; lookahead extends it shortly
             }
             Action::PrevFrame => {
                 self.pending_seek = None; // manual step cancels an automatic seek
                 self.playback.prefetch = None; // …and any in-flight playback step
-                let tl = self.timeline_len();
+                let tl = self.transport_len();
                 let (lo, hi) = self.loop_bounds(tl);
                 let full = self.playback.loop_range.is_none();
-                let f = self.shared_frame;
+                let f = self.transport_frame();
                 if lo < f && f <= hi {
-                    self.shared_frame -= 1;
+                    self.set_transport_frame(f - 1);
                 } else if !full {
-                    self.shared_frame = hi; // sub-range: wrap at its edges
-                } else if self.current_at_end() {
-                    self.shared_frame = hi; // full range: wrap once length is known
+                    self.set_transport_frame(hi); // sub-range: wrap at its edges
+                } else if self.transport_at_end() {
+                    self.set_transport_frame(hi); // full range: wrap once length is known
                 }
             }
             Action::ResetView => {
@@ -170,7 +172,7 @@ impl CimApp {
         // between (they're never staged, and the frontier is discovered by header
         // only — see `ensure_lookahead`). `1` = play every frame.
         let ff = self.playback.fast_forward.max(1);
-        let f = self.shared_frame;
+        let f = self.transport_frame();
         let next = if f < lo {
             Some(lo) // jump into the window
         } else if f + ff <= hi {
@@ -195,19 +197,11 @@ impl CimApp {
         };
         if let Some(nf) = next {
             // Pre-render this frame; `refresh_textures` commits it (and applies it
-            // to `shared_frame`) once all panes are ready.
+            // to the transport's playhead — `shared_frame`, or the driven pane's
+            // own frame when an unsynced pane owns the transport) once all panes
+            // are ready. Only that one playhead moves: a pane the transport
+            // doesn't drive stays exactly where the user parked it.
             self.playback.prefetch = Some(nf);
-            // Advance unsynced panes' own timelines in step, staged the same way.
-            for p in &mut self.panes {
-                if !p.sync_temporal {
-                    let c = p.media.frame_count();
-                    if p.frame + 1 < c {
-                        p.frame = (p.frame + ff).min(c - 1);
-                    } else if p.media.at_end() {
-                        p.frame = 0;
-                    }
-                }
-            }
         }
     }
 

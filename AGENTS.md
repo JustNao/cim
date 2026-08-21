@@ -1151,6 +1151,30 @@ flags; `CimApp` holds `shared_view`/`shared_frame`. `view_ref/view_mut(i)` and
 its last frame**), else the pane's own. Toggling sync **off** snapshots the shared
 state into the pane so it doesn't jump. (Transformations sync is §9.)
 
+**The transport drives one timeline: the focused pane's, when that pane is
+temporally unsynced** (`transport()` / `transport_own()` / `transport_frame()` /
+`set_transport_frame()` / `transport_len()` / `transport_at_end()` /
+`transport_seek()`). An unsynced pane's playhead is its own `Pane.frame`, which
+`shared_frame` never moves — so without this the scrubber, the frame counter, the
+step keys and playback all wrote `shared_frame` and the pane simply didn't move
+while the timeline appeared to run (and playback separately bumped *every*
+unsynced pane one step per tick, so they marched in lock-step anyway). Now
+`transport()` is the focused pane when it is an unsynced sequence (or one still
+discovering), else `loop_control()`; the frame bar reads that pane's length,
+end-state, name, resident shading and playhead, and every manual step / scrub /
+typed jump / playback commit writes through `set_transport_frame`. Only the driven
+timeline moves: with an unsynced pane on the transport the synced panes hold on
+`shared_frame` and the *other* unsynced panes stay parked where they were left; on
+the shared timeline the unsynced panes hold. `playback_limit` returns the driven
+pane's own length/end outright in the pane-own case (nothing else advances, so no
+other frontier can hold it back), `prefetch_playback` targets only the panes that
+actually advance, `ensure_lookahead` keeps the transport pane's frontier discovered
+alongside `loop_control()`'s, and `stage_target`/`frame_at_timeline` apply the
+playback prefetch to the driven pane(s) only. `pending_seek`/`drive_seek` stay a
+**shared-timeline** mechanism: a pane-own seek clamps to the discovered frontier
+instead of riding it. Export is unchanged — it still composes on the shared
+timeline (`timeline_len`, `shared_frame`, per-pane `synced_index`).
+
 The **Control** pane (manager's **Control** selector) has two roles: it is the shared
 **clip-bounds source** for any *Share clip* pane (§7) — so it may be **any** media — and,
 when it's a sequence, it also **drives the loop**. Because a still can now be the Control,
@@ -1158,7 +1182,8 @@ the loop driver is *derived*: `loop_control()` = the Control pane when it's a se
 else the first sequence (a still Control supplies the shared bounds but can't drive the
 loop). `timeline_len()` / `current_at_end()` and the frontier walks
 (`ensure_lookahead`/`prefetch_playback`/`drive_seek`) all read `loop_control()`, while the
-scrubber/transport show it too. `ensure_control` now only **clamps** `control` in range (it
+scrubber/transport show `transport()` — the same pane unless an unsynced one owns the
+transport (below). `ensure_control` now only **clamps** `control` in range (it
 no longer repoints onto a sequence). The Control pane is **separate from `current`** (the
 focused pane for Single/keyboard/tint), so viewing a still doesn't hijack playback. Picking
 a new Control drops the `loop_range` only when `loop_control()` actually changes.
@@ -1182,7 +1207,8 @@ being waited on catches up by **probe**, not decode (`catching_up`, §4), and a
 fast-scannable one usually needs no wait at all — the background offset scan (§4)
 completes its length outright. **The manual next/previous-frame controls obey the same window**
 (`apply_action(NextFrame/PrevFrame)`, shared by the keys, the Ctrl+wheel scrub, and the
-frame-bar Prev/Next buttons via `ui.ctx()`): stepping inside `[lo, hi]` moves one frame;
+frame-bar Prev/Next buttons via `ui.ctx()`), applied to the **transport's** timeline
+(above): stepping inside `[lo, hi]` moves one frame;
 at an edge a sub-range wraps to the other edge, a full range wraps only once the real end
 is known (else holds at the frontier). `draw_scrubber` shades resident frames (contiguous runs merged), dims
 outside the window, and draws the brackets. `advance_playback` accumulates
@@ -1192,8 +1218,8 @@ elapsed time on any frame woken by a *delayed* repaint request, i.e. every paced
 `request_repaint_after` wake — which silently ran playback at a fraction of the
 requested fps unless input events kept the dts real), steps at `fps` carrying the
 overshoot into the next interval (capped at one step, so lateness doesn't compound
-into a rate error but a stall can't burst), and advances unsynced panes
-independently. With a
+into a rate error but a stall can't burst), and advances **the transport's**
+timeline only (see above). With a
 **fast-forward stride** (`fast_forward` > 1, §6) it steps by `fast_forward` frames
 (clamped to the window end), skimming those in between; `prefetch_playback` strides to
 match and `ensure_lookahead` probes (headers) rather than decoding the jumped-over
@@ -1209,8 +1235,9 @@ the frame interval (the next frame is due `step` after this one *fired*, not aft
 committed), yet a slow proprietary operator still **paces** playback — at most one frame
 fires the moment a long gate lands, never a burst — instead of the frame counter racing
 ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
-pause, any manual next/prev/seek, and length clamping; unsynced panes advance their own
-frame in step, staged the same way.
+pause, any manual next/prev/seek, and length clamping; when an unsynced pane owns the
+transport the commit lands on **its** `frame` instead of `shared_frame`, staged the
+same way.
 
 ### 8.1 Timeline hover preview (`app/preview.rs`, `thumbs.rs`)
 
@@ -1219,9 +1246,12 @@ its index, floating above the bar. On by default (`Config.timeline_preview`).
 
 **Which frame, and with what tone.** The pane is `preview_pane()` — the **focused** pane
 (`current`), since that is the media whose visualization options the preview honours,
-falling back to `loop_control()` when `current` is a still or temporally unsynced (neither
-tracks the scrubber, so its frame wouldn't move as the cursor did). The frame is
-`tone::synced_index` of the hovered index, exactly as `frame_disp` picks it. The tone is
+falling back to `transport()` when `current` is a **still** (it doesn't track the
+scrubber, so its frame wouldn't move as the cursor did — an unsynced sequence now does,
+since the transport drives its own playhead). The frame is
+`frame_at_timeline` of the hovered index — `frame_disp`'s rule, except that the
+transport-owning pane tracks the hovered index directly (its playhead *is* the
+timeline). The tone is
 the pane's live one (`tone_bounds`'s inputs — clip percentile, Share clip, `tone_region`),
 **except** when the frame would run the proprietary operators: those are heavy,
 dimension-keyed C++ instances owned by the pane's render thread, and a thumbnail is not

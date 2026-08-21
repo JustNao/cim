@@ -1660,6 +1660,96 @@ impl CimApp {
             .unwrap_or(c)
     }
 
+    /// The pane whose playhead the **transport** drives — the scrubber, the
+    /// frame counter, the next/previous-frame controls and playback.
+    ///
+    /// The **focused** pane when it is a temporally *unsynced* sequence: such a
+    /// pane has its own playhead (`Pane.frame`) that `shared_frame` never moves,
+    /// so unless the transport drives *that* one its frame controls would do
+    /// nothing at all while the timeline appeared to run (§8). Otherwise the
+    /// shared timeline's driver, `loop_control()` — which is also what an
+    /// unsynced *Control* pane resolves to, so the timeline still describes the
+    /// playhead it moves.
+    pub(super) fn transport(&self) -> usize {
+        if self.panes.is_empty() {
+            return 0;
+        }
+        let c = self.current.min(self.panes.len() - 1);
+        // A sequence — or one still discovering, whose length is briefly 1: it
+        // owns the transport as soon as it is focused, so stepping it discovers
+        // forward instead of moving a timeline it doesn't follow.
+        let p = &self.panes[c];
+        if !p.sync_temporal && (p.media.frame_count() > 1 || !p.media.at_end()) {
+            return c;
+        }
+        self.loop_control()
+    }
+
+    /// Whether the transport drives a pane's **own** playhead rather than the
+    /// shared timeline. When it does, only that pane moves: the synced panes hold
+    /// on `shared_frame` and every other unsynced pane stays where it was parked.
+    pub(super) fn transport_own(&self) -> bool {
+        self.panes
+            .get(self.transport())
+            .is_some_and(|p| !p.sync_temporal)
+    }
+
+    /// The playhead the transport reads and writes — the driven pane's own frame
+    /// when unsynced, else the shared timeline.
+    pub(super) fn transport_frame(&self) -> usize {
+        let t = self.transport();
+        if self.transport_own() {
+            self.panes[t].frame
+        } else {
+            self.shared_frame
+        }
+    }
+
+    /// Move the transport's playhead (see [`transport_frame`](Self::transport_frame)).
+    pub(super) fn set_transport_frame(&mut self, f: usize) {
+        let t = self.transport();
+        if self.transport_own() {
+            self.panes[t].frame = f;
+        } else {
+            self.shared_frame = f;
+        }
+    }
+
+    /// Length of the timeline the transport shows: the driven pane's own.
+    /// Identical to `timeline_len()` unless an unsynced pane owns the transport.
+    pub(super) fn transport_len(&self) -> usize {
+        self.panes
+            .get(self.transport())
+            .map(|p| p.media.frame_count())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// Whether the transport-driven media's true end is known (its `at_end`).
+    pub(super) fn transport_at_end(&self) -> bool {
+        self.panes
+            .get(self.transport())
+            .is_none_or(|p| p.media.at_end())
+    }
+
+    /// Which frame of pane `idx` timeline position `t` shows. `frame_disp`'s rule
+    /// (synced panes track `t` and hold on their last frame, unsynced ones stay on
+    /// their own), **except** for the pane that owns the transport: its own
+    /// playhead *is* the timeline, so it tracks `t` directly. Used by anything
+    /// that maps a timeline position onto a pane — staging and the hover preview.
+    pub(super) fn frame_at_timeline(&self, idx: usize, t: usize) -> usize {
+        let count = self.panes[idx].media.frame_count().max(1);
+        if self.transport_own() && idx == self.transport() {
+            return t.min(count - 1);
+        }
+        crate::tone::synced_index(
+            t,
+            count,
+            self.panes[idx].sync_temporal,
+            self.panes[idx].frame,
+        )
+    }
+
     /// Length of the shared timeline: the loop-driving sequence drives the loop.
     /// Other synced sequences clamp/hold against this length.
     pub(super) fn timeline_len(&self) -> usize {
@@ -1688,8 +1778,13 @@ impl CimApp {
     /// fully-discovered sequence keeps the existing behaviour of holding on its
     /// last frame while the timeline plays on.
     pub(super) fn playback_limit(&self) -> (usize, bool) {
-        let mut len = self.timeline_len();
-        let mut at_end = self.current_at_end();
+        let mut len = self.transport_len();
+        let mut at_end = self.transport_at_end();
+        // An unsynced pane owning the transport plays *alone* — no other pane's
+        // frontier can hold it back, since no other pane advances with it.
+        if self.transport_own() {
+            return (len, at_end);
+        }
         let ctrl = self.loop_control();
         for i in self.displayed_indices() {
             let p = &self.panes[i];
@@ -1729,6 +1824,24 @@ impl CimApp {
         }
     }
 
+    /// Seek whatever the transport drives (`transport`) to `target`: the pane's
+    /// own playhead when an unsynced pane owns it, else the shared timeline via
+    /// [`seek_to`](Self::seek_to). A pane-own seek clamps to the discovered
+    /// frontier rather than arming a `pending_seek` — `pending_seek`/`drive_seek`
+    /// ride the *shared* timeline — so a target past the end waits for
+    /// `ensure_lookahead` to discover it instead of riding it blind.
+    pub(super) fn transport_seek(&mut self, target: usize) {
+        if !self.transport_own() {
+            self.seek_to(target);
+            return;
+        }
+        let t = self.transport();
+        self.playback.prefetch = None; // a jump abandons any in-flight playback step
+        self.pending_seek = None;
+        let len = self.panes[t].media.frame_count().max(1);
+        self.panes[t].frame = target.min(len - 1);
+    }
+
     /// Run a committed **Fast jump** (0-based, like the frame readout) on the
     /// Seek the timeline to `target` (0-based, as the frame readout commits it),
     /// trying a **fast jump** first and falling back to the ordinary discovery.
@@ -1740,7 +1853,7 @@ impl CimApp {
     /// be made or doesn't validate, it **falls back to the old way**: `seek_to`
     /// arms `pending_seek` and rides the frontier to `target`.
     pub(super) fn do_fast_jump(&mut self, target: usize) {
-        let i = self.loop_control();
+        let i = self.transport();
         let Some(pane) = self.panes.get_mut(i) else {
             return;
         };
@@ -1752,9 +1865,9 @@ impl CimApp {
             self.panes[i].media.touch(target, clock);
         }
         // Within the known length now (fast jump landed it), or the fast path
-        // didn't apply / failed — either way seek_to does the right thing:
+        // didn't apply / failed — either way the seek does the right thing:
         // an instant jump when known, else riding the frontier the old way.
-        self.seek_to(target);
+        self.transport_seek(target);
     }
 
     /// Whether the timeline-driving media's true end is known. Until it is, the
@@ -2150,8 +2263,11 @@ impl CimApp {
         if self.shared_frame >= tl {
             self.shared_frame = tl - 1;
         }
-        // A pre-render target can't outrun the (possibly just-clamped) length.
-        if self.playback.prefetch.is_some_and(|f| f >= tl) {
+        // A pre-render target can't outrun the (possibly just-clamped) length of
+        // the timeline it belongs to — the transport's, which is the shared one
+        // unless an unsynced pane owns it.
+        let ttl = self.transport_len();
+        if self.playback.prefetch.is_some_and(|f| f >= ttl) {
             self.playback.prefetch = None;
         }
 

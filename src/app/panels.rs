@@ -161,13 +161,14 @@ impl CimApp {
 
     // ---- full-width frame bar -------------------------------------------
 
-    /// The bottom transport strip: play / step controls, the selected media's
-    /// name and frame counter, and a full-width scrubber. Shown only while the
-    /// focused media is a sequence; its length tracks the selected media.
+    /// The bottom transport strip: play / step controls, the driven media's
+    /// name and frame counter, and a full-width scrubber. Everything here reads
+    /// and moves the **transport's** timeline (`transport`) — the shared one, or
+    /// the focused pane's own when that pane is temporally unsynced (§8).
     pub(super) fn draw_frame_bar(&mut self, ui: &mut egui::Ui) {
-        let len = self.timeline_len();
-        let at_end = self.current_at_end();
-        let cur = self.loop_control();
+        let len = self.transport_len();
+        let at_end = self.transport_at_end();
+        let cur = self.transport();
         let name = self
             .panes
             .get(cur)
@@ -342,10 +343,10 @@ impl CimApp {
                     if let Ok(target) = self.frame_edit.trim().parse::<usize>() {
                         self.do_fast_jump(target);
                     }
-                    self.frame_edit = self.shared_frame.to_string();
+                    self.frame_edit = self.transport_frame().to_string();
                 } else if !resp.has_focus() {
                     // Keep the buffer showing the live frame while not editing.
-                    self.frame_edit = self.shared_frame.to_string();
+                    self.frame_edit = self.transport_frame().to_string();
                 }
                 ui.monospace(t!("frame_bar.frame"));
                 // While a typed seek is riding the frontier (target past the
@@ -388,7 +389,7 @@ impl CimApp {
         // runs so a long cached span is one rect (cheap, and reads as solid).
         let mut res: Vec<usize> = self
             .panes
-            .get(self.loop_control())
+            .get(self.transport())
             .map(|p| {
                 p.media
                     .resident_frames()
@@ -469,7 +470,7 @@ impl CimApp {
         painter.line_segment([Pos2::new(xhi, bot), Pos2::new(xhi - cap, bot)], st);
 
         // Playhead.
-        let px = x_of(self.shared_frame.min(len.saturating_sub(1)));
+        let px = x_of(self.transport_frame().min(len.saturating_sub(1)));
         painter.line_segment(
             [Pos2::new(px, rect.top()), Pos2::new(px, rect.bottom())],
             Stroke::new(2.0_f32, Color32::from_gray(235)),
@@ -517,7 +518,7 @@ impl CimApp {
                     None => {
                         self.pending_seek = None;
                         self.playback.prefetch = None;
-                        self.shared_frame = f;
+                        self.set_transport_frame(f);
                     }
                 }
             }
@@ -529,7 +530,8 @@ impl CimApp {
             if let Some(p) = resp.interact_pointer_pos() {
                 self.pending_seek = None;
                 self.playback.prefetch = None;
-                self.shared_frame = frame_at(p);
+                let f = frame_at(p);
+                self.set_transport_frame(f);
             }
         }
     }

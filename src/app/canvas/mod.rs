@@ -281,7 +281,8 @@ impl CimApp {
                 if ctrl {
                     // Ctrl + wheel scrubs the sequence a frame at a time (up =
                     // next, down = previous) instead of zooming — same stepping as
-                    // the next/prev-frame keys (advances the shared timeline).
+                    // the next/prev-frame keys (advances the transport's timeline —
+                    // the focused pane's own when it is temporally unsynced).
                     let step = if scroll > 0.0 {
                         Action::NextFrame
                     } else {

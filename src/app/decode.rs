@@ -321,11 +321,13 @@ impl CimApp {
             return;
         }
         // The loop-driving pane drives the shared timeline/scrubber even when it
-        // isn't on screen, so it must keep discovering its frontier too.
+        // isn't on screen, so it must keep discovering its frontier too — as does
+        // the transport-driven pane when an unsynced one owns the scrubber (§8).
         let mut targets = self.displayed_indices();
-        let ctrl = self.loop_control();
-        if !targets.contains(&ctrl) {
-            targets.push(ctrl);
+        for extra in [self.loop_control(), self.transport()] {
+            if !targets.contains(&extra) {
+                targets.push(extra);
+            }
         }
         // How far past the shown frame the frontier must stay discovered. Browsing
         // needs one page. **While playing, keep a whole prefetch window ahead**:
@@ -389,13 +391,25 @@ impl CimApp {
         let (lo, hi) = self.loop_bounds(tl);
         let full = self.playback.loop_range.is_none();
 
-        // Same targets as lookahead: on-screen panes plus the loop-driving pane
-        // (which drives the shared timeline even when it isn't displayed).
-        let mut targets = self.displayed_indices();
-        let ctrl = self.loop_control();
-        if !targets.contains(&ctrl) {
-            targets.push(ctrl);
-        }
+        // Only the panes playback actually moves. When an unsynced pane owns the
+        // transport that is just that pane (nothing else advances with it, §8);
+        // otherwise the on-screen *synced* panes plus the loop-driving one (which
+        // drives the shared timeline even when it isn't displayed). A pane holding
+        // its parked frame has nothing to prefetch.
+        let targets: Vec<usize> = if self.transport_own() {
+            vec![self.transport()]
+        } else {
+            let ctrl = self.loop_control();
+            let mut t: Vec<usize> = self
+                .displayed_indices()
+                .into_iter()
+                .filter(|&i| self.panes[i].sync_temporal)
+                .collect();
+            if !t.contains(&ctrl) {
+                t.push(ctrl);
+            }
+            t
+        };
         // Prefetch the frames playback will actually land on: with a fast-forward
         // stride it steps by `ff`, so prefetch the strided targets (not the frames
         // skimmed over) to match `advance_playback`.
@@ -415,44 +429,36 @@ impl CimApp {
         // that gates the commit. Interleaving keeps each pane's nearest-needed
         // frame near the front.
         let mut plans: Vec<(usize, Vec<usize>)> = Vec::with_capacity(targets.len());
+        // Where playback is on the driven timeline — the shared one, or the owning
+        // pane's own frame. Every target advances along it (a synced pane shorter
+        // than the window simply stops at its own `known`).
+        let base = self.playback.prefetch.unwrap_or(self.transport_frame());
         for i in targets {
             let known = self.panes[i].media.frame_count();
             let mut frames = Vec::with_capacity(depth);
-            if self.panes[i].sync_temporal {
-                // Walk the loop window forward from where playback is now, wrapping
-                // to the window start when looping — exactly the frames it shows next.
-                let mut f = self.playback.prefetch.unwrap_or(self.shared_frame);
-                for _ in 0..depth {
-                    // Mirror `advance_playback`'s stride decision exactly, so prefetch
-                    // requests only the frames playback will actually land on — never a
-                    // partial stride onto the undiscovered frontier (which would decode
-                    // a frame the stride is meant to skim).
-                    f = if f + ff <= hi {
-                        f + ff // a full stride fits inside the discovered window
-                    } else if f < hi && (!full || at_end) {
-                        hi // final short stride onto a real window end
-                    } else if full && !at_end {
-                        break; // holding at the frontier; discovery is ensure_lookahead's job
-                    } else if self.playback.loop_playback {
-                        lo // wrap to the window start
-                    } else {
-                        break; // playback will stop at the window end
-                    };
-                    if f >= known {
-                        break;
-                    }
-                    frames.push(f);
+            // Walk the loop window forward from where playback is now, wrapping
+            // to the window start when looping — exactly the frames it shows next.
+            let mut f = base;
+            for _ in 0..depth {
+                // Mirror `advance_playback`'s stride decision exactly, so prefetch
+                // requests only the frames playback will actually land on — never a
+                // partial stride onto the undiscovered frontier (which would decode
+                // a frame the stride is meant to skim).
+                f = if f + ff <= hi {
+                    f + ff // a full stride fits inside the discovered window
+                } else if f < hi && (!full || at_end) {
+                    hi // final short stride onto a real window end
+                } else if full && !at_end {
+                    break; // holding at the frontier; discovery is ensure_lookahead's job
+                } else if self.playback.loop_playback {
+                    lo // wrap to the window start
+                } else {
+                    break; // playback will stop at the window end
+                };
+                if f >= known {
+                    break;
                 }
-            } else {
-                // Unsynced pane: look ahead on its own timeline (strided too).
-                let base = self.panes[i].frame;
-                for k in 1..=depth {
-                    let f = base + k * ff;
-                    if f >= known {
-                        break;
-                    }
-                    frames.push(f);
-                }
+                frames.push(f);
             }
             plans.push((i, frames));
         }
@@ -667,10 +673,12 @@ impl CimApp {
             // pairs a freshly committed base with the previous frame's region.
             self.panes[idx].region_show = self.panes[idx].region_want;
         }
-        // A committed playback step advances the shared timeline to the frame we
-        // just showed — so the counter and the image stay on the same frame.
+        // A committed playback step advances the transport's playhead to the frame
+        // we just showed — so the counter and the image stay on the same frame.
+        // That is the shared timeline, or the driven pane's own frame when an
+        // unsynced pane owns the transport (§8).
         if let Some(f) = self.playback.prefetch.take() {
-            self.shared_frame = f;
+            self.set_transport_frame(f);
         }
     }
 
@@ -682,16 +690,23 @@ impl CimApp {
         self.panes[idx].tex.id()
     }
 
-    /// The frame `refresh_textures` should stage for pane `idx`. Synced panes chase
-    /// the playback prefetch (the candidate next shared frame) if one is in flight,
-    /// else the committed shared frame; unsynced panes use their own frame.
+    /// The frame `refresh_textures` should stage for pane `idx`: the frame it will
+    /// show at the transport's next playhead position — the playback prefetch (the
+    /// candidate next frame) if one is in flight, else the committed playhead.
+    ///
+    /// Only the transport's own timeline moves, so the prefetch applies to the
+    /// pane(s) it drives: the synced panes when it is the shared timeline, or the
+    /// single unsynced pane that owns it. Every other pane holds where it is
+    /// (`frame_at_timeline`, which is `frame_disp`'s rule).
     pub(super) fn stage_target(&self, idx: usize) -> usize {
-        crate::tone::synced_index(
-            self.playback.prefetch.unwrap_or(self.shared_frame),
-            self.panes[idx].media.frame_count(),
-            self.panes[idx].sync_temporal,
-            self.panes[idx].frame,
-        )
+        let next = self.playback.prefetch.unwrap_or(self.transport_frame());
+        if self.transport_own() {
+            if idx == self.transport() {
+                return next.min(self.panes[idx].media.frame_count().max(1) - 1);
+            }
+            return self.frame_at_timeline(idx, self.shared_frame);
+        }
+        self.frame_at_timeline(idx, next)
     }
 
     /// Source pixels per screen pixel for pane `idx` at its current zoom — the

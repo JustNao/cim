@@ -38,18 +38,19 @@ use std::sync::Arc;
 impl CimApp {
     /// The pane a timeline preview describes: the **focused** pane, since that is
     /// the media the user is working with and whose visualization options the
-    /// preview honours. A still or a temporally unsynced pane doesn't track the
-    /// scrubber at all, though (its frame wouldn't move as the cursor did), so
-    /// those fall back to the pane that actually drives the timeline.
+    /// preview honours. A **still** doesn't track the scrubber at all, though (its
+    /// frame wouldn't move as the cursor did), so it falls back to the pane that
+    /// actually drives the timeline. A temporally *unsynced* sequence does track
+    /// it — the transport drives its own playhead (§8) — so it previews itself.
     pub(super) fn preview_pane(&self) -> Option<usize> {
         if self.panes.is_empty() {
             return None;
         }
         let c = self.current.min(self.panes.len() - 1);
-        if self.panes[c].media.frame_count() > 1 && self.panes[c].sync_temporal {
+        if self.panes[c].media.frame_count() > 1 {
             return Some(c);
         }
-        let l = self.loop_control();
+        let l = self.transport();
         (l < self.panes.len()).then_some(l)
     }
 
@@ -141,12 +142,7 @@ impl CimApp {
         let Some(idx) = self.preview_pane() else {
             return;
         };
-        let f = crate::tone::synced_index(
-            t,
-            self.panes[idx].media.frame_count(),
-            self.panes[idx].sync_temporal,
-            self.panes[idx].frame,
-        );
+        let f = self.frame_at_timeline(idx, t);
         // Restart the dwell whenever the cursor moves to another frame.
         let now = ctx.input(|i| i.time);
         if self.preview.at != Some((idx, f)) {
@@ -196,12 +192,7 @@ impl CimApp {
         let Some(idx) = self.preview_pane() else {
             return;
         };
-        let f = crate::tone::synced_index(
-            t,
-            self.panes[idx].media.frame_count(),
-            self.panes[idx].sync_temporal,
-            self.panes[idx].frame,
-        );
+        let f = self.frame_at_timeline(idx, t);
         // The tone the preview *was* rendered with, so the note under it matches
         // the image rather than the pane's current setting.
         let subst = self.panes[idx]
