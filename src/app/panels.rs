@@ -481,7 +481,19 @@ impl CimApp {
         // Only recorded here — the fetching/rendering decisions run next update
         // from `tick`, and the box itself is drawn in a foreground layer after
         // this bar, so neither can be clipped to it or hitch this paint.
-        if let Some(p) = resp.hover_pos() {
+        //
+        // The track is only 26 px tall, so a cursor sweeping *along* it drifts off
+        // the edge constantly — and `hover_pos` also goes `None` for a frame
+        // whenever something else briefly owns the hover. Either dropped the
+        // preview mid-sweep. Accept the pointer anywhere within a few pixels of
+        // the track as well, as long as it is still this layer's (nothing else is
+        // over it), which keeps the box up across both.
+        let hover = resp.hover_pos().or_else(|| {
+            let p = ui.ctx().pointer_latest_pos()?;
+            let near = rect.expand2(Vec2::new(0.0, PREVIEW_SLACK));
+            (near.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id())).then_some(p)
+        });
+        if let Some(p) = hover {
             let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
             let k = ((t * span).round() as usize).min(len.saturating_sub(1));
             self.preview.hover = Some((k, Pos2::new(p.x, rect.top())));

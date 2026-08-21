@@ -189,9 +189,15 @@ const PLAY_PREFETCH: usize = 3;
 /// and sweeping the scrubber crosses hundreds of frames, so it is only fetched
 /// once the user has actually stopped on it. See [`preview`].
 const PREVIEW_DWELL: f64 = 0.2;
-/// Side of the empty plate drawn in the preview box while a thumbnail is still
-/// being fetched, so the box doesn't resize under the cursor when it lands.
-const PREVIEW_PLACEHOLDER: f32 = 200.0;
+/// Vertical gap between the hover preview's box and the top of the scrubber.
+/// Non-zero so the box never touches the track it is describing — overlapping it
+/// would steal the pointer's hover and blink the preview away (see `preview`).
+const PREVIEW_GAP: f32 = 8.0;
+/// How far outside the scrubber's own rect the pointer still counts as hovering
+/// the track, for the preview only (never for seeking). The bar is thin and the
+/// cursor slides along it, so an exact hit test blinked the preview off on the
+/// smallest vertical drift. See `draw_scrubber`.
+const PREVIEW_SLACK: f32 = 8.0;
 
 const FRONTIER_PROBES: usize = 8;
 
@@ -570,6 +576,12 @@ struct Preview {
     /// Thumbnail renders queued but not yet landed, so a job isn't sent twice
     /// while the cursor rests on the same frame.
     inflight: HashSet<crate::thumbs::ThumbKey>,
+    /// Height the box measured last time it was painted, used to place the next
+    /// one **fully above** the scrubber. Laying it out from an estimate instead
+    /// let a taller-than-expected box cover the track's top edge, which took the
+    /// pointer's hover off the scrubber — dropping the preview, which shrank the
+    /// box, which restored the hover: a flicker loop (see `draw_preview`).
+    box_h: f32,
 }
 
 /// Playback transport state for the control sequence.

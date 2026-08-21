@@ -54,6 +54,21 @@ impl CimApp {
         (l < self.panes.len()).then_some(l)
     }
 
+    /// The pixel shape the preview reserves for pane `idx`: its **current**
+    /// frame's thumbnail size (`thumbs::thumb_size` of the shown frame).
+    ///
+    /// The box is laid out from this whether or not the thumbnail has landed, so
+    /// the plate drawn while one renders is already the shape the image will be —
+    /// a fixed placeholder made the box (and its position, which is derived from
+    /// its height) jump on every landing, which reads as flicker while the cursor
+    /// sweeps the track. Pages of a mixed-size sequence still differ from the
+    /// shown frame; a landed thumbnail of another shape is *fitted* into the plate
+    /// rather than resizing it (`draw_preview`).
+    fn preview_plate(&self, idx: usize) -> Vec2 {
+        let [w, h] = crate::thumbs::thumb_size(self.disp_size(idx));
+        Vec2::new(w as f32, h as f32)
+    }
+
     /// Whether pane `idx` would run the proprietary operators on `frame`, and so
     /// needs the substituted Linear tone. Split out because it is the *cheap*
     /// half of the tone decision (no percentile scan) and the cache key needs it
@@ -201,19 +216,29 @@ impl CimApp {
             .is_some_and(|fr| self.preview_substitutes(idx, &fr));
         let key = self.preview_key(idx, f, subst);
         let tex = self.thumb_cache.get(&key).cloned();
-        let size = tex
-            .as_ref()
-            .map(|t| t.size_vec2())
-            .unwrap_or(Vec2::new(PREVIEW_PLACEHOLDER, PREVIEW_PLACEHOLDER * 0.6));
+        // The plate: the shape this pane's thumbnails come out at, reserved
+        // whether or not this one has landed, so nothing resizes when it does.
+        let size = self.preview_plate(idx);
+        // A landed thumbnail of a different shape (a mixed-size sequence) is
+        // fitted inside the plate instead of resizing it.
+        let shown = tex.as_ref().map(|t| fit_in(t.size_vec2(), size));
 
         // Sit just above the scrubber, centred on the cursor, and stay on screen.
         let screen = ctx.screen_rect();
         let pad = 6.0;
         let box_w = size.x + pad * 2.0;
         let x = (anchor.x - box_w / 2.0).clamp(screen.left() + 4.0, screen.right() - box_w - 4.0);
-        let pos = Pos2::new(x, anchor.y - size.y - 30.0);
+        // Place it by the height it actually measured last time, so the box sits
+        // **fully above** the track: overlapping the scrubber's top edge takes the
+        // pointer's hover off it, which drops the preview, which un-overlaps it —
+        // the box blinking in and out as the cursor moves along the bar. The first
+        // paint (and any size change) falls back to an estimate from the plate,
+        // which the measured height corrects on the next frame.
+        let est = size.y + pad * 2.0 + 22.0;
+        let h = self.preview.box_h.max(est);
+        let pos = Pos2::new(x, anchor.y - h - PREVIEW_GAP);
 
-        egui::Area::new(egui::Id::new("timeline_preview"))
+        let area = egui::Area::new(egui::Id::new("timeline_preview"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .interactable(false)
@@ -225,16 +250,22 @@ impl CimApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         ui.vertical_centered(|ui| {
-                            match &tex {
-                                Some(tex) => {
-                                    ui.image((tex.id(), size));
-                                }
-                                None => {
-                                    // No spinner, as everywhere else here: an
-                                    // empty plate that fills in when it lands.
-                                    let (r, _) = ui.allocate_exact_size(size, Sense::hover());
-                                    ui.painter().rect_filled(r, 0.0, PANE_BG);
-                                }
+                            // The plate is always allocated at its full shape, so
+                            // the box keeps one size; the image (when it has
+                            // landed) is painted centred inside it.
+                            let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+                            if let (Some(tex), Some(fitted)) = (&tex, shown) {
+                                let at = egui::Rect::from_center_size(r.center(), fitted);
+                                ui.painter().image(
+                                    tex.id(),
+                                    at,
+                                    egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            } else {
+                                // No spinner, as everywhere else here: an empty
+                                // plate that fills in when it lands.
+                                ui.painter().rect_filled(r, 0.0, PANE_BG);
                             }
                             ui.monospace(format!("{t}"));
                             if subst {
@@ -243,5 +274,16 @@ impl CimApp {
                         });
                     });
             });
+        // Remember what it measured, for the next frame's placement (above).
+        self.preview.box_h = area.response.rect.height();
     }
+}
+
+/// `size` scaled to fit inside `plate` (never enlarged past it), keeping aspect.
+fn fit_in(size: Vec2, plate: Vec2) -> Vec2 {
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return plate;
+    }
+    let k = (plate.x / size.x).min(plate.y / size.y).min(1.0);
+    size * k
 }

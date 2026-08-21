@@ -1299,6 +1299,24 @@ being clipped to the bar. `tick` clears `hover` after reading it, so it is `None
 the pointer is off the track or the bar isn't drawn at all (the `line_hover` idiom). A
 preview one frame behind the cursor is invisible next to the dwell.
 
+**Nothing about the box may move while the cursor sweeps** — three separate causes of
+flicker, all fixed together:
+- **One shape.** The box is laid out from the **plate** (`preview_plate` =
+  `thumbs::thumb_size` of the pane's *current* frame — the shape its thumbnails come out
+  at), reserved whether or not this thumbnail has landed. A fixed placeholder resized the
+  box on every landing; a landed thumbnail of a *different* shape (a mixed-size sequence)
+  is now **fitted inside** the plate (`fit_in`) rather than resizing it.
+- **Placed by its measured height** (`Preview.box_h`, remembered from the last paint, with
+  the plate-derived estimate as a floor) and kept `PREVIEW_GAP` above the track. Laying it
+  out from an estimate left the box overlapping the scrubber's top edge whenever it was
+  taller than assumed (e.g. the extra `preview.linear` note), which took the pointer's
+  hover off the track → preview dropped → box shrank → hover back: a blink loop.
+- **A forgiving hover.** The track is 26 px tall and the cursor slides *along* it, so
+  `draw_scrubber` also accepts a pointer within `PREVIEW_SLACK` of the rect (and only when
+  `layer_id_at` says nothing else is over it) — for the preview record only, never for
+  seeking. Exact hit-testing blinked the preview off on the smallest vertical drift, and
+  on any frame where `hover_pos` briefly went `None`.
+
 ---
 
 ## 9. Modes & central drawing (`app/canvas/`)

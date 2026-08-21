@@ -81,6 +81,17 @@ pub fn step_for(size: [usize; 2]) -> usize {
     size[0].max(size[1]).div_ceil(THUMB_PX).max(1)
 }
 
+/// The pixel size the thumbnail of a `size` frame comes out at — `size`
+/// decimated by [`step_for`], i.e. exactly what [`render`] produces
+/// (`Region::whole(size, step).out`).
+///
+/// Lets the hover preview reserve the finished thumbnail's shape *before* it has
+/// rendered, so the box doesn't resize when the image lands.
+pub fn thumb_size(size: [usize; 2]) -> [usize; 2] {
+    let step = step_for(size);
+    [size[0].div_ceil(step).max(1), size[1].div_ceil(step).max(1)]
+}
+
 pub struct ThumbPool {
     job_tx: mpsc::Sender<ThumbJob>,
     done_rx: mpsc::Receiver<ThumbDone>,
@@ -233,6 +244,17 @@ mod tests {
         frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut want);
         assert_eq!(got.size, region.out);
         assert_eq!(got.pixels, want);
+    }
+
+    /// The hover preview reserves its box from `thumb_size` before the thumbnail
+    /// exists, so it must be *exactly* what the render then produces — otherwise
+    /// the box resizes on landing, which is the flicker it exists to avoid.
+    #[test]
+    fn thumb_size_is_what_the_render_produces() {
+        for size in [[1, 1], [240, 100], [241, 100], [4096, 4096], [25000, 3]] {
+            let region = Region::whole(size, step_for(size));
+            assert_eq!(thumb_size(size), region.out, "{size:?}");
+        }
     }
 
     #[test]
