@@ -698,6 +698,9 @@ impl CimApp {
                 // off-screen; below that the ScrollArea shrinks to content so every
                 // row shows without scrolling.
                 let max_h = ctx.screen_rect().height() * 0.85;
+                // A solid (not floating) bar: once the list overflows it takes
+                // its own strip instead of covering the rows' close "✖" column.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::vertical()
                     .max_height(max_h)
                     .show(ui, |ui| {
