@@ -181,6 +181,33 @@ fn rasterize_label(ctx: &egui::Context, text: &str, size_px: f32) -> Option<Labe
     Some(LabelBitmap { w, h, alpha })
 }
 
+/// A media name without its file extension — the default export label. The
+/// extension is the last `.` followed by 1–5 alphanumerics (at least one a
+/// letter, so a version like `v1.0` survives) that end the name or
+/// are followed by a space, `,` or `(`, so the decorated names keep their tail:
+/// `tile.jp2 (1/8)` → `tile (1/8)`, a sequence token `img_%04u.tif,0,99` →
+/// `img_%04u,0,99`. A leading dot (`.hidden`) is not an extension.
+fn strip_extension(name: &str) -> String {
+    for (i, _) in name.match_indices('.').rev() {
+        if i == 0 {
+            break;
+        }
+        let rest = &name[i + 1..];
+        let len = rest
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(rest.len());
+        let ends = rest[len..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || c == ',' || c == '(');
+        let ext = &rest[..len];
+        if (1..=5).contains(&len) && ext.chars().any(|c| c.is_ascii_alphabetic()) && ends {
+            return format!("{}{}", &name[..i], &rest[len..]);
+        }
+    }
+    name.to_owned()
+}
+
 /// Human-readable name of a label position (the 3×3 selector's hover text).
 fn anchor_name(a: LabelAnchor) -> String {
     match a {
@@ -628,12 +655,12 @@ impl CimApp {
     }
 
     /// The name burnt in for pane `idx`: the user's custom text, falling back to
-    /// the media's own name when unset or blank.
+    /// the media's own name (without its file extension) when unset or blank.
     pub(super) fn label_text(&self, idx: usize) -> String {
         let p = &self.panes[idx];
         match self.export.labels.get(&p.id).map(|s| s.trim()) {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => p.media.name().to_string(),
+            _ => strip_extension(p.media.name()),
         }
     }
 
@@ -944,7 +971,13 @@ impl CimApp {
         // Snapshot (id, fallback name) so the map can be borrowed mutably below.
         let rows: Vec<(usize, u64, String)> = participants
             .iter()
-            .map(|&i| (i, self.panes[i].id, self.panes[i].media.name().to_string()))
+            .map(|&i| {
+                (
+                    i,
+                    self.panes[i].id,
+                    strip_extension(self.panes[i].media.name()),
+                )
+            })
             .collect();
 
         // ui.add_space(4.0);
@@ -1429,6 +1462,17 @@ impl CimApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_labels_drop_the_file_extension() {
+        assert_eq!(strip_extension("scan.tif"), "scan");
+        assert_eq!(strip_extension("a.b.png"), "a.b");
+        assert_eq!(strip_extension("tile.jp2 (1/8)"), "tile (1/8)");
+        assert_eq!(strip_extension("img_%04u.tif,0,99"), "img_%04u,0,99");
+        assert_eq!(strip_extension("no_extension"), "no_extension");
+        assert_eq!(strip_extension(".hidden"), ".hidden");
+        assert_eq!(strip_extension("v1.0 final"), "v1.0 final");
+    }
 
     /// The label rasterizer really pulls glyph coverage out of egui's font
     /// atlas: non-empty ink, and a bitmap about the requested pixel height.

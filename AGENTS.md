@@ -1839,7 +1839,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   (`Export.labels_on`) draws one text label per media in every layout and both formats.
   The text is per media, keyed by **pane id** (`Export.labels: HashMap<u64, String>`, so it
   survives reorder/close), edited in a list of fields under the toggle and defaulting to the
-  media's own name (`label_text`); colour, size, optional background box, 9-way position
+  media's own name **without its file extension** (`label_text` / `strip_extension`, which
+  keeps a decorated tail such as a JPEG 2000 `(1/8)` or a sequence token's `,START,END`); colour, size, optional background box, 9-way position
   (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. All
   export state is runtime-only (not persisted in the config).
   Labels are **rasterized once at plan time** on the UI thread (`export_ui::rasterize_label`)
