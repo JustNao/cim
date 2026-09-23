@@ -261,6 +261,20 @@ impl CimApp {
     /// fall through to the `Still` snapshot of the result now on screen, which is
     /// precisely what the view shows.
     fn export_source(&self, idx: usize) -> ExportSource {
+        let source = self.export_source_native(idx);
+        // A Scaled pane's decoded frames get the live pane's resample. Its
+        // `Still` snapshot is taken from the (already scaled) resident frame.
+        match self.panes[idx].media.scale_to() {
+            Some(size) if !matches!(source, ExportSource::Still(_)) => ExportSource::Scaled {
+                inner: Box::new(source),
+                size,
+            },
+            _ => source,
+        }
+    }
+
+    /// [`Self::export_source`] before any Scale is applied.
+    fn export_source_native(&self, idx: usize) -> ExportSource {
         let p = &self.panes[idx];
         if let Some(c) = p
             .compute

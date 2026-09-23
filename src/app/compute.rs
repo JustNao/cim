@@ -251,7 +251,12 @@ impl CimApp {
         };
         match result {
             Ok((fr, name, status)) => {
-                self.panes[idx].media = media::Media::still(name, fr);
+                // Carry the Scale target over, so a scaled Compute pane's fresh
+                // result isn't treated as a Scale change (which drops `tex`).
+                let fit = self.panes[idx].media.scale_to();
+                let mut m = media::Media::still(name, fr);
+                m.set_scale_to(fit);
+                self.panes[idx].media = m;
                 // Bump the data generation rather than clearing `tex`: `stage`
                 // re-renders the new result into `pending` while the last frame
                 // keeps showing, so an auto-refreshing pane never flashes black

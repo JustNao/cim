@@ -807,6 +807,11 @@ struct Pane {
     tone: ToneOptions,
     /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
     details: bool,
+    /// The media manager's **Scale** toggle: show this media nearest-resampled
+    /// to the **Control** media's size, so a same-ratio image of another
+    /// resolution lines up with it pixel for pixel. Applied (and kept following
+    /// the Control) by `sync_scales`; ignored on the Control pane itself.
+    scale: bool,
     /// Display rotation in **degrees** (-180..180), about the image centre.
     /// Applied at draw time (the texture stays unrotated) and to the export;
     /// rides the Geometry sync (`sync_geometry`).
@@ -1921,6 +1926,60 @@ impl CimApp {
         self.control = self.control.min(self.panes.len() - 1);
     }
 
+    /// Bring every pane's **Scale** target in line with its toggle and the
+    /// Control media's (own) size — run each update, so switching the Control,
+    /// reloading it, or re-levelling a JPEG 2000 Control carries the scaled panes
+    /// along. `set_scale_to` no-ops when nothing changed; a pane whose target did
+    /// change now holds frames of a new size, so everything derived from the old
+    /// ones is dropped, as a JPEG 2000 re-level does (`relevel_jp2_panes`).
+    pub(super) fn sync_scales(&mut self) {
+        let Some(ctrl) = self.panes.get(self.control).map(|p| p.media.native_size()) else {
+            return;
+        };
+        for i in 0..self.panes.len() {
+            let fit = (self.panes[i].scale && i != self.control).then_some(ctrl);
+            if !self.panes[i].media.set_scale_to(fit) {
+                continue;
+            }
+            let id = self.panes[i].id;
+            // In-flight decodes land at the old target and are dropped by
+            // `pump_decoder`; clear them so the frames are asked for again.
+            self.inflight.retain(|(pid, _)| *pid != id);
+            // Operator instances and the GPU display table are keyed on the
+            // frame size; the adaptive regions describe the old frames.
+            self.renderer.forget(id);
+            if let Some(g) = &mut self.gpu {
+                g.forget_pane(id);
+            }
+            self.render_inflight.remove(&id);
+            self.roi_inflight.remove(&id);
+            self.regions.forget_pane(id);
+            let p = &mut self.panes[i];
+            p.tex.clear();
+            p.stats = None;
+            p.hist = None;
+            p.overlay_tex = None;
+            p.error = None;
+            // An overlay drawn *from* this pane is the wrong size now too.
+            let shared_src = self.shared_overlay.map(|o| o.src_id);
+            for p in &mut self.panes {
+                let src = if p.sync_tone {
+                    shared_src
+                } else {
+                    p.overlay.map(|o| o.src_id)
+                };
+                if src == Some(id) {
+                    p.overlay_tex = None;
+                }
+            }
+            // A synced pane shares the Control's image space, which scaling onto
+            // it is the point of — so only a pane with its own view re-fits.
+            if !self.panes[i].sync_spatial {
+                self.panes[i].transform.needs_fit = true;
+            }
+        }
+    }
+
     /// Pixel size of pane `i` if it can serve as an overlay source — i.e. its
     /// current frame is **single-channel** (a boolean mask or a grayscale image /
     /// sequence) or **colour** (RGB, tinting with its own colours and keying
@@ -2271,6 +2330,7 @@ impl CimApp {
         // Clamp `control` into range, then clamp the shared timeline to the
         // loop-driving sequence.
         self.ensure_control();
+        self.sync_scales();
         let tl = self.timeline_len();
         if self.shared_frame >= tl {
             self.shared_frame = tl - 1;

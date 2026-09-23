@@ -29,11 +29,19 @@ struct Job {
     /// how `cancel_pending` discards a whole queued backlog (e.g. the thousands
     /// of frames a "Load all" queues at once) the instant Stop is pressed.
     epoch: u64,
+    /// The pane's **Scale** target when queued (`Media::scale_to`): a decoded
+    /// frame is nearest-resampled to it here, on the worker, rather than on the
+    /// UI thread when it lands.
+    scale: Option<[usize; 2]>,
 }
 
 pub struct Done {
     pub id: u64,
     pub frame: usize,
+    /// The Scale target the frame was resampled to (`Job::scale`). The UI drops
+    /// a frame whose target no longer matches the pane's — it would be the wrong
+    /// size, and resampling a resample would compound the nearest pick.
+    pub scale: Option<[usize; 2]>,
     pub result: Result<Decoded>,
     /// Wall-clock spent reading + decoding this job (for the `CIM_DEBUG` profiler).
     pub elapsed: std::time::Duration,
@@ -200,10 +208,17 @@ impl BackgroundDecoder {
                         media::decode_file(path).map(|f| Decoded::Frame(Arc::new(f)))
                     }
                 };
+                let result = match (result, job.scale) {
+                    (Ok(Decoded::Frame(f)), Some(size)) if f.size != size => {
+                        Ok(Decoded::Frame(Arc::new(f.resample_nearest(size))))
+                    }
+                    (r, _) => r,
+                };
                 if done_tx
                     .send(Done {
                         id: job.id,
                         frame: job.frame,
+                        scale: job.scale,
                         result,
                         elapsed: started.elapsed(),
                         io,
@@ -225,13 +240,16 @@ impl BackgroundDecoder {
         }
     }
 
-    pub fn request(&self, id: u64, frame: usize, req: DecodeReq) {
+    /// Queue `req` for pane `id`'s `frame`; a decoded frame is resampled to
+    /// `scale` (the pane's Scale target) before it is handed back.
+    pub fn request(&self, id: u64, frame: usize, req: DecodeReq, scale: Option<[usize; 2]>) {
         let epoch = self.epoch.load(Ordering::Relaxed);
         let _ = self.job_tx.send(Job {
             id,
             frame,
             req,
             epoch,
+            scale,
         });
     }
 

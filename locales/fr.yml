@@ -109,6 +109,12 @@ manager.control: Contrôle
 manager.control_hover: >-
   Ce média est la source de bornes partagée ; une séquence pilote aussi la
   timeline et la lecture
+manager.scale: Échelle
+manager.scale_hover: >-
+  Afficher ce média redimensionné à la taille du média Contrôle (%{w}×%{h}), au
+  plus proche voisin, pour qu'une image de même ratio à une autre résolution s'y
+  superpose pixel pour pixel
+manager.scale_control_hover: Ceci est le média Contrôle — les autres s'alignent sur sa taille
 manager.reload: Recharger
 manager.reload_hover: Recharger ce média depuis le disque
 manager.reload_all_hover: Tout recharger depuis le disque
@@ -534,6 +540,7 @@ cli.help: |
           --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)
           --detail <B,B,...>       Bascules DETAILS_ENHANCED par panneau (1/0)
           --show <B,B,...>         Visibilité par panneau (1/0)
+          --scale <B,B,...>        Mise à la taille du média Contrôle par panneau (1/0)
           --tsync <B,B,...>        Sync Visualisation par panneau (1/0)
           --gsync <B,B,...>        Sync Géométrie (rotation) par panneau (1/0)
           --rotate <D,D,...>       Rotation d'affichage par panneau, en degrés

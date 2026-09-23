@@ -69,6 +69,14 @@ pub enum ExportSource {
         a: Box<SourceInput>,
         b: Box<SourceInput>,
     },
+    /// A pane under the media manager's **Scale** toggle: `inner`'s frames,
+    /// nearest-resampled to `size` (the Control media's) exactly as the live
+    /// pane's are (`FrameData::resample_nearest`). A scaled **still** needs no
+    /// wrapper — its `Still` snapshot is already the resampled frame.
+    Scaled {
+        inner: Box<ExportSource>,
+        size: [usize; 2],
+    },
 }
 
 /// One decodable input of a [`ExportSource::Computed`]: a source, the timeline
@@ -258,6 +266,14 @@ fn decode_source(
         ExportSource::Computed { kind, a, b } => {
             let (fa, fb) = (a.frame_at(idx)?, b.frame_at(idx)?);
             crate::media::combine_frames(&fa, &fb, *kind).map(Arc::new)
+        }
+        ExportSource::Scaled { inner, size } => {
+            let f = decode_source(inner, idx, reader, cur_file)?;
+            Some(if f.size == *size {
+                f
+            } else {
+                Arc::new(f.resample_nearest(*size))
+            })
         }
     }
 }

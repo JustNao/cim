@@ -102,6 +102,12 @@ manager.control: Control
 manager.control_hover: >-
   This media is the shared clip source; a sequence also drives the timeline &
   playback
+manager.scale: Scale
+manager.scale_hover: >-
+  Show this media resized to the Control media's size (%{w}×%{h}), nearest
+  neighbour, so an image of the same ratio at another resolution lines up with
+  it pixel for pixel
+manager.scale_control_hover: This is the Control media — the others scale to its size
 manager.reload: Reload
 manager.reload_hover: Reload this media from disk
 manager.reload_all_hover: Reload all from disk
@@ -507,6 +513,7 @@ cli.help: |
           --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
           --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
           --show <B,B,...>         Per-pane visibility / show-hide (1/0)
+          --scale <B,B,...>        Per-pane scale to the Control media's size (1/0)
           --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)
           --gsync <B,B,...>        Per-pane Geometry-sync toggles (rotation) (1/0)
           --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)

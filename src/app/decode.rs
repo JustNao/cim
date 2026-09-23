@@ -31,6 +31,12 @@ impl CimApp {
                         self.decode_ema_secs + (s - self.decode_ema_secs) / 8.0
                     };
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
+                        // Decoded for a Scale target the pane has since left
+                        // (toggled, or its Control changed): drop it — it is no
+                        // longer in `inflight`, so it is simply re-requested.
+                        if d.scale != p.media.scale_to() {
+                            continue;
+                        }
                         p.media.insert(d.frame, frame);
                         p.media.touch(d.frame, clock); // freshly decoded → most recent
                         p.error = None; // a good frame clears any stale error
@@ -74,7 +80,8 @@ impl CimApp {
             return;
         }
         if let Some(req) = self.panes[idx].media.decode_job(frame) {
-            self.decoder.request(id, frame, req);
+            let scale = self.panes[idx].media.scale_to();
+            self.decoder.request(id, frame, req, scale);
             self.inflight.insert((id, frame));
         }
     }
@@ -91,7 +98,8 @@ impl CimApp {
             return;
         }
         if let Some(req) = self.panes[idx].media.probe_job(frame) {
-            self.decoder.request(id, frame, req);
+            let scale = self.panes[idx].media.scale_to();
+            self.decoder.request(id, frame, req, scale);
             self.inflight.insert((id, frame));
         }
     }

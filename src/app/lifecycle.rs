@@ -127,6 +127,11 @@ impl CimApp {
                 p.visible = v;
             }
         }
+        if let Some(scale) = &vs.scale {
+            for (p, &s) in self.panes.iter_mut().zip(scale) {
+                p.scale = s;
+            }
+        }
         if let Some(c) = vs.control {
             if n > 0 {
                 self.control = c.min(n - 1);
@@ -293,6 +298,15 @@ impl CimApp {
                     .map(|p| if p.visible { "1" } else { "0" })
                     .collect();
                 parts.push(format!("--show {}", show.join(",")));
+            }
+            // Scale to the Control — omit when no pane scales (the default).
+            if self.panes.iter().any(|p| p.scale) {
+                let scale: Vec<&str> = self
+                    .panes
+                    .iter()
+                    .map(|p| if p.scale { "1" } else { "0" })
+                    .collect();
+                parts.push(format!("--scale {}", scale.join(",")));
             }
             // Geometry-sync. Emit when any pane is unsynced *or* `--rotate` was
             // emitted (it unsyncs geometry on replay, so an all-synced session
@@ -502,6 +516,7 @@ impl CimApp {
             contrast,
             tone,
             details: false,
+            scale: false,
             rotation: 0.0,
             overlay: None,
             overlay_tex: None,

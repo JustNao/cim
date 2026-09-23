@@ -228,6 +228,56 @@ impl FrameData {
         f
     }
 
+    /// This frame **nearest-neighbour** resampled to `size` (`[width, height]`)
+    /// as a new independent frame — same sample type / channels / mask flag. Every
+    /// output sample is a copy of the source sample whose area its centre falls
+    /// in (never a blend), so the result still holds only true source values: a
+    /// ×2 upscale repeats each sample twice per axis, a ÷2 downscale keeps one of
+    /// each 2×2 block. How a pane's **Scale** toggle brings a same-ratio image of
+    /// another resolution onto the Control media's grid.
+    pub fn resample_nearest(&self, size: [usize; 2]) -> FrameData {
+        let [sw, sh] = self.size;
+        let [w, h] = size;
+        let n = self.channels;
+        // Source column/row of each output column/row: the sample under the
+        // output pixel's centre, `floor((x + ½) · sw / w)`, in integers.
+        let map = |dst: usize, src: usize| -> Vec<usize> {
+            (0..dst)
+                .map(|x| ((2 * x + 1) * src / (2 * dst)).min(src.saturating_sub(1)))
+                .collect()
+        };
+        let (xs, ys) = (map(w, sw), map(h, sh));
+        macro_rules! pick {
+            ($v:expr) => {{
+                let mut out = Vec::with_capacity(w * h * n);
+                for &sy in &ys {
+                    let row = &$v[sy * sw * n..(sy + 1) * sw * n];
+                    for &sx in &xs {
+                        out.extend_from_slice(&row[sx * n..(sx + 1) * n]);
+                    }
+                }
+                out
+            }};
+        }
+        let samples = if sw == 0 || sh == 0 {
+            // Nothing to sample from: an empty frame of the right type.
+            match &self.samples {
+                Samples::U8(_) => Samples::U8(vec![0; w * h * n]),
+                Samples::U16(_) => Samples::U16(vec![0; w * h * n]),
+                Samples::F32(_) => Samples::F32(vec![0.0; w * h * n]),
+            }
+        } else {
+            match &self.samples {
+                Samples::U8(v) => Samples::U8(pick!(v)),
+                Samples::U16(v) => Samples::U16(pick!(v)),
+                Samples::F32(v) => Samples::F32(pick!(v)),
+            }
+        };
+        let mut f = FrameData::new(size, n, samples);
+        f.mask = self.mask;
+        f
+    }
+
     /// True when this frame is a boolean mask (decoded from a 1-bit TIFF).
     pub fn is_mask(&self) -> bool {
         self.mask
@@ -424,6 +474,67 @@ mod tests {
     use crate::media::loader::mask_bits;
     use crate::testutil::*;
     use std::sync::Arc;
+
+    /// Nearest resampling copies whole samples: ×2 repeats each one twice per
+    /// axis, ÷2 keeps one per 2×2 block, and channels stay interleaved together.
+    #[test]
+    fn resample_nearest_copies_true_samples() {
+        let f = FrameData::new([2, 2], 1, Samples::U16(vec![1, 2, 3, 4]));
+        let up = f.resample_nearest([4, 4]);
+        let Samples::U16(v) = &up.samples else {
+            panic!("sample type changed");
+        };
+        assert_eq!(up.size, [4, 4]);
+        assert_eq!(v, &[1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4]);
+        let down = up.resample_nearest([2, 2]);
+        let Samples::U16(v) = &down.samples else {
+            panic!("sample type changed");
+        };
+        assert_eq!(v, &[1, 2, 3, 4]);
+
+        let rgb = FrameData::new([2, 1], 3, Samples::U8(vec![1, 2, 3, 4, 5, 6]));
+        let Samples::U8(v) = rgb.resample_nearest([4, 1]).samples else {
+            panic!("sample type changed");
+        };
+        assert_eq!(v, vec![1, 2, 3, 1, 2, 3, 4, 5, 6, 4, 5, 6]);
+
+        let mask = FrameData::new_mask([2, 2], 1, Samples::U8(vec![0, 1, 1, 0]));
+        assert!(mask.resample_nearest([3, 3]).is_mask());
+    }
+
+    /// A Scale target resizes a still from its kept original (so a second
+    /// target, or turning it off, never resamples a resample), and a sequence
+    /// drops its resident frames and stores new ones at the target size.
+    #[test]
+    fn scale_target_resizes_stills_and_sequences() {
+        let orig = FrameData::new([2, 2], 1, Samples::U8(vec![1, 2, 3, 4]));
+        let mut still = Media::still("s".into(), orig);
+        assert!(still.set_scale_to(Some([4, 4])));
+        assert_eq!(still.size(), [4, 4]);
+        assert_eq!(still.native_size(), [2, 2]);
+        assert_eq!(still.resident(0).unwrap().size, [4, 4]);
+        assert!(!still.set_scale_to(Some([4, 4])), "same target is a no-op");
+        assert!(still.set_scale_to(Some([1, 1])));
+        assert!(still.set_scale_to(None));
+        let Samples::U8(v) = &still.resident(0).unwrap().samples else {
+            panic!("sample type changed");
+        };
+        assert_eq!(v, &[1, 2, 3, 4], "original restored untouched");
+        // A target equal to the own size is no scaling.
+        assert!(!still.set_scale_to(Some([2, 2])));
+        assert_eq!(still.scale_to(), None);
+
+        let dir = fixture_dir("scale_seq");
+        let files = write_png_run(&dir, 2, 8, 6);
+        let mut seq = load_sequence(&files, "run".into()).expect("open run");
+        let frame = |p: &std::path::Path| Arc::new(decode_file(p).unwrap());
+        seq.insert(0, frame(&files[0]));
+        assert!(seq.set_scale_to(Some([16, 12])));
+        assert!(seq.resident(0).is_none(), "wrong-size frames dropped");
+        assert_eq!(seq.size(), [16, 12]);
+        seq.insert(1, frame(&files[1]));
+        assert_eq!(seq.resident(1).unwrap().size, [16, 12]);
+    }
 
     /// Opening a TIFF must not walk the whole file: the length starts at one
     /// page and pages are discovered by decoding, with `Ok(None)` marking the

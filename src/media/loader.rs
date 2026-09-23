@@ -46,6 +46,7 @@ fn open_still(path: &Path, name: String) -> Result<Media> {
         frame: Arc::new(frame),
         hi_depth,
         jp2: None,
+        native: None,
     }))
 }
 
@@ -59,6 +60,7 @@ fn open_jp2_still(path: &Path, name: String) -> Result<Media> {
         frame: Arc::new(frame),
         hi_depth,
         jp2: Some(cache),
+        native: None,
     }))
 }
 

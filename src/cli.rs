@@ -118,6 +118,8 @@ pub struct ViewState {
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
     pub visible: Option<Vec<bool>>,
+    /// Per-pane Scale-to-Control toggles (`--scale`), in pane order.
+    pub scale: Option<Vec<bool>>,
     /// Per-pane Visualization-sync flags (`--tsync`), in pane order.
     pub tsync: Option<Vec<bool>>,
     /// Per-pane Geometry-sync flags (`--gsync`, rotation), in pane order.
@@ -216,6 +218,10 @@ pub fn parse(args: Vec<String>) -> Cli {
                 view.visible = next(i).and_then(parse_details);
                 i += 1;
             }
+            "--scale" => {
+                view.scale = next(i).and_then(parse_details);
+                i += 1;
+            }
             "--tsync" => {
                 view.tsync = next(i).and_then(parse_details);
                 i += 1;
@@ -311,7 +317,7 @@ fn parse_floats(s: &str) -> Option<Vec<f32>> {
 }
 
 /// Parse a comma-separated per-pane on/off list (`1`/`0`), shared by `--detail`,
-/// `--share-clip`, `--show` and `--tsync`.
+/// `--share-clip`, `--show`, `--scale` and `--tsync`.
 fn parse_details(s: &str) -> Option<Vec<bool>> {
     Some(
         s.split(',')
@@ -859,7 +865,7 @@ mod tests {
 
     #[test]
     fn parses_show_tsync_control() {
-        let args = "a.tif b.tif --show 1,0 --tsync 0,1 --gsync 1,0 --control 1"
+        let args = "a.tif b.tif --show 1,0 --scale 0,1 --tsync 0,1 --gsync 1,0 --control 1"
             .split(' ')
             .map(String::from)
             .collect();
@@ -867,6 +873,7 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(view.visible, Some(vec![true, false]));
+        assert_eq!(view.scale, Some(vec![false, true]));
         assert_eq!(view.tsync, Some(vec![false, true]));
         assert_eq!(view.gsync, Some(vec![true, false]));
         assert_eq!(view.control, Some(1));

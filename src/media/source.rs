@@ -54,6 +54,11 @@ pub struct Still {
     /// re-levelled when the detail budget changes without re-reading the file.
     /// `None` for every other still (an ordinary image, a Compute result).
     pub(super) jp2: Option<super::jp2::Jp2Cache>,
+    /// The decoded frame at its own size while `frame` holds a **Scale**d copy
+    /// (see [`Media::set_scale_to`]) — kept so a new target, or turning Scale
+    /// off, resamples from the original rather than from a resample. `None`
+    /// when unscaled (`frame` is then the original).
+    pub(super) native: Option<Arc<FrameData>>,
 }
 
 /// Frame residency plus LRU / memory-budget bookkeeping, shared by both
@@ -73,6 +78,12 @@ pub(super) struct SeqCache {
     /// scanning + sorting the whole cache each over-budget tick. Kept in sync by
     /// `insert` / `touch` / `evict`; non-resident slots are never in the set.
     lru: BTreeSet<(u64, usize)>,
+    /// The **Scale** target `[width, height]`: every frame stored is first
+    /// nearest-resampled to it (see [`Media::set_scale_to`]). Applied here, in
+    /// the one place frames enter the cache, so the background decodes (which
+    /// normally arrive pre-scaled) and the synchronous fast-scan jumps alike
+    /// hold scaled frames. `None` = frames keep their own size.
+    fit: Option<[usize; 2]>,
 }
 
 impl SeqCache {
@@ -83,6 +94,7 @@ impl SeqCache {
             last_used: vec![0; len],
             resident_bytes: 0,
             lru: BTreeSet::new(),
+            fit: None,
         }
     }
 
@@ -99,6 +111,10 @@ impl SeqCache {
     /// (how a TIFF frontier probe discovers the next page). Out-of-range inserts
     /// are ignored.
     pub(super) fn insert(&mut self, idx: usize, frame: Arc<FrameData>) {
+        let frame = match self.fit {
+            Some(size) if frame.size != size => Arc::new(frame.resample_nearest(size)),
+            _ => frame,
+        };
         if idx < self.cache.len() {
             if let Some(old) = &self.cache[idx] {
                 self.resident_bytes -= old.byte_len(); // already in `lru` at its tick
@@ -155,6 +171,14 @@ impl SeqCache {
         if let Some(Some(old)) = self.cache.get_mut(idx).map(|s| s.take()) {
             self.resident_bytes -= old.byte_len();
             self.lru.remove(&(self.last_used[idx], idx));
+        }
+    }
+
+    /// Drop every resident frame (the known length stays) — a new Scale target
+    /// makes them all the wrong size; they re-decode on demand.
+    fn evict_all(&mut self) {
+        for idx in 0..self.cache.len() {
+            self.evict(idx);
         }
     }
 
@@ -259,6 +283,7 @@ impl Media {
             frame: Arc::new(frame),
             hi_depth,
             jp2: None,
+            native: None,
         })
     }
 
@@ -278,7 +303,14 @@ impl Media {
             Some(frame) => {
                 s.name = cache.display_name();
                 s.hi_depth = frame.hi_depth();
+                // A Scaled still stays scaled: the new level becomes the
+                // original, and the shown frame its resample.
+                let fit = s.native.as_ref().map(|_| s.frame.size);
                 s.frame = Arc::new(frame);
+                if let Some(size) = fit {
+                    s.native = Some(s.frame.clone());
+                    s.frame = Arc::new(s.frame.resample_nearest(size));
+                }
                 Ok(true)
             }
         }
@@ -321,14 +353,68 @@ impl Media {
         !matches!(self, Media::Still(_))
     }
 
+    /// The size every frame is shown at: the **Scale** target when one is set
+    /// (see [`Self::set_scale_to`]), else the media's own [`Self::native_size`].
     pub fn size(&self) -> [usize; 2] {
+        self.scale_to().unwrap_or_else(|| self.native_size())
+    }
+
+    /// The media's own size (page 0 for a sequence), ignoring any Scale target.
+    pub fn native_size(&self) -> [usize; 2] {
         match self {
-            Media::Still(s) => s.frame.size,
+            Media::Still(s) => s.native.as_ref().unwrap_or(&s.frame).size,
             Media::TiffSeq(t) => t.size,
             Media::FileSeq(f) => f.size,
             Media::ConcatSeq(c) => c.size,
             Media::Video(v) => v.size,
         }
+    }
+
+    /// The **Scale** target this media's frames are resampled to, if any.
+    pub fn scale_to(&self) -> Option<[usize; 2]> {
+        match self {
+            Media::Still(s) => s.native.as_ref().map(|_| s.frame.size),
+            Media::TiffSeq(t) => t.frames.fit,
+            Media::FileSeq(f) => f.frames.fit,
+            Media::ConcatSeq(c) => c.frames.fit,
+            Media::Video(v) => v.frames.fit,
+        }
+    }
+
+    /// Show every frame **nearest-resampled** to `fit` (`[width, height]`), or at
+    /// its own size for `None` — the media manager's **Scale** toggle, which
+    /// brings an image onto the Control media's pixel grid. The media then *is*
+    /// that size to everything downstream (view, readout, stats, overlays,
+    /// export), and every sample it shows is still a true source sample. A still
+    /// resamples its kept original at once; a sequence drops its resident frames,
+    /// which re-decode already scaled (the decode pool resamples on its worker —
+    /// [`Self::scale_to`] rides the request). Returns whether anything changed.
+    pub fn set_scale_to(&mut self, fit: Option<[usize; 2]>) -> bool {
+        // A target equal to the own size is no scaling at all.
+        let fit = fit.filter(|&f| f != self.native_size());
+        if fit == self.scale_to() {
+            return false;
+        }
+        let cache = match self {
+            Media::Still(s) => {
+                let native = s.native.take().unwrap_or_else(|| s.frame.clone());
+                match fit {
+                    Some(size) => {
+                        s.frame = Arc::new(native.resample_nearest(size));
+                        s.native = Some(native);
+                    }
+                    None => s.frame = native,
+                }
+                return true;
+            }
+            Media::TiffSeq(t) => &mut t.frames,
+            Media::FileSeq(f) => &mut f.frames,
+            Media::ConcatSeq(c) => &mut c.frames,
+            Media::Video(v) => &mut v.frames,
+        };
+        cache.fit = fit;
+        cache.evict_all();
+        true
     }
 
     /// For a sequence built from **several files concatenated into one timeline**
@@ -487,7 +573,11 @@ impl Media {
             // resident memory, and hiding it from the budget would make the
             // slider's frame count a lie (stills never evict, so this only
             // ever *reports* — it can't be reclaimed).
-            Media::Still(s) => s.frame.byte_len() + s.jp2.as_ref().map_or(0, |c| c.bytes.len()),
+            Media::Still(s) => {
+                s.frame.byte_len()
+                    + s.native.as_ref().map_or(0, |f| f.byte_len())
+                    + s.jp2.as_ref().map_or(0, |c| c.bytes.len())
+            }
             Media::TiffSeq(t) => t.frames.resident_bytes,
             Media::FileSeq(f) => f.frames.resident_bytes,
             Media::ConcatSeq(c) => c.frames.resident_bytes,

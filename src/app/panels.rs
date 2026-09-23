@@ -917,6 +917,32 @@ impl CimApp {
                                         {
                                             self.set_sync_geometry(i, gs);
                                         }
+                                        // Scale: show this media nearest-resampled
+                                        // to the Control's size (`sync_scales` applies
+                                        // it). Meaningless on the Control itself.
+                                        let is_control = self.control == i;
+                                        let scale_hover = if is_control {
+                                            t!("manager.scale_control_hover")
+                                        } else {
+                                            let [w, h] =
+                                                self.panes[self.control].media.native_size();
+                                            t!("manager.scale_hover", w = w, h = h)
+                                        };
+                                        let scale_on = self.panes[i].scale && !is_control;
+                                        if ui
+                                            .add_enabled(
+                                                !is_control,
+                                                egui::SelectableLabel::new(
+                                                    scale_on,
+                                                    t!("manager.scale"),
+                                                ),
+                                            )
+                                            .on_hover_text(scale_hover.clone())
+                                            .on_disabled_hover_text(scale_hover)
+                                            .clicked()
+                                        {
+                                            self.panes[i].scale = !self.panes[i].scale;
+                                        }
                                         // The Control pane is the shared clip-bounds
                                         // source (any media) and, when it's a sequence,
                                         // also drives the timeline / loop.
