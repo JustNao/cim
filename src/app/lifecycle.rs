@@ -46,6 +46,7 @@ impl CimApp {
                 p.contrast = match t {
                     cli::Tone::Linear => ContrastMode::Linear,
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
+                    cli::Tone::Boost => ContrastMode::Boost,
                     cli::Tone::Colormap(pal) => {
                         p.tone.palette = *pal;
                         ContrastMode::Colormap
@@ -53,7 +54,7 @@ impl CimApp {
                 };
                 p.sync_tone = false;
                 // Restored tone re-renders via `tone_sig`; no `tex` nulling (it
-                // would flash black for a heavy LUT_ALPHA/details pane).
+                // would flash black for a heavy operator/details pane).
             }
         }
         // Per-pane Linear clip (`--clip`): a toggle + percentile. Like --tone this
@@ -214,12 +215,13 @@ impl CimApp {
         let n = self.panes.len();
         if n > 0 {
             // Per-pane tone mode (effective — shared when tone-synced). The mode
-            // is Linear for every pane unless LUT_ALPHA is chosen, so omit `--tone`
-            // when no pane uses LUT_ALPHA.
+            // is Linear for every pane unless another tone is chosen, so omit
+            // `--tone` when every pane is Linear.
             let tones: Vec<String> = (0..n)
                 .map(|i| match self.contrast_of(i) {
                     ContrastMode::Linear => "linear".to_string(),
                     ContrastMode::LutAlpha => "lutalpha".to_string(),
+                    ContrastMode::Boost => "boost".to_string(),
                     ContrastMode::Colormap => {
                         format!("colormap:{}", self.tone_of(i).palette.token())
                     }

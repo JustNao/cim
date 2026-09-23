@@ -515,6 +515,7 @@ impl ExportPane {
                     .filter(|_| crate::tone::uses_colormap(self.contrast, sub)),
                 ops: crate::imageproc::Ops {
                     lut_alpha: self.contrast == ContrastMode::LutAlpha,
+                    boost: self.contrast == ContrastMode::Boost,
                     details: self.details,
                 },
             },

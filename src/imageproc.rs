@@ -1,10 +1,11 @@
 //! Runtime loader + per-pane instance manager for the optional proprietary C++
 //! image-processing operators.
 //!
-//! The two operators live in **separately built** shared libraries, one each:
-//! LUT_ALPHA (auto-contrast) and DETAILS_ENHANCED (detail enhancement). cim does
-//! **not** link them at build time: each is loaded on demand at startup by its
-//! hard-coded file name (see `LUT_ALPHA_LIB` / `DETAILS_LIB`). The **directory**
+//! The operators live in **separately built** shared libraries, one each:
+//! LUT_ALPHA and Boost (two alternative auto-contrast tones) and DETAILS_ENHANCED
+//! (detail enhancement). cim does **not** link them at build time: each is loaded
+//! on demand at startup by its hard-coded file name (see `LUT_ALPHA_LIB` /
+//! `BOOST_LIB` / `DETAILS_LIB`). The **directory**
 //! that holds them is configured in Settings (`Config::cpp_lib_dir`) and passed
 //! to [`init`]; when it's left empty the bare name is used and the system loader
 //! resolves it via its search path (`LD_LIBRARY_PATH`, Linux-only), preserving
@@ -33,7 +34,7 @@
 //!
 //! `data` is the raw 16-bit buffer (transformed in place); `lut8` is a read-only
 //! `len`-sample 8-bit render of the **current view LUT output** — the pane's own
-//! tone as it is shown, i.e. `data` after any LUT_ALPHA (or the linear/clip map)
+//! tone as it is shown, i.e. `data` after any LUT_ALPHA / Boost (or the linear/clip map)
 //! downscaled to 8 bits — built in [`PaneOps::apply`], so it always tracks
 //! whichever LUT the view is using.
 //!
@@ -45,7 +46,7 @@
 //! `renderer::Worker`) or its export pane, so a given instance is only ever
 //! touched by one thread — the proprietary class need not be reentrant.
 //!
-//! Both operators receive the frame as a **single-channel 16-bit** buffer
+//! All operators receive the frame as a **single-channel 16-bit** buffer
 //! (`width * height` u16 samples, one per pixel, row-major) and transform it
 //! **in place**, keeping the same dimensions. They are only ever invoked for
 //! frames whose native format is **single-channel 16-bit unsigned** (see the
@@ -62,7 +63,7 @@ use std::sync::{Mutex, PoisonError, RwLock};
 /// The C symbols each operator library exports (see the module docs):
 /// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
 type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
-/// LUT_ALPHA's `apply`: raw 16-bit buffer, transformed in place.
+/// LUT_ALPHA's and Boost's `apply`: raw 16-bit buffer, transformed in place.
 type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
 /// DETAILS_ENHANCED's `apply`: the raw 16-bit buffer (in place) **plus** the
 /// after-LUT 8-bit companion (read-only), both `len` samples.
@@ -76,6 +77,7 @@ type DestroyFn = unsafe extern "C" fn(*mut c_void);
 // (`LD_LIBRARY_PATH`) by bare name.
 // TODO: replace these placeholders with the real distributed file names.
 const LUT_ALPHA_LIB: &str = "libcim_lut_alpha.so"; // placeholder
+const BOOST_LIB: &str = "libcim_boost.so"; // placeholder
 const DETAILS_LIB: &str = "libcim_details_enhanced.so"; // placeholder
 
 /// Resolve a library file name against the optional configured directory. With a
@@ -94,7 +96,7 @@ fn resolve(dir: Option<&Path>, name: &str) -> PathBuf {
 struct Operator {
     _lib: libloading::Library,
     create: CreateFn,
-    /// The `<stem>_apply` symbol. LUT_ALPHA and DETAILS_ENHANCED export different
+    /// The `<stem>_apply` symbol. LUT_ALPHA / Boost and DETAILS_ENHANCED export different
     /// `apply` signatures ([`ApplyFn`] vs [`DetailsApplyFn`]); it is stored as the
     /// canonical [`ApplyFn`] and the DETAILS call site transmutes it to
     /// [`DetailsApplyFn`] (all fn pointers share a representation, so this is
@@ -112,6 +114,7 @@ unsafe impl Sync for Operator {}
 /// Guarded by an `RwLock` so each pane's worker can read them concurrently to
 /// build its own instance.
 static LUT_ALPHA: RwLock<Option<Operator>> = RwLock::new(None);
+static BOOST: RwLock<Option<Operator>> = RwLock::new(None);
 static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
 
 /// Process-wide lock serialising every operator **`create` and `destroy`** call.
@@ -124,7 +127,7 @@ static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
 /// heavy size-dependent constructors routinely touch process-global state on first
 /// use — FFTW planner setup, static lookup-table init, one-time library bring-up —
 /// none of which is guaranteed reentrant. When several synced panes are switched to
-/// LUT_ALPHA / Details in the same frame they each fire a render job at once, so
+/// LUT_ALPHA / Boost / Details in the same frame they each fire a render job at once, so
 /// their worker threads call `create` **simultaneously** and race that global init
 /// (intermittent segfault); applying the operator to one desynced pane at a time
 /// never overlaps two constructions, which is why that path never crashes. This
@@ -157,7 +160,7 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
     }
 }
 
-/// Attempt to load both operator libraries from `dir` (the configured library
+/// Attempt to load every operator library from `dir` (the configured library
 /// folder, or `None` to resolve by bare name via `LD_LIBRARY_PATH`). Call once at
 /// startup. A library that's missing or lacking a symbol simply leaves that
 /// operator unavailable (its feature disabled in the UI); it never fails startup.
@@ -168,8 +171,7 @@ pub fn init(dir: Option<&Path>) {
 }
 
 /// Load any operator library that **isn't loaded yet** from `dir`, leaving
-/// already-loaded operators untouched, and return the resulting
-/// `(lut_alpha_loaded, details_loaded)`.
+/// already-loaded operators untouched, and return which are loaded afterwards.
 ///
 /// This is the safe way to apply a newly configured folder **without a restart**:
 /// it only ever *adds* a library, never unloads one, so it cannot invalidate the
@@ -177,44 +179,96 @@ pub fn init(dir: Option<&Path>) {
 /// (see the module docs — those bypass the `RwLock`). It therefore fills in only
 /// operators that failed to load at startup (empty/wrong folder then); repointing
 /// an *already-loaded* operator at a different folder still needs a restart.
-pub fn load_missing(dir: Option<&Path>) -> (bool, bool) {
-    // Hold each slot's write lock only while (re)loading it; scope the guards so
-    // the `*_available()` reads below take fresh read locks.
-    {
-        let mut slot = LUT_ALPHA.write().unwrap();
+pub fn load_missing(dir: Option<&Path>) -> Libs {
+    for (slot, lib, stem) in [
+        (&LUT_ALPHA, LUT_ALPHA_LIB, "cim_lut_alpha"),
+        (&BOOST, BOOST_LIB, "cim_boost"),
+        (&DETAILS, DETAILS_LIB, "cim_details_enhanced"),
+    ] {
+        // Hold each slot's write lock only while (re)loading it, so the
+        // `loaded()` read below takes fresh read locks.
+        let mut slot = slot.write().unwrap();
         if slot.is_none() {
-            if let Ok(op) = load_one(&resolve(dir, LUT_ALPHA_LIB), "cim_lut_alpha") {
+            if let Ok(op) = load_one(&resolve(dir, lib), stem) {
                 *slot = Some(op);
             }
         }
     }
-    {
-        let mut slot = DETAILS.write().unwrap();
-        if slot.is_none() {
-            if let Ok(op) = load_one(&resolve(dir, DETAILS_LIB), "cim_details_enhanced") {
-                *slot = Some(op);
-            }
-        }
-    }
-    (lut_alpha_available(), details_available())
+    loaded()
 }
 
-/// Whether each operator library **file** is present in `dir` (or, with no
-/// directory, resolvable next to the working directory by bare name). Returns
-/// `(lut_alpha_present, details_present)`. Used by Settings to show a found /
-/// not-found indicator for the configured folder — a pure filesystem check that
-/// doesn't load anything, so it can run live as the user edits the path.
-pub fn libs_present(dir: Option<&Path>) -> (bool, bool) {
-    (
-        resolve(dir, LUT_ALPHA_LIB).is_file(),
-        resolve(dir, DETAILS_LIB).is_file(),
-    )
+/// One flag per operator library — which are present in a folder
+/// ([`libs_present`]) or loaded ([`loaded`]). A struct rather than a tuple so
+/// adding an operator can't silently shift a positional bool at a call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Libs {
+    pub lut_alpha: bool,
+    pub boost: bool,
+    pub details: bool,
+}
+
+impl Libs {
+    /// The operators' own (untranslated) names, in a fixed order.
+    const NAMES: [&'static str; 3] = ["LUT_ALPHA", "Boost", "Details"];
+
+    fn flags(self) -> [bool; 3] {
+        [self.lut_alpha, self.boost, self.details]
+    }
+
+    /// Whether every operator's library is set.
+    pub fn all(self) -> bool {
+        self.flags().iter().all(|&f| f)
+    }
+
+    /// Whether no operator's library is set.
+    pub fn none(self) -> bool {
+        !self.flags().iter().any(|&f| f)
+    }
+
+    /// The set operators' names, comma-separated (`"LUT_ALPHA, Details"`), for
+    /// the Settings indicators and the toolbar note.
+    pub fn names(self) -> String {
+        Self::NAMES
+            .iter()
+            .zip(self.flags())
+            .filter_map(|(n, f)| f.then_some(*n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Which operator library **files** are present in `dir` (or, with no directory,
+/// resolvable next to the working directory by bare name). Used by Settings to
+/// show a found / not-found indicator for the configured folder — a pure
+/// filesystem check that doesn't load anything, so it can run live as the user
+/// edits the path.
+pub fn libs_present(dir: Option<&Path>) -> Libs {
+    Libs {
+        lut_alpha: resolve(dir, LUT_ALPHA_LIB).is_file(),
+        boost: resolve(dir, BOOST_LIB).is_file(),
+        details: resolve(dir, DETAILS_LIB).is_file(),
+    }
+}
+
+/// Which operators are loaded and callable right now.
+pub fn loaded() -> Libs {
+    Libs {
+        lut_alpha: lut_alpha_available(),
+        boost: boost_available(),
+        details: details_available(),
+    }
 }
 
 /// Whether the LUT_ALPHA operator is loaded and callable. The UI gates the
 /// LUT_ALPHA contrast mode on this.
 pub fn lut_alpha_available() -> bool {
     LUT_ALPHA.read().unwrap().is_some()
+}
+
+/// Whether the Boost operator is loaded and callable. The UI gates the Boost
+/// contrast mode on this.
+pub fn boost_available() -> bool {
+    BOOST.read().unwrap().is_some()
 }
 
 /// Whether the Details (detail-enhancement) operator is loaded and callable. The
@@ -232,7 +286,9 @@ pub fn details_available() -> bool {
 pub fn ops_active(frame: &crate::media::FrameData, ops: Ops) -> bool {
     frame.is_op_input()
         && !frame.is_mask()
-        && ((ops.lut_alpha && lut_alpha_available()) || (ops.details && details_available()))
+        && ((ops.lut_alpha && lut_alpha_available())
+            || (ops.boost && boost_available())
+            || (ops.details && details_available()))
 }
 
 /// How to turn a frame's samples into display pixels: the window, the optional
@@ -262,6 +318,9 @@ pub struct Display {
 pub struct Ops {
     /// Run LUT_ALPHA (only a LUT_ALPHA-tone pane sets it; masks never do).
     pub lut_alpha: bool,
+    /// Run Boost (only a Boost-tone pane sets it). An alternative tone to
+    /// LUT_ALPHA, so the two are never both set.
+    pub boost: bool,
     /// Run the detail enhancement.
     pub details: bool,
 }
@@ -311,20 +370,21 @@ const INSTANCES_PER_OP: usize = 3;
 #[derive(Default)]
 pub struct PaneOps {
     lut_alpha: Vec<Instance>,
+    boost: Vec<Instance>,
     details: Vec<Instance>,
 }
 
 impl PaneOps {
     /// Apply the tone operators to an already-rendered **single-channel 16-bit**
-    /// buffer (`width * height` samples) in place: the optional LUT_ALPHA operator
-    /// (when `lut_alpha` is set) followed by the optional details enhancement. Each
-    /// stage is a no-op when its library isn't loaded (callers also gate on
-    /// `lut_alpha_available` / `details_available`). Reuses this pane's cached
+    /// buffer (`width * height` samples) in place: the optional tone operator —
+    /// LUT_ALPHA or Boost, whichever `ops` asks for — followed by the optional
+    /// details enhancement. Each stage is a no-op when its library isn't loaded
+    /// (callers also gate on `ops_active`). Reuses this pane's cached
     /// instances, building one only for a `(width, height)` it doesn't hold.
     ///
     /// DETAILS_ENHANCED additionally receives the **after-LUT 8-bit companion** of
     /// the frame — the current view's tone output. That is exactly `gray` as it
-    /// stands here (LUT_ALPHA already applied if this is a LUT_ALPHA pane, and the
+    /// stands here (LUT_ALPHA / Boost already applied if that is the pane's tone, and the
     /// linear/clip window already baked into the render) downscaled to 8 bits, i.e.
     /// the very pixels the pane would show without details. It is built here, so the
     /// operator always sees whichever LUT the view is currently using.
@@ -339,10 +399,15 @@ impl PaneOps {
                 run(inst, gray);
             }
         }
+        if ops.boost {
+            if let Some(inst) = Self::ensure(&mut self.boost, &BOOST, width, height) {
+                run(inst, gray);
+            }
+        }
         if ops.details {
             if let Some(inst) = Self::ensure(&mut self.details, &DETAILS, width, height) {
                 // The 8-bit companion is the current view LUT output: `gray`
-                // (post LUT_ALPHA if used, else the linear/clip map) downscaled
+                // (post LUT_ALPHA / Boost if used, else the linear/clip map) downscaled
                 // to 8 bits.
                 let companion: Vec<u8> = gray.iter().map(|&s| (s >> 8) as u8).collect();
                 run_details(inst, gray, &companion);
@@ -455,7 +520,8 @@ impl PaneOps {
     }
 }
 
-/// Run one instance's LUT_ALPHA-style operator over `gray` in place.
+/// Run one instance's LUT_ALPHA-style operator (LUT_ALPHA or Boost) over `gray`
+/// in place.
 fn run(inst: &Instance, gray: &mut [u16]) {
     // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/writes
     // within it and keeps the dimensions (per the ABI). `handle` matches `apply`.
@@ -479,5 +545,30 @@ fn run_details(inst: &Instance, gray: &mut [u16], companion: &[u8]) {
             companion.as_ptr(),
             gray.len(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libs_names_list_the_set_operators_in_order() {
+        let none = Libs::default();
+        assert!(none.none() && !none.all());
+        assert_eq!(none.names(), "");
+        let some = Libs {
+            lut_alpha: true,
+            details: true,
+            ..none
+        };
+        assert!(!some.none() && !some.all());
+        assert_eq!(some.names(), "LUT_ALPHA, Details");
+        let all = Libs {
+            boost: true,
+            ..some
+        };
+        assert!(all.all());
+        assert_eq!(all.names(), "LUT_ALPHA, Boost, Details");
     }
 }

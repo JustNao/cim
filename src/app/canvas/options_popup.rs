@@ -41,16 +41,22 @@ impl CimApp {
         let mut details = self.details_of(idx);
         let mut rotation = self.rotation_of(idx);
 
-        // The proprietary operators (LUT_ALPHA / Details) each need their own
-        // loaded library and a single-channel 16-bit frame; gate their controls
-        // independently and explain why when disabled.
+        // The proprietary operators (LUT_ALPHA / Boost / Details) each need their
+        // own loaded library and a single-channel 16-bit frame; gate their
+        // controls independently and explain why when disabled.
         let op_input = self.pane_is_op_input(idx);
-        let lut_ok = crate::imageproc::lut_alpha_available() && op_input;
         let details_ok = crate::imageproc::details_available() && op_input;
-        let lut_hint = if !crate::imageproc::lut_alpha_available() {
-            t!("transform.op_missing_lib", lib = "LUT_ALPHA")
-        } else {
-            t!("transform.op_needs_u16")
+        // Why an operator tone `m` can't be picked, or `None` when it can.
+        let tone_blocked = |m: ContrastMode| {
+            if !m.is_operator() {
+                None
+            } else if !m.library_loaded() {
+                Some(t!("transform.op_missing_lib", lib = m.label()))
+            } else if !op_input {
+                Some(t!("transform.op_needs_u16"))
+            } else {
+                None
+            }
         };
         let details_hint = if !crate::imageproc::details_available() {
             t!("transform.op_missing_lib", lib = "Details")
@@ -167,18 +173,21 @@ impl CimApp {
                                 .width(130.0)
                                 .show_ui(ui, |ui| {
                                     for m in ContrastMode::ORDER {
-                                        // LUT_ALPHA needs the library + a 16-bit
-                                        // frame; disable it otherwise (unless it's
-                                        // already the pane's mode, so it stays
+                                        // An operator tone needs its library + a
+                                        // 16-bit frame; disable it otherwise (unless
+                                        // it's already the pane's mode, so it stays
                                         // visible / switchable away).
-                                        if m == ContrastMode::LutAlpha && !lut_ok && contrast != m {
-                                            ui.add_enabled(
-                                                false,
-                                                egui::SelectableLabel::new(false, m.label()),
-                                            )
-                                            .on_disabled_hover_text(lut_hint.clone());
-                                        } else {
-                                            ui.selectable_value(&mut contrast, m, m.label());
+                                        match tone_blocked(m).filter(|_| contrast != m) {
+                                            Some(why) => {
+                                                ui.add_enabled(
+                                                    false,
+                                                    egui::SelectableLabel::new(false, m.label()),
+                                                )
+                                                .on_disabled_hover_text(why);
+                                            }
+                                            None => {
+                                                ui.selectable_value(&mut contrast, m, m.label());
+                                            }
                                         }
                                     }
                                 });
@@ -485,9 +494,9 @@ fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone:
             ui.end_row();
             draw_clip_and_share(ui, tone);
         }
-        // LUT_ALPHA has no options. Add a knob here: one row + a field on
-        // `ToneOptions`.
-        ContrastMode::LutAlpha => {}
+        // The operator tones have no options. Add a knob here: one row + a field
+        // on `ToneOptions`.
+        ContrastMode::LutAlpha | ContrastMode::Boost => {}
     }
 }
 

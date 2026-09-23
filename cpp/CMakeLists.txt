@@ -1,9 +1,10 @@
 # Example CMake build for the optional cim image-processing operators.
 #
-# Builds TWO shared libraries — one per operator — under the exact names cim
-# loads at runtime (see src/imageproc.rs: LUT_ALPHA_LIB / DETAILS_LIB):
+# Builds THREE shared libraries — one per operator — under the exact names cim
+# loads at runtime (see src/imageproc.rs: LUT_ALPHA_LIB / BOOST_LIB / DETAILS_LIB):
 #
 #     libcim_lut_alpha.so         <- lut_alpha.cpp        + your vendor alpha subsystem
+#     libcim_boost.so             <- boost.cpp            + your vendor boost subsystem
 #     libcim_details_enhanced.so  <- details_enhanced.cpp + your vendor detail subsystem
 #
 # Each library exports only its own operator's cim_* symbols and links only its
@@ -12,9 +13,10 @@
 #
 #     cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release
 #     cmake --build build
-#     # -> build/libcim_lut_alpha.so, build/libcim_details_enhanced.so
+#     # -> build/libcim_lut_alpha.so, build/libcim_boost.so,
+#     #    build/libcim_details_enhanced.so
 #
-# Then put both libraries AND their vendor .so dependencies together in one
+# Then put the libraries AND their vendor .so dependencies together in one
 # directory on cim's loader path and launch cim (Linux-only):
 #
 #     LD_LIBRARY_PATH=/path/to/lib ./cim
@@ -26,9 +28,10 @@ project(cim_ops LANGUAGES CXX)
 # CMake adds the `lib` prefix and `.so` suffix, so the target name is the stem:
 # target `cim_lut_alpha` -> `libcim_lut_alpha.so`, exactly what cim resolves.
 add_library(cim_lut_alpha SHARED lut_alpha.cpp)
+add_library(cim_boost SHARED boost.cpp)
 add_library(cim_details_enhanced SHARED details_enhanced.cpp)
 
-foreach(op cim_lut_alpha cim_details_enhanced)
+foreach(op cim_lut_alpha cim_boost cim_details_enhanced)
     target_compile_features(${op} PRIVATE cxx_std_17)
     set_target_properties(${op} PROPERTIES
         # A shared library needs PIC; setting it explicitly also forces any static
@@ -50,6 +53,9 @@ endforeach()
 #
 #   target_include_directories(cim_lut_alpha PRIVATE /path/to/vendor_alpha/include)
 #   target_link_libraries(cim_lut_alpha PRIVATE /path/to/vendor_alpha/lib/libvendor_alpha.so)
+#
+#   target_include_directories(cim_boost PRIVATE /path/to/vendor_boost/include)
+#   target_link_libraries(cim_boost PRIVATE /path/to/vendor_boost/lib/libvendor_boost.so)
 #
 #   target_include_directories(cim_details_enhanced PRIVATE /path/to/vendor_details/include)
 #   target_link_libraries(cim_details_enhanced PRIVATE /path/to/vendor_details/lib/libvendor_details.so)

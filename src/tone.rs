@@ -37,10 +37,11 @@ pub fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize,
 /// The effective per-tail clip percentile for a pane's tone: `Some(pct)` clips
 /// that much off each tail, `None` maps the full range.
 ///
-/// LUT_ALPHA always takes the full range — it computes its own contrast — so the
-/// clip toggle doesn't apply to it. Linear and Colormap share the same bounds.
+/// An operator tone (LUT_ALPHA / Boost) always takes the full range — it computes
+/// its own contrast — so the clip toggle doesn't apply to it. Linear and Colormap
+/// share the same bounds.
 pub fn clip_pct(contrast: ContrastMode, tone: &ToneOptions) -> Option<f32> {
-    (contrast != ContrastMode::LutAlpha && tone.clip.enabled).then_some(tone.clip.percent)
+    (!contrast.is_operator() && tone.clip.enabled).then_some(tone.clip.percent)
 }
 
 /// Whether a pane renders through the palette rather than the plain LUT.
@@ -160,8 +161,9 @@ mod tests {
         tone.clip.percent = 0.25;
         assert_eq!(clip_pct(ContrastMode::Linear, &tone), Some(0.25));
         assert_eq!(clip_pct(ContrastMode::Colormap, &tone), Some(0.25));
-        // LUT_ALPHA computes its own contrast: always the full range.
+        // LUT_ALPHA / Boost compute their own contrast: always the full range.
         assert_eq!(clip_pct(ContrastMode::LutAlpha, &tone), None);
+        assert_eq!(clip_pct(ContrastMode::Boost, &tone), None);
         tone.clip.enabled = false;
         assert_eq!(clip_pct(ContrastMode::Linear, &tone), None);
     }

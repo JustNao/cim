@@ -86,8 +86,8 @@ src/
     percentile.rs  The one per-tail percentile histogram scan (rect + fallback),
                  shared by whole-image auto-contrast and region tone.
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
-                 (LUT_ALPHA, DETAILS_ENHANCED); C++ in cpp/ is built separately
-                 into two .so, loaded by hard-coded name. PaneOps owns a pane's
+                 (LUT_ALPHA, Boost, DETAILS_ENHANCED); C++ in cpp/ is built
+                 separately into three .so, loaded by hard-coded name. PaneOps owns a pane's
                  per-operator instances (create/apply/destroy; 16-bit only) and
                  the shared render tail render_display; ops_active gates them.
   cpu.rs         The instance's CPU thread budget (§5.1): splits config.cpu_budget
@@ -851,6 +851,13 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   percentile are seeded in `add_pane` and editable per pane. The default mode.
 - **LUT_ALPHA** — full-range map then the proprietary operator at full strength
   (no options; ignores the clip). Knobs slot in via `draw_tone_options`.
+- **Boost** — a second proprietary auto-contrast tone with **exactly LUT_ALPHA's
+  behaviour** (own library `libcim_boost.so`, `Ops.boost`, same ABI, same exemptions),
+  an alternative to it rather than a stage after it. Everything that exempts an operator
+  tone — clip (`tone::clip_pct`), Share clip, region tone / export crop (`tone_region`,
+  `tone_sig`) — reads **`ContrastMode::is_operator()`**, and the tone picker gates each
+  operator tone on `ContrastMode::library_loaded()`, so a further operator tone joins
+  those rules by adding itself to those two methods.
 - **Colormap** — false-colour a **mono** frame through a palette (`crate::palette`:
   viridis / turbo / diverging), using the **same window/clip bounds as Linear**; a
   display-only tone (no operators), rendered via `FrameData::render_cmap` (a per-value
@@ -862,7 +869,7 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
 Plus a per-pane **Share clip** toggle (`ToneOptions.share_clip`) that locks the pane's
 display bounds to the **Control** media's own `[lo,hi]` (`control_clip_bounds` — the
 Control pane's clip / full-range map on its current frame) instead of computing its own,
-for any non-LUT_ALPHA tone, so panes are **locked to identical display bounds** and real
+for any non-operator tone (not LUT_ALPHA / Boost), so panes are **locked to identical display bounds** and real
 intensity differences show as brightness rather than being hidden by per-pane
 auto-normalisation. `tone_bounds` splits into `own_tone_bounds` (a pane's own clip / region
 bounds — `tone::clip_pct` + `tone_region` + `tone::frame_bounds`, §2) and the Share-clip path
@@ -887,10 +894,10 @@ Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
 sample per pixel) so they see full native precision, then the result is expanded
 back to grey RGBA and downscaled to 8-bit for the texture. **They run only for
 single-channel 16-bit (`uint16`) frames with the operator library loaded** —
-otherwise LUT_ALPHA / Details fall back to the plain 8-bit LUT render
+otherwise LUT_ALPHA / Boost / Details fall back to the plain 8-bit LUT render
 (`render_into`). **One predicate decides when the operators run —
-`imageproc::ops_active(frame, lut_alpha, details)`** (folding in `is_op_input` +
-`lut_alpha_available`/`details_available`, and excluding masks); the UI-gating
+`imageproc::ops_active(frame, ops)`** (folding in `is_op_input` +
+`lut_alpha_available`/`boost_available`/`details_available`, and excluding masks); the UI-gating
 `pane_is_op_input` and the pane-indexed `CimApp::pane_ops_active` sit alongside it.
 The heavy render **tail** (gray16 render → operators → expand to RGBA, else plain
 LUT) is itself a **single function, `imageproc::PaneOps::render_display`**, so the
@@ -945,8 +952,8 @@ percentile** too (`ExportPane.clip: Option<f32>` → `clip_bounds`/`display_boun
 so an exported frame matches the live view's tone exactly.
 
 The operators are **loaded at runtime** (`libloading`, Linux-only) at startup
-(`imageproc::init(dir)`) from **two separate libraries**, one per operator, by
-their hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `DETAILS_LIB`). The
+(`imageproc::init(dir)`) from **three separate libraries**, one per operator, by
+their hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `BOOST_LIB` / `DETAILS_LIB`). The
 directory is the **Library folder** Setting (`config.cpp_lib_dir`): when set,
 each lib is loaded as `<dir>/<name>`; when empty, it defaults to a **`LIBS`
 folder next to the cim executable** (`<cim location>/LIBS`), and only if the
@@ -957,14 +964,16 @@ without a restart: `update` notices `cpp_lib_dir` changed and calls
 `CimApp::load_cpp_libs` → `imageproc::load_missing`, which only ever *adds* a
 not-yet-loaded library, never unloads one, so it can't dangle the
 `apply`/`destroy` pointers copied into live render/export instances (it then
-invalidates textures to re-render when something newly loads). Repointing an
+invalidates textures to re-render when something newly loads, naming what loaded).
+Which libraries are present / loaded is reported as an `imageproc::Libs` (one flag per
+operator, `names()` for the Settings indicators) rather than positional bools. Repointing an
 *already-loaded* operator at a different folder still needs a restart. The operators are **heavy, size-dependent
 C++ objects**, so the C ABI is a **create/apply/destroy lifecycle** per operator
 (`cim_<op>_create(w,h)` → opaque handle, `cim_<op>_apply(handle, data, len)` on a
 **single-channel 16-bit** buffer `len == width*height`, `cim_<op>_destroy`).
 **DETAILS_ENHANCED's `apply` takes a second buffer** — the **after-LUT 8-bit**
 companion of the same frame: the **current view LUT output** (the 16-bit buffer
-after any LUT_ALPHA, else the linear/clip map, downscaled to 8 bits, built in
+after any LUT_ALPHA / Boost, else the linear/clip map, downscaled to 8 bits, built in
 `PaneOps::apply`) — so it sees whatever tone the pane is actually showing, not
 just the raw 16-bit data.
 `imageproc::PaneOps` holds one pane's instances, created lazily and kept in a small
@@ -972,14 +981,15 @@ just the raw 16-bit data.
 input size — and adaptive rendering's base/region size alternation (§7.1) reuses both
 instead of rebuilding twice a frame; it is owned by the pane's render worker thread
 (and by each export pane), so an instance is only ever touched by one thread. Each operator is independent: a missing library
-disables only its own feature (`lut_alpha_available` / `details_available`). See
+disables only its own feature (`lut_alpha_available` / `boost_available` /
+`details_available`). See
 `INTEGRATION_CPP.md` for the contract and how to build the `.so`.
 
 **Off-thread live render (`RenderPool`, §5-ish).** For a heavy pane, `stage`
 computes a cheap parameter-only `tone_sig` (contrast/clip%/details/region), and
 if neither the shown `tex` nor the `pending` slot holds `(target frame, sig)`,
-submits a `RenderJob` (frame `Arc`, pre-computed `lo/hi` bounds, `lut_alpha`,
-`details`) and returns not-ready — the pane keeps showing its last committed frame.
+submits a `RenderJob` (frame `Arc`, pre-computed `lo/hi` bounds, the pane's
+`Ops`) and returns not-ready — the pane keeps showing its last committed frame.
 `render_inflight` (a set of pane ids) caps it to one render per pane, so rapid
 tone/frame changes coalesce. `pump_render` (each update) drains finished jobs into
 each pane's `pending` slot (not `tex` — the lock-step commit flips them); `CachedTex.sig`
@@ -994,16 +1004,16 @@ they need no locking. `render_inflight` still caps each pane to one in-flight jo
 **Region-driven tone (`Pane.region_tone`).** When pinned (§9), a pane's linear
 bounds come from the shared stats region via `region_display_bounds` — the region's
 min/max (clip off) or its per-tail-percentile clip (clip on). Pixels outside the
-region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA still
-runs over the whole image. Recomputed on each texture rebuild; replicates to all
+region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA / Boost
+still run over the whole image. Recomputed on each texture rebuild; replicates to all
 panes. **An export crop drives the same thing:** while the Export panel is open and a
-crop is set, every non-LUT_ALPHA pane's bounds come from `export.region` (taking
+crop is set, every non-operator pane's bounds come from `export.region` (taking
 precedence over `stats_region`), so the live view previews the region-restricted tone
 the export composites; `tone_sig` folds the crop rect in so panes re-render when it
 changes/clears.
 
 That precedence — **export crop → pinned stats region → whole frame**, never for
-LUT_ALPHA — is `CimApp::tone_region(idx)`, the one place it is stated. It is *policy*;
+an operator tone (LUT_ALPHA / Boost) — is `CimApp::tone_region(idx)`, the one place it is stated. It is *policy*;
 the maths it feeds is `tone::frame_bounds` (§2). The export snapshots the method's
 result into `ExportPane.region`, so a region-pinned pane exports with the bounds it
 displays (§10) — it previously had no region on the export side at all.
@@ -1913,7 +1923,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,
   `--zoom`, `--center X,Y`, `--frame`, `--pane`, `--control`, `--ab A,B,SPLIT`,
-  `--tone` (per-pane `linear|lutalpha|colormap[:viridis|turbo|diverging]`;
+  `--tone` (per-pane `linear|lutalpha|boost|colormap[:viridis|turbo|diverging]`;
   `linearclip`/`clip` are accepted as deprecated aliases for `linear`), `--clip`
   (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
   at each pane's depth default), `--share-clip` (per-pane `1`/`0` — lock the pane's bounds
@@ -2020,7 +2030,7 @@ per locale, `_version: 1` then `area.key: text`), baked into the binary by
 - **Changing language** (Settings → Language, listing each language in its own name)
   calls `apply_locale` immediately, so the UI is translated on the next frame — no
   restart. The choice is `config.language`, persisted by the ordinary autosave.
-- **Not translated on purpose:** proper names (LUT_ALPHA, Details, Turbo, Viridis, MP4,
+- **Not translated on purpose:** proper names (LUT_ALPHA, Boost, Details, Turbo, Viridis, MP4,
   fps), the A/B slot letters, and anything that is an identifier rather than prose.
 - **Text-sized chrome:** the pane header buttons are hand-painted at a measured width, so
   `draw_header` measures each *translated* label (`text_w`) instead of assuming the

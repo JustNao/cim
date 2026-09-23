@@ -3,8 +3,8 @@
 // cim loads these libraries at **runtime** (not at link time) via `libloading`
 // (see src/imageproc.rs) by hard-coded file name, resolved through the loader
 // search path (`LD_LIBRARY_PATH`; Linux-only). Each operator lives in its **own**
-// shared library (`libcim_lut_alpha.so` / `libcim_details_enhanced.so`) that
-// exports the three C symbols for that operator. cim resolves them by these exact
+// shared library (`libcim_lut_alpha.so` / `libcim_boost.so` /
+// `libcim_details_enhanced.so`) that exports the three C symbols for that operator. cim resolves them by these exact
 // names, so they must be `extern "C"` (unmangled).
 //
 // ---------- Why three symbols per operator (create / apply / destroy) ----------
@@ -28,8 +28,8 @@
 //   * `apply` transforms it IN PLACE and keeps the same dimensions.
 //   * DETAILS_ENHANCED's `apply` takes a SECOND buffer, `lut8`: the after-LUT
 //     8-bit companion of the same frame — the CURRENT VIEW LUT output, i.e. the
-//     exact grayscale the pane is showing (LUT_ALPHA applied if that's the active
-//     tone, else the linear/clip map). `len` samples, one per pixel, row-major,
+//     exact grayscale the pane is showing (LUT_ALPHA / Boost applied if that's the
+//     active tone, else the linear/clip map). `len` samples, one per pixel, row-major,
 //     READ-ONLY (const) context; write your result into `data`, not `lut8`.
 //   * The operators are only ever called for single-channel 16-bit images; cim
 //     expands the result back to grey RGBA afterwards.
@@ -55,6 +55,13 @@ extern "C" {
 CIM_EXPORT void* cim_lut_alpha_create(std::size_t width, std::size_t height);
 CIM_EXPORT void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len);
 CIM_EXPORT void cim_lut_alpha_destroy(void* handle);
+
+// ---- Boost: alternative auto-contrast tone mapping (libcim_boost.so) --------
+// Same contract as LUT_ALPHA (full native range in, its own contrast out); a
+// pane uses one or the other, never both.
+CIM_EXPORT void* cim_boost_create(std::size_t width, std::size_t height);
+CIM_EXPORT void cim_boost_apply(void* handle, std::uint16_t* data, std::size_t len);
+CIM_EXPORT void cim_boost_destroy(void* handle);
 
 // ---- DETAILS_ENHANCED: local detail / sharpness (libcim_details_enhanced.so) --
 // `apply` additionally receives `lut8`, the after-LUT 8-bit companion of the same

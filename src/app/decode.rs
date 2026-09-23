@@ -1072,6 +1072,7 @@ impl CimApp {
             ContrastMode::Linear => 0u8,
             ContrastMode::LutAlpha => 1,
             ContrastMode::Colormap => 2,
+            ContrastMode::Boost => 3,
         };
         let tone = self.tone_of(idx);
         c.hash(&mut h);
@@ -1108,11 +1109,11 @@ impl CimApp {
             // Region-tone bounds move with the shared stats region.
             self.stats_gen.hash(&mut h);
         }
-        // An export crop (Export panel open) restricts every non-LUT_ALPHA pane's
+        // An export crop (Export panel open) restricts every non-operator pane's
         // LUT to that region (`own_tone_bounds`), so fold it in to re-render when
         // the crop changes or clears — and, transitively, for Share-clip panes
         // whose Control adopts it.
-        if self.export.show && self.contrast_of(idx) != ContrastMode::LutAlpha {
+        if self.export.show && !self.contrast_of(idx).is_operator() {
             if let Some(reg) = self.export.region {
                 for v in [reg.min.x, reg.min.y, reg.max.x, reg.max.y] {
                     v.to_bits().hash(&mut h);
@@ -1135,9 +1136,9 @@ impl CimApp {
         let contrast = self.contrast_of(idx);
         let tone = self.tone_of(idx);
         // "Share clip" locks the bounds to the Control media's own bounds (but
-        // not for LUT_ALPHA, which does its own contrast). Falls through to this
-        // pane's own bounds when the Control frame isn't resident yet.
-        if contrast != ContrastMode::LutAlpha && tone.share_clip {
+        // not for an operator tone, which does its own contrast). Falls through
+        // to this pane's own bounds when the Control frame isn't resident yet.
+        if !contrast.is_operator() && tone.share_clip {
             if let Some(b) = self.control_clip_bounds() {
                 return b;
             }
@@ -1167,10 +1168,10 @@ impl CimApp {
     /// 2. else the pinned **stats region**, when this pane has region-tone on;
     /// 3. else nothing.
     ///
-    /// LUT_ALPHA is excluded throughout: it runs over the whole image with its
-    /// own contrast.
+    /// The operator tones (LUT_ALPHA / Boost) are excluded throughout: they run
+    /// over the whole image with their own contrast.
     pub(super) fn tone_region(&self, idx: usize) -> Option<Rect> {
-        if self.contrast_of(idx) == ContrastMode::LutAlpha {
+        if self.contrast_of(idx).is_operator() {
             return None;
         }
         if self.export.show {

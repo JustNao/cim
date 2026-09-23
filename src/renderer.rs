@@ -259,7 +259,7 @@ mod tests {
 
     /// The worker's output must equal the plain LUT render byte-for-byte when
     /// no proprietary library is loaded (the test environment) — including
-    /// when the job *asks* for LUT_ALPHA / details, which is the documented
+    /// when the job *asks* for LUT_ALPHA / Boost / details, which is the documented
     /// fallback. This locks the live-render half of the "all render paths
     /// match pixel-for-pixel" invariant before the paths are unified.
     #[test]
@@ -277,7 +277,19 @@ mod tests {
         let reference = eframe::egui::ColorImage::from_rgba_unmultiplied([8, 4], &reference);
 
         let mut worker = Worker::default();
-        for (lut_alpha, details) in [(false, false), (true, false), (false, true)] {
+        let off = crate::imageproc::Ops::default();
+        for ops in [
+            off,
+            crate::imageproc::Ops {
+                lut_alpha: true,
+                ..off
+            },
+            crate::imageproc::Ops { boost: true, ..off },
+            crate::imageproc::Ops {
+                details: true,
+                ..off
+            },
+        ] {
             let done = worker.render(RenderJob {
                 id: 1,
                 frame: 0,
@@ -287,16 +299,13 @@ mod tests {
                     lo,
                     hi,
                     palette: None,
-                    ops: crate::imageproc::Ops { lut_alpha, details },
+                    ops,
                 },
                 region: Region::whole([8, 4], 1),
                 target: Target::Base,
             });
             assert_eq!(done.image.size, [8, 4]);
-            assert_eq!(
-                done.image, reference,
-                "lut_alpha={lut_alpha} details={details}"
-            );
+            assert_eq!(done.image, reference, "{ops:?}");
         }
     }
 
@@ -333,7 +342,7 @@ mod tests {
                 // Library absent → plain fallback, still the region path.
                 ops: crate::imageproc::Ops {
                     lut_alpha: true,
-                    details: false,
+                    ..Default::default()
                 },
             },
             region,
@@ -400,6 +409,7 @@ mod tests {
             // the palette branch wins regardless.
             ops: crate::imageproc::Ops {
                 lut_alpha: true,
+                boost: true,
                 details: true,
             },
         };

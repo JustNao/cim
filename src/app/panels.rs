@@ -1262,32 +1262,30 @@ impl CimApp {
                             .desired_width(f32::INFINITY),
                     );
                 });
-                // Live found/not-found indicator for the two libraries: green ✔
-                // both present, orange ✔ only one, red ✖ none. A pure filesystem
+                // Live found/not-found indicator for the operator libraries: green
+                // ✔ all present, orange ✔ some, red ✖ none. A pure filesystem
                 // check on the configured folder — it doesn't load anything.
                 let dir = super::cpp_lib_dir(&self.config);
-                let (lut_ok, details_ok) = crate::imageproc::libs_present(dir.as_deref());
+                let found = crate::imageproc::libs_present(dir.as_deref());
                 ui.horizontal(|ui| {
-                    let (icon, color, msg) = match (lut_ok, details_ok) {
-                        (true, true) => (
+                    let (icon, color, msg) = if found.all() {
+                        (
                             "✔",
                             Color32::from_rgb(120, 210, 120),
-                            t!("settings.libs_both").into_owned(),
-                        ),
-                        (false, false) => (
+                            t!("settings.libs_all").into_owned(),
+                        )
+                    } else if found.none() {
+                        (
                             "✖",
                             Color32::from_rgb(230, 120, 120),
                             t!("settings.libs_none").into_owned(),
-                        ),
-                        _ => (
+                        )
+                    } else {
+                        (
                             "✔",
                             Color32::from_rgb(240, 180, 90),
-                            t!(
-                                "settings.libs_one",
-                                lib = if lut_ok { "LUT_ALPHA" } else { "Details" }
-                            )
-                            .into_owned(),
-                        ),
+                            t!("settings.libs_some", libs = found.names()).into_owned(),
+                        )
                     };
                     ui.colored_label(color, egui::RichText::new(icon).strong());
                     ui.colored_label(color, msg);
@@ -1296,13 +1294,11 @@ impl CimApp {
                 // What's actually loaded right now. Libraries auto-load when the
                 // folder changes (see the `update` loop / `CimApp::load_cpp_libs`),
                 // so this reflects the effect of the path above without any button.
-                let lut_loaded = crate::imageproc::lut_alpha_available();
-                let details_loaded = crate::imageproc::details_available();
-                let loaded = match (lut_loaded, details_loaded) {
-                    (true, true) => t!("settings.libs_loaded", libs = "LUT_ALPHA, Details"),
-                    (true, false) => t!("settings.libs_loaded", libs = "LUT_ALPHA"),
-                    (false, true) => t!("settings.libs_loaded", libs = "Details"),
-                    (false, false) => t!("settings.libs_loaded_none"),
+                let libs = crate::imageproc::loaded();
+                let loaded = if libs.none() {
+                    t!("settings.libs_loaded_none")
+                } else {
+                    t!("settings.libs_loaded", libs = libs.names())
                 };
                 ui.label(egui::RichText::new(loaded).weak());
 

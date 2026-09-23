@@ -368,14 +368,14 @@ settings.operators: Opérateurs d'image (C++)
 settings.library_folder: Dossier des bibliothèques
 settings.library_folder_hover: >-
   Dossier contenant les bibliothèques d'opérateurs propriétaires (LUT_ALPHA /
-  Details). Laissez vide pour utiliser le dossier LIBS situé à côté de
+  Boost / Details). Laissez vide pour utiliser le dossier LIBS situé à côté de
   l'exécutable cim. Les bibliothèques se chargent automatiquement quand ce
   dossier change.
 settings.library_folder_hint: (utilise <cim>/LIBS)
 settings.browse: 📂 Parcourir…
-settings.libs_both: Les deux bibliothèques d'opérateurs ont été trouvées
+settings.libs_all: Toutes les bibliothèques d'opérateurs ont été trouvées
 settings.libs_none: Aucune bibliothèque d'opérateur trouvée dans ce dossier
-settings.libs_one: Seule la bibliothèque %{lib} a été trouvée
+settings.libs_some: "Trouvées seulement : %{libs}"
 settings.libs_loaded: "chargées : %{libs}"
 settings.libs_loaded_none: "chargées : aucune"
 settings.shortcuts: Raccourcis clavier
@@ -421,6 +421,7 @@ action.select_media: Sélectionner le média %{n}
 status.load_all_queued: Toutes les images ont été mises en file de décodage…
 status.discovering_length: Découverte de la longueur de la séquence (en-têtes seuls)…
 status.load_stopped: Chargement arrêté
+status.libs_loaded: "Opérateurs chargés : %{libs}"
 status.cache_full: >-
   Cache d'images plein — la suite se poursuit en offsets (en-têtes) seulement
 status.view_command_copied: Commande de vue copiée dans le presse-papiers
@@ -534,7 +535,7 @@ cli.help: |
           --frame <N>              Image de la timeline à afficher
           --pane <N>               Panneau sélectionné
           --ab <A,B,SPLIT>         Opérandes A/B et position 0..1 du séparateur
-          --tone <T,T,...>         Rendu par panneau : linear | lutalpha |
+          --tone <T,T,...>         Rendu par panneau : linear | lutalpha | boost |
                                  colormap[:viridis|turbo|diverging]
           --clip <C,C,...>         Écrêtage linéaire par panneau : off | POURCENT
           --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)

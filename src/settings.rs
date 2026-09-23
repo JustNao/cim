@@ -310,9 +310,9 @@ impl Keybindings {
     }
 }
 
-/// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` routes
-/// the rendered image through the proprietary LUT_ALPHA auto-contrast (see
-/// `crate::imageproc`); `Linear` is the built-in full-range map, with an
+/// Per-pane tone-mapping mode, chosen in the media manager. `LutAlpha` and
+/// `Boost` route the rendered image through a proprietary auto-contrast operator
+/// (see `crate::imageproc`); `Linear` is the built-in full-range map, with an
 /// optional percentile clip toggled per pane (see [`ClipOptions`]).
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum ContrastMode {
@@ -323,6 +323,9 @@ pub enum ContrastMode {
     Linear,
     /// Proprietary LUT_ALPHA auto-contrast, applied to the rendered image.
     LutAlpha,
+    /// Proprietary Boost auto-contrast — an alternative to LUT_ALPHA with the
+    /// same contract (full range in, its own contrast out), from its own library.
+    Boost,
     /// False-colour a **mono** image through a palette (see [`ToneOptions::palette`]).
     /// Uses the same window/clip bounds as Linear; multi-channel frames fall back
     /// to the plain render. A display-only tone (no proprietary operators).
@@ -331,19 +334,39 @@ pub enum ContrastMode {
 
 impl ContrastMode {
     /// The modes in dropdown order.
-    pub const ORDER: [ContrastMode; 3] = [
+    pub const ORDER: [ContrastMode; 4] = [
         ContrastMode::Linear,
         ContrastMode::LutAlpha,
+        ContrastMode::Boost,
         ContrastMode::Colormap,
     ];
 
-    /// Short label for the media-manager dropdown. LUT_ALPHA is the operator's
-    /// own name, so it reads the same in every language.
+    /// Short label for the media-manager dropdown. LUT_ALPHA and Boost are the
+    /// operators' own names, so they read the same in every language.
     pub fn label(self) -> String {
         match self {
             ContrastMode::Linear => t!("tone.linear").into_owned(),
             ContrastMode::LutAlpha => "LUT_ALPHA".to_owned(),
+            ContrastMode::Boost => "Boost".to_owned(),
             ContrastMode::Colormap => t!("tone.colormap").into_owned(),
+        }
+    }
+
+    /// A **proprietary operator tone** (LUT_ALPHA or Boost): it takes the full
+    /// native range and computes its own contrast, so the clip, Share clip,
+    /// region-tone and export-crop bounds all skip it. The one predicate every
+    /// such rule reads, so a new operator tone joins them all at once.
+    pub fn is_operator(self) -> bool {
+        matches!(self, ContrastMode::LutAlpha | ContrastMode::Boost)
+    }
+
+    /// Whether this tone's operator library is loaded (always true for the
+    /// built-in tones) — what the tone picker gates an operator tone on.
+    pub fn library_loaded(self) -> bool {
+        match self {
+            ContrastMode::LutAlpha => crate::imageproc::lut_alpha_available(),
+            ContrastMode::Boost => crate::imageproc::boost_available(),
+            ContrastMode::Linear | ContrastMode::Colormap => true,
         }
     }
 }
@@ -372,8 +395,8 @@ impl Default for ClipOptions {
 }
 
 /// Per-pane tone options. Extend by growing this struct and reading it in
-/// `stage`/`tone_bounds`/`tone_sig`/`view_command`/`export_pane`. (LUT_ALPHA has
-/// no options; it runs the operator at full strength.)
+/// `stage`/`tone_bounds`/`tone_sig`/`view_command`/`export_pane`. (LUT_ALPHA and
+/// Boost have no options; they run the operator at full strength.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
@@ -381,8 +404,8 @@ pub struct ToneOptions {
     /// (its clip / full-range map) instead of computing its own, so panes share
     /// identical bounds — real intensity differences then show as brightness
     /// rather than being hidden by per-pane auto-normalisation. Off by default;
-    /// overrides this pane's own clip when on. Ignored by LUT_ALPHA, which does
-    /// its own contrast.
+    /// overrides this pane's own clip when on. Ignored by LUT_ALPHA / Boost, which
+    /// do their own contrast.
     pub share_clip: bool,
     /// Palette for the Colormap tone (ignored by other modes).
     pub palette: crate::palette::Palette,

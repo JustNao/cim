@@ -800,7 +800,8 @@ struct Pane {
     /// "Geometry" sync group, independent of `sync_tone`.
     sync_geometry: bool,
     visible: bool,
-    /// Per-pane tone-mapping mode (Linear or proprietary LUT_ALPHA).
+    /// Per-pane tone-mapping mode (Linear, Colormap, or a proprietary operator
+    /// tone — LUT_ALPHA / Boost).
     contrast: ContrastMode,
     /// Per-mode tone options (clip percentile, LUT_ALPHA knobs, …), edited in
     /// the Transformations panel.
@@ -1546,8 +1547,8 @@ impl CimApp {
 
     /// Whether pane `i`'s currently shown frame is single-channel 16-bit — the
     /// only input the proprietary operators accept. Used (with
-    /// `imageproc::lut_alpha_available` / `details_available`) to gate the
-    /// LUT_ALPHA mode and the Details toggle in the popup. A not-yet-resident
+    /// `ContrastMode::library_loaded` / `imageproc::details_available`) to gate
+    /// the operator tones and the Details toggle in the popup. A not-yet-resident
     /// frame reads as unsupported until it loads.
     pub(super) fn pane_is_op_input(&self, i: usize) -> bool {
         let f = self.frame_disp(i);
@@ -1578,6 +1579,7 @@ impl CimApp {
     pub(super) fn ops_of(&self, i: usize) -> crate::imageproc::Ops {
         crate::imageproc::Ops {
             lut_alpha: self.contrast_of(i) == ContrastMode::LutAlpha,
+            boost: self.contrast_of(i) == ContrastMode::Boost,
             details: self.details_of(i),
         }
     }
@@ -1600,10 +1602,7 @@ impl CimApp {
     /// cheap to call on every folder change. (Repointing an already-loaded operator
     /// at a different folder still needs a restart.)
     pub(super) fn load_cpp_libs(&mut self) {
-        let before = (
-            crate::imageproc::lut_alpha_available(),
-            crate::imageproc::details_available(),
-        );
+        let before = crate::imageproc::loaded();
         let dir = cpp_lib_dir(&self.config);
         let after = crate::imageproc::load_missing(dir.as_deref());
         if after == before {
@@ -1618,12 +1617,14 @@ impl CimApp {
         // operator, at unchanged keys (the tone signature doesn't see library
         // availability) — drop them all so they re-render with it.
         self.regions.clear();
-        self.status.set(match after {
-            (true, true) => "Operator libraries loaded",
-            (true, false) => "LUT_ALPHA operator loaded",
-            (false, true) => "Details operator loaded",
-            (false, false) => return,
-        });
+        // Name only what this call added (`load_missing` never unloads).
+        let added = crate::imageproc::Libs {
+            lut_alpha: after.lut_alpha && !before.lut_alpha,
+            boost: after.boost && !before.boost,
+            details: after.details && !before.details,
+        };
+        self.status
+            .set(t!("status.libs_loaded", libs = added.names()).into_owned());
     }
 
     /// Set a pane's **Visualization** sync flag. Turning it **off** snapshots the

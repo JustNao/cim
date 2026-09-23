@@ -351,14 +351,14 @@ settings.adaptive_render_hover: >-
 settings.operators: Image operators (C++)
 settings.library_folder: Library folder
 settings.library_folder_hover: >-
-  Folder holding the proprietary operator libraries (LUT_ALPHA / Details).
+  Folder holding the proprietary operator libraries (LUT_ALPHA / Boost / Details).
   Leave empty to use the LIBS folder next to the cim executable. Libraries load
   automatically when this folder changes.
 settings.library_folder_hint: (uses <cim>/LIBS)
 settings.browse: 📂 Browse…
-settings.libs_both: Both operator libraries found
+settings.libs_all: All operator libraries found
 settings.libs_none: No operator libraries found in this folder
-settings.libs_one: Only the %{lib} library found
+settings.libs_some: "Only found: %{libs}"
 settings.libs_loaded: "loaded: %{libs}"
 settings.libs_loaded_none: "loaded: none"
 settings.shortcuts: Keyboard shortcuts
@@ -403,6 +403,7 @@ action.select_media: Select media %{n}
 status.load_all_queued: Queued all frames for background decoding…
 status.discovering_length: Discovering sequence length (headers only)…
 status.load_stopped: Stopped loading
+status.libs_loaded: "Operators loaded: %{libs}"
 status.cache_full: Frame cache full — continuing with offsets only (headers) for the rest
 status.view_command_copied: View command copied to clipboard
 status.settings_reset: Settings reset to defaults
@@ -507,7 +508,7 @@ cli.help: |
           --frame <N>              Timeline frame to show
           --pane <N>               Focused pane
           --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
-          --tone <T,T,...>         Per-pane tone: linear | lutalpha |
+          --tone <T,T,...>         Per-pane tone: linear | lutalpha | boost |
                                  colormap[:viridis|turbo|diverging]
           --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
           --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)

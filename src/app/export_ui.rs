@@ -385,7 +385,7 @@ impl CimApp {
         // frame (matching the live view). The plan attaches the Control source.
         {
             let t = self.tone_of(idx);
-            if self.contrast_of(idx) != ContrastMode::LutAlpha && t.share_clip {
+            if !self.contrast_of(idx).is_operator() && t.share_clip {
                 pane.share_clip = true;
             }
             if self.contrast_of(idx) == ContrastMode::Colormap {

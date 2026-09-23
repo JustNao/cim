@@ -1,7 +1,7 @@
 # Integrating the proprietary C++ image functions
 
-cim calls two proprietary C++ operators — **LUT_ALPHA** (auto-contrast) and
-**DETAILS_ENHANCED** (detail/sharpening). Each lives in its **own separately
+cim calls three proprietary C++ operators — **LUT_ALPHA** and **Boost** (two
+alternative auto-contrast tones) and **DETAILS_ENHANCED** (detail/sharpening). Each lives in its **own separately
 built shared library** (`.so`) that cim loads **at runtime**, not at build time.
 This is a **Linux-only** feature. There is no C++ compiler or `cxx` dependency in
 cim's own build — `cargo build` compiles no C++ at all.
@@ -10,24 +10,25 @@ Because the libraries are loaded dynamically:
 
 - cim builds and runs with **no** proprietary code present.
 - cim loads each library at startup by its **hard-coded file name**
-  (`LUT_ALPHA_LIB` / `DETAILS_LIB` in `src/imageproc.rs` — currently
+  (`LUT_ALPHA_LIB` / `BOOST_LIB` / `DETAILS_LIB` in `src/imageproc.rs` — currently
   placeholders), resolved through the OS loader's search path. Put the libraries
   on that path with `LD_LIBRARY_PATH` when launching cim. A missing library is
   **silently** ignored (no startup log).
 - Each operator is **independent**: if its library is missing or a symbol doesn't
   resolve, only **that** operator's feature is disabled in the UI (the LUT_ALPHA
-  mode, or the Details toggle); the other keeps working and cim otherwise behaves
-  as a plain viewer.
+  or Boost tone, or the Details toggle); the others keep working and cim otherwise
+  behaves as a plain viewer.
 
 ## Where the pieces live
 
 | File | Role |
 |------|------|
-| `src/imageproc.rs` | Runtime loader (`libloading`): hard-coded library names, `init` / `lut_alpha_available` / `details_available`, the **`ops_active`** gate (when do the operators run), and **`PaneOps`** — one pane's operator instances (create/apply/destroy lifecycle) plus **`render_display`**, the single shared render tail (gray16 → operators → RGBA, else plain LUT) driven by the render pool and export. |
+| `src/imageproc.rs` | Runtime loader (`libloading`): hard-coded library names, `init` / `lut_alpha_available` / `boost_available` / `details_available`, the **`ops_active`** gate (when do the operators run), and **`PaneOps`** — one pane's operator instances (create/apply/destroy lifecycle) plus **`render_display`**, the single shared render tail (gray16 → operators → RGBA, else plain LUT) driven by the render pool and export. |
 | `cpp/imageproc.h` | The **C ABI** cim resolves by name — the `create`/`apply`/`destroy` triple per operator, plus the full rationale. |
 | `cpp/lut_alpha.cpp` | **Integration point** for LUT_ALPHA → `libcim_lut_alpha.so`. Placeholder class to replace with your auto-contrast class; worked wiring example in the header comment. |
+| `cpp/boost.cpp` | **Integration point** for Boost → `libcim_boost.so`. Placeholder class (a stretch plus a gamma lift, so it looks different from LUT_ALPHA's) to replace with your class; wired exactly like LUT_ALPHA. |
 | `cpp/details_enhanced.cpp` | **Integration point** for DETAILS_ENHANCED → `libcim_details_enhanced.so`. |
-| `cpp/CMakeLists.txt` | Example build producing the two operator `.so`. |
+| `cpp/CMakeLists.txt` | Example build producing the three operator `.so`. |
 | `src/renderer.rs` / `src/export.rs` | Each holds a `PaneOps` and calls `render_display` (live view off-thread per pane; export on its worker), so the two match pixel-for-pixel **by construction** — one implementation, not two mirrored copies. |
 
 ## The data contract (do not change without updating both sides)
@@ -42,6 +43,11 @@ extern "C" void* cim_lut_alpha_create(size_t width, size_t height);
 extern "C" void  cim_lut_alpha_apply(void* handle, uint16_t* data, size_t len);
 extern "C" void  cim_lut_alpha_destroy(void* handle);
 
+// libcim_boost.so — same shape and contract as LUT_ALPHA
+extern "C" void* cim_boost_create(size_t width, size_t height);
+extern "C" void  cim_boost_apply(void* handle, uint16_t* data, size_t len);
+extern "C" void  cim_boost_destroy(void* handle);
+
 // libcim_details_enhanced.so
 extern "C" void* cim_details_enhanced_create(size_t width, size_t height);
 extern "C" void  cim_details_enhanced_apply(void* handle, uint16_t* data,
@@ -49,12 +55,19 @@ extern "C" void  cim_details_enhanced_apply(void* handle, uint16_t* data,
 extern "C" void  cim_details_enhanced_destroy(void* handle);
 ```
 
+**Boost is a tone exactly like LUT_ALPHA**: it gets the frame over its **full
+native range** (the clip, Share clip, region-tone and export-crop windows all skip
+both — one predicate, `ContrastMode::is_operator`), computes its own contrast, and
+a pane runs one or the other, never both. DETAILS_ENHANCED, when on, runs after
+whichever it is.
+
 **DETAILS_ENHANCED's `apply` takes a second buffer, `lut8`** — the **after-LUT
 8-bit** companion of the same frame: the **current view LUT output**, i.e. the
 exact grayscale the pane is showing. Whatever LUT the view is using is the 8-bit
-input — **LUT_ALPHA** when that's the active tone, otherwise the linear/clip map.
+input — **LUT_ALPHA** or **Boost** when that's the active tone, otherwise the
+linear/clip map.
 `len` samples, one per pixel, row-major, **read-only**. cim builds it in
-`PaneOps::apply` (`src/imageproc.rs`) as the 16-bit `data` after any LUT_ALPHA,
+`PaneOps::apply` (`src/imageproc.rs`) as the 16-bit `data` after any LUT_ALPHA / Boost,
 downscaled to 8 bits. Transform the 16-bit `data` in place using `lut8` as
 context; never write `lut8`.
 
@@ -101,6 +114,7 @@ library without rebuilding cim).
 cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 # → build/libcim_lut_alpha.so
+# → build/libcim_boost.so
 # → build/libcim_details_enhanced.so
 ```
 
@@ -122,7 +136,8 @@ LD_LIBRARY_PATH=/path/to/lib ./cim
 ```
 
 The entry libraries must be findable there under the exact names cim expects
-(`libcim_lut_alpha.so` / `libcim_details_enhanced.so`). `ldd libcim_lut_alpha.so`
+(`libcim_lut_alpha.so` / `libcim_boost.so` / `libcim_details_enhanced.so`).
+`ldd libcim_lut_alpha.so`
 lists what each pulls in — if a dependency is missing, the entry library fails to
 load and that operator is silently unavailable.
 
@@ -162,7 +177,8 @@ would be to load each entry library into its own link-map namespace via
 
 ## Filling in the operators
 
-Replace the placeholder classes in `cpp/lut_alpha.cpp` / `cpp/details_enhanced.cpp`
+Replace the placeholder classes in `cpp/lut_alpha.cpp` / `cpp/boost.cpp` /
+`cpp/details_enhanced.cpp`
 with your real ones: do the heavy construction in `create`, convert cim's
 single-channel 16-bit buffer to/from your API in `apply`, free in `destroy`. Each
 file has a worked wiring example in its header comment. Then build (above) and put
@@ -183,7 +199,7 @@ the `.so` on the loader path — no rebuild of cim needed to swap a library late
   panes to guard **at `apply` time**. **`create`/`destroy` are the exception:**
   cim serialises every operator construction and teardown process-wide behind one
   mutex (`CONSTRUCT` in `src/imageproc.rs`), because switching several synced panes
-  to LUT_ALPHA / Details at once fires their per-pane render jobs in the same frame,
+  to LUT_ALPHA / Boost / Details at once fires their per-pane render jobs in the same frame,
   so their worker threads would otherwise enter a vendor `create` **simultaneously**
   — and heavy constructors routinely touch process-global state on first use (FFTW
   planner setup, static-table init, one-time library bring-up) that is not reentrant,
