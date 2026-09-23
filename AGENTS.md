@@ -1940,8 +1940,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 12. Settings & persistence (`settings.rs`)
 
-`Config { language, max_columns, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
-cursor_dot, timeline_preview, cpp_lib_dir, hardware_accel, keybindings }` (`jp2_max_mp` = the most
+`Config { language, max_columns, header_parents, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
+cursor_dot, timeline_preview, cpp_lib_dir, hardware_accel, keybindings }` (`header_parents` = how many
+parent folders the pane header prefixes to the media name — `CimApp::header_name`, from
+the pane's `Source` file / first sequence file, bare name for a Compute pane; default `0`)
+(`jp2_max_mp` = the most
 megapixels to decode from one JPEG 2000 image, default 32, `0` = whole — §3; live, and
 the Settings row names the level the open panes landed on) (`hardware_accel` = build display pixels on
 the GPU — §7.1 — **off by default**, and the checkbox is shown only under `CIM_GPU=1`

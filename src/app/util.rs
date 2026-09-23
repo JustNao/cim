@@ -74,11 +74,53 @@ pub(super) fn absolute_path(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// `name` prefixed by the last `n` folders `path` sits in, joined with the
+/// platform separator (`a/b/name` for `n = 2`) — the pane header's title. Stops
+/// early at the root, so a large `n` on a shallow path just shows every folder.
+pub(super) fn with_parent_dirs(path: &Path, name: &str, n: usize) -> String {
+    let mut dirs: Vec<String> = path
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.components().rev())
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .take(n)
+        .collect();
+    dirs.reverse();
+    dirs.push(name.to_owned());
+    dirs.join(std::path::MAIN_SEPARATOR_STR)
+}
+
 pub(super) fn ellipsize(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_parent_dirs_prefixes_the_last_folders() {
+        let sep = std::path::MAIN_SEPARATOR_STR;
+        let p = Path::new("root").join("run1").join("cam").join("a.tif");
+        assert_eq!(with_parent_dirs(&p, "a.tif", 0), "a.tif");
+        assert_eq!(with_parent_dirs(&p, "a.tif", 1), format!("cam{sep}a.tif"));
+        assert_eq!(
+            with_parent_dirs(&p, "a.tif", 2),
+            format!("run1{sep}cam{sep}a.tif")
+        );
+        // More folders than the path has: every one of them, no root/prefix.
+        assert_eq!(
+            with_parent_dirs(&p, "a.tif", 9),
+            format!("root{sep}run1{sep}cam{sep}a.tif")
+        );
+        assert_eq!(with_parent_dirs(Path::new("a.tif"), "a.tif", 3), "a.tif");
     }
 }

@@ -396,6 +396,11 @@ pub struct Config {
     #[serde(default = "default_language")]
     pub language: String,
     pub max_columns: usize,
+    /// How many of a file's parent folders to prefix to its name in the pane
+    /// header (`0` = the file name alone). Tells apart same-named files from
+    /// different folders — the usual shape of a before/after comparison.
+    #[serde(default)]
+    pub header_parents: usize,
     /// Global UI zoom factor for buttons/text (egui zoom_factor).
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
@@ -494,6 +499,7 @@ impl Default for Config {
         Self {
             language: default_language(),
             max_columns: 3,
+            header_parents: 0,
             ui_scale: default_ui_scale(),
             cache_budget_mb: default_cache_budget_mb(),
             cpu_budget: default_cpu_budget(),

@@ -1112,6 +1112,11 @@ impl CimApp {
                     ui.add(egui::Slider::new(&mut self.config.max_columns, 1..=8));
                 });
                 ui.horizontal(|ui| {
+                    ui.label(t!("settings.header_parents"));
+                    ui.add(egui::Slider::new(&mut self.config.header_parents, 0..=5))
+                        .on_hover_text(t!("settings.header_parents_hover"));
+                });
+                ui.horizontal(|ui| {
                     ui.label(t!("settings.ui_scale"));
                     ui.add(
                         egui::Slider::new(&mut self.config.ui_scale, 0.6..=2.0)

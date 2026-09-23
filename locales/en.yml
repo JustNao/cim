@@ -283,6 +283,11 @@ settings.title: Settings
 settings.general: General
 settings.language: Language
 settings.max_columns: Max columns
+settings.header_parents: Parent folders in title
+settings.header_parents_hover: >-
+  How many parent folders to show before the file name in each media's title
+  (0 = the file name alone), to tell apart same-named files from different
+  folders.
 settings.ui_scale: UI scale
 settings.frame_cache: Frame cache
 settings.frame_cache_hover: >-

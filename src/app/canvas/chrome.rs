@@ -63,7 +63,7 @@ impl CimApp {
         };
 
         let count = self.panes[idx].media.frame_count();
-        let name = self.panes[idx].media.name();
+        let name = self.header_name(idx);
         // The index number is the one part that must always show; the filename is
         // dropped below if the cell is too narrow for the full title.
         let idx_str = format!("{}", idx + 1);
@@ -289,6 +289,25 @@ impl CimApp {
     /// current global frame maps to (`local_file`); any other file-backed media
     /// (a still or one multi-page TIFF) resolves to its own source path. `None`
     /// for a computed pane, or a sequence frame not yet mapped to a file.
+    /// The name shown in the pane title: the media's own name, prefixed by the
+    /// last `config.header_parents` folders of the file (or, for a numbered
+    /// sequence, the first frame file) it was opened from. A Compute pane has no
+    /// file, so it keeps its bare name.
+    pub(super) fn header_name(&self, idx: usize) -> String {
+        let pane = &self.panes[idx];
+        let name = pane.media.name();
+        let n = self.config.header_parents;
+        let file = match &pane.source {
+            Source::File(p) => Some(p),
+            Source::Sequence { files, .. } => files.first(),
+            Source::Computed => None,
+        };
+        match file {
+            Some(p) if n > 0 => with_parent_dirs(&absolute_path(p), name, n),
+            _ => name.to_owned(),
+        }
+    }
+
     pub(super) fn current_file_path(&self, idx: usize) -> Option<PathBuf> {
         let pane = &self.panes[idx];
         if let Some((p, _)) = pane.media.local_file(self.frame_disp(idx)) {

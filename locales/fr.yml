@@ -297,6 +297,11 @@ settings.title: Réglages
 settings.general: Général
 settings.language: Langue
 settings.max_columns: Colonnes max
+settings.header_parents: Dossiers parents dans le titre
+settings.header_parents_hover: >-
+  Nombre de dossiers parents affichés devant le nom du fichier dans le titre de
+  chaque média (0 = le nom du fichier seul), pour distinguer des fichiers de
+  même nom venant de dossiers différents.
 settings.ui_scale: Échelle de l'interface
 settings.frame_cache: Cache d'images
 settings.frame_cache_hover: >-
