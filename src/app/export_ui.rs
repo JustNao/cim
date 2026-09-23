@@ -980,18 +980,36 @@ impl CimApp {
             })
             .collect();
 
-        // ui.add_space(4.0);
-        for (idx, id, fallback) in &rows {
-            ui.horizontal(|ui| {
-                let text = self
-                    .export
-                    .labels
-                    .entry(*id)
-                    .or_insert_with(|| fallback.clone());
-                ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
-                ui.label(egui::RichText::new((idx + 1).to_string()).weak().small());
-            });
-        }
+        // At most `LABEL_ROWS` fields show at once; past that the list scrolls, so
+        // many media can't push the style controls and the Export button off the
+        // bottom of the window. A solid (not floating) bar takes its own width
+        // rather than covering the index numbers.
+        const LABEL_ROWS: f32 = 6.0;
+        let row_h = ui
+            .spacing()
+            .interact_size
+            .y
+            .max(ui.text_style_height(&egui::TextStyle::Body) + 4.0)
+            + ui.spacing().item_spacing.y;
+        ui.scope(|ui| {
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            egui::ScrollArea::vertical()
+                .id_salt("exp_labels")
+                .max_height(row_h * LABEL_ROWS - ui.spacing().item_spacing.y)
+                .show(ui, |ui| {
+                    for (idx, id, fallback) in &rows {
+                        ui.horizontal(|ui| {
+                            let text = self
+                                .export
+                                .labels
+                                .entry(*id)
+                                .or_insert_with(|| fallback.clone());
+                            ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                            ui.label(egui::RichText::new((idx + 1).to_string()).weak().small());
+                        });
+                    }
+                });
+        });
         if rows.is_empty() {
             ui.label(egui::RichText::new(t!("export.labels_no_media")).weak());
         }

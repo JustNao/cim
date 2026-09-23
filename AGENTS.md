@@ -1838,7 +1838,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 - **Media names burnt into the output ("Add names").** The panel's toggle
   (`Export.labels_on`) draws one text label per media in every layout and both formats.
   The text is per media, keyed by **pane id** (`Export.labels: HashMap<u64, String>`, so it
-  survives reorder/close), edited in a list of fields under the toggle and defaulting to the
+  survives reorder/close), edited in a list of fields under the toggle (at most **6** shown,
+  the rest in a solid-bar `ScrollArea`, so many media can't push the Export button off the
+  window) and defaulting to the
   media's own name **without its file extension** (`label_text` / `strip_extension`, which
   keeps a decorated tail such as a JPEG 2000 `(1/8)` or a sequence token's `,START,END`); colour, size, optional background box, 9-way position
   (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. All
