@@ -280,7 +280,8 @@ help.not_found: "Could not read %{file}. Looked for it here:\n%{paths}"
 
 # ---- settings --------------------------------------------------------------
 settings.title: Settings
-settings.general: General
+settings.interface: Interface
+settings.performance: Performance
 settings.language: Language
 settings.max_columns: Max columns
 settings.header_parents: Parent folders in title

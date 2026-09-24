@@ -465,10 +465,10 @@ pub struct Config {
     /// **Adaptive rendering**: when a pane is zoomed into a large image, render
     /// only the visible region (plus margin) at full sharpness over a small
     /// decimated whole-image base, instead of one huge whole-image texture (see
-    /// `app::roi`). Off by default — the whole-image path is the long-tested
-    /// behaviour, and adaptive mode changes what the proprietary operators see
-    /// (they run on the reduced visible region, by design).
-    #[serde(default)]
+    /// `app::roi`). On by default; turning it off restores the whole-image path,
+    /// which is also what the proprietary operators see then (in adaptive mode
+    /// they run on the reduced visible region, by design).
+    #[serde(default = "default_true")]
     pub adaptive_render: bool,
     /// Directory holding the proprietary C++ operator shared libraries (`.so`).
     /// Empty = resolve them by bare name via the system loader search path
@@ -529,7 +529,7 @@ impl Default for Config {
             jp2_max_mp: default_jp2_max_mp(),
             cursor_dot: true,
             timeline_preview: true,
-            adaptive_render: false,
+            adaptive_render: true,
             cpp_lib_dir: String::new(),
             hardware_accel: false,
             keybindings: Keybindings::default(),

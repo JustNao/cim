@@ -294,7 +294,8 @@ help.not_found: "Impossible de lire %{file}. Chemins essayés :\n%{paths}"
 
 # ---- réglages --------------------------------------------------------------
 settings.title: Réglages
-settings.general: Général
+settings.interface: Interface
+settings.performance: Performances
 settings.language: Langue
 settings.max_columns: Colonnes max
 settings.header_parents: Dossiers parents dans le titre

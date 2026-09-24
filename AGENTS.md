@@ -675,7 +675,7 @@ Two consequences worth stating. The pane is then **magnified from a decimated te
 1:1 — every texel is still a true sample (§7's rule holds, and the readout reads
 `FrameData`), but you are no longer seeing *every* sample; that is inherent to holding a
 whole image in one texture, and the fix for it is region-of-interest staging — which is
-exactly what the opt-in **Adaptive rendering** mode does (§7.1). And such a render is
+exactly what the **Adaptive rendering** mode (on by default) does (§7.1). And such a render is
 still large in absolute terms (a 25000² image at `step 2` is a 12500² texture), so it
 goes **off-thread** like any other big render — the `bulk` gate counts output texels and
 no longer demands `step == 1`.
@@ -695,8 +695,8 @@ swapping the spent old texture back to the front and flicker between frames.
 
 ### 7.1 Adaptive rendering (viewport regions) — `app/roi.rs`
 
-The opt-in **Adaptive rendering** setting (`Config.adaptive_render`, off by default —
-default behaviour stays byte-identical) is the region-of-interest staging §7 promises. Its
+The **Adaptive rendering** setting (`Config.adaptive_render`, **on by default**; off
+restores the classic whole-image path byte for byte) is the region-of-interest staging §7 promises. Its
 target is **frame rate while playing a zoomed-in sequence**: the classic path re-renders and
 re-uploads the whole image every frame even when a few percent is on screen, and for the
 sizes this tool compares (~1000–4000 px) that is the frame-rate ceiling. Two layers per pane:
@@ -2011,7 +2011,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { language, max_columns, header_parents, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
-cursor_dot, timeline_preview, cpp_lib_dir, hardware_accel, keybindings }` (`header_parents` = how many
+cursor_dot, timeline_preview, adaptive_render, cpp_lib_dir, hardware_accel, keybindings }` (`header_parents` = how many
 parent folders the pane header prefixes to the media name — `CimApp::header_name`, from
 the pane's `Source` file / first sequence file, bare name for a Compute pane; default `0`)
 (`jp2_max_mp` = the most
@@ -2029,6 +2029,11 @@ worker threads across the decode and rayon pools, 4–64, default 16 — §5.1),
 saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written automatically** once an edit settles — there is no Save button.
+The window groups them: **Interface** (language, max columns, UI scale, parent folders
+in the title, cursor dot, timeline preview), **Performance** (adaptive rendering, frame
+cache, CPU threads, JPEG 2000 detail, and the shelved hardware toggle), then the C++
+operators and the keyboard shortcuts. `adaptive_render` defaults to `true` (serde
+`default_true` too), but a config file that already saved `false` keeps it.
 `config` is edited live by the widgets, so `CimApp::autosave_config` (run each `update`)
 notices a change by comparing against `seen_config`, arms `autosave_at` for
 `CONFIG_AUTOSAVE_DEBOUNCE` (0.5 s), and writes on expiry only if `config != saved_config`

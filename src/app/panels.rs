@@ -1111,7 +1111,7 @@ impl CimApp {
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
-                ui.heading(t!("settings.general"));
+                ui.heading(t!("settings.interface"));
                 ui.horizontal(|ui| {
                     ui.label(t!("settings.language"));
                     // The picker lists every language in its own name; changing it
@@ -1141,11 +1141,6 @@ impl CimApp {
                     ui.add(egui::Slider::new(&mut self.config.max_columns, 1..=8));
                 });
                 ui.horizontal(|ui| {
-                    ui.label(t!("settings.header_parents"));
-                    ui.add(egui::Slider::new(&mut self.config.header_parents, 0..=5))
-                        .on_hover_text(t!("settings.header_parents_hover"));
-                });
-                ui.horizontal(|ui| {
                     ui.label(t!("settings.ui_scale"));
                     ui.add(
                         egui::Slider::new(&mut self.config.ui_scale, 0.6..=2.0)
@@ -1153,6 +1148,26 @@ impl CimApp {
                             .fixed_decimals(2),
                     );
                 });
+                ui.horizontal(|ui| {
+                    ui.label(t!("settings.header_parents"));
+                    ui.add(egui::Slider::new(&mut self.config.header_parents, 0..=5))
+                        .on_hover_text(t!("settings.header_parents_hover"));
+                });
+                ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
+                    .on_hover_text(t!("settings.cursor_dot_hover"));
+                ui.checkbox(
+                    &mut self.config.timeline_preview,
+                    t!("settings.timeline_preview"),
+                )
+                .on_hover_text(t!("settings.timeline_preview_hover"));
+                ui.add_space(8.0);
+                ui.separator();
+                ui.heading(t!("settings.performance"));
+                ui.checkbox(
+                    &mut self.config.adaptive_render,
+                    t!("settings.adaptive_render"),
+                )
+                .on_hover_text(t!("settings.adaptive_render_hover"));
                 ui.horizontal(|ui| {
                     ui.label(t!("settings.frame_cache"));
                     ui.add(
@@ -1232,18 +1247,6 @@ impl CimApp {
                         }
                     });
                 }
-                ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
-                    .on_hover_text(t!("settings.cursor_dot_hover"));
-                ui.checkbox(
-                    &mut self.config.timeline_preview,
-                    t!("settings.timeline_preview"),
-                )
-                .on_hover_text(t!("settings.timeline_preview_hover"));
-                ui.checkbox(
-                    &mut self.config.adaptive_render,
-                    t!("settings.adaptive_render"),
-                )
-                .on_hover_text(t!("settings.adaptive_render_hover"));
                 ui.add_space(8.0);
                 ui.separator();
                 ui.heading(t!("settings.operators"));
