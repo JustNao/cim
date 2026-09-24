@@ -856,6 +856,10 @@ mod tests {
         assert!(!m.computed_done(1) && !m.computed_done(4));
         assert_eq!(m.resident_count(), 0);
         m.insert(0, frame());
-        assert_eq!(m.resident(0).map(|f| f.size), Some([2, 2]), "stored resampled");
+        assert_eq!(
+            m.resident(0).map(|f| f.size),
+            Some([2, 2]),
+            "stored resampled"
+        );
     }
 }

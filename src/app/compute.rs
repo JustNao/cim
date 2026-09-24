@@ -275,10 +275,19 @@ impl CimApp {
     /// store it (touched now, so the LRU keeps it over older frames). `false`
     /// when an input frame isn't resident or the two don't combine (size /
     /// channel mismatch — reported on the pane).
-    fn compute_binary_frame(&mut self, i: usize, k: usize, kind: Reduce, a: usize, b: usize) -> bool {
+    fn compute_binary_frame(
+        &mut self,
+        i: usize,
+        k: usize,
+        kind: Reduce,
+        a: usize,
+        b: usize,
+    ) -> bool {
         let (fa, fb) = (self.binary_input_frame(a, k), self.binary_input_frame(b, k));
-        let (Some(x), Some(y)) = (self.panes[a].media.resident(fa), self.panes[b].media.resident(fb))
-        else {
+        let (Some(x), Some(y)) = (
+            self.panes[a].media.resident(fa),
+            self.panes[b].media.resident(fb),
+        ) else {
             return false;
         };
         match media::combine_frames(&x, &y, kind) {
@@ -469,8 +478,8 @@ impl CimApp {
 
                 if let Some(c) = self.panes[idx].compute.as_mut() {
                     c.computed = true; // switch from the config form to the result
-                    // A new generated sequence is empty: hold a downstream
-                    // reduction until the fill has had its go at it.
+                                       // A new generated sequence is empty: hold a downstream
+                                       // reduction until the fill has had its go at it.
                     c.filling = kind.is_binary();
                 }
                 self.set_compute_status(idx, status);

@@ -25,7 +25,13 @@ impl CimApp {
         let pane_id = self.panes[idx].id;
         let (mut kind, mut source_id, mut source_b, computed, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
-            (c.kind, c.source_id, c.source_b, c.computed, c.status.clone())
+            (
+                c.kind,
+                c.source_id,
+                c.source_b,
+                c.computed,
+                c.status.clone(),
+            )
         };
         // A computed pane shows only its status line; with nothing to say there
         // is no panel at all, so it doesn't sit over the result for nothing.
