@@ -182,18 +182,13 @@ compute.new: Nouveau calcul
 compute.mode: Mode
 compute.source: Source
 compute.compute: Calculer
-compute.save: Enregistrer
 compute.cancel: Annuler
-compute.save_hint: nom.tif
 compute.reduce_mean: Moyenne
 compute.reduce_std: Écart-type
 compute.reduce_add: Addition
 compute.reduce_sub: Soustraction
 compute.status_reduce: "%{kind} de %{n} image(s) en mémoire"
 compute.status_binary: Image %{a} %{sign} image %{b}
-compute.saved: "%{name} enregistré"
-compute.save_failed: "Échec de l'enregistrement : %{err}"
-compute.nothing_to_save: Aucun calcul à enregistrer
 compute.err_source_gone: Source indisponible
 compute.err_no_frames: Aucune image source en mémoire
 compute.err_pick: Choisissez la source %{slot}

@@ -104,8 +104,6 @@ impl CimApp {
             computed: false,
             armed: false, // the form's Compute button arms it
             last_sig: 0,
-            saving: false,
-            save_name: "computed.tif".into(),
             status: String::new(),
         });
         self.set_compute_tone_defaults(i);
@@ -133,8 +131,6 @@ impl CimApp {
             // until its sources (and any upstream Compute pane) are ready.
             armed: true,
             last_sig: 0,
-            saving: false,
-            save_name: "computed.tif".into(),
             status: String::new(),
         });
         self.set_compute_tone_defaults(i);
@@ -332,29 +328,6 @@ impl CimApp {
             if !again {
                 break;
             }
-        }
-    }
-
-    /// Write the computed image to `name` (relative to the working dir), leaving
-    /// the result in memory. Format follows the extension (.tif/.png/.jpg).
-    pub(super) fn save_computed(&mut self, idx: usize, name: &str) {
-        let name = name.trim();
-        if name.is_empty() {
-            self.set_compute_status(idx, "Enter a file name".into());
-            return;
-        }
-        let Some(frame) = self.panes[idx].media.resident(0) else {
-            self.set_compute_status(idx, t!("compute.nothing_to_save").into_owned());
-            return;
-        };
-        match media::save_frame(&frame, Path::new(name)) {
-            Ok(()) => {
-                if let Some(c) = self.panes[idx].compute.as_mut() {
-                    c.saving = false;
-                }
-                self.set_compute_status(idx, t!("compute.saved", name = name).into_owned());
-            }
-            Err(e) => self.set_compute_status(idx, t!("compute.save_failed", err = e).into_owned()),
         }
     }
 

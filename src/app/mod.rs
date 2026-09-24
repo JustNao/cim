@@ -762,7 +762,7 @@ struct Compute {
     source_b: Option<u64>,
     /// False while the pane is still being configured (the in-pane form is
     /// shown); set once a compute succeeds, after which the result image shows
-    /// with the Save control top-left.
+    /// (with just its status line top-left).
     computed: bool,
     /// The pane has been told to compute — by the form's **Compute** button or by
     /// a view command that replayed it — and so refreshes itself whenever its
@@ -774,9 +774,6 @@ struct Compute {
     /// Input signature at the last (attempted) compute, so the auto-refresh only
     /// recomputes when something actually changed. See `compute_sig`.
     last_sig: u64,
-    /// Save UI expanded (showing the file-name input).
-    saving: bool,
-    save_name: String,
     /// Short result / error line shown in the controls.
     status: String,
 }

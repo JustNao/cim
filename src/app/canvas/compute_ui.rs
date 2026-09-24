@@ -1,7 +1,7 @@
 //! The in-pane Compute controls: the config form (mode + source pickers +
-//! Compute) while unconfigured, then the Refresh / Save row over the result
-//! (a computed pane always refreshes itself when its inputs change, so there
-//! is no toggle). The compute engine itself is in app (recompute_pane).
+//! Compute) while unconfigured, then just the status line over the result (a
+//! computed pane always refreshes itself when its inputs change, so there is
+//! no toggle). The compute engine itself is in app (recompute_pane).
 
 use crate::app::*;
 
@@ -9,9 +9,9 @@ impl CimApp {
     /// Overlay a Compute pane with a top-left foreground `Area`. Two states:
     /// **unconfigured** shows the config form (mode + source combos + a
     /// **Compute** button that runs it); once computed, the result image shows
-    /// with the **Refresh** / **Save** controls instead (the refresh is also
-    /// automatic — see `refresh_auto_compute`).
-    /// Edits are written back and a recompute / save is dispatched after.
+    /// with only its status line (the refresh is automatic — see
+    /// `refresh_auto_compute`). Edits are written back and a recompute is
+    /// dispatched after.
     /// `header_bottom` is the header strip's bottom edge relative to the cell's
     /// top (its height *plus* any chrome inset above it), so the panel clears
     /// the header in the top row as well.
@@ -23,21 +23,17 @@ impl CimApp {
         header_bottom: f32,
     ) {
         let pane_id = self.panes[idx].id;
-        let (mut kind, mut source_id, mut source_b, computed, mut saving, mut save_name, status) = {
+        let (mut kind, mut source_id, mut source_b, computed, status) = {
             let c = self.panes[idx].compute.as_ref().unwrap();
-            (
-                c.kind,
-                c.source_id,
-                c.source_b,
-                c.computed,
-                c.saving,
-                c.save_name.clone(),
-                c.status.clone(),
-            )
+            (c.kind, c.source_id, c.source_b, c.computed, c.status.clone())
         };
+        // A computed pane shows only its status line; with nothing to say there
+        // is no panel at all, so it doesn't sit over the result for nothing.
+        if computed && status.is_empty() {
+            return;
+        }
         let sources = self.compute_sources(idx, kind);
         let mut recompute = false;
-        let mut do_save = false;
 
         // Top-left of the cell, just under the header strip, constrained to the
         // cell so it can't spill into a neighbour.
@@ -68,31 +64,6 @@ impl CimApp {
                         {
                             recompute = true;
                         }
-                    } else {
-                        // Result controls (the form is replaced by the output).
-                        // No Refresh button: the pane recomputes itself whenever
-                        // its inputs change (`refresh_auto_compute`).
-                        ui.horizontal(|ui| {
-                            if !saving && ui.button(t!("compute.save")).clicked() {
-                                saving = true;
-                            }
-                        });
-                        // Inline save: a name field (relative to the working dir).
-                        if saving {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut save_name)
-                                    .desired_width(220.0)
-                                    .hint_text(t!("compute.save_hint")),
-                            );
-                            ui.horizontal(|ui| {
-                                if ui.button(t!("compute.save")).clicked() {
-                                    do_save = true;
-                                }
-                                if ui.button(t!("compute.cancel")).clicked() {
-                                    saving = false;
-                                }
-                            });
-                        }
                     }
                     if !status.is_empty() {
                         ui.label(egui::RichText::new(&status).weak().small());
@@ -106,8 +77,6 @@ impl CimApp {
             c.kind = kind;
             c.source_id = source_id;
             c.source_b = source_b;
-            c.saving = saving;
-            c.save_name = save_name.clone();
             // Pressing Compute is what arms the pane's automatic refresh; from
             // here on it recomputes itself whenever its inputs change.
             c.armed |= recompute;
@@ -118,9 +87,6 @@ impl CimApp {
             // others (`recompute_pane` bumps `render_gen` and keeps the last
             // texture, so the pane never draws black).
             self.pending_recompute = Some(idx);
-        }
-        if do_save {
-            self.save_computed(idx, &save_name);
         }
     }
 }

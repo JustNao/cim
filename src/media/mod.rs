@@ -2,7 +2,7 @@
 //!
 //! Frames keep their **original** samples (8- or 16-bit, 1/3/4 channels) so the
 //! UI can report true pixel values and histograms at native bit depth. The
-//! 8-bit RGBA needed for display is derived on demand in [`FrameData::render_rgba`].
+//! 8-bit RGBA needed for display is derived on demand (see `render.rs`).
 //!
 //! Decoding runs on the background pool (see `decoder.rs`), so the pieces that
 //! pool needs are exposed here: a stateless [`decode_tiff_page`] plus cache
@@ -27,14 +27,9 @@ pub use source::{DecodeReq, Media};
 pub use stats::{combine_frames, reduce_frames, HistData, Reduce, RegionStats};
 pub use video::VideoReader;
 
-use rust_i18n::t;
-use std::fs::File;
-use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
-use tiff::encoder::{colortype, TiffEncoder};
 
 /// Pixels below which an analytic whole-image scan — value extent, histogram,
 /// percentile — stays serial. Each is a map-reduce over the samples, so the
@@ -123,47 +118,6 @@ pub struct FrameData {
 /// before a source has been chosen / reduced.
 pub fn placeholder_frame() -> FrameData {
     FrameData::new([64, 64], 1, Samples::U8(vec![40; 64 * 64]))
-}
-
-/// Write a single frame to disk. `.tif`/`.tiff` preserves the native values as a
-/// 32-bit float TIFF (mono or RGB); `.png`/`.jpg`/`.jpeg` writes the 8-bit
-/// display rendering (native range mapped to `[0, 255]`), dropping any alpha.
-pub fn save_frame(frame: &FrameData, path: &Path) -> Result<()> {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let [w, h] = frame.size;
-    match ext.as_str() {
-        "tif" | "tiff" => {
-            let mut file =
-                File::create(path).with_context(|| format!("create {}", path.display()))?;
-            let mut enc = TiffEncoder::new(&mut file)?;
-            let (cc, data) = frame.color_f32();
-            if cc == 1 {
-                enc.write_image::<colortype::Gray32Float>(w as u32, h as u32, &data)?;
-            } else {
-                enc.write_image::<colortype::RGB32Float>(w as u32, h as u32, &data)?;
-            }
-            Ok(())
-        }
-        "png" | "jpg" | "jpeg" => {
-            let rgba = frame.render_rgba(false);
-            let mut rgb = Vec::with_capacity(w * h * 3);
-            for px in rgba.chunks_exact(4) {
-                rgb.extend_from_slice(&px[..3]);
-            }
-            image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8)
-                .with_context(|| format!("save {}", path.display()))?;
-            Ok(())
-        }
-        other => Err(anyhow!(t!(
-            "error.save_extension",
-            ext = other,
-            exts = ".tif, .png, .jpg"
-        )
-        .into_owned())),
-    }
 }
 
 impl FrameData {
@@ -403,8 +357,9 @@ impl FrameData {
     }
 
     /// The colour samples as interleaved `f32`, alpha excluded: returns the
-    /// colour-channel count (1 or 3) and a `w*h*cc` buffer. Used to write a
-    /// computed frame out as a float TIFF.
+    /// colour-channel count (1 or 3) and a `w*h*cc` buffer. Lets a test read a
+    /// frame's values back regardless of its sample type.
+    #[cfg(test)]
     pub fn color_f32(&self) -> (usize, Vec<f32>) {
         let cc = self.color_channels();
         let px = self.size[0] * self.size[1];

@@ -63,6 +63,8 @@ impl FrameData {
     }
 
     /// Build the 8-bit RGBA buffer egui uploads as a texture (fresh allocation).
+    /// The reference the tests hold the optimised render paths to.
+    #[cfg(test)]
     pub fn render_rgba(&self, clip: bool) -> Vec<u8> {
         let (lo, hi) = self.display_bounds(clip);
         let mut out = Vec::new();
@@ -76,7 +78,8 @@ impl FrameData {
     /// Convenience wrapper over [`render_into_lut`](Self::render_into_lut) with a
     /// throwaway table — use that directly (passing a reused [`ToneLut`]) on any
     /// per-frame path so a fixed-tone run doesn't rebuild the ≤ 64 Ki-entry LUT
-    /// every frame (the bulk of per-frame CPU on a large image).
+    /// every frame (the bulk of per-frame CPU on a large image). Test-only now.
+    #[cfg(test)]
     pub fn render_into(&self, lo: f32, hi: f32, out: &mut Vec<u8>) {
         self.render_into_lut(lo, hi, &mut ToneLut::default(), out);
     }
@@ -239,6 +242,7 @@ impl FrameData {
     /// [`render_lut`](Self::render_lut) over the whole image at full resolution,
     /// reusing `lut`. The common case, spelled out so callers that never crop
     /// don't have to build a [`Region`].
+    #[cfg(test)]
     pub fn render_into_lut<S: RgbaSink>(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut S) {
         self.render_lut(lo, hi, Region::whole(self.size, 1), lut, out);
     }

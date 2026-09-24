@@ -359,7 +359,6 @@ impl FrameData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::{load, save_frame};
 
     /// Region statistics cover only the selected pixels: mean/std/min/max and
     /// the region-derived tone bounds ignore extremes elsewhere in the image.
@@ -430,22 +429,6 @@ mod tests {
         assert!(combine_frames(&da, &db, Reduce::Mean).is_none());
         // `diff` is the old token for the subtraction, still parsed.
         assert_eq!(Reduce::from_token("diff"), Some(Reduce::Sub));
-
-        let dir = std::env::temp_dir().join("cim_compute_test");
-        let _ = std::fs::create_dir_all(&dir);
-
-        // Float TIFF preserves the fractional values (re-openable, right size).
-        let tif = dir.join("mean.tif");
-        save_frame(&mean, &tif).expect("save tif");
-        assert_eq!(load(&tif).expect("reload tif").size(), [2, 1]);
-
-        // PNG writes the 8-bit view.
-        let png = dir.join("mean.png");
-        save_frame(&mean, &png).expect("save png");
-        assert!(png.exists());
-
-        // Unsupported extension is rejected.
-        assert!(save_frame(&mean, &dir.join("mean.gif")).is_err());
     }
 
     /// The region percentile over the FULL frame must equal the whole-image

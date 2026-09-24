@@ -60,7 +60,7 @@ src/
                  its loadable files, alphabetical; `input_for_path` shares it with
                  drops/dialog).
   media/         Data model, split by concern (re-exported from mod.rs):
-    mod.rs       FrameData/Samples core (accessors, crop), save_frame,
+    mod.rs       FrameData/Samples core (accessors, crop),
                  placeholder_frame.
     source.rs    Media (Still|TiffSeq|FileSeq|ConcatSeq|Video) + SeqCache +
                  DecodeReq: the source kinds behind one interface, length
@@ -171,7 +171,7 @@ being one level deeper). Many CimApp fields are grouped into sub-structs —
 - `Samples` = `U8 | U16 | F32` — **native** interleaved samples, kept at native bit
   depth so the UI reports true values/histograms; 8-bit RGBA is derived on demand.
 - `FrameData { size, channels:1|3|4, samples, bounds_full, bounds_clip }`.
-  `new()`; `byte_len()` (cache budget); `render_rgba`/`render_into` (§7);
+  `new()`; `byte_len()` (cache budget); `render_lut` (§7; `render_rgba`/`render_into` are test-only references);
   `display_bounds(clip)` memoized in the two `OnceLock` cells; `pixel_string`,
   `histogram_display`, `region_stats`.
 - **Parallel analytic scans.** The whole-image passes — `value_extent`,
@@ -1661,9 +1661,9 @@ top-left foreground `Area` over the pane) has two states keyed on `Compute.compu
 while `false` it shows the **config form** (mode + source combos + a **Compute**
 button); that button sets `pending_recompute` (run at the top of the next `update`,
 before `refresh_textures`, so the result never flashes black — §13) → `recompute_pane`,
-which on success sets `computed = true`, so the **result image** then shows with the
-**Save** control instead — there is **no Refresh button**, since a computed pane
-refreshes itself. `Pane.compute` holds the `kind`, source id(s), `computed` (a result
+which on success sets `computed = true`, so the **result image** then shows with only
+its status line (no panel at all when that is empty) — there is **no Refresh or Save
+button**, since a computed pane refreshes itself (and exporting covers writing it out). `Pane.compute` holds the `kind`, source id(s), `computed` (a result
 exists → show it instead of the form) and `armed` (the user pressed **Compute**, or a
 view command replayed the pane → it refreshes itself from now on). The two are separate
 so a compute that *failed* still retries: a replayed pane whose source frames aren't
@@ -1694,9 +1694,7 @@ for the binary ops, source resident-count for the reductions; a source that is *
 Compute pane contributes its `render_gen`, which is what propagates a recompute along a
 chain) against `Compute.last_sig` each update, iterating **to a fixed point** (bounded by
 the pane count) so a whole chain settles within one update whatever order the panes sit in.
-Only an `armed` pane refreshes, so an unconfigured one keeps its form. `Source::Computed` makes the manager's ⟳ recompute; an inline **Save**
-(`media::save_frame`, `.tif` **32-bit float** or `.png`/`.jpg` 8-bit view, relative
-to the working dir).
+Only an `armed` pane refreshes, so an unconfigured one keeps its form. `Source::Computed` makes the manager's ⟳ recompute.
 
 **No black flash on recompute.** `recompute_pane` swaps in the new result media but
 does **not** null `tex`; instead it bumps a per-pane data generation

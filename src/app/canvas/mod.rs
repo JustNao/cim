@@ -346,7 +346,7 @@ impl CimApp {
             self.line_overlay_for_pane(ui, ctx, idx, img_area, img_area, resp.hovered());
         }
 
-        // Compute-pane controls (source / kind / recompute + inline save) —
+        // Compute-pane controls (source / kind / recompute, then its status) —
         // floated at the cell's bottom-left (above the footer). Gated on
         // `show_chrome` so the show/hide-all-bars shortcut hides it too (kept
         // separate from the Transformations popup's own toggle).
