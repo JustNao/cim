@@ -254,10 +254,7 @@ fn decode_source(
                 *reader = Some(ExportReader::Video(VideoReader::open(path).ok()?));
             }
             match reader {
-                Some(ExportReader::Video(r)) => match r.decode(idx) {
-                    Ok(Some(f)) => Some(Arc::new(f)),
-                    _ => None,
-                },
+                Some(ExportReader::Video(r)) => r.decode(idx).ok().flatten(),
                 _ => None,
             }
         }

@@ -9,11 +9,14 @@
 //! seeking to a page reuses the crate's cached IFD offsets instead of
 //! re-walking the file every decode. Different sequences decode in parallel;
 //! frames of the same sequence serialise on that sequence's reader (a single
-//! file is read sequentially anyway).
+//! file is read sequentially anyway) — **in the order they were queued**, via a
+//! ticket per job ([`Slot`]). A plain mutex let one worker win the reader again
+//! and again while another, holding the very frame playback waited on, starved;
+//! for a video that frame then lay behind the stream and cost a seek.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 
 use anyhow::Result;
@@ -77,26 +80,100 @@ enum Reader {
 
 /// Persistent readers, keyed by `(pane id, file index)`. A lone TIFF or a video
 /// uses file index 0; a concatenation keeps one reader per file so each file's
-/// IFD offset cache stays warm. The outer mutex guards the map (held only
-/// briefly), the inner one serialises decodes of one file.
-type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Mutex<Reader>>>>>;
+/// IFD offset cache stays warm. The map mutex is held only for the lookup.
+type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Slot>>>>;
 
-/// Get the persistent reader for `key`, opening (and caching) it with `open`
-/// on first use. The map lock is held only for the lookup/insert.
-fn get_reader(
-    readers: &Readers,
-    key: (u64, usize),
-    open: impl FnOnce() -> Result<Reader>,
-) -> Result<Arc<Mutex<Reader>>> {
-    let mut map = readers.lock().unwrap();
-    match map.get(&key) {
-        Some(r) => Ok(Arc::clone(r)),
-        None => open().map(|r| {
-            let r = Arc::new(Mutex::new(r));
-            map.insert(key, Arc::clone(&r));
-            r
-        }),
+/// One file's persistent reader, used by one job at a time **in queue order**.
+///
+/// Each job takes a ticket when it leaves the queue (still under the queue
+/// lock, so ticket order *is* queue order) and waits for its number. Playback
+/// queues frames in the order it shows them, so the reader sees them in that
+/// order too, whichever worker picked each up — a mutex alone guarantees no
+/// order, and on Windows one worker could hold the reader through a whole run
+/// of later frames while the one playback was waiting on sat blocked.
+struct Slot {
+    /// Tickets handed out so far.
+    issued: AtomicU64,
+    turn: Mutex<Turn>,
+    cv: Condvar,
+}
+
+struct Turn {
+    /// The ticket allowed to use the reader now.
+    serving: u64,
+    /// Opened by the first job to need it; an open that fails is retried by the
+    /// next job, as before.
+    reader: Option<Reader>,
+}
+
+impl Slot {
+    /// Block until `ticket` is served, then hold the reader.
+    fn wait_turn(&self, ticket: u64) -> Held<'_> {
+        let mut turn = self.turn.lock().unwrap();
+        while turn.serving != ticket {
+            turn = self.cv.wait(turn).unwrap();
+        }
+        Held {
+            slot: self,
+            turn: Some(turn),
+        }
     }
+}
+
+/// A job's turn at a [`Slot`]'s reader. Dropping it — however the job ends —
+/// passes the reader to the next ticket, so one failed decode can't wedge the
+/// file's queue.
+struct Held<'a> {
+    slot: &'a Slot,
+    turn: Option<MutexGuard<'a, Turn>>,
+}
+
+impl Held<'_> {
+    /// The reader, opened with `open` if this is its first use.
+    fn reader(&mut self, open: impl FnOnce() -> Result<Reader>) -> Result<&mut Reader> {
+        let turn = self.turn.as_mut().expect("held until dropped");
+        if turn.reader.is_none() {
+            turn.reader = Some(open()?);
+        }
+        Ok(turn.reader.as_mut().expect("just opened"))
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(mut turn) = self.turn.take() {
+            turn.serving += 1;
+            drop(turn);
+            self.slot.cv.notify_all();
+        }
+    }
+}
+
+/// The persistent reader a job decodes through, or `None` for a standalone
+/// file (a numbered still run's frame).
+fn reader_key(id: u64, req: &DecodeReq) -> Option<(u64, usize)> {
+    match req {
+        DecodeReq::Tiff { file, .. } => Some((id, *file)),
+        DecodeReq::Video { .. } => Some((id, 0)),
+        DecodeReq::File(_) => None,
+    }
+}
+
+/// Take the next ticket for `key`'s reader, creating its (empty) slot on first
+/// use. Called under the job-queue lock.
+fn take_ticket(readers: &Readers, key: (u64, usize)) -> (Arc<Slot>, u64) {
+    let slot = Arc::clone(readers.lock().unwrap().entry(key).or_insert_with(|| {
+        Arc::new(Slot {
+            issued: AtomicU64::new(0),
+            turn: Mutex::new(Turn {
+                serving: 0,
+                reader: None,
+            }),
+            cv: Condvar::new(),
+        })
+    }));
+    let ticket = slot.issued.fetch_add(1, Ordering::Relaxed);
+    (slot, ticket)
 }
 
 pub struct BackgroundDecoder {
@@ -128,77 +205,83 @@ impl BackgroundDecoder {
             let epoch = Arc::clone(&epoch);
             let ctx = ctx.clone();
             thread::spawn(move || loop {
-                // Hold the job lock only for the hand-off, then decode unlocked
+                // Hold the job lock only for the hand-off (and the ticket, so
+                // the reader serves jobs in queue order), then decode unlocked
                 // so other workers can pick up queued jobs in parallel.
-                let job = match job_rx.lock().unwrap().recv() {
-                    Ok(job) => job,
-                    Err(_) => break, // sender dropped: app is shutting down
+                let (job, ticket) = {
+                    let rx = job_rx.lock().unwrap();
+                    let job = match rx.recv() {
+                        Ok(job) => job,
+                        Err(_) => break, // sender dropped: app is shutting down
+                    };
+                    // A cancelled backlog (Stop / new load) bumps the epoch: drop
+                    // the stale job without decoding or reporting it (and before
+                    // it takes a ticket, which would then have to be served). The
+                    // UI clears `inflight` in step, so a still-wanted frame is
+                    // simply re-queued.
+                    if job.epoch < epoch.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let ticket = reader_key(job.id, &job.req).map(|k| take_ticket(&readers, k));
+                    (job, ticket)
                 };
-                // A cancelled backlog (Stop / new load) bumps the epoch: drop the
-                // stale job without decoding or reporting it. The UI clears
-                // `inflight` in step, so a still-wanted frame is simply re-queued.
-                if job.epoch < epoch.load(Ordering::Relaxed) {
-                    continue;
-                }
+                let slot = |t: &Option<(Arc<Slot>, u64)>| {
+                    let (slot, n) = t.as_ref().expect("a reader-backed job takes a ticket");
+                    (Arc::clone(slot), *n)
+                };
 
-                let started = std::time::Instant::now();
+                let mut started = std::time::Instant::now();
                 let mut io = std::time::Duration::ZERO;
                 let result = match &job.req {
                     // Multi-page TIFF: decode (or, when `probe`, metadata-only
                     // check) `page` through the file's persistent reader (keyed
                     // by pane id + file) so seeks reuse cached IFD offsets.
                     DecodeReq::Tiff {
-                        file,
-                        page,
-                        path,
-                        probe,
+                        page, path, probe, ..
                     } => {
-                        let reader = get_reader(&readers, (job.id, *file), || {
-                            SeqReader::open(path).map(Reader::Tiff)
-                        });
-                        match reader {
-                            Ok(r) => {
-                                let mut guard = r.lock().unwrap();
-                                match (&mut *guard, *probe) {
-                                    (Reader::Tiff(reader), true) => {
-                                        reader.probe(*page).map(|exists| {
-                                            if exists {
-                                                Decoded::Exists
-                                            } else {
-                                                Decoded::End
-                                            }
-                                        })
-                                    }
-                                    (Reader::Tiff(reader), false) => {
-                                        reader.take_io(); // clear residue from prior probes
-                                        let res = reader.decode(*page).map(|f| match f {
-                                            Some(f) => Decoded::Frame(Arc::new(f)),
-                                            None => Decoded::End,
-                                        });
-                                        io = reader.take_io(); // this decode's file-I/O share
-                                        res
-                                    }
-                                    _ => Err(anyhow::anyhow!("reader kind mismatch")),
+                        let (slot, n) = slot(&ticket);
+                        let mut held = slot.wait_turn(n);
+                        match (
+                            held.reader(|| SeqReader::open(path).map(Reader::Tiff)),
+                            *probe,
+                        ) {
+                            (Ok(Reader::Tiff(reader)), true) => reader.probe(*page).map(|exists| {
+                                if exists {
+                                    Decoded::Exists
+                                } else {
+                                    Decoded::End
                                 }
+                            }),
+                            (Ok(Reader::Tiff(reader)), false) => {
+                                reader.take_io(); // clear residue from prior probes
+                                let res = reader.decode(*page).map(|f| match f {
+                                    Some(f) => Decoded::Frame(Arc::new(f)),
+                                    None => Decoded::End,
+                                });
+                                io = reader.take_io(); // this decode's file-I/O share
+                                res
                             }
-                            Err(e) => Err(e),
+                            (Ok(_), _) => Err(anyhow::anyhow!("reader kind mismatch")),
+                            (Err(e), _) => Err(e),
                         }
                     }
                     // Video frame: decode through the file's persistent
                     // streaming ffmpeg reader (sequential requests read straight
                     // off the pipe; a jump respawns the child with a seek).
                     DecodeReq::Video { path, frame } => {
-                        let reader = get_reader(&readers, (job.id, 0), || {
-                            VideoReader::open(path).map(Reader::Video)
-                        });
-                        match reader {
-                            Ok(r) => match &mut *r.lock().unwrap() {
-                                Reader::Video(reader) => reader.decode(*frame).map(|f| match f {
-                                    Some(f) => Decoded::Frame(Arc::new(f)),
-                                    None => Decoded::End,
-                                }),
-                                _ => Err(anyhow::anyhow!("reader kind mismatch")),
-                            },
+                        let (slot, n) = slot(&ticket);
+                        let mut held = slot.wait_turn(n);
+                        // Time the decode, not the wait for this one reader: a
+                        // video decodes strictly one frame at a time, and
+                        // counting the queue inflated the latency the prefetch
+                        // depth is sized from.
+                        started = std::time::Instant::now();
+                        match held.reader(|| VideoReader::open(path).map(Reader::Video)) {
+                            Ok(Reader::Video(reader)) => reader.decode(*frame).map(|f| match f {
+                                Some(f) => Decoded::Frame(f),
+                                None => Decoded::End,
+                            }),
+                            Ok(_) => Err(anyhow::anyhow!("reader kind mismatch")),
                             Err(e) => Err(e),
                         }
                     }
@@ -271,5 +354,39 @@ impl BackgroundDecoder {
     /// Take every finished frame available right now (non-blocking).
     pub fn drain(&self) -> Vec<Done> {
         self.done_rx.try_iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file's jobs use its reader in ticket (= queue) order, however the
+    /// workers holding them are scheduled: here every later ticket is already
+    /// waiting before the first one arrives, the worst case for a plain mutex.
+    #[test]
+    fn a_reader_serves_jobs_in_queue_order() {
+        let readers: Readers = Arc::new(Mutex::new(HashMap::new()));
+        let tickets: Vec<_> = (0..8).map(|_| take_ticket(&readers, (1, 0))).collect();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let workers: Vec<_> = tickets
+            .into_iter()
+            .rev() // the last-queued job reaches the reader first
+            .map(|(slot, n)| {
+                let order = Arc::clone(&order);
+                let w = thread::spawn(move || {
+                    let _held = slot.wait_turn(n);
+                    order.lock().unwrap().push(n);
+                });
+                thread::sleep(std::time::Duration::from_millis(5));
+                w
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert_eq!(*order.lock().unwrap(), (0..8).collect::<Vec<u64>>());
+        // Another file's queue is independent.
+        assert_eq!(take_ticket(&readers, (1, 1)).1, 0);
     }
 }

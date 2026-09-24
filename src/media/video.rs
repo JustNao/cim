@@ -4,6 +4,10 @@
 //! and a persistent [`VideoReader`] streams rawvideo frames from a long-lived
 //! `ffmpeg` child process: sequential decodes just read the next frame off the
 //! pipe; a non-sequential index respawns the child with an accurate `-ss` seek.
+//! Small reorderings — which the decode pool produces routinely, since several
+//! workers race for this one reader — are absorbed instead of seeking: a request
+//! a few frames ahead reads forward to it, and one a few frames behind is served
+//! from the frames just read (see [`VideoReader::decode`]).
 //!
 //! Frames are always 8-bit (`rgb24`, or `gray` for grayscale sources — mono
 //! keeps the Colormap tone usable); higher-bit-depth sources are tone-mapped
@@ -12,6 +16,7 @@
 //! on seeks — a documented limitation.
 
 use rust_i18n::t;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -172,6 +177,18 @@ fn seek_seconds(idx: usize, fps: f64) -> f64 {
     ((idx as f64) - 0.5).max(0.0) / fps
 }
 
+/// How far past the stream's position a request may be and still be reached by
+/// reading forward rather than respawning with a seek. A seek is a process
+/// spawn plus a decode from the previous keyframe — up to a whole GOP of 4K
+/// frames — so reading a few frames through is the cheaper way there.
+const READ_FORWARD: usize = 16;
+
+/// Frames kept after they are read, so a request that arrives a little late
+/// (its worker lost the race for this reader to one asking for a later frame)
+/// is answered without seeking back. Matches the deepest playback prefetch, the
+/// widest spread of video jobs that can be queued at once.
+const RECENT: usize = 8;
+
 /// Persistent streaming decoder for one video file: a long-lived `ffmpeg`
 /// child writing rawvideo frames to stdout. Owned behind the decode pool's
 /// per-pane reader mutex (like a TIFF's `SeqReader`), or per export pane.
@@ -182,6 +199,13 @@ pub struct VideoReader {
     stdout: Option<ChildStdout>,
     /// The frame index the stream will yield next.
     next: usize,
+    /// The last [`RECENT`] frames read off the stream, oldest first. Shared
+    /// (`Arc`) with whoever received them, so holding them costs nothing while
+    /// the frame cache has them too.
+    recent: VecDeque<(usize, Arc<FrameData>)>,
+    /// How many times the child was (re)spawned — the expensive event; tests
+    /// assert small reorderings don't cause one.
+    spawns: usize,
 }
 
 impl VideoReader {
@@ -195,6 +219,8 @@ impl VideoReader {
             child: None,
             stdout: None,
             next: 0,
+            recent: VecDeque::with_capacity(RECENT),
+            spawns: 0,
         })
     }
 
@@ -236,25 +262,62 @@ impl VideoReader {
         self.stdout = child.stdout.take();
         self.child = Some(child);
         self.next = idx;
+        self.spawns += 1;
         Ok(())
     }
 
     /// Decode frame `idx`; `Ok(None)` = past the last frame (also when the
     /// stream ends a little before an *estimated* frame count).
-    pub fn decode(&mut self, idx: usize) -> Result<Option<FrameData>> {
+    ///
+    /// Only a real jump seeks. The decode pool hands this reader's frames to
+    /// several workers, which then queue on its mutex in no particular order,
+    /// so playback's prefetch of frames `f+1, f+2, …` routinely arrives as
+    /// `f+3, f+1, f+2`. Seeking on each of those restarted ffmpeg and decoded
+    /// from the previous keyframe every time — on a long-GOP 4K file, a stall
+    /// that grew through each GOP and reset at the next keyframe. Instead:
+    /// - a frame just read is returned from [`RECENT`] memory;
+    /// - a frame up to [`READ_FORWARD`] ahead is reached by reading on (the
+    ///   frames passed are kept, so their own requests hit memory next);
+    /// - anything else respawns the child with a seek, as before.
+    pub fn decode(&mut self, idx: usize) -> Result<Option<Arc<FrameData>>> {
         if idx >= self.meta.frame_count {
             return Ok(None);
         }
-        if self.stdout.is_none() || idx != self.next {
-            self.spawn_at(idx)?;
+        if let Some((_, f)) = self.recent.iter().find(|(i, _)| *i == idx) {
+            return Ok(Some(Arc::clone(f)));
         }
+        if !(self.next..=self.next + READ_FORWARD).contains(&idx) {
+            self.spawn_at(idx)?;
+        } else if self.stdout.is_none() {
+            // No stream yet (or it ended): start it where we are rather than
+            // at `idx`, so the frames just before `idx` — likely requested
+            // next, by the workers that lost the race — are read on the way.
+            self.spawn_at(self.next)?;
+        }
+        loop {
+            match self.read_next()? {
+                None => return Ok(None),
+                Some(f) if self.next == idx + 1 => return Ok(Some(f)),
+                Some(_) => {} // passed on the way; kept in `recent`
+            }
+        }
+    }
+
+    /// Read the stream's next frame (index `self.next`) and remember it.
+    fn read_next(&mut self) -> Result<Option<Arc<FrameData>>> {
+        let idx = self.next;
         let [w, h] = self.meta.size;
         let channels = if self.meta.gray { 1 } else { 3 };
         let mut buf = vec![0u8; w * h * channels];
         match self.stdout.as_mut().unwrap().read_exact(&mut buf) {
             Ok(()) => {
                 self.next += 1;
-                Ok(Some(FrameData::new([w, h], channels, Samples::U8(buf))))
+                let f = Arc::new(FrameData::new([w, h], channels, Samples::U8(buf)));
+                if self.recent.len() == RECENT {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back((idx, Arc::clone(&f)));
+                Ok(Some(f))
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // The stream ended cleanly before the declared count (an
@@ -302,7 +365,7 @@ pub(super) fn open_video(path: &Path, name: String) -> Result<Media> {
     let mut frames = SeqCache::new(meta.frame_count);
     if let Ok(mut reader) = VideoReader::open(path) {
         if let Ok(Some(first)) = reader.decode(0) {
-            frames.insert(0, Arc::new(first));
+            frames.insert(0, first);
         }
     }
     Ok(Media::Video(VideoSeq {
@@ -447,15 +510,67 @@ nb_frames=100
         assert!(reader.decode(10).expect("past end").is_none());
         // testsrc frames really differ — otherwise the seek checks prove nothing.
         assert_ne!(frame_bytes(&frames[3]), frame_bytes(&frames[4]));
-        // A backward seek respawns ffmpeg with `-ss`; the landed frame must be
-        // byte-identical to the sequential walk's (testsrc frames differ, so
-        // an off-by-one seek would show here).
-        let f7 = reader.decode(7).expect("seek back").expect("frame 7");
-        assert_eq!(frame_bytes(&f7), frame_bytes(&frames[7]), "seek to 7");
-        let f3 = reader.decode(3).expect("seek back").expect("frame 3");
-        assert_eq!(frame_bytes(&f3), frame_bytes(&frames[3]), "seek to 3");
+        assert_eq!(reader.spawns, 1, "a sequential walk never respawns");
+        // A frame just read comes back from memory, no seek.
+        let f7 = reader.decode(7).expect("recent").expect("frame 7");
+        assert_eq!(frame_bytes(&f7), frame_bytes(&frames[7]), "recent 7");
+        assert_eq!(reader.spawns, 1);
+        // Further back than that respawns ffmpeg with `-ss`; the landed frame
+        // must be byte-identical to the sequential walk's (testsrc frames
+        // differ, so an off-by-one seek would show here).
+        let f1 = reader.decode(1).expect("seek back").expect("frame 1");
+        assert_eq!(frame_bytes(&f1), frame_bytes(&frames[1]), "seek to 1");
+        assert_eq!(reader.spawns, 2);
         // And the stream continues sequentially from a seek landing.
-        let f4 = reader.decode(4).expect("resume").expect("frame 4");
-        assert_eq!(frame_bytes(&f4), frame_bytes(&frames[4]), "resume at 4");
+        let f2 = reader.decode(2).expect("resume").expect("frame 2");
+        assert_eq!(frame_bytes(&f2), frame_bytes(&frames[2]), "resume at 2");
+        assert_eq!(reader.spawns, 2);
+    }
+
+    /// The decode pool's workers race for one video reader, so playback's
+    /// prefetch reaches it out of order. Small reorderings must be absorbed —
+    /// read forward or served from the recent frames — with **no** respawn
+    /// (each one was a seek from the last keyframe: the periodic 4K stalls),
+    /// and every frame must still be the right one. Only a real jump seeks.
+    #[test]
+    fn reader_absorbs_out_of_order_requests_without_seeking() {
+        let path = crate::testutil::fixture_dir("video").join("long.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=64x48:rate=10:duration=6")
+            .args(["-pix_fmt", "yuv420p", "-g", "30"])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            return; // ffmpeg not installed
+        }
+        let mut reference = VideoReader::open(&path).expect("open");
+        let want: Vec<Vec<u8>> = (0..60)
+            .map(|i| frame_bytes(&reference.decode(i).unwrap().unwrap()).to_vec())
+            .collect();
+
+        let mut reader = VideoReader::open(&path).expect("open");
+        // Each window of four prefetched frames lands shuffled, as four
+        // workers winning the reader's lock in arbitrary order would.
+        let order: Vec<usize> = (0..40)
+            .step_by(4)
+            .flat_map(|b| [b + 2, b, b + 3, b + 1])
+            .collect();
+        for &i in &order {
+            let f = reader.decode(i).expect("decode").expect("frame");
+            assert_eq!(frame_bytes(&f), want[i], "frame {i}");
+        }
+        assert_eq!(
+            reader.spawns, 1,
+            "reordering within the prefetch window never seeks"
+        );
+
+        // A jump past the read-forward window does seek, and lands exactly.
+        let far = reader.next + READ_FORWARD + 1;
+        let f = reader.decode(far).expect("jump").expect("frame");
+        assert_eq!(frame_bytes(&f), want[far], "jump to {far}");
+        assert_eq!(reader.spawns, 2);
     }
 }

@@ -241,9 +241,14 @@ Compute result); `Media::computed(name, size, len)` is an empty **generated sequ
   a `FileSeq` it is always `at_end` and only ever decoded, never probed (no
   offset scan, no fastscan). Frames come from a persistent **`VideoReader`**: a
   long-lived `ffmpeg … -f rawvideo pipe:1` child; sequential decodes read the
-  next frame off the pipe, a non-sequential index respawns the child with an
+  next frame off the pipe, and only a real jump respawns the child with an
   accurate input-side `-ss` (`seek_seconds` — midpoint of the preceding frame
-  interval). Always **8-bit** (`rgb24`, or `gray` for grayscale sources — mono
+  interval). A respawn is a process start plus a decode from the previous keyframe
+  (up to a GOP of frames — ~0.6–2.6 s each on a 4K clip), so small reorderings are
+  absorbed: a frame up to `READ_FORWARD` (16) ahead is reached by reading on, and the
+  last `RECENT` (8) frames read are kept (`Arc`-shared with the cache) to answer a
+  request that arrives just behind the stream. `decode` returns `Arc<FrameData>`;
+  `spawns` counts respawns for the tests. Always **8-bit** (`rgb24`, or `gray` for grayscale sources — mono
   keeps the Colormap tone usable; `hi_depth` false, never a mask); frame↔time
   assumes **CFR** (avg rate), so a VFR file may land ±1 frame on seeks. Missing
   ffmpeg/ffprobe → a clear open error / per-pane frame error, never a crash.
@@ -508,14 +513,22 @@ check falls back rather than showing a wrong frame.
   demand).
 - **Jobs addressed by stable pane `id`**, not Vec index, so results land after
   reorder/close.
-- **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Mutex<Reader>>>`,
-  where `Reader = Tiff(SeqReader) | Video(VideoReader)` (a key only ever maps to
-  one kind — reload/close `forget` first). A `Tiff`/`Video` job locks the map to
-  get/open the file's reader, then locks the reader to decode. Different files
-  decode in parallel; pages/frames of one file serialise (a video's sequential
-  requests then read straight off the streaming pipe). `forget(id)` drops all of
-  a pane's readers (killing a video's ffmpeg child via `Drop`). A `File` job has
-  no persistent reader.
+- **Persistent readers:** `readers: HashMap<(pane id, file), Arc<Slot>>`, a `Slot`
+  holding the file's `Reader = Tiff(SeqReader) | Video(VideoReader)` (opened by the
+  first job to need it; a key only ever maps to one kind — reload/close `forget`
+  first). Different files decode in parallel; pages/frames of one file serialise **in
+  queue order**: a job takes a **ticket** from its file's slot while still holding the
+  queue lock (`take_ticket`, after the epoch check, so ticket order *is* queue order)
+  and waits for that number (`Slot::wait_turn`, a `Condvar`); the `Held` guard passes
+  the reader on when dropped, however the job ends. A plain mutex guaranteed no order:
+  on Windows one worker re-won a video's reader through a run of later frames while the
+  worker holding the frame playback waited on starved, and that frame then lay behind
+  the stream and cost a seek — measured on a 4K GOP-40 clip with 4 workers and 6 frames
+  queued, 120 frames took **44 s** with 0.6–2.6 s stalls every few frames, against
+  **2.7 s** in order. `forget(id)` drops all of a pane's readers (killing a video's
+  ffmpeg child via `Drop`). A `File` job has no persistent reader and takes no ticket.
+  A video job's `elapsed` is timed from its turn, not its wait, so the latency EMA below
+  measures decode rather than queueing.
 - `request` enqueues; `drain()` collects finished `Done` non-blocking each update.
   `Done.result: Result<Decoded>` — `Decoded::Frame` a decoded frame, `Decoded::Exists`
   a **metadata-only** frontier probe hit (`DecodeReq::Tiff { probe: true }`, page exists
