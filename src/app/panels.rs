@@ -1319,8 +1319,16 @@ impl CimApp {
                 );
                 ui.add_space(4.0);
 
+                // A fixed height, not "whatever the window has left": the window
+                // grows to last frame's content, and a scroll area sized from the
+                // leftover space only ever gained the footer's height per frame —
+                // so the list crept open a row at a time. Asking for the full
+                // height up front (still shrinking to a shorter list) lets the
+                // window take it all in the next frame.
+                const KEYS_HEIGHT: f32 = 360.0;
                 egui::ScrollArea::vertical()
-                    .max_height(360.0)
+                    .max_height(KEYS_HEIGHT)
+                    .min_scrolled_height(KEYS_HEIGHT)
                     .show(ui, |ui| {
                         egui::Grid::new("keys")
                             .num_columns(3)
