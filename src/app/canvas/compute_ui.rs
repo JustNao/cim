@@ -32,7 +32,11 @@ impl CimApp {
         if computed && status.is_empty() {
             return;
         }
-        let sources = self.compute_sources(idx, kind);
+        // The source list depends on the mode (the reductions only take real
+        // stacks), so it is built *after* the mode row has had its say this
+        // frame — a list filtered by the previous mode would briefly offer the
+        // wrong panes.
+        let sources = |kind: Reduce| self.compute_sources(idx, kind);
         let mut recompute = false;
 
         // Top-left of the cell, just under the header strip, constrained to the
@@ -51,7 +55,7 @@ impl CimApp {
                         compute_config_rows(
                             ui,
                             pane_id,
-                            &sources,
+                            sources,
                             &mut kind,
                             &mut source_id,
                             &mut source_b,
@@ -93,13 +97,14 @@ impl CimApp {
 
 /// The mode + source combo rows shared by the floating compute draft and a
 /// realized Compute pane. `salt` disambiguates widget ids between the two.
-/// `sources` is the caller's kind-filtered source list. Returns true if any
+/// `sources` builds the source list for a mode; it is called once the mode row
+/// has been drawn, so the pickers always filter by the mode shown. Returns true if any
 /// selection changed (so the caller can recompute). The binary ops show an A and
 /// a B picker; the reductions show a single Source.
 fn compute_config_rows(
     ui: &mut egui::Ui,
     salt: u64,
-    sources: &[(u64, String)],
+    sources: impl Fn(Reduce) -> Vec<(u64, String)>,
     kind: &mut Reduce,
     source_id: &mut Option<u64>,
     source_b: &mut Option<u64>,
@@ -118,6 +123,7 @@ fn compute_config_rows(
             });
     });
     let binary = kind.is_binary();
+    let sources = sources(*kind);
     let mut pick = |ui: &mut egui::Ui, label: &str, id: &str, sel: &mut Option<u64>| {
         ui.horizontal(|ui| {
             ui.label(label);
@@ -128,7 +134,7 @@ fn compute_config_rows(
             egui::ComboBox::from_id_salt((id, salt))
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
-                    for (mid, mname) in sources {
+                    for (mid, mname) in &sources {
                         if ui
                             .selectable_value(sel, Some(*mid), format!("{} {}", mid, mname))
                             .clicked()
