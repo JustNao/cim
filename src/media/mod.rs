@@ -818,4 +818,44 @@ mod tests {
         m.evict(1);
         assert_eq!(m.lru_evictable(0), None); // only the shown frame is left
     }
+
+    /// A generated (Compute add/sub) sequence is a pooled sequence like any
+    /// other: frames count toward the budget and evict, and each frame
+    /// remembers it was computed so the background fill doesn't redo an
+    /// evicted one — until a Scale change invalidates them all.
+    #[test]
+    fn a_computed_sequence_shares_the_cache_and_remembers_what_it_computed() {
+        let frame = || Arc::new(FrameData::new([4, 4], 1, Samples::F32(vec![1.0; 16])));
+        let mut m = Media::computed("A − B".into(), [4, 4], 3);
+        assert!(m.is_computed() && m.is_sequence() && m.at_end());
+        assert_eq!(m.frame_count(), 3);
+        assert!(m.decode_job(0).is_none(), "never decoded");
+        assert_eq!((m.resident_count(), m.resident_bytes()), (0, 0));
+
+        m.insert(1, frame());
+        m.touch(1, 5);
+        assert!(m.computed_done(1) && !m.computed_done(0));
+        assert_eq!(m.resident_bytes(), 16 * 4);
+        assert_eq!(m.lru_evictable(0).map(|(t, f, _)| (t, f)), Some((5, 1)));
+
+        // Evicted, but still known as computed: the fill leaves it alone.
+        m.evict(1);
+        assert!(m.resident(1).is_none() && m.computed_done(1));
+        assert_eq!(m.resident_bytes(), 0);
+
+        // The inputs discovered more frames: the sequence grows, never shrinks.
+        m.grow_computed(5);
+        assert_eq!(m.frame_count(), 5);
+        m.grow_computed(2);
+        assert_eq!(m.frame_count(), 5);
+        m.insert(4, frame());
+        assert!(m.computed_done(4));
+
+        // A Scale target makes every frame the wrong size: all forgotten.
+        assert!(m.set_scale_to(Some([2, 2])));
+        assert!(!m.computed_done(1) && !m.computed_done(4));
+        assert_eq!(m.resident_count(), 0);
+        m.insert(0, frame());
+        assert_eq!(m.resident(0).map(|f| f.size), Some([2, 2]), "stored resampled");
+    }
 }

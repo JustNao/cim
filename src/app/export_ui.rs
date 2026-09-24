@@ -310,9 +310,14 @@ impl CimApp {
                         ExportSource::Still(p.media.resident(0).expect("sequence frame 0 resident"))
                     }
                 },
-                None => {
-                    ExportSource::Still(p.media.resident(0).expect("still frame always resident"))
-                }
+                // A still — or a generated add/sub sequence whose sources are
+                // gone, which can only be snapshotted as the frame it shows.
+                None => ExportSource::Still(
+                    p.media
+                        .resident(self.frame_disp(idx))
+                        .or_else(|| p.media.resident(0))
+                        .unwrap_or_else(|| std::sync::Arc::new(media::placeholder_frame())),
+                ),
             }
         }
     }

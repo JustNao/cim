@@ -232,6 +232,12 @@ impl CimApp {
     /// no pixel decode), clearing itself once the end is found.
     pub(super) fn drive_eager(&mut self) {
         for i in 0..self.panes.len() {
+            // A generated sequence has nothing to decode; its frames fill in as
+            // its inputs load (`drive_binary_compute`).
+            if self.panes[i].media.is_computed() {
+                self.panes[i].eager = Eager::Off;
+                continue;
+            }
             match self.panes[i].eager {
                 Eager::Off => continue,
                 Eager::Full => {
@@ -865,6 +871,14 @@ impl CimApp {
             }
         }
         let Some(frame) = self.panes[idx].media.resident(target) else {
+            // A generated (add/sub) frame is never decoded: it's computed at the
+            // top of the update once its inputs are in memory. Hold the commit
+            // for it only while those are still on their way, so a result that
+            // can't arrive (an errored input, a size mismatch) never stalls the
+            // other panes.
+            if self.panes[idx].media.is_computed() {
+                return !self.binary_frame_expected(idx, target, 0);
+            }
             self.request(idx, target); // not decoded yet: queue it, keep showing tex
             return false;
         };

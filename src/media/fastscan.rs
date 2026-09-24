@@ -768,6 +768,7 @@ pub fn availability(media: &Media) -> Result<(), String> {
         }
         Media::Video(_) => Err("a video's length is already known — seek freely".into()),
         Media::Still(_) => Err("not a multi-page sequence".into()),
+        Media::Computed(_) => Err("a computed sequence has no file to scan".into()),
     }
 }
 

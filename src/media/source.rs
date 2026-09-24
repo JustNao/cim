@@ -1,5 +1,5 @@
 //! The `Media` model: the source kinds (still, multi-page TIFF, numbered file
-//! run, concatenated TIFF run) behind one interface — length discovery,
+//! run, concatenated TIFF run, video, computed sequence) behind one interface — length discovery,
 //! residency / LRU bookkeeping, and how each frame is decoded (`DecodeReq`).
 
 use std::collections::BTreeSet;
@@ -15,6 +15,7 @@ pub enum Media {
     FileSeq(FileSeq),
     ConcatSeq(ConcatSeq),
     Video(VideoSeq),
+    Computed(ComputedSeq),
 }
 
 /// A concatenation's frame files and its discovered `frame → (file, page)` map.
@@ -207,6 +208,22 @@ impl SeqCache {
     }
 }
 
+/// A sequence **generated in memory** — a binary Compute pane's `A ± B`, one
+/// result frame per timeline position. Nothing backs it on disk, so a frame is
+/// never decoded: the app computes it from its inputs' resident frames and
+/// `insert`s it. The frames live in an ordinary [`SeqCache`], so they share the
+/// one cache budget with every other media and are evicted like any decoded
+/// frame (an evicted one is simply recomputed when shown again).
+pub struct ComputedSeq {
+    pub(super) name: String,
+    pub(super) size: [usize; 2],
+    pub(super) frames: SeqCache,
+    /// Frames computed at least once since the sequence was (re)built. The
+    /// background fill skips these, so a frame the budget evicted isn't
+    /// recomputed only to be evicted again — it comes back when it is *shown*.
+    pub(super) done: Vec<bool>,
+}
+
 /// A video file (mp4/avi), decoded frame-by-frame through the ffmpeg CLI (see
 /// `media/video.rs`). Its length is probed up front with ffprobe, so like a
 /// `FileSeq` there is no lazy discovery and it is always "at end".
@@ -276,6 +293,39 @@ pub struct ConcatSeq {
 impl Media {
     /// Wrap an in-memory frame as an always-resident still (e.g. a computed
     /// image). Not backed by a file.
+    /// An empty generated sequence of `len` frames at `size` (see
+    /// [`ComputedSeq`]); frames arrive through [`Self::insert`].
+    pub fn computed(name: String, size: [usize; 2], len: usize) -> Media {
+        Media::Computed(ComputedSeq {
+            name,
+            size,
+            frames: SeqCache::new(len.max(1)),
+            done: vec![false; len.max(1)],
+        })
+    }
+
+    /// A generated sequence (see [`ComputedSeq`]).
+    pub fn is_computed(&self) -> bool {
+        matches!(self, Media::Computed(_))
+    }
+
+    /// Whether frame `idx` of a generated sequence has been computed since it
+    /// was built (even if since evicted). `false` for any other media.
+    pub fn computed_done(&self, idx: usize) -> bool {
+        matches!(self, Media::Computed(c) if c.done.get(idx).copied().unwrap_or(false))
+    }
+
+    /// Grow a generated sequence to (at least) `len` frames — its inputs
+    /// discovered more of their length. Never shrinks; other media ignore it.
+    pub fn grow_computed(&mut self, len: usize) {
+        if let Media::Computed(c) = self {
+            c.frames.note_len_to(len);
+            if c.done.len() < len {
+                c.done.resize(len, false);
+            }
+        }
+    }
+
     pub fn still(name: String, frame: FrameData) -> Media {
         let hi_depth = frame.hi_depth();
         Media::Still(Still {
@@ -333,6 +383,7 @@ impl Media {
             Media::FileSeq(f) => &f.name,
             Media::ConcatSeq(c) => &c.name,
             Media::Video(v) => &v.name,
+            Media::Computed(c) => &c.name,
         }
     }
 
@@ -343,14 +394,20 @@ impl Media {
             Media::FileSeq(f) => f.frames.len(),
             Media::ConcatSeq(c) => c.frames.len(),
             Media::Video(v) => v.frames.len(),
+            Media::Computed(c) => c.frames.len(),
         }
     }
 
     /// Whether this is a multi-frame sequence (not a single still). A multi-page
     /// TIFF counts even before its length is discovered (`frame_count` starts at
-    /// 1), since it decodes and plays like a sequence.
+    /// 1), since it decodes and plays like a sequence; a generated one counts
+    /// once it spans more than one frame.
     pub fn is_sequence(&self) -> bool {
-        !matches!(self, Media::Still(_))
+        match self {
+            Media::Still(_) => false,
+            Media::Computed(c) => c.frames.len() > 1,
+            _ => true,
+        }
     }
 
     /// The size every frame is shown at: the **Scale** target when one is set
@@ -367,6 +424,7 @@ impl Media {
             Media::FileSeq(f) => f.size,
             Media::ConcatSeq(c) => c.size,
             Media::Video(v) => v.size,
+            Media::Computed(c) => c.size,
         }
     }
 
@@ -378,6 +436,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.fit,
             Media::ConcatSeq(c) => c.frames.fit,
             Media::Video(v) => v.frames.fit,
+            Media::Computed(c) => c.frames.fit,
         }
     }
 
@@ -411,6 +470,12 @@ impl Media {
             Media::FileSeq(f) => &mut f.frames,
             Media::ConcatSeq(c) => &mut c.frames,
             Media::Video(v) => &mut v.frames,
+            // Every computed frame is now the wrong size: forget them all, so the
+            // fill recomputes them (already resampled, by `insert`).
+            Media::Computed(c) => {
+                c.done.iter_mut().for_each(|d| *d = false);
+                &mut c.frames
+            }
         };
         cache.fit = fit;
         cache.evict_all();
@@ -466,6 +531,8 @@ impl Media {
             Media::ConcatSeq(c) => c.hi_depth,
             // Video frames are always decoded to 8-bit (rgb24/gray).
             Media::Video(_) => false,
+            // Computed frames are float.
+            Media::Computed(_) => true,
         }
     }
 
@@ -491,6 +558,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.resident(idx),
             Media::ConcatSeq(c) => c.frames.resident(idx),
             Media::Video(v) => v.frames.resident(idx),
+            Media::Computed(c) => c.frames.resident(idx),
         }
     }
 
@@ -530,6 +598,8 @@ impl Media {
                 frame: idx,
             }),
             Media::Video(_) => None,
+            // Computed by the app from its inputs, never decoded.
+            Media::Computed(_) => None,
         }
     }
 
@@ -540,6 +610,12 @@ impl Media {
             Media::FileSeq(f) => f.frames.insert(idx, frame),
             Media::ConcatSeq(c) => c.insert(idx, frame),
             Media::Video(v) => v.frames.insert(idx, frame),
+            Media::Computed(c) => {
+                if idx < c.frames.len() {
+                    c.frames.insert(idx, frame);
+                    c.done[idx] = true;
+                }
+            }
         }
     }
 
@@ -551,6 +627,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.touch(idx, clock),
             Media::ConcatSeq(c) => c.frames.touch(idx, clock),
             Media::Video(v) => v.frames.touch(idx, clock),
+            Media::Computed(c) => c.frames.touch(idx, clock),
         }
     }
 
@@ -563,6 +640,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.evict(idx),
             Media::ConcatSeq(c) => c.frames.evict(idx),
             Media::Video(v) => v.frames.evict(idx),
+            Media::Computed(c) => c.frames.evict(idx),
         }
     }
 
@@ -582,6 +660,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.resident_bytes,
             Media::ConcatSeq(c) => c.frames.resident_bytes,
             Media::Video(v) => v.frames.resident_bytes,
+            Media::Computed(c) => c.frames.resident_bytes,
         }
     }
 
@@ -594,6 +673,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.resident_frames(),
             Media::ConcatSeq(c) => c.frames.resident_frames(),
             Media::Video(v) => v.frames.resident_frames(),
+            Media::Computed(c) => c.frames.resident_frames(),
         }
     }
 
@@ -608,6 +688,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.lru_evictable(protect),
             Media::ConcatSeq(c) => c.frames.lru_evictable(protect),
             Media::Video(v) => v.frames.lru_evictable(protect),
+            Media::Computed(c) => c.frames.lru_evictable(protect),
         }
     }
 
@@ -616,7 +697,7 @@ impl Media {
     /// discovered lazily for a TIFF or a concatenation.
     pub fn at_end(&self) -> bool {
         match self {
-            Media::Still(_) | Media::FileSeq(_) | Media::Video(_) => true,
+            Media::Still(_) | Media::FileSeq(_) | Media::Video(_) | Media::Computed(_) => true,
             Media::TiffSeq(t) => t.at_end,
             Media::ConcatSeq(c) => c.at_end,
         }
@@ -662,6 +743,7 @@ impl Media {
             Media::FileSeq(f) => f.frames.resident_count(),
             Media::ConcatSeq(c) => c.frames.resident_count(),
             Media::Video(v) => v.frames.resident_count(),
+            Media::Computed(c) => c.frames.resident_count(),
         }
     }
 

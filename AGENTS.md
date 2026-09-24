@@ -124,7 +124,8 @@ src/
                  per-pane state resolution, the update loop (tick / draw_modals /
                  apply_deferred).
     lifecycle.rs Open/add/remove/reload media; view-state replay + "View cmd".
-    compute.rs   Compute panes: reduce/add/sub, source graph (chaining +
+    compute.rs   Compute panes: reduce/add/sub (add/sub as a generated,
+                 cache-pooled sequence), source graph (chaining +
                  cycle guard), recompute/auto-refresh/save.
     watch.rs     Auto-reload file watching (poll_watches / rebaseline_watch):
                  rate-limited requests + the debounce, signing done off-thread.
@@ -201,13 +202,24 @@ being one level deeper). Many CimApp fields are grouped into sub-structs —
   and what `tifffile` writes for a bool array — the `tiff` decoder normalises
   those to intensity, flipping the bit), so a mask isn't shown inverted.
 
-### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq | Video`
+### `Media` = `Still | TiffSeq | FileSeq | ConcatSeq | Video | Computed`
 Unified interface: `name`, `size`, `frame_count`, `hi_depth`; `resident(idx)` /
 `insert(idx, frame)`; `decode_job(idx) -> Option<DecodeReq>` (how the pool decodes:
 `Tiff { file, page, path }` seeks in a persistent reader keyed by `(pane id,
 file)`, `File(path)` decodes a standalone still); lazy length `at_end()` /
 `frontier_ended()`; cache budget `resident_bytes()` / `touch` / `evict` /
-`resident_frames()`. `Media::still(name, frame)` wraps an in-memory frame (Compute).
+`resident_frames()`. `Media::still(name, frame)` wraps an in-memory frame (a Mean/Std
+Compute result); `Media::computed(name, size, len)` is an empty **generated sequence**
+(an Add/Sub Compute result, §9).
+
+- `Computed` (`ComputedSeq`) — frames that exist only in memory: never decoded
+  (`decode_job` → `None`, always `at_end`), `insert`ed by the app as it computes them.
+  They live in an ordinary `SeqCache`, so they **count against the cache budget and
+  evict by the same LRU** as decoded frames (§6). A parallel `done` flag per frame
+  records "computed since the sequence was built", which the background fill honours
+  so an evicted frame isn't recomputed only to be evicted again; a Scale change
+  (`set_scale_to`) clears it along with the frames. `grow_computed` extends the length
+  as the inputs discover theirs.
 
 - `Still` — one always-resident frame.
 - The three sequence kinds share a private **`SeqCache`** (`cache:
@@ -602,7 +614,8 @@ Frames are held at native bit depth and never freed by decode alone. Guard:
     timeline / export range.
   - A **Stop** button (frame bar / export panel, shown while `decoding_all`) cancels
     either via `stop_load`.
-- Stills never evict. Export decodes through its own `SeqReader`, so it's unaffected —
+- Stills never evict. A generated Compute sequence (§9) evicts like any sequence —
+  its frames are recomputed on demand when shown again. Export decodes through its own `SeqReader`, so it's unaffected —
   but an **export-initiated "Load all"** that hits the budget raises a modal warning
   on completion (`warn_popup`) that not the whole sequence is resident (`§10`).
 
@@ -1672,15 +1685,35 @@ as they land. `media::Reduce` modes:
 - **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
   accumulation → `f32`).
-- **Add | Sub** (`Reduce::is_binary`) — `compute_binary` takes **two** sources'
-  *current* frames (`frame_disp`, both must be resident) and calls
-  `media::combine_frames` (`A + B` / signed `A − B`, float). Sources may be stills;
-  reductions need ≥2 frames (`compute_sources`).
+- **Add | Sub** (`Reduce::is_binary`) — the result is a **generated sequence**
+  (`Media::Computed`, §3), not a still: `compute_binary` builds it *empty*, spanning the
+  inputs' timeline (`binary_span`: the longer input, an unsynced input counting as one
+  frame — the export's `export_timeline` rule). Result frame `k` is
+  `media::combine_frames` (`A + B` / signed `A − B`, float) of the frame each input shows
+  at timeline position `k` (`binary_input_frame` = `synced_index`, i.e. `frame_disp`'s
+  rule). `drive_binary_compute` (run by `refresh_auto_compute`, before
+  `refresh_textures`) then fills it in two passes:
+  1. **Shown first.** The pane's `frame_disp` and `stage_target` (the frame playback is
+     about to commit) are made resident synchronously by `ensure_binary_frame`: computed
+     when both inputs are in memory, otherwise a decode is `request`ed for a missing
+     file-backed input (so a *hidden* source still loads) and an upstream generated
+     input is ensured recursively. Landing anywhere on the timeline is therefore
+     instant — nothing before the shown frame is worked through.
+  2. **The fill.** Every other frame whose inputs are **already in memory**, forward from
+     the shown frame then backward, within `FILL_BUDGET` (12 ms) per update; leftover
+     work sets `Compute.filling` and asks for another repaint. Frames already `done`
+     are skipped — see §3 — and nothing is decoded for the fill.
+  Computed frames are `touch`ed at the current clock, so at the budget ceiling they
+  evict older frames of *other* media (the intended trade: one memory pool). In
+  `stage`, a missing generated frame holds the lock-step commit only while
+  `binary_frame_expected` says its inputs are still coming (decodable and not errored,
+  or upstream-expected); an errored input or a size mismatch never stalls the others.
+  Sources may be stills; reductions need ≥2 frames (`compute_sources`) — which an
+  Add/Sub result spanning a sequence has, so **Mean/Std can read an Add/Sub pane** like
+  any sequence (its resident frames).
 
-**A sequence paired with a still** needs no special case: each source contributes the
-frame it is *showing*, and a still always shows its only frame — so a binary op between
-a sequence and a single image applies that image to whichever frame the sequence is on,
-and the always-on refresh follows it across the whole sequence as it plays.
+**A sequence paired with a still** needs no special case: a still shows its only frame
+at every timeline position, so it is applied to each frame of the sequence.
 
 **Compute results are themselves sources**, so panes chain (mean of a sequence → subtract
 that mean from the sequence). `compute_sources(idx, kind)` offers every pane *except* the
@@ -1688,12 +1721,17 @@ pane itself and anything that already reads it — `depends_on` walks the source
 cycle can't be selected; `compute_source_id` applies the same guard when a view command
 replays sources by index.
 
-Results become an `f32` `Media::still` (default tone Linear, clip on). **Refresh is
-automatic** and has no toggle: `refresh_auto_compute` compares `compute_sig` (shown frames
-for the binary ops, source resident-count for the reductions; a source that is *itself* a
-Compute pane contributes its `render_gen`, which is what propagates a recompute along a
-chain) against `Compute.last_sig` each update, iterating **to a fixed point** (bounded by
-the pane count) so a whole chain settles within one update whatever order the panes sit in.
+Results are `f32` (default tone Linear, clip on). **Refresh is automatic** and has no
+toggle: `refresh_auto_compute` compares `compute_sig` against `Compute.last_sig` each
+update, iterating **to a fixed point** (bounded by the pane count) so a whole chain
+settles within one update whatever order the panes sit in. The signature folds in each
+source's `render_gen` (bumped when a Compute result is rebuilt **or a file pane
+reloads** — what propagates a recompute along a chain) and Scale target, plus the
+source's resident count for a reduction, or for a binary op how each input maps the
+timeline (synced, or pinned to which frame) — **not** the shown frame: moving along the
+timeline only computes more of the existing sequence, while a changed signature rebuilds
+it from scratch. A reduction reading a generated sequence that is still `filling` waits
+(`waits_on_fill`) rather than re-reducing a growing stack every update.
 Only an `armed` pane refreshes, so an unconfigured one keeps its form. `Source::Computed` makes the manager's ⟳ recompute.
 
 **No black flash on recompute.** `recompute_pane` swaps in the new result media but

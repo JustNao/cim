@@ -179,12 +179,11 @@ compute.reduce_std: Std
 compute.reduce_add: Add
 compute.reduce_sub: Subtract
 compute.status_reduce: "%{kind} of %{n} frame(s) in memory"
-compute.status_binary: Frame %{a} %{sign} frame %{b}
+compute.status_binary: "%{n} frame(s) computed in memory"
 compute.err_source_gone: Source no longer available
 compute.err_no_frames: No source frames in memory
 compute.err_pick: Pick source %{slot}
 compute.err_slot_gone: Source %{slot} no longer available
-compute.err_frame_missing: "%{slot}'s current frame not in memory"
 compute.err_shape_mismatch: A and B differ in size / channels
 
 # ---- export panel ----------------------------------------------------------

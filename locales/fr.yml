@@ -188,12 +188,11 @@ compute.reduce_std: Écart-type
 compute.reduce_add: Addition
 compute.reduce_sub: Soustraction
 compute.status_reduce: "%{kind} de %{n} image(s) en mémoire"
-compute.status_binary: Image %{a} %{sign} image %{b}
+compute.status_binary: "%{n} image(s) calculée(s) en mémoire"
 compute.err_source_gone: Source indisponible
 compute.err_no_frames: Aucune image source en mémoire
 compute.err_pick: Choisissez la source %{slot}
 compute.err_slot_gone: Source %{slot} indisponible
-compute.err_frame_missing: "L'image courante de %{slot} n'est pas en mémoire"
 compute.err_shape_mismatch: A et B diffèrent en taille / nombre de canaux
 
 # ---- panneau d'export ------------------------------------------------------

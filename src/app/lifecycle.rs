@@ -671,6 +671,9 @@ impl CimApp {
                 // Drop stale in-flight decodes aimed at the old contents.
                 self.inflight.retain(|(pid, _)| *pid != id);
                 self.panes[i].media = m;
+                // New data behind the same pane: a Compute pane reading it
+                // sees the generation move and recomputes.
+                self.panes[i].render_gen = self.panes[i].render_gen.wrapping_add(1);
                 self.panes[i].tex.clear();
                 self.panes[i].stats = None; // recompute region stats from fresh data
                 self.panes[i].hist = None; // recompute histogram from fresh data

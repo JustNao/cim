@@ -774,6 +774,9 @@ struct Compute {
     /// Input signature at the last (attempted) compute, so the auto-refresh only
     /// recomputes when something actually changed. See `compute_sig`.
     last_sig: u64,
+    /// An add/sub pane's generated sequence still has in-memory frames to fill
+    /// (`drive_binary_compute`); a reduction reading it waits until it hasn't.
+    filling: bool,
     /// Short result / error line shown in the controls.
     status: String,
 }
@@ -2356,8 +2359,12 @@ impl CimApp {
                 self.recompute_pane(i);
             }
         }
-        // Auto-refresh Compute panes whose inputs advanced (e.g. during playback).
-        self.refresh_auto_compute();
+        // Auto-refresh Compute panes whose inputs advanced (e.g. during playback),
+        // and fill the generated add/sub sequences — a slice per update, so come
+        // back for the rest.
+        if self.refresh_auto_compute() {
+            ctx.request_repaint();
+        }
 
         // Timeline hover preview: act on what the scrubber recorded last frame,
         // then clear the record so it stays `None` whenever the pointer is off
