@@ -1109,7 +1109,11 @@ impl CimApp {
             .default_pos(ctx.screen_rect().center())
             .pivot(egui::Align2::CENTER_CENTER)
             .resizable(true)
-            .default_width(440.0)
+            // Start narrow and let the content widen it, like the Export panel:
+            // a resizable window only ever *grows* to its content (egui's
+            // `Resize` keeps the larger of its size and the content's), so a
+            // wide default left empty space right of every row.
+            .default_width(240.0)
             .show(ctx, |ui| {
                 ui.heading(t!("settings.interface"));
                 ui.horizontal(|ui| {
