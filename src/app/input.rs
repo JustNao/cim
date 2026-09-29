@@ -31,38 +31,45 @@ impl CimApp {
             Action::NextMedia if n > 0 => self.current = (self.current + 1) % n,
             Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
             Action::NextFrame => {
-                self.pending_seek = None; // manual step cancels an automatic seek
-                self.playback.prefetch = None; // …and any in-flight playback step
-                                               // Step within the active loop window (the same one playback
-                                               // obeys), not the whole timeline — and on the timeline the
-                                               // transport drives, which is the focused pane's own when it is
-                                               // temporally unsynced (§8).
+                // Step within the active loop window (the same one playback
+                // obeys), not the whole timeline — and on the timeline the
+                // transport drives, which is the focused pane's own when it is
+                // temporally unsynced (§8).
+                //
+                // Steps **queue**: a step starts from the frame the timeline is
+                // already heading to (a pending seek), not the one on screen, so
+                // pressing `n` times moves `n` frames however slowly they load.
+                // One past the discovered frontier arms a seek there, which
+                // rides the frontier (headers only) and lands on it.
+                self.playback.prefetch = None; // a step abandons any in-flight playback step
                 let tl = self.transport_len();
                 let (lo, hi) = self.loop_bounds(tl);
                 let full = self.playback.loop_range.is_none();
-                let f = self.transport_frame();
+                let f = self.step_origin();
                 if lo <= f && f < hi {
-                    self.set_transport_frame(f + 1);
-                } else if !full {
-                    self.set_transport_frame(lo); // sub-range: wrap at its edges
-                } else if self.transport_at_end() {
-                    self.set_transport_frame(lo); // full range: wrap once length is known
+                    self.transport_seek(f + 1);
+                } else if !full || self.transport_at_end() {
+                    // Wrap: at a sub-range's edge, or the full range's once its
+                    // length is known.
+                    self.transport_seek(lo);
+                } else if !self.transport_own() {
+                    self.seek_to(f + 1); // past the frontier: queue it
                 }
-                // else hold at the frontier; lookahead extends it shortly
+                // else (a pane's own playhead) hold at the frontier; lookahead
+                // extends it shortly
             }
             Action::PrevFrame => {
-                self.pending_seek = None; // manual step cancels an automatic seek
-                self.playback.prefetch = None; // …and any in-flight playback step
+                self.playback.prefetch = None; // a step abandons any in-flight playback step
                 let tl = self.transport_len();
                 let (lo, hi) = self.loop_bounds(tl);
                 let full = self.playback.loop_range.is_none();
-                let f = self.transport_frame();
-                if lo < f && f <= hi {
-                    self.set_transport_frame(f - 1);
-                } else if !full {
-                    self.set_transport_frame(hi); // sub-range: wrap at its edges
-                } else if self.transport_at_end() {
-                    self.set_transport_frame(hi); // full range: wrap once length is known
+                let f = self.step_origin();
+                if f > hi && f > lo && full {
+                    self.seek_to(f - 1); // still past the frontier: stays queued
+                } else if lo < f && f <= hi {
+                    self.transport_seek(f - 1);
+                } else if !full || self.transport_at_end() {
+                    self.transport_seek(hi); // wrap, as for NextFrame
                 }
             }
             Action::ResetView => {
@@ -255,7 +262,9 @@ impl CimApp {
             for action in Action::all() {
                 if let Some(chord) = self.config.keybindings.chord_for(action) {
                     // Exact modifier match, so `R` and `Ctrl+R` stay distinct.
-                    if ctx.input(|i| chord.pressed(i)) {
+                    // Once per press, so presses queued behind a slow frame
+                    // aren't merged into one.
+                    for _ in 0..ctx.input(|i| chord.presses(i)) {
                         self.apply_action(action, ctx);
                     }
                 }

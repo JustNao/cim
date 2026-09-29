@@ -343,10 +343,12 @@ impl CimApp {
                     if let Ok(target) = self.frame_edit.trim().parse::<usize>() {
                         self.do_fast_jump(target);
                     }
-                    self.frame_edit = self.transport_frame().to_string();
+                    self.frame_edit = self.step_origin().to_string();
                 } else if !resp.has_focus() {
-                    // Keep the buffer showing the live frame while not editing.
-                    self.frame_edit = self.transport_frame().to_string();
+                    // Keep the buffer showing the live frame while not editing —
+                    // or, while a seek catches up, the frame it is heading to,
+                    // so queued steps count up as they're pressed.
+                    self.frame_edit = self.step_origin().to_string();
                 }
                 ui.monospace(t!("frame_bar.frame"));
                 // While a typed seek is riding the frontier (target past the

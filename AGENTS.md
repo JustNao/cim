@@ -1267,7 +1267,13 @@ completes its length outright. **The manual next/previous-frame controls obey th
 frame-bar Prev/Next buttons via `ui.ctx()`), applied to the **transport's** timeline
 (above): stepping inside `[lo, hi]` moves one frame;
 at an edge a sub-range wraps to the other edge, a full range wraps only once the real end
-is known (else holds at the frontier). `draw_scrubber` shades resident frames (contiguous runs merged), dims
+is known. **Steps queue:** each starts from `step_origin` — a pending seek's target when
+there is one, else the playhead — so pressing Next `n` times moves `n` frames however
+slowly they load; a step past the discovered frontier arms `pending_seek` there (on the
+shared timeline — a pane's own playhead still holds at its frontier), which `drive_seek`
+rides by header and lands, and the frame readout shows that target meanwhile. Shortcuts
+fire **once per press** (`Chord::presses`, egui's `num_presses`), so presses queued behind
+a slow frame aren't merged into one. `draw_scrubber` shades resident frames (contiguous runs merged), dims
 outside the window, and draws the brackets. `advance_playback` accumulates
 **wall-clock time** (`i.time` deltas via `Playback.last_tick` — **never
 `stable_dt`**: egui substitutes a fixed `predicted_dt` of 1/60 s for the real

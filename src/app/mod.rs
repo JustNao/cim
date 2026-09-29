@@ -1732,6 +1732,17 @@ impl CimApp {
         }
     }
 
+    /// Where a frame step starts from: the frame a pending seek is heading to
+    /// (so repeated steps accumulate while it catches up), else the
+    /// transport's playhead. A pending seek rides the shared timeline, so it
+    /// doesn't apply when an unsynced pane owns the transport.
+    pub(super) fn step_origin(&self) -> usize {
+        match self.pending_seek {
+            Some(t) if !self.transport_own() => t,
+            _ => self.transport_frame(),
+        }
+    }
+
     /// Move the transport's playhead (see [`transport_frame`](Self::transport_frame)).
     pub(super) fn set_transport_frame(&mut self, f: usize) {
         let t = self.transport();

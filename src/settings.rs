@@ -205,13 +205,19 @@ impl Chord {
         })
     }
 
-    /// True when this exact chord (its key **and** its modifier set) fired this
-    /// frame — an exact match, so `R` and `Ctrl+R` are distinct.
-    pub fn pressed(&self, i: &egui::InputState) -> bool {
-        i.key_pressed(self.key)
-            && i.modifiers.command == self.ctrl
+    /// How many times this exact chord (its key **and** its modifier set) fired
+    /// this frame — an exact match, so `R` and `Ctrl+R` are distinct. A count,
+    /// not a flag: presses that pile up during one slow frame each count, so
+    /// pressing a key `n` times always acts `n` times.
+    pub fn presses(&self, i: &egui::InputState) -> usize {
+        let mods = i.modifiers.command == self.ctrl
             && i.modifiers.shift == self.shift
-            && i.modifiers.alt == self.alt
+            && i.modifiers.alt == self.alt;
+        if mods {
+            i.num_presses(self.key)
+        } else {
+            0
+        }
     }
 }
 
