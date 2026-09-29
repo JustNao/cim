@@ -9,6 +9,7 @@
 //! accessors ([`Media::resident`] / [`Media::insert`]).
 
 mod fastscan;
+mod format;
 pub mod jp2;
 mod loader;
 mod percentile;
@@ -21,7 +22,8 @@ pub use fastscan::{
     apply_offset_counts, availability as fast_jump_availability, fast_jump, fast_jump_to_file,
     offset_jump, offset_paths, scan_offset_counts, PageAnchor,
 };
-pub use loader::{decode_file, load, load_sequence, SeqReader};
+pub use format::{Format, LOADABLE_EXTS, VIDEO_EXTS};
+pub use loader::{decode_file, load, load_ready, load_sequence, load_sequence_ready, SeqReader};
 pub use render::{Region, RgbaSink, ToneLut};
 pub use source::{DecodeReq, Media};
 pub use stats::{combine_frames, reduce_frames, HistData, Reduce, RegionStats};

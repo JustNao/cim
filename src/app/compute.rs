@@ -174,9 +174,10 @@ impl CimApp {
     /// the synced group or dial in a clip afterward.
     fn set_compute_tone_defaults(&mut self, i: usize) {
         self.panes[i].sync_tone = false;
-        self.panes[i].contrast = ContrastMode::Linear;
-        self.panes[i].tone.clip.enabled = false;
-        self.panes[i].tone.share_clip = false;
+        let v = &mut self.panes[i].visual;
+        v.contrast = ContrastMode::Linear;
+        v.tone.clip.enabled = false;
+        v.tone.share_clip = false;
     }
 
     /// Mean/std reduction of a source's resident frames → (frame, name, status).
@@ -534,7 +535,7 @@ impl CimApp {
                 self.panes[idx].hist = None; // recompute for the new result
                 self.panes[idx].error = None;
                 // Its preview thumbnails show the previous result.
-                self.thumb_cache.forget_pane(self.panes[idx].id);
+                self.work.thumb_cache.forget_pane(self.panes[idx].id);
 
                 if let Some(c) = self.panes[idx].compute.as_mut() {
                     c.computed = true; // switch from the config form to the result

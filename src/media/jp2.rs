@@ -141,11 +141,6 @@ impl Jp2Cache {
 /// codestream forms (the decoder sniffs which one it was handed).
 pub const EXTS: &[&str] = &["jp2", "j2k", "j2c", "jpc"];
 
-/// Does this lowercased extension name a JPEG 2000 file?
-pub fn handles(ext: &str) -> bool {
-    EXTS.contains(&ext)
-}
-
 /// How the decoded components map onto a `FrameData`: how many of them to
 /// keep, and the channel count that produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,17 +417,6 @@ mod tests {
     fn garbage_is_an_error_not_a_panic() {
         let err = decode_jp2_bytes(b"not a jpeg 2000 file at all", Path::new("bad.jp2"), None);
         assert!(err.is_err());
-    }
-
-    #[test]
-    fn every_claimed_extension_is_loadable_and_recognised() {
-        for ext in EXTS {
-            assert!(handles(ext), "{ext}");
-            assert!(
-                crate::cli::LOADABLE_EXTS.contains(ext),
-                "{ext} missing from LOADABLE_EXTS"
-            );
-        }
     }
 
     #[test]

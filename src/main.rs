@@ -44,30 +44,22 @@ fn main() -> eframe::Result<()> {
         cli::Cli::Exit(code) => std::process::exit(code),
     };
 
-    // Which renderer this run gets, decided here because eframe can only be told
-    // once — hence the "takes effect after restart" note in Settings.
-    //
-    // **glow (OpenGL) stays the default and the fallback.** It is what every run
-    // with hardware acceleration off — the default — and every machine without a
-    // usable adapter uses, unchanged from before this option existed, which is
-    // the point: adding a GPU path must not change the graphics stack under
-    // users who aren't asking for one. Accelerated runs take wgpu instead,
-    // because sharing its device is what lets the tone map write into a texture
-    // egui samples without a readback (see `crate::gpu`).
+    // Start loading the inputs now: creating the window takes ~150 ms, and the
+    // first frames decode meanwhile instead of after it. The budget first, so
+    // the loads run on the instance's share of the CPU.
+    cpu::set_budget(config.cpu_budget);
+    media::jp2::set_budget_px(config.jp2_max_mp.saturating_mul(1_000_000));
+    let preload = std::sync::Mutex::new(Some(app::Preload::start(inputs.clone())));
+
+    // The renderer is chosen once, here (hence "takes effect after restart" in
+    // Settings). glow is the default and the fallback; an accelerated run takes
+    // wgpu, whose device the tone map shares to write straight into a texture
+    // egui samples (see `crate::gpu`).
     if gpu::wants_gpu(config.hardware_accel) {
-        // The adapter probe has no window, so it can only answer "this machine
-        // has a Vulkan device" — not "that device can present to the window this
-        // app is about to open". A remote / VNC / headless-X session is exactly
-        // where those two answers differ, so **wgpu starting is not guaranteed
-        // by the probe succeeding**, and eframe does not fall back on its own:
-        // `run_native` dispatches straight to `run_wgpu` and returns its error,
-        // which would mean no window at all rather than a slower one.
-        //
-        // So take the error and run the whole thing again on glow. The user gets
-        // the app, on the CPU path, exactly as if the machine had no card —
-        // which beats an accelerated run they cannot start and cannot turn off
-        // without hand-editing the config.
-        match run(&inputs, &view, eframe::Renderer::Wgpu) {
+        // The windowless adapter probe can't tell whether the device can
+        // present to this window (remote / VNC sessions often can't), and
+        // eframe doesn't fall back by itself: on error, run again on glow.
+        match run(&config, &inputs, &view, &preload, eframe::Renderer::Wgpu) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 crate::debug::log(&format!("gpu: wgpu renderer failed to start ({e})"));
@@ -75,20 +67,22 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
-    run(&inputs, &view, eframe::Renderer::Glow)
+    run(&config, &inputs, &view, &preload, eframe::Renderer::Glow)
 }
 
 /// Open the window and run the app on `renderer`.
 ///
-/// Takes its inputs by reference and clones them per attempt because it may be
-/// called twice: eframe's creator is `FnOnce`, and the wgpu attempt above has to
-/// leave a second, glow-rendered attempt possible. The clone is a list of paths.
+/// May be called twice (the wgpu attempt above, then glow), so the preload is
+/// taken rather than moved, and a second attempt whose first already consumed
+/// it loads the inputs again.
 fn run(
+    config: &settings::Config,
     inputs: &[cli::Input],
     view: &cli::ViewState,
+    preload: &std::sync::Mutex<Option<app::Preload>>,
     renderer: eframe::Renderer,
 ) -> eframe::Result<()> {
-    let (inputs, view) = (inputs.to_vec(), view.clone());
+    let (config, view) = (config.clone(), view.clone());
     let native_options = eframe::NativeOptions {
         renderer,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
@@ -125,7 +119,14 @@ fn run(
     eframe::run_native(
         "cim",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::CimApp::new(cc, inputs, view)))),
+        Box::new(move |cc| {
+            let preload = preload
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| app::Preload::start(inputs.to_vec()));
+            Ok(Box::new(app::CimApp::new(cc, config, preload, view)))
+        }),
     )
 }
 

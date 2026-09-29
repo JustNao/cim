@@ -591,7 +591,7 @@ impl CimApp {
     /// regions themselves are staged with the base (`stage_region`).
     pub(super) fn enforce_region_budget(&mut self) {
         let protect = self.live_regions();
-        self.regions.enforce(REGION_CACHE_BYTES, &protect);
+        self.work.regions.enforce(REGION_CACHE_BYTES, &protect);
     }
 
     /// The regions the panes are drawing right now **or are about to** — off
@@ -662,8 +662,8 @@ impl CimApp {
             dims: plan.dims,
         };
         self.panes[idx].region_want = Some(key);
-        if self.regions.get(&key).is_some() {
-            self.regions.touch(&key, self.clock);
+        if self.work.regions.get(&key).is_some() {
+            self.work.regions.touch(&key, self.clock);
             return true;
         }
         // A synchronous render leaves the region in the cache, so the pane is
@@ -689,7 +689,7 @@ impl CimApp {
         key: RegionKey,
     ) -> bool {
         let id = self.panes[idx].id;
-        let contrast = self.contrast_of(idx);
+        let contrast = self.visual(idx).contrast;
         let ops = self.ops_of(idx);
         let cmap = crate::tone::uses_colormap(contrast, frame);
         let heavy = !cmap && crate::imageproc::ops_active(frame, ops);
@@ -699,7 +699,7 @@ impl CimApp {
             hi,
             // Carried into the job as well as used inline: a Colormap region big
             // enough to render off-thread must still come back false-coloured.
-            palette: cmap.then(|| self.tone_of(idx).palette),
+            palette: cmap.then(|| self.visual(idx).tone.palette),
             ops,
         };
         let region = key.region();
@@ -711,9 +711,9 @@ impl CimApp {
             // render. That is `RenderPool`'s documented invariant. The key is
             // filed here and read back in `land_region`, so a result never has
             // to be re-derived from the geometry it was rendered at.
-            if let std::collections::hash_map::Entry::Vacant(e) = self.roi_inflight.entry(id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = self.work.roi_inflight.entry(id) {
                 e.insert(key);
-                self.renderer.request(crate::renderer::RenderJob {
+                self.work.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: target,
                     sig: key.sig,
@@ -758,7 +758,9 @@ impl CimApp {
     pub(super) fn upload_region(&mut self, ctx: &egui::Context, key: RegionKey, img: ColorImage) {
         let t = crate::debug::enabled().then(std::time::Instant::now);
         let protect = self.live_regions();
-        self.regions.insert(ctx, key, img, self.clock, &protect);
+        self.work
+            .regions
+            .insert(ctx, key, img, self.clock, &protect);
         if let Some(t) = t {
             self.metrics.upload.record(t.elapsed());
         }

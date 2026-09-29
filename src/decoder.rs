@@ -8,11 +8,10 @@
 //! Each sequence keeps one persistent [`SeqReader`] (keyed by pane id) so
 //! seeking to a page reuses the crate's cached IFD offsets instead of
 //! re-walking the file every decode. Different sequences decode in parallel;
-//! frames of the same sequence serialise on that sequence's reader (a single
-//! file is read sequentially anyway) — **in the order they were queued**, via a
-//! ticket per job ([`Slot`]). A plain mutex let one worker win the reader again
-//! and again while another, holding the very frame playback waited on, starved;
-//! for a video that frame then lay behind the stream and cost a seek.
+//! frames of the same sequence serialise on that sequence's reader **in the
+//! order they were queued**, via a ticket per job ([`Slot`]): with a plain
+//! mutex one worker can win the reader repeatedly while the frame playback
+//! waits on starves (for a video, falling behind the stream costs a seek).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +35,10 @@ struct Job {
     /// frame is nearest-resampled to it here, on the worker, rather than on the
     /// UI thread when it lands.
     scale: Option<[usize; 2]>,
+    /// Whole-frame display bounds to compute once decoded (`Some(clip)`, see
+    /// `tone::frame_bounds`): they are memoized in the frame, so the UI's
+    /// first render of it finds them ready instead of scanning the frame.
+    bounds: Option<Option<f32>>,
 }
 
 pub struct Done {
@@ -50,8 +53,7 @@ pub struct Done {
     pub elapsed: std::time::Duration,
     /// The share of `elapsed` spent inside file `read`/`seek` calls (true I/O;
     /// the rest is CPU decompress). Only the persistent-reader TIFF path splits
-    /// this out — a standalone `File` job reports zero (its decode stage then
-    /// still means read + decode, as before).
+    /// this out; a standalone `File` job reports zero.
     pub io: std::time::Duration,
 }
 
@@ -88,9 +90,7 @@ type Readers = Arc<Mutex<HashMap<(u64, usize), Arc<Slot>>>>;
 /// Each job takes a ticket when it leaves the queue (still under the queue
 /// lock, so ticket order *is* queue order) and waits for its number. Playback
 /// queues frames in the order it shows them, so the reader sees them in that
-/// order too, whichever worker picked each up — a mutex alone guarantees no
-/// order, and on Windows one worker could hold the reader through a whole run
-/// of later frames while the one playback was waiting on sat blocked.
+/// order too, whichever worker picked each up.
 struct Slot {
     /// Tickets handed out so far.
     issued: AtomicU64,
@@ -102,7 +102,7 @@ struct Turn {
     /// The ticket allowed to use the reader now.
     serving: u64,
     /// Opened by the first job to need it; an open that fails is retried by the
-    /// next job, as before.
+    /// next job.
     reader: Option<Reader>,
 }
 
@@ -297,6 +297,9 @@ impl BackgroundDecoder {
                     }
                     (r, _) => r,
                 };
+                if let (Ok(Decoded::Frame(f)), Some(clip)) = (&result, job.bounds) {
+                    crate::cpu::install(|| crate::tone::frame_bounds(f, clip, None));
+                }
                 if done_tx
                     .send(Done {
                         id: job.id,
@@ -324,8 +327,16 @@ impl BackgroundDecoder {
     }
 
     /// Queue `req` for pane `id`'s `frame`; a decoded frame is resampled to
-    /// `scale` (the pane's Scale target) before it is handed back.
-    pub fn request(&self, id: u64, frame: usize, req: DecodeReq, scale: Option<[usize; 2]>) {
+    /// `scale` (the pane's Scale target) and its `bounds` computed before it is
+    /// handed back.
+    pub fn request(
+        &self,
+        id: u64,
+        frame: usize,
+        req: DecodeReq,
+        scale: Option<[usize; 2]>,
+        bounds: Option<Option<f32>>,
+    ) {
         let epoch = self.epoch.load(Ordering::Relaxed);
         let _ = self.job_tx.send(Job {
             id,
@@ -333,6 +344,7 @@ impl BackgroundDecoder {
             req,
             epoch,
             scale,
+            bounds,
         });
     }
 

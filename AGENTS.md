@@ -26,7 +26,8 @@
   only, so there is nothing to write them with — see `src/testdata/README.md`.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
-- **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25, `tiff` 0.11, `rfd` 0.14,
+- **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25 (only the `png`/`jpeg`/`bmp`/`webp`
+  features — TIFF and JPEG 2000 have their own decoders), `tiff` 0.11, `rfd` 0.14,
   `serde`/`serde_json`, `directories` 5, `anyhow`, `libloading` 0.8 (runtime load
   of the optional proprietary C++ operators — **no** C++ compiler needed to build
   cim; see `INTEGRATION_CPP.md`), `rust-i18n` 4 (UI translations, §12). Export
@@ -65,7 +66,10 @@ src/
     source.rs    Media (Still|TiffSeq|FileSeq|ConcatSeq|Video) + SeqCache +
                  DecodeReq: the source kinds behind one interface, length
                  discovery, LRU.
-    loader.rs    load*/open*/decode* constructors, SeqReader (persistent TIFF
+    format.rs    Format (Tiff|Jp2|Raster|Video): the one extension → decoder
+                 dispatch, plus LOADABLE_EXTS / VIDEO_EXTS.
+    loader.rs    load*/open*/decode* constructors (load_ready: first frame
+                 decoded + bounds warmed, for off-thread opens), SeqReader (persistent TIFF
                  decoder), bilevel-mask bit handling.
     video.rs     Video via the ffmpeg CLI: ffprobe metadata (probe_video) and
                  VideoReader (persistent streaming ffmpeg child; §3).
@@ -123,7 +127,10 @@ src/
                  RegionSel/LineSel/PaneTex/Watch/Deferred), consts, new(),
                  per-pane state resolution, the update loop (tick / draw_modals /
                  apply_deferred).
-    lifecycle.rs Open/add/remove/reload media; view-state replay + "View cmd".
+    lifecycle.rs Open (Preload: background, parallel) / add / remove / reload
+                 media; view-state replay + "View cmd".
+    workers.rs   Workers: the background pools + their in-flight bookkeeping,
+                 and forget_pane (the one teardown for a closed/changed pane).
     compute.rs   Compute panes: reduce/add/sub (add/sub as a generated,
                  cache-pooled sequence), source graph (chaining +
                  cycle guard), recompute/auto-refresh/save.
@@ -256,7 +263,7 @@ Compute result); `Media::computed(name, size, len)` is an empty **generated sequ
 
 **JPEG 2000 (`.jp2`, `.j2k`/`.j2c`/`.jpc`, `media/jp2.rs`)** is a **still**, not a
 source kind of its own: `load`/`decode_file` dispatch on the extension
-(`jp2::handles`) and everything downstream (a `Still` pane, a `FileSeq` numbered
+(`media::Format`) and everything downstream (a `Still` pane, a `FileSeq` numbered
 run, a folder concatenation, export's `Files` source) is unchanged. Only the
 *decoder* differs — the `image` crate has no JPEG 2000 — and unlike video it is
 **in-process** (`hayro-jpeg2000`), deliberately: the machines cim runs on don't all
@@ -444,7 +451,7 @@ len)` grows length by one.
     `SeqReader` cache) and a whole-sequence count vector doesn't fit the pool's
     per-frame `Decoded` result, and this way an open's scan never occupies a
     worker that should be decoding the first visible frame. A **generation** tags
-    each scan (`Pane.offset_scan` = the in-flight gen, `CimApp.offset_gen` the
+    each scan (`Pane.offset_scan` = the in-flight gen, `work.offset_gen` the
     counter): pane ids are stable across reload, so a scan returning after a reload
     is recognised as stale and dropped. A layout that isn't fast-scannable just
     `Err`s on the worker and is left to lazy discovery — **no** classic
@@ -533,9 +540,15 @@ check falls back rather than showing a wrong frame.
   `Done.result: Result<Decoded>` — `Decoded::Frame` a decoded frame, `Decoded::Exists`
   a **metadata-only** frontier probe hit (`DecodeReq::Tiff { probe: true }`, page exists
   but not decoded — §4), `Decoded::End` past-end, `Err` failure.
-- App side (`app/decode.rs`): `inflight: HashSet<(id, frame)>` dedupes both `request`
-  and `probe`; `pump_decoder` drains (insert + `touch`, or `note_frontier` for a probe
-  hit, or `frontier_ended`, or set pane `error`).
+- App side (`app/decode.rs`, state in `app/workers.rs`): `work.inflight: HashSet<(id,
+  frame)>` dedupes both `request` and `probe`; `pump_decoder` drains (insert + `touch`, or
+  `note_frontier` for a probe hit, or `frontier_ended`, or set pane `error`).
+- **Bounds computed on the worker.** A decode request carries the whole-frame bounds the
+  pane will render with (`bounds_hint`: its clip percentile, or `None` when a region or the
+  Control's shared clip supplies them); the worker computes them after decoding, so they
+  are memoized in the frame before it lands and `stage` never scans it on the UI thread.
+- **Shown frame first.** Pages of one file decode in queue order, so `ensure_lookahead`
+  queues the shown frame (when not resident) before the next page.
 - **Playback prefetch (`prefetch_playback`).** While playing, each on-screen pane (plus
   the loop-driving pane) pre-decodes the next `PLAY_PREFETCH` (3) frames along the loop window
   (same walk as `advance_playback`; wraps when looping), so playback overlaps decode with
@@ -1293,16 +1306,16 @@ actually reach the screen (`Playback.shown`, a `ShownRate` fed by each lock-step
 over the last second; a re-render of the same frame doesn't count), against the `fps`
 asked for — then the frame readout.
 
-**Render-gated playback (`play_prefetch`).** Playback does **not** bump `shared_frame`
+**Render-gated playback (`playback.prefetch`).** Playback does **not** bump `shared_frame`
 directly. When the accumulator is due, `advance_playback` picks the next frame and parks
-it in `play_prefetch` (the candidate next shared frame), then stages the panes toward it;
+it in `playback.prefetch` (the candidate next shared frame), then stages the panes toward it;
 `refresh_textures` advances `shared_frame` to it only on the commit — i.e. once **every**
 on-screen pane has that frame ready. While a prefetch is in flight the accumulator **keeps
 counting real time but is capped at one `step`**: the gate's own latency doesn't stretch
 the frame interval (the next frame is due `step` after this one *fired*, not after it
 committed), yet a slow proprietary operator still **paces** playback — at most one frame
 fires the moment a long gate lands, never a burst — instead of the frame counter racing
-ahead of the image. `play_prefetch` is cleared (playback step abandoned) by
+ahead of the image. `playback.prefetch` is cleared (playback step abandoned) by
 pause, any manual next/prev/seek, and length clamping; when an unsynced pane owns the
 transport the commit lands on **its** `frame` instead of `shared_frame`, staged the
 same way.
@@ -1548,7 +1561,7 @@ one per pane in flight at a time, and (b) hands the work to
 `offsets::OffsetScanner`: it is given only the **paths** (never the pane's `Media` /
 `Source`), signs them, posts a `SignDone` back and `request_repaint`s; the UI thread
 only compares hashes and runs the debounce. Results are keyed by pane `id` **and a
-generation** (`CimApp.watch_gen`, `Watch.inflight`): ids are stable across reload, so a
+generation** (`work.watch_gen`, `Watch.inflight`): ids are stable across reload, so a
 signature in flight when the watch is re-baselined measured contents that are no longer
 the baseline and is dropped. Baselining is likewise asynchronous — `loaded = None`
 means "adopt the next signature".
@@ -1600,11 +1613,11 @@ Compute **recompute** instead bumps `render_gen` so it keeps the last frame, §9
 **Two sync groups.** The Transformations split into **two independent** sync groups,
 each a checkbox column in the manager's Sync row (and a Sync toggle in the matching
 panel group):
-- **Visualization (`Pane.sync_tone`, default on).** Follows `shared_contrast`/
-  `shared_tone`/`shared_details`/`shared_overlay`. `contrast_of`/`tone_of`/`details_of`/
-  `overlay_of` return the effective value (shared when synced), read by
+- **Visualization (`Pane.sync_tone`, default on).** One `Visual { contrast, tone,
+  details, overlay }` per pane plus `shared_visual`; `visual(i)` / `visual_mut(i)` return
+  the effective one (shared when synced), read by
   `stage`/`prepare_overlay`/`export_pane`/`view_command`. `set_sync_tone(false)`
-  snapshots the shared tone/overlay in so nothing jumps.
+  copies the shared set in so nothing jumps.
 - **Geometry (`Pane.sync_geometry`, default on).** Follows `shared_rotation` only.
   `rotation_of` returns the effective angle; `set_rotation` writes shared-or-own by it.
   `set_sync_geometry(false)` snapshots the shared angle in.
@@ -1996,7 +2009,14 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
 
 ## 11. CLI (`cli.rs`) & entry (`main.rs`)
 
-`main` → `cli::parse` → `Cli::Run { paths, view }` or `Cli::Exit(code)`.
+`main` → `cli::parse` → `Cli::Run { paths, view }` or `Cli::Exit(code)`. On `Run`,
+`main` applies the CPU / JPEG 2000 budgets and starts an `app::Preload` for the inputs
+**before** creating the window: eframe's window + GL setup takes ~150 ms, and the first
+frames decode during it (one rayon job per input, each with its first frame decoded and
+its default bounds computed — `media::load_ready`). `CimApp::new` receives the config and
+the preload; `poll_opening` adds the panes when it finishes, and the view state waits in
+`pending_view` until then. Drops and the file dialog go through the same `Preload`, so
+opening never blocks the UI thread.
 
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,
@@ -2175,11 +2195,12 @@ still-blank window white for a few frames. A cloaked window is fully managed but
 never composited, so nothing can flash; `tick` **uncloaks on the third frame**, once
 a real maximized frame has been swapped, requesting repaints until then so those
 first frames come even while idle); **resize both shared pools if `cpu_budget`
-changed** (§5.1); `pump_decoder` → `pump_render` (stage
+changed** (§5.1); `poll_opening` (add finished background opens) → `pump_decoder` →
+`pump_render` (stage
 finished tone renders into `pending`) → `handle_input` → `advance_playback` → `drive_seek`;
 `drive_eager` → `ensure_lookahead` → `prefetch_playback` (pre-decode upcoming frames while
 playing, §5) → `poll_decoding_all` → `enforce_cache_budget`; clamp
-`shared_frame` (and any stale `play_prefetch`); `poll_watches` (reload any watched
+`shared_frame` (and any stale `playback.prefetch`); `poll_watches` (reload any watched
 pane whose source file changed and settled) then recompute any Compute pane (a deferred
 `pending_recompute` button click, then `refresh_auto_compute`) — all **before**
 `refresh_textures`, so a reloaded/recomputed texture (nulled by the reload/recompute)

@@ -14,7 +14,10 @@ eframe = { version = "0.29", default-features = true, features = ["wgpu"] }
 # Already in the tree via winit; used to reach the Win32 HWND for the
 # startup DWM cloak (no white flash — see app/mod.rs::set_window_cloak).
 raw-window-handle = "0.6"
-image = "0.25"
+# Only the still formats cim opens (TIFF and JPEG 2000 have their own
+# decoders) and PNG/JPEG for the image export: the default feature set adds an
+# AV1 encoder, OpenEXR, GIF, … that nothing here uses.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
 tiff = "0.11"
 # JPEG 2000 (.jp2 / raw codestreams). Pure Rust and `#![forbid(unsafe_code)]`,
 # with **no transitive dependencies** at these features — the point being that
@@ -23,10 +26,7 @@ tiff = "0.11"
 # own cleanup path). `simd` is left off on purpose: it measured ~6% on a
 # 2048x2048 16-bit image and pulls in a dependency for it.
 hayro-jpeg2000 = { version = "0.4", default-features = false, features = ["std"] }
-# Row-parallel tone mapping for full-resolution renders (see media::render).
-# Already in the tree via `image`'s AVIF encoder, so this pins no new package —
-# but it *is* a direct dependency now, so Cargo.lock changes and the offline
-# build image (build_utils/) must be rebuilt online before it can be used.
+# Row-parallel tone mapping and analytic scans (see media::render, crate::cpu).
 rayon = "1"
 rfd = "0.14"
 serde = { version = "1", features = ["derive"] }
@@ -61,7 +61,7 @@ bytemuck = { version = "1", features = ["derive"] } # sample buffers -> GPU byte
 # the PNG(s) in assets/, `ico` assembles the multi-size .ico, and `winresource`
 # invokes the Windows SDK resource compiler. All Windows-only build-time deps.
 [target.'cfg(windows)'.build-dependencies]
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 ico = "0.3"
 winresource = "0.1"
 

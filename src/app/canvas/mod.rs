@@ -386,7 +386,7 @@ impl CimApp {
     /// rect is `[origin * step, (origin + dims) * step)`.
     pub(in crate::app) fn region_of(&self, idx: usize) -> Option<(TextureId, Rect)> {
         let k = self.panes[idx].region_show?;
-        let tex = self.regions.get(&k)?;
+        let tex = self.work.regions.get(&k)?;
         let s = k.step as f32;
         let rect = Rect::from_min_max(
             Pos2::new(k.origin[0] as f32 * s, k.origin[1] as f32 * s),

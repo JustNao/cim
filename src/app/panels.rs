@@ -11,7 +11,7 @@ impl CimApp {
                 .on_hover_text(self.hover_for(Action::OpenFiles, ""))
                 .clicked()
             {
-                self.open_dialog();
+                self.open_dialog(ui.ctx());
             }
             ui.separator();
             for (mode, label, action) in [
@@ -652,7 +652,7 @@ impl CimApp {
                     ui.add_space(6.0);
                     ui.label(t!(
                         "debug.regions",
-                        mb = self.regions.resident_bytes() >> 20
+                        mb = self.work.regions.resident_bytes() >> 20
                     ));
                 }
             });
@@ -680,11 +680,8 @@ impl CimApp {
         let mut open = self.show_manager;
         let shared_view = self.shared_view;
         let shared_frame = self.shared_frame;
-        let shared_contrast = self.shared_contrast;
-        let shared_tone = self.shared_tone;
-        let shared_details = self.shared_details;
+        let shared_visual = self.shared_visual;
         let shared_rotation = self.shared_rotation;
-        let shared_overlay = self.shared_overlay;
 
         // Row drag-to-reorder: rows collects each media row's (vec index, screen
         // y-band) so a drop can be mapped to a target; do_move carries the
@@ -791,10 +788,7 @@ impl CimApp {
                                                     continue;
                                                 }
                                                 if !all_ts {
-                                                    p.contrast = shared_contrast;
-                                                    p.tone = shared_tone;
-                                                    p.details = shared_details;
-                                                    p.overlay = shared_overlay;
+                                                    p.visual = shared_visual;
                                                 }
                                                 p.sync_tone = all_ts;
                                                 p.overlay_tex = None; // tone re-renders via tone_sig

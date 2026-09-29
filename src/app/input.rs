@@ -92,7 +92,7 @@ impl CimApp {
                     .zoom_at(1.0 / 1.25, a.center(), a);
             }
             Action::LoadAll => self.load_all(),
-            Action::OpenFiles => self.open_dialog(),
+            Action::OpenFiles => self.open_dialog(ctx),
             Action::ToggleSettings => self.show_settings = !self.show_settings,
             Action::ToggleManager => self.show_manager = !self.show_manager,
             Action::ToggleVis => {
@@ -142,7 +142,7 @@ impl CimApp {
             .map_or(0.0, |t| ((now - t) as f32).clamp(0.0, 0.25));
         self.playback.last_tick = Some(now);
         let step = 1.0 / self.playback.fps.max(0.1);
-        // Playback is render-gated: a step is pre-rendered into `play_prefetch`,
+        // Playback is render-gated: a step is pre-rendered into `playback.prefetch`,
         // and the timeline only advances once every on-screen pane has that frame
         // ready (`refresh_textures` clears it on commit). While one is in flight,
         // wait — so a slow operator paces playback instead of the counter racing
@@ -301,7 +301,7 @@ impl CimApp {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.open_paths(dropped);
+            self.open_paths(dropped, ctx);
         }
     }
 }

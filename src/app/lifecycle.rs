@@ -4,6 +4,85 @@
 
 use super::*;
 
+use std::sync::{Arc, OnceLock};
+
+/// An open whose media load on a background thread, one input per rayon job,
+/// with each first frame decoded before it lands. Started from `main` before
+/// the window exists, so the startup decode overlaps creating it; a drop or a
+/// dialog open starts one the same way and never blocks the UI thread.
+pub struct Preload {
+    thread: std::thread::JoinHandle<Loaded>,
+    /// Woken when the load finishes. Filled once the UI exists, which may be
+    /// after the thread finished — `CimApp::new` checks for that.
+    waker: Arc<OnceLock<egui::Context>>,
+}
+
+/// Loaded items in input order, and each failed input's error.
+struct Loaded {
+    items: Vec<OpenItem>,
+    errors: Vec<String>,
+}
+
+impl Preload {
+    pub fn start(inputs: Vec<cli::Input>) -> Self {
+        let waker: Arc<OnceLock<egui::Context>> = Arc::default();
+        let wake = Arc::clone(&waker);
+        let thread = std::thread::spawn(move || {
+            let loaded = load_inputs(inputs);
+            if let Some(ctx) = wake.get() {
+                ctx.request_repaint();
+            }
+            loaded
+        });
+        Self { thread, waker }
+    }
+
+    pub(super) fn set_waker(&self, ctx: &egui::Context) {
+        let _ = self.waker.set(ctx.clone());
+        if self.thread.is_finished() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn join(self) -> Loaded {
+        self.thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+}
+
+fn load_inputs(inputs: Vec<cli::Input>) -> Loaded {
+    use rayon::prelude::*;
+    let results: Vec<Result<OpenItem, String>> =
+        crate::cpu::install(|| inputs.into_par_iter().map(load_input).collect());
+    let mut loaded = Loaded {
+        items: Vec::new(),
+        errors: Vec::new(),
+    };
+    for r in results {
+        match r {
+            Ok(item) => loaded.items.push(item),
+            Err(e) => loaded.errors.push(e),
+        }
+    }
+    loaded
+}
+
+fn load_input(input: cli::Input) -> Result<OpenItem, String> {
+    let (res, source) = match input {
+        cli::Input::Single(p) => (media::load_ready(&p), Source::File(p)),
+        cli::Input::Sequence { token, files } => (
+            media::load_sequence_ready(&files, token.clone()),
+            Source::Sequence { token, files },
+        ),
+        // No media to load: its sources are wired by `commit_open` once every
+        // pane exists.
+        cli::Input::Compute { kind, a, b } => return Ok(OpenItem::Compute { kind, a, b }),
+    };
+    res.map(|m| OpenItem::Media(m, source))
+        .map_err(|e| t!("error.open_failed", err = e).into_owned())
+}
+
 impl CimApp {
     /// Apply a viewpoint parsed from the command line (see `cli::ViewState`).
     /// Called once after the startup files are opened. Only the fields that were
@@ -50,18 +129,16 @@ impl CimApp {
         // synced) — otherwise the restored per-pane tone wouldn't take effect.
         if let Some(tones) = &vs.tones {
             for (p, t) in self.panes.iter_mut().zip(tones) {
-                p.contrast = match t {
+                p.visual.contrast = match t {
                     cli::Tone::Linear => ContrastMode::Linear,
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
                     cli::Tone::Boost => ContrastMode::Boost,
                     cli::Tone::Colormap(pal) => {
-                        p.tone.palette = *pal;
+                        p.visual.tone.palette = *pal;
                         ContrastMode::Colormap
                     }
                 };
                 p.sync_tone = false;
-                // Restored tone re-renders via `tone_sig`; no `tex` nulling (it
-                // would flash black for a heavy operator/details pane).
             }
         }
         // Per-pane Linear clip (`--clip`): a toggle + percentile. Like --tone this
@@ -69,10 +146,10 @@ impl CimApp {
         if let Some(clips) = &vs.clips {
             for (p, c) in self.panes.iter_mut().zip(clips) {
                 match c {
-                    cli::ClipSpec::Off => p.tone.clip.enabled = false,
+                    cli::ClipSpec::Off => p.visual.tone.clip.enabled = false,
                     cli::ClipSpec::On(pct) => {
-                        p.tone.clip.enabled = true;
-                        p.tone.clip.percent = *pct;
+                        p.visual.tone.clip.enabled = true;
+                        p.visual.tone.clip.percent = *pct;
                     }
                 }
                 p.sync_tone = false;
@@ -82,13 +159,13 @@ impl CimApp {
         // media's. Per-pane like --tone/--clip, so unsync the panes it sets.
         if let Some(shares) = &vs.share_clip {
             for (p, s) in self.panes.iter_mut().zip(shares) {
-                p.tone.share_clip = *s;
+                p.visual.tone.share_clip = *s;
                 p.sync_tone = false;
             }
         }
         if let Some(details) = &vs.details {
             for (p, d) in self.panes.iter_mut().zip(details) {
-                p.details = *d;
+                p.visual.details = *d;
                 p.sync_tone = false;
             }
         }
@@ -107,14 +184,16 @@ impl CimApp {
         if let Some(sync) = &vs.tsync {
             if let Some(k) = sync.iter().position(|&s| s) {
                 if let Some(p) = self.panes.get(k) {
-                    self.shared_contrast = p.contrast;
-                    self.shared_tone = p.tone;
-                    self.shared_details = p.details;
+                    // The overlay isn't part of the view command, so it stays.
+                    let overlay = self.shared_visual.overlay;
+                    self.shared_visual = Visual {
+                        overlay,
+                        ..p.visual
+                    };
                 }
             }
             for (p, &s) in self.panes.iter_mut().zip(sync) {
                 p.sync_tone = s;
-                // Effective tone changed → re-renders via `tone_sig`; no nulling.
             }
         }
         // Geometry sync flags (`--gsync`), applied *after* --rotate (which unsyncs
@@ -168,19 +247,15 @@ impl CimApp {
     /// split. Anything left at its default is omitted to keep the line short.
     ///
     /// Only the *shared* view is captured — panes with their own view (sync off)
-    /// fall back to it. Sequences are listed as their individual files (the
-    /// compact `PREFIX%0Xu…,…` token isn't reconstructed).
+    /// fall back to it.
     pub(super) fn view_command(&self) -> String {
         let mut parts: Vec<String> = vec!["cim".into()];
         for p in &self.panes {
-            // Re-emit a numbered sequence as its compact token so a replay
-            // reopens it as one sequence (not a pane per file). Paths are made
-            // absolute (against the current working directory) so the command
-            // reopens the same files regardless of where it's later run from —
-            // cim is often launched from a desktop/app launcher whose CWD isn't
-            // where the media lives (a relative arg would then miss). `absolute_path`
-            // is lexical, so it absolutises the numbered token's prefix too without
-            // disturbing the `%0Xu…,START,END` tail.
+            // A numbered sequence goes back out as its compact token, so a replay
+            // reopens it as one pane. Paths are made absolute: the command may
+            // be run from a launcher whose working directory is elsewhere.
+            // `absolute_path` is lexical, so a token's `%0Xu…,START,END` tail
+            // survives it.
             match &p.source {
                 Source::File(path) => parts.push(quote_path(&absolute_path(path))),
                 Source::Sequence { token, .. } => parts.push(quote_arg(
@@ -232,20 +307,17 @@ impl CimApp {
             // is Linear for every pane unless another tone is chosen, so omit
             // `--tone` when every pane is Linear.
             let tones: Vec<String> = (0..n)
-                .map(|i| match self.contrast_of(i) {
+                .map(|i| match self.visual(i).contrast {
                     ContrastMode::Linear => "linear".to_string(),
                     ContrastMode::LutAlpha => "lutalpha".to_string(),
                     ContrastMode::Boost => "boost".to_string(),
                     ContrastMode::Colormap => {
-                        format!("colormap:{}", self.tone_of(i).palette.token())
+                        format!("colormap:{}", self.visual(i).tone.palette.token())
                     }
                 })
                 .collect();
-            // Any per-pane transformation flag below makes `apply_view_state`
-            // *unsync* the panes it sets; whenever we emit one we must also emit
-            // `--tsync` to restore the sync state (otherwise an all-synced session
-            // would replay unsynced — the default is synced, so `--tsync` is
-            // normally omitted).
+            // Replaying a per-pane transformation flag unsyncs the panes it
+            // sets, so emitting one forces `--tsync` below.
             let mut per_pane_transform = false;
             if (0..n).any(|i| tones[i] != "linear") {
                 parts.push(format!("--tone {}", tones.join(",")));
@@ -256,7 +328,7 @@ impl CimApp {
             // 0.01% for >8-bit, off for 8-bit).
             let clips: Vec<String> = (0..n)
                 .map(|i| {
-                    let clip = self.tone_of(i).clip;
+                    let clip = self.visual(i).tone.clip;
                     if clip.enabled {
                         format!("{}", (clip.percent * 1000.0).round() / 1000.0)
                     } else {
@@ -275,77 +347,49 @@ impl CimApp {
                 parts.push(format!("--clip {}", clips.join(",")));
                 per_pane_transform = true;
             }
-            // Per-pane "Share clip" (effective): 1/0. Omit when no pane shares
-            // (the default).
-            if (0..n).any(|i| self.tone_of(i).share_clip) {
-                let shares: Vec<&str> = (0..n)
-                    .map(|i| if self.tone_of(i).share_clip { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--share-clip {}", shares.join(",")));
+            // Per-pane 0/1 flags, each omitted while at its default.
+            let flags = |f: &dyn Fn(usize) -> bool| -> String {
+                (0..n)
+                    .map(|i| if f(i) { "1" } else { "0" })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            if (0..n).any(|i| self.visual(i).tone.share_clip) {
+                parts.push(format!(
+                    "--share-clip {}",
+                    flags(&|i| self.visual(i).tone.share_clip)
+                ));
                 per_pane_transform = true;
             }
-            // Details — omit when all off (the default).
-            if (0..n).any(|i| self.details_of(i)) {
-                let details: Vec<&str> = (0..n)
-                    .map(|i| if self.details_of(i) { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--detail {}", details.join(",")));
+            if (0..n).any(|i| self.visual(i).details) {
+                parts.push(format!("--detail {}", flags(&|i| self.visual(i).details)));
                 per_pane_transform = true;
             }
-            // Per-pane effective rotation — omit when every pane is unrotated.
-            // Rotation rides the *Geometry* sync, so it forces `--gsync` (below),
-            // not `--tsync`.
-            let mut per_pane_geometry = false;
-            if (0..n).any(|i| self.rotation_of(i) != 0.0) {
+            // Rotation rides the *Geometry* sync, so it forces `--gsync`, not
+            // `--tsync`.
+            let per_pane_geometry = (0..n).any(|i| self.rotation_of(i) != 0.0);
+            if per_pane_geometry {
                 let rots: Vec<String> = (0..n)
-                    .map(|i| {
-                        let r = self.rotation_of(i);
-                        format!("{}", (r * 100.0).round() / 100.0)
-                    })
+                    .map(|i| format!("{}", (self.rotation_of(i) * 100.0).round() / 100.0))
                     .collect();
                 parts.push(format!("--rotate {}", rots.join(",")));
-                per_pane_geometry = true;
             }
-            // Visibility — omit when all visible (the default).
             if self.panes.iter().any(|p| !p.visible) {
-                let show: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.visible { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--show {}", show.join(",")));
+                parts.push(format!("--show {}", flags(&|i| self.panes[i].visible)));
             }
-            // Scale to the Control — omit when no pane scales (the default).
             if self.panes.iter().any(|p| p.scale) {
-                let scale: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.scale { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--scale {}", scale.join(",")));
+                parts.push(format!("--scale {}", flags(&|i| self.panes[i].scale)));
             }
-            // Geometry-sync. Emit when any pane is unsynced *or* `--rotate` was
-            // emitted (it unsyncs geometry on replay, so an all-synced session
-            // needs `--gsync 1,1,…` to re-sync).
+            // Replaying a per-pane flag unsyncs the panes it sets, so an
+            // all-synced session that emitted one needs the sync flags to re-sync.
             if self.panes.iter().any(|p| !p.sync_geometry) || per_pane_geometry {
-                let gs: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.sync_geometry { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--gsync {}", gs.join(",")));
+                parts.push(format!(
+                    "--gsync {}",
+                    flags(&|i| self.panes[i].sync_geometry)
+                ));
             }
-            // Visualization-sync. Emit when any pane is unsynced *or* any of the
-            // per-pane tone flags above was emitted (they unsync on replay, so an
-            // all-synced session needs `--tsync 1,1,…` to re-sync — otherwise it
-            // would come back unsynced).
             if self.panes.iter().any(|p| !p.sync_tone) || per_pane_transform {
-                let ts: Vec<&str> = self
-                    .panes
-                    .iter()
-                    .map(|p| if p.sync_tone { "1" } else { "0" })
-                    .collect();
-                parts.push(format!("--tsync {}", ts.join(",")));
+                parts.push(format!("--tsync {}", flags(&|i| self.panes[i].sync_tone)));
             }
         }
         if let Some((lo, hi)) = self.playback.loop_range {
@@ -368,14 +412,14 @@ impl CimApp {
         parts.join(" ")
     }
 
-    pub(super) fn open_dialog(&mut self) {
+    pub(super) fn open_dialog(&mut self, ctx: &egui::Context) {
         if let Some(paths) = rfd::FileDialog::new()
             .add_filter("Images & sequences", crate::cli::LOADABLE_EXTS)
             .add_filter("Videos", crate::cli::VIDEO_EXTS)
             .add_filter("All files", &["*"])
             .pick_files()
         {
-            self.open_paths(paths);
+            self.open_paths(paths, ctx);
         }
     }
 
@@ -384,45 +428,35 @@ impl CimApp {
     /// becomes its own pane, while a **dropped directory** opens as one
     /// concatenated sequence of its image files plus one pane per video
     /// (like `cim folder`).
-    pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>) {
-        self.open_inputs(paths.into_iter().flat_map(cli::inputs_for_path).collect());
+    pub(super) fn open_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        self.open_inputs(
+            paths.into_iter().flat_map(cli::inputs_for_path).collect(),
+            ctx,
+        );
     }
 
-    /// Open a list of CLI inputs: a `Single` becomes one media, a `Sequence`
-    /// becomes a single numbered-file sequence media (one pane, not one per file).
-    ///
-    /// Media are loaded first (cheap — metadata / page 0 only, decoding is lazy),
-    /// then gated: if the result would leave **more than `SEQ_WARN_LIMIT`
-    /// sequences** open at once, the loaded media are held in `pending_open` and a
-    /// resource-warning confirmation is shown instead of adding the panes now (see
-    /// the popup in `update`). Otherwise they're added immediately.
-    pub(super) fn open_inputs(&mut self, inputs: Vec<cli::Input>) {
-        let mut loaded: Vec<OpenItem> = Vec::new();
-        for input in inputs {
-            let (res, source) = match input {
-                cli::Input::Single(p) => (media::load(&p), Source::File(p)),
-                cli::Input::Sequence { token, files } => (
-                    media::load_sequence(&files, token.clone()),
-                    Source::Sequence { token, files },
-                ),
-                // A Compute pane carries no media to load — keep it in order so it
-                // lands at its original pane index (its sources are wired up by
-                // `commit_open` once every pane exists).
-                cli::Input::Compute { kind, a, b } => {
-                    loaded.push(OpenItem::Compute { kind, a, b });
-                    continue;
-                }
-            };
-            match res {
-                Ok(m) => loaded.push(OpenItem::Media(m, source)),
-                Err(e) => self.error_popup = Some(t!("error.open_failed", err = e).into_owned()),
-            }
-        }
+    /// Open a list of CLI inputs in the background (see [`Preload`]).
+    pub(super) fn open_inputs(&mut self, inputs: Vec<cli::Input>, ctx: &egui::Context) {
+        let preload = Preload::start(inputs);
+        preload.set_waker(ctx);
+        self.opening.push_back(preload);
+    }
 
-        // Count sequences (multi-frame media) that would be open after this —
-        // panes already up, plus any batch already waiting behind the warning, plus
-        // the ones now loading. Including `pending_open` keeps a second drop gated
-        // instead of slipping panes in while the big batch still waits.
+    /// Add the panes of finished background opens, in the order they started.
+    pub(super) fn poll_opening(&mut self) {
+        while self.opening.front().is_some_and(|p| p.thread.is_finished()) {
+            let loaded = self.opening.pop_front().expect("checked above").join();
+            if let Some(e) = loaded.errors.into_iter().last() {
+                self.error_popup = Some(e);
+            }
+            self.gate_open(loaded.items);
+        }
+    }
+
+    /// Add loaded items as panes — unless the result would leave more than
+    /// `SEQ_WARN_LIMIT` sequences open, in which case they wait in
+    /// `pending_open` behind a confirmation.
+    fn gate_open(&mut self, loaded: Vec<OpenItem>) {
         let open_seqs = self.panes.iter().filter(|p| p.media.is_sequence()).count();
         let waiting_seqs = self
             .pending_open
@@ -431,8 +465,6 @@ impl CimApp {
             .unwrap_or(0);
         let opening = loaded.iter().filter(|it| it.is_sequence()).count();
         if open_seqs + waiting_seqs + opening > SEQ_WARN_LIMIT {
-            // Hold the load behind the warning; `commit_open` finishes it on
-            // confirm. Merge with any batch already waiting (rapid drops).
             match &mut self.pending_open {
                 Some(pend) => pend.extend(loaded),
                 None => self.pending_open = Some(loaded),
@@ -506,15 +538,12 @@ impl CimApp {
         // Always the built-in Linear map; the clip toggle carries the auto-
         // contrast. >8-bit sources need it to be legible, so clip defaults on;
         // 8-bit displays 1:1, so clip defaults off (a plain identity map).
-        let contrast = ContrastMode::Linear;
-        let mut tone = ToneOptions::default();
-        tone.clip.enabled = media.hi_depth();
+        let mut visual = Visual::default();
+        visual.tone.clip.enabled = media.hi_depth();
         // Transformations sync is on by default; the first opened media seeds the
         // shared set (so its depth-appropriate tone becomes the group default).
         if self.panes.is_empty() {
-            self.shared_contrast = contrast;
-            self.shared_tone = tone;
-            self.shared_details = false;
+            self.shared_visual = visual;
             self.shared_rotation = 0.0;
         }
         self.panes.push(Pane {
@@ -530,12 +559,9 @@ impl CimApp {
             sync_tone: true,
             sync_geometry: true,
             visible: true,
-            contrast,
-            tone,
-            details: false,
+            visual,
             scale: false,
             rotation: 0.0,
-            overlay: None,
             overlay_tex: None,
             region_tone: false,
             stats: None,
@@ -566,32 +592,18 @@ impl CimApp {
             return;
         }
         let removed_id = self.panes[i].id;
-        self.decoder.forget(removed_id); // drop its persistent reader
-        self.renderer.forget(removed_id); // drop its render thread + operator instances
-        if let Some(g) = &mut self.gpu {
-            g.forget_pane(removed_id); // drop its uploaded display table
-        }
-        self.render_inflight.remove(&removed_id);
-        // A region job in flight for this pane will never land now, and its
-        // guard would otherwise block that pane id's regions forever — which,
-        // with regions gating the lock-step commit, would stall playback.
-        self.roi_inflight.remove(&removed_id);
-        // Its cached regions can never be wanted again either: `retire_stale`
-        // only fires on a *later insert by the same pane*, so with the pane gone
-        // they would sit in the budget until the LRU got round to them.
-        self.regions.forget_pane(removed_id);
-        // Same reasoning for its timeline-preview thumbnails.
-        self.thumb_cache.forget_pane(removed_id);
+        self.forget_pane_work(removed_id);
         self.panes.remove(i);
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
-        if self.shared_overlay.is_some_and(|o| o.src_id == removed_id) {
-            self.shared_overlay = None;
+        for v in std::iter::once(&mut self.shared_visual)
+            .chain(self.panes.iter_mut().map(|p| &mut p.visual))
+        {
+            if v.overlay.is_some_and(|o| o.src_id == removed_id) {
+                v.overlay = None;
+            }
         }
         for p in &mut self.panes {
-            if p.overlay.is_some_and(|o| o.src_id == removed_id) {
-                p.overlay = None;
-            }
             p.overlay_tex = None;
         }
         let n = self.panes.len();
@@ -607,10 +619,6 @@ impl CimApp {
         fix(&mut self.slot_b);
     }
 
-    /// Re-open a pane's file from disk, picking up external changes while
-    /// keeping its current frame (via a fastscan offset jump, else riding the
-    /// frontier). Files are opened read-only with shared access, so a persistent
-    /// reader never blocks another program from writing them.
     /// Re-decode every open JPEG 2000 pane at the level `config.jp2_max_mp` now
     /// implies, from its **kept codestream** — no file is re-read (see
     /// `media::jp2`). The image's pixel size changes with the level, so the
@@ -634,6 +642,10 @@ impl CimApp {
         }
     }
 
+    /// Re-open a pane's file from disk, picking up external changes while
+    /// keeping its current frame (via a fastscan offset jump, else riding the
+    /// frontier). Files are opened read-only with shared access, so a persistent
+    /// reader never blocks another program from writing them.
     pub(super) fn reload(&mut self, i: usize) {
         if i >= self.panes.len() {
             return;
@@ -670,21 +682,7 @@ impl CimApp {
         match loaded {
             Ok(m) => {
                 let id = self.panes[i].id;
-                self.decoder.forget(id); // reopen the file for its fresh contents
-                self.renderer.forget(id); // rebuild the render thread + instances for fresh contents
-                if let Some(g) = &mut self.gpu {
-                    g.forget_pane(id); // its display table describes the old contents
-                }
-                self.render_inflight.remove(&id);
-                // Same reasoning as on close — except the pane id lives on, so a
-                // stranded guard would block its regions (and the timeline)
-                // forever, and the regions themselves describe the old contents.
-                self.roi_inflight.remove(&id);
-                self.regions.forget_pane(id);
-                // Its preview thumbnails describe the old contents too.
-                self.thumb_cache.forget_pane(id);
-                // Drop stale in-flight decodes aimed at the old contents.
-                self.inflight.retain(|(pid, _)| *pid != id);
+                self.forget_pane_work(id);
                 self.panes[i].media = m;
                 // New data behind the same pane: a Compute pane reading it
                 // sees the generation move and recomputes.
@@ -694,19 +692,8 @@ impl CimApp {
                 self.panes[i].hist = None; // recompute histogram from fresh data
                 self.panes[i].error = None;
                 self.panes[i].fast_jump = None; // re-measure the (possibly new) layout
-                                                // If this is a mask, invalidate overlay textures whose effective
-                                                // source is it, so they rebuild from the reloaded contents.
-                let shared_src = self.shared_overlay.map(|o| o.src_id);
-                for p in &mut self.panes {
-                    let eff = if p.sync_tone {
-                        shared_src
-                    } else {
-                        p.overlay.map(|o| o.src_id)
-                    };
-                    if eff == Some(id) {
-                        p.overlay_tex = None;
-                    }
-                }
+                                                // Overlays tinted from the old contents.
+                self.drop_overlays_from(id);
                 // Land back on what the user was viewing. For a media spanning
                 // several files (a folder, a concatenated run) that is a *file*
                 // and a page within it, not a global index — the re-listing above
@@ -742,20 +729,12 @@ impl CimApp {
                     }
                 }
                 // Single-file media (one multi-page TIFF), or a file-anchored jump
-                // that couldn't be made: land on the same global index instead. The
-                // fresh media only knows its first page, so first try a direct
-                // fastscan offset jump (validate + decode `target` at its predicted
-                // position, growing the known length through it in one step).
-                //
-                // When the layout isn't stride-predictable, jump by **byte
-                // offset** instead: the position this frame sat at before the
-                // reload is re-checked against the fresh file and, if it still
-                // holds the same page, decoded straight from there. That is the
-                // auto-reload case — a file overwritten in place — so it costs two
-                // header reads. Without a usable anchor (the first reload) the
-                // chain is walked once to build one, still far cheaper than riding
-                // the frontier a probe per update, which is what both falling back
-                // to `None` leaves to `seek_to` below.
+                // that couldn't be made: land on the same global index instead.
+                // The fresh media only knows its first page, so try a stride-
+                // predicted fast jump, then a byte-offset jump: the page's old
+                // offset re-checked against the fresh file (two header reads for
+                // a file overwritten in place), or a one-off chain walk to build
+                // that anchor. Failing both, `seek_to` below rides the frontier.
                 if let Some(f) = landed {
                     target = f;
                     self.panes[i].media.touch(target, clock);

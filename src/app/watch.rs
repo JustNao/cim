@@ -48,7 +48,7 @@ impl CimApp {
     /// asynchronously: `loaded = None` means "adopt the next signature", and
     /// bumping the generation rejects the in-flight one.
     pub(super) fn rebaseline_watch(&mut self, i: usize) {
-        self.watch_gen += 1;
+        self.work.watch_gen += 1;
         let w = &mut self.panes[i].watch;
         w.loaded = None;
         w.seen = None;
@@ -62,7 +62,7 @@ impl CimApp {
     /// and commits in step with the other panes instead of flashing.
     pub(super) fn poll_watches(&mut self, now: f64) {
         let mut to_reload: Vec<usize> = Vec::new();
-        for done in self.watcher.drain() {
+        for done in self.work.watcher.drain() {
             let Some(i) = self.panes.iter().position(|p| p.id == done.id) else {
                 continue; // pane closed while the signature was in flight
             };
@@ -101,10 +101,10 @@ impl CimApp {
 
         // Rate-limit the requests themselves. One signature per pane in flight at
         // a time, so a slow share can never queue up a backlog.
-        if now - self.watch_polled_at < WATCH_POLL.as_secs_f64() {
+        if now - self.work.watch_polled_at < WATCH_POLL.as_secs_f64() {
             return;
         }
-        self.watch_polled_at = now;
+        self.work.watch_polled_at = now;
         for i in 0..self.panes.len() {
             if !self.panes[i].watch.on || self.panes[i].watch.inflight.is_some() {
                 continue;
@@ -119,10 +119,10 @@ impl CimApp {
                 continue;
             }
             self.panes[i].watch.polled_at = now;
-            self.watch_gen += 1;
-            let gen = self.watch_gen;
+            self.work.watch_gen += 1;
+            let gen = self.work.watch_gen;
             self.panes[i].watch.inflight = Some(gen);
-            self.watcher.request(self.panes[i].id, gen, paths);
+            self.work.watcher.request(self.panes[i].id, gen, paths);
         }
     }
 }

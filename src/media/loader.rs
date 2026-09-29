@@ -14,27 +14,54 @@ use tiff::decoder::{Decoder, DecodingResult};
 use tiff::ColorType;
 
 use super::source::{ConcatSeq, FileSeq, Media, SeqCache, Still, TiffSeq};
-use super::{FrameData, Samples};
+use super::{Format, FrameData, Samples};
 
-/// Open any supported file as a `Media`.
+/// Open any supported file as a `Media`. A TIFF reads only its first header
+/// here; its pages decode on the pool.
 pub fn load(path: &Path) -> Result<Media> {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
+    match Format::decoder_for(path) {
+        Format::Tiff => open_tiff(path, name),
+        Format::Video => super::video::open_video(path, name),
+        // May decode at a reduced resolution level, and keeps its codestream.
+        Format::Jp2 => open_jp2_still(path, name),
+        Format::Raster => open_still(path, name),
+    }
+}
 
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+/// [`load`] with the first frame resident and its default display bounds
+/// computed, for an open that runs off the UI thread: the pane then shows
+/// without a round trip through the decode pool. A first page that fails to
+/// decode is left to the pool, which reports the error in the pane.
+pub fn load_ready(path: &Path) -> Result<Media> {
+    let mut media = load(path)?;
+    if media.resident(0).is_none() && Format::decoder_for(path) == Format::Tiff {
+        if let Ok(frame) = decode_file(path) {
+            media.insert(0, Arc::new(frame));
+        }
+    }
+    warm_first_bounds(&media);
+    Ok(media)
+}
 
-    match ext.as_str() {
-        "tif" | "tiff" => open_tiff(path, name),
-        "mp4" | "avi" => super::video::open_video(path, name),
-        // JPEG 2000 opens through its own path: it may be decoded at a reduced
-        // resolution level, and it keeps its codestream (see `media::jp2`).
-        e if super::jp2::handles(e) => open_jp2_still(path, name),
-        _ => open_still(path, name),
+/// [`load_sequence`] counterpart of [`load_ready`].
+pub fn load_sequence_ready(files: &[PathBuf], name: String) -> Result<Media> {
+    let media = load_sequence(files, name)?;
+    warm_first_bounds(&media);
+    Ok(media)
+}
+
+/// Compute frame 0's bounds for the tone a new pane starts with (clip on for
+/// deep media), so the first render doesn't scan the frame on the UI thread.
+fn warm_first_bounds(media: &Media) {
+    if let Some(frame) = media.resident(0) {
+        let clip = media
+            .hi_depth()
+            .then_some(crate::settings::ToneOptions::default().clip.percent);
+        crate::cpu::install(|| crate::tone::frame_bounds(&frame, clip, None));
     }
 }
 
@@ -95,14 +122,7 @@ pub fn load_sequence(files: &[PathBuf], name: String) -> Result<Media> {
     let first = files
         .first()
         .ok_or_else(|| anyhow!(t!("error.empty_sequence").into_owned()))?;
-    let is_tiff = first
-        .extension()
-        .map(|e| {
-            let e = e.to_string_lossy().to_lowercase();
-            e == "tif" || e == "tiff"
-        })
-        .unwrap_or(false);
-    if is_tiff {
+    if Format::decoder_for(first) == Format::Tiff {
         load_concat(files, name)
     } else {
         load_file_seq(files, name)
@@ -159,12 +179,8 @@ fn load_concat(files: &[PathBuf], name: String) -> Result<Media> {
 /// go through the `tiff` crate (page 0), JPEG 2000 through `media::jp2`,
 /// everything else through the `image` crate.
 pub fn decode_file(path: &Path) -> Result<FrameData> {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "tif" | "tiff" => {
+    match Format::decoder_for(path) {
+        Format::Tiff => {
             let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
             let mut dec = Decoder::new(BufReader::new(file))?;
             decode_current(&mut dec)
@@ -173,31 +189,24 @@ pub fn decode_file(path: &Path) -> Result<FrameData> {
     }
 }
 
-/// Decode a still image file into a `FrameData` via the `image` crate, mapping
-/// its colour type to native `Samples`.
+/// Decode a still image file into a `FrameData` at its native sample type.
 fn decode_still_frame(path: &Path) -> Result<FrameData> {
     use image::ColorType as C;
-    // JPEG 2000 is not an `image` crate format; it has its own decoder
-    // (see `media::jp2`).
-    if path
-        .extension()
-        .is_some_and(|e| super::jp2::handles(&e.to_string_lossy().to_lowercase()))
-    {
+    if Format::decoder_for(path) == Format::Jp2 {
         return super::jp2::decode_jp2(path);
     }
     let dynimg = image::open(path).with_context(|| format!("decode image {}", path.display()))?;
-    let color = dynimg.color();
     let (w, h) = (dynimg.width() as usize, dynimg.height() as usize);
-
-    let (samples, channels) = match color {
-        C::L8 | C::La8 => (Samples::U8(dynimg.to_luma8().into_raw()), 1),
-        C::L16 | C::La16 => (Samples::U16(dynimg.to_luma16().into_raw()), 1),
-        C::Rgb16 => (Samples::U16(dynimg.to_rgb16().into_raw()), 3),
-        C::Rgba16 => (Samples::U16(dynimg.to_rgba16().into_raw()), 4),
-        C::Rgb8 => (Samples::U8(dynimg.to_rgb8().into_raw()), 3),
-        C::Rgb32F => (Samples::F32(dynimg.to_rgb32f().into_raw()), 3),
-        C::Rgba32F => (Samples::F32(dynimg.to_rgba32f().into_raw()), 4),
-        _ => (Samples::U8(dynimg.to_rgba8().into_raw()), 4),
+    // `into_*` hands the buffer over without a copy when the type already matches.
+    let (samples, channels) = match dynimg.color() {
+        C::L8 | C::La8 => (Samples::U8(dynimg.into_luma8().into_raw()), 1),
+        C::L16 | C::La16 => (Samples::U16(dynimg.into_luma16().into_raw()), 1),
+        C::Rgb16 => (Samples::U16(dynimg.into_rgb16().into_raw()), 3),
+        C::Rgba16 => (Samples::U16(dynimg.into_rgba16().into_raw()), 4),
+        C::Rgb8 => (Samples::U8(dynimg.into_rgb8().into_raw()), 3),
+        C::Rgb32F => (Samples::F32(dynimg.into_rgb32f().into_raw()), 3),
+        C::Rgba32F => (Samples::F32(dynimg.into_rgba32f().into_raw()), 4),
+        _ => (Samples::U8(dynimg.into_rgba8().into_raw()), 4),
     };
     Ok(FrameData::new([w, h], channels, samples))
 }
@@ -238,8 +247,8 @@ impl Seek for TimedFile {
 ///
 /// The `tiff` crate caches the byte offset of each IFD it has walked, but only
 /// within a single `Decoder`. Keeping one `SeqReader` alive per sequence keeps
-/// that cache warm, so seeking to page `k` no longer re-walks the whole IFD
-/// chain from the start on every decode (which made a sweep O(N²)).
+/// that cache warm, so seeking to page `k` doesn't re-walk the IFD chain from
+/// the start (a sweep would be O(N²)).
 ///
 /// When the file has a **regular page stride** (uniform uncompressed pages —
 /// see [`FastScan`](super::fastscan::FastScan)), decodes and probes first try

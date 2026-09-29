@@ -36,9 +36,9 @@ impl CimApp {
         let pane_id = self.panes[idx].id;
 
         // Edit the effective values (shared when the group is synced, else own).
-        let mut contrast = self.contrast_of(idx);
-        let mut tone = self.tone_of(idx);
-        let mut details = self.details_of(idx);
+        let mut contrast = self.visual(idx).contrast;
+        let mut tone = self.visual(idx).tone;
+        let mut details = self.visual(idx).details;
         let mut rotation = self.rotation_of(idx);
 
         // The proprietary operators (LUT_ALPHA / Boost / Details) each need their
@@ -77,7 +77,7 @@ impl CimApp {
             .map(|(i, p)| (p.id, self.pane_name(i), self.overlay_src_is_color(i)))
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
-        let (mut ov_src, mut ov_color, mut ov_alpha) = match self.overlay_of(idx) {
+        let (mut ov_src, mut ov_color, mut ov_alpha) = match self.visual(idx).overlay {
             Some(o) => (Some(o.src_id), o.color, o.opacity),
             None => (None, Color32::from_rgb(240, 60, 60), 0.5),
         };
@@ -377,7 +377,7 @@ impl CimApp {
             // pane's pixel size — reject a mismatch with an error popup (colour/alpha
             // edits on the same source skip the check).
             let synced = self.panes[idx].sync_tone;
-            let cur = self.overlay_of(idx);
+            let cur = self.visual(idx).overlay;
             let new = ov_src.map(|src_id| OverlaySpec {
                 src_id,
                 color: ov_color,
@@ -412,45 +412,23 @@ impl CimApp {
                     None => true, // clearing, or a colour/alpha edit on the same source
                 };
                 if size_ok {
+                    self.visual_mut(idx).overlay = new;
                     if synced {
-                        self.shared_overlay = new;
                         for p in &mut self.panes {
                             if p.sync_tone {
                                 p.overlay_tex = None;
                             }
                         }
                     } else {
-                        self.panes[idx].overlay = new;
                         self.panes[idx].overlay_tex = None;
                     }
                 }
             }
 
-            // Write the effective tone back (own or shared). No texture nulling: every
-            // synced pane's `tone_sig` now reflects the new shared tone, so `stage`
-            // re-renders and commits each while it keeps showing its last frame —
-            // nulling `tex` would flash a heavy LUT_ALPHA/details render to black.
-            if synced {
-                if self.shared_contrast != contrast
-                    || self.shared_tone != tone
-                    || self.shared_details != details
-                {
-                    self.shared_contrast = contrast;
-                    self.shared_tone = tone;
-                    self.shared_details = details;
-                }
-            } else {
-                let p = &mut self.panes[idx];
-                if p.contrast != contrast || p.tone != tone || p.details != details {
-                    p.contrast = contrast;
-                    p.tone = tone;
-                    p.details = details;
-                    // No texture invalidation: the new tone changes `tone_sig`, so
-                    // `stage` re-renders and commits the fresh frame while the pane
-                    // keeps showing its last committed `tex` — nulling it here would
-                    // blank a heavy (async) LUT_ALPHA/details render to black instead.
-                }
-            }
+            let v = self.visual_mut(idx);
+            v.contrast = contrast;
+            v.tone = tone;
+            v.details = details;
         } // !vis_sync_changed
 
         // Rotation is applied at draw time (no texture to invalidate); it rides

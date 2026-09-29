@@ -17,16 +17,8 @@ use std::path::{Path, PathBuf};
 
 use rust_i18n::t;
 
-/// File extensions the app can open (stills + multi-page TIFF). Shared by the
-/// file dialog and the completion filter so they never drift apart.
-pub const LOADABLE_EXTS: &[&str] = &[
-    "tif", "tiff", "png", "jpg", "jpeg", "bmp", "webp", "jp2", "j2k", "j2c", "jpc",
-];
-
-/// Video containers, each opened as **one pane of its own** — never grouped
-/// into a numbered-run sequence or a directory concatenation (a video already
-/// is a timeline).
-pub const VIDEO_EXTS: &[&str] = &["mp4", "avi"];
+use crate::media::Format;
+pub use crate::media::{LOADABLE_EXTS, VIDEO_EXTS};
 
 /// Outcome of parsing argv.
 // One of these exists, once, at startup: boxing `Run`'s payload to even out the
@@ -669,20 +661,11 @@ fn split_index(name: &str) -> Option<(String, usize, usize, String)> {
 }
 
 fn is_loadable(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .map(|e| {
-            let e = e.to_string_lossy().to_lowercase();
-            LOADABLE_EXTS.contains(&e.as_str()) || VIDEO_EXTS.contains(&e.as_str())
-        })
-        .unwrap_or(false)
+    Format::of(Path::new(name)).is_some()
 }
 
 fn is_video(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .map(|e| VIDEO_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
-        .unwrap_or(false)
+    Format::of(Path::new(name)) == Some(Format::Video)
 }
 
 /// Case-insensitive prefix test (Windows file names are case-insensitive).

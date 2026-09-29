@@ -372,12 +372,12 @@ impl CimApp {
     pub(super) fn export_pane(&self, idx: usize) -> ExportPane {
         let p = &self.panes[idx];
         // Snapshot the clip through the same rule the live render uses.
-        let clip = crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx));
+        let clip = crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone);
         let (count, sync) = self.export_timeline(idx);
         let mut pane = ExportPane::new(
             *self.view_ref(idx),
-            self.contrast_of(idx),
-            self.details_of(idx),
+            self.visual(idx).contrast,
+            self.visual(idx).details,
             clip,
             count,
             sync,
@@ -389,11 +389,11 @@ impl CimApp {
         // recomputes the shared window from the Control's frame every exported
         // frame (matching the live view). The plan attaches the Control source.
         {
-            let t = self.tone_of(idx);
-            if !self.contrast_of(idx).is_operator() && t.share_clip {
+            let t = self.visual(idx).tone;
+            if !self.visual(idx).contrast.is_operator() && t.share_clip {
                 pane.share_clip = true;
             }
-            if self.contrast_of(idx) == ContrastMode::Colormap {
+            if self.visual(idx).contrast == ContrastMode::Colormap {
                 pane.palette = Some(t.palette);
             }
         }
@@ -403,7 +403,7 @@ impl CimApp {
         pane.rotation = self.rotation_of(idx).to_radians();
         // Use the effective overlay (shared when the pane is tone-synced), and
         // skip mask panes (they don't take an overlay), matching prepare_overlay.
-        if let Some(ov) = self.overlay_of(idx).filter(|_| !p.media.is_mask()) {
+        if let Some(ov) = self.visual(idx).overlay.filter(|_| !p.media.is_mask()) {
             if let Some(m) = self.panes.iter().position(|q| q.id == ov.src_id) {
                 let mp = &self.panes[m];
                 let (ocount, osync) = self.export_timeline(m);
@@ -842,7 +842,7 @@ impl CimApp {
         // Both inputs come from the same helpers the live render uses, so the
         // per-frame Share-clip window the export recomputes is the one the panes
         // show — no second statement of the clip rule or the region precedence.
-        let clip = crate::tone::clip_pct(self.contrast_of(c), &self.tone_of(c));
+        let clip = crate::tone::clip_pct(self.visual(c).contrast, &self.visual(c).tone);
         let region = self.tone_region(c);
         let (count, sync) = self.export_timeline(c);
         Some((self.export_source(c), count, sync, p.frame, clip, region))

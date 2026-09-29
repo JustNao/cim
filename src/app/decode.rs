@@ -10,8 +10,8 @@ impl CimApp {
     pub(super) fn pump_decoder(&mut self) {
         let clock = self.clock;
         let debug = crate::debug::enabled();
-        for d in self.decoder.drain() {
-            self.inflight.remove(&(d.id, d.frame));
+        for d in self.work.decoder.drain() {
+            self.work.inflight.remove(&(d.id, d.frame));
             match d.result {
                 Ok(Decoded::Frame(frame)) => {
                     // Only a real decode (not a metadata-only probe) counts.
@@ -50,17 +50,11 @@ impl CimApp {
                     }
                 }
                 Ok(Decoded::End) => {
-                    // Frontier probe found no page here: a TIFF has reached its
-                    // end; a concatenation rolls over to the next file.
-                    //
-                    // Only at the *true* frontier. The frontier is probed several
-                    // pages ahead at once (`probe_ahead`), so a probe past the real
-                    // end can land while earlier pages are still in flight —
-                    // ending the sequence on it would record a length short of the
-                    // pages that do exist. `Decoded::Exists` is already safe this
-                    // way (`note_len` only grows at `idx == len`); this is the same
-                    // rule for the other outcome. A dropped result costs nothing:
-                    // the probe is simply re-issued once the frontier reaches it.
+                    // No page here: a TIFF has ended; a concatenation rolls over
+                    // to the next file. `frontier_ended` ignores a miss away from
+                    // the true frontier: probes run ahead (`probe_ahead`), so a
+                    // miss past the end can land while earlier pages are still
+                    // in flight.
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == d.id) {
                         p.media.frontier_ended(d.frame);
                     }
@@ -76,14 +70,26 @@ impl CimApp {
 
     pub(super) fn request(&mut self, idx: usize, frame: usize) {
         let id = self.panes[idx].id;
-        if self.inflight.contains(&(id, frame)) {
+        if self.work.inflight.contains(&(id, frame)) {
             return;
         }
         if let Some(req) = self.panes[idx].media.decode_job(frame) {
             let scale = self.panes[idx].media.scale_to();
-            self.decoder.request(id, frame, req, scale);
-            self.inflight.insert((id, frame));
+            let bounds = self.bounds_hint(idx);
+            self.work.decoder.request(id, frame, req, scale, bounds);
+            self.work.inflight.insert((id, frame));
         }
+    }
+
+    /// The whole-frame bounds pane `idx` will render with, for the decode
+    /// worker to compute ahead — `None` when they come from elsewhere (a region,
+    /// or the Control's shared clip).
+    fn bounds_hint(&self, idx: usize) -> Option<Option<f32>> {
+        let v = self.visual(idx);
+        if self.tone_region(idx).is_some() || (!v.contrast.is_operator() && v.tone.share_clip) {
+            return None;
+        }
+        Some(crate::tone::clip_pct(v.contrast, &v.tone))
     }
 
     /// Like `request`, but a **metadata-only** frontier probe: confirms the page
@@ -94,38 +100,24 @@ impl CimApp {
     /// because a probe only targets the undiscovered frontier.
     pub(super) fn probe(&mut self, idx: usize, frame: usize) {
         let id = self.panes[idx].id;
-        if self.inflight.contains(&(id, frame)) {
+        if self.work.inflight.contains(&(id, frame)) {
             return;
         }
         if let Some(req) = self.panes[idx].media.probe_job(frame) {
             let scale = self.panes[idx].media.scale_to();
-            self.decoder.request(id, frame, req, scale);
-            self.inflight.insert((id, frame));
+            self.work.decoder.request(id, frame, req, scale, None);
+            self.work.inflight.insert((id, frame));
         }
     }
 
-    /// Probe the next `count` undiscovered pages at once, rather than one per
-    /// update.
+    /// Probe the next `count` undiscovered pages at once, so discovering a
+    /// sequence costs one UI round trip per run rather than per page.
     ///
-    /// Discovery is inherently serial — `SeqCache::note_len` grows only at
-    /// `idx == len`, so page N+1 isn't confirmed until N is. But that does *not*
-    /// mean it must cost a **UI round trip** per page, which is what one probe per
-    /// update cost: request → worker → `request_repaint` → drain → `note_len` →
-    /// next update. That loop latency, not decode speed, is what capped playback
-    /// and "Load all" of a not-yet-discovered sequence (~20 fps against 60+ once
-    /// the length was known — the pool simply ran dry between frames). Probes are
-    /// header-only and pipeline through the file's reader, so a run of them
-    /// collapses those round trips into one.
-    ///
-    /// Over-probing is safe by construction: a result landing ahead of the
-    /// frontier is dropped — `note_len` ignores `idx != len`, and `Decoded::End`
-    /// is guarded the same way in `pump_decoder` — and simply re-issued when the
-    /// frontier reaches it. The cost of a wasted probe is a few hundred bytes.
-    ///
-    /// A `ConcatSeq` cannot be probed ahead: an undiscovered global index has no
-    /// known `(file, page)` until the ones before it land, so `probe_job` returns
-    /// `None` past the frontier and this quietly does the single probe it always
-    /// did.
+    /// Discovery stays serial (`SeqCache::note_len` grows only at `idx == len`);
+    /// a result landing ahead of the frontier is dropped and re-issued when the
+    /// frontier reaches it. A `ConcatSeq` can't be probed ahead (an undiscovered
+    /// index has no known `(file, page)`), so `probe_job` returns `None` past
+    /// the frontier and only the next page is probed.
     pub(super) fn probe_ahead(&mut self, i: usize, count: usize) {
         if self.panes[i].media.at_end() {
             return;
@@ -179,11 +171,11 @@ impl CimApp {
         let Some(paths) = media::offset_paths(&p.media) else {
             return; // not a lazily-discovered TIFF sequence
         };
-        self.offset_gen += 1;
-        let gen = self.offset_gen;
+        self.work.offset_gen += 1;
+        let gen = self.work.offset_gen;
         p.offset_scan = Some(gen);
         let id = p.id;
-        self.scanner.request(id, gen, paths);
+        self.work.scanner.request(id, gen, paths);
     }
 
     /// Drain finished background offset scans and apply their page counts to the
@@ -191,7 +183,7 @@ impl CimApp {
     /// was reloaded, or closed) is discarded; an `Err` (layout not fast-scannable)
     /// is ignored, leaving the sequence to discover its length lazily.
     pub(super) fn pump_offset_scans(&mut self) {
-        for done in self.scanner.drain() {
+        for done in self.work.scanner.drain() {
             let Some(i) = self.panes.iter().position(|p| p.id == done.id) else {
                 continue; // pane closed
             };
@@ -221,8 +213,8 @@ impl CimApp {
         // its whole backlog, and the worker pool would keep grinding through it.
         // Cancel that backlog and drop the now-orphaned inflight markers so the
         // frames the user actually views re-request cleanly.
-        self.decoder.cancel_pending();
-        self.inflight.clear();
+        self.work.decoder.cancel_pending();
+        self.work.inflight.clear();
         self.status.set(t!("status.load_stopped"));
     }
 
@@ -380,6 +372,13 @@ impl CimApp {
                 if self.playback.playing || ff > 1 {
                     self.probe_ahead(i, FRONTIER_PROBES);
                 } else {
+                    // The shown frame first: pages of one file decode in queue
+                    // order, so a lookahead queued ahead of it delays it by a
+                    // whole decode (`stage` only asks once the pane is fitted).
+                    let shown = self.frame_disp(i);
+                    if self.panes[i].media.resident(shown).is_none() {
+                        self.request(i, shown);
+                    }
                     self.request(i, known);
                 }
             }
@@ -537,7 +536,7 @@ impl CimApp {
     /// too small — warn the user with a modal.
     pub(super) fn poll_decoding_all(&mut self) {
         let active = self.panes.iter().any(|p| p.eager != Eager::Off);
-        if self.decoding_all && !active && self.inflight.is_empty() {
+        if self.decoding_all && !active && self.work.inflight.is_empty() {
             self.decoding_all = false;
             // Clear only our own transient load notes (don't clobber a newer one).
             if self.status.is_load_note() {
@@ -557,7 +556,7 @@ impl CimApp {
     /// re-requests when the result is stale.
     pub(super) fn pump_render(&mut self, ctx: &egui::Context) {
         let debug = crate::debug::enabled();
-        for d in self.renderer.drain() {
+        for d in self.work.renderer.drain() {
             if debug {
                 self.metrics.lut.record(d.lut_time);
                 if !d.ops_time.is_zero() {
@@ -570,7 +569,7 @@ impl CimApp {
             match d.target {
                 crate::renderer::Target::Viewport => self.land_region(ctx, d),
                 crate::renderer::Target::Base => {
-                    self.render_inflight.remove(&d.id);
+                    self.work.render_inflight.remove(&d.id);
                     if let Some(idx) = self.panes.iter().position(|p| p.id == d.id) {
                         self.upload_tex(ctx, idx, d);
                     }
@@ -587,7 +586,7 @@ impl CimApp {
         // One region render per pane at a time (`render_region`), so the guard —
         // and the key — are keyed on the pane, not on the region's identity. A
         // result with no entry belongs to a pane closed or reloaded mid-flight.
-        let Some(key) = self.roi_inflight.remove(&d.id) else {
+        let Some(key) = self.work.roi_inflight.remove(&d.id) else {
             return;
         };
         // `roi_plan` refuses a region larger than the backend accepts, so this
@@ -602,7 +601,7 @@ impl CimApp {
 
     /// Bring every on-screen pane's texture up to date and, once they are **all**
     /// ready, flip them to their new frame together. During playback the shared
-    /// timeline advances only when this commit lands (`play_prefetch`), so the
+    /// timeline advances only when this commit lands (`playback.prefetch`), so the
     /// frame counter never leads the image and all panes update in step — a slow
     /// proprietary operator paces playback instead of the counter racing ahead.
     ///
@@ -758,12 +757,10 @@ impl CimApp {
     /// the one the pane wants right now.
     ///
     /// Zoom is not the only floor: a texture also has to **fit the backend's
-    /// limit** (`GL_MAX_TEXTURE_SIZE`, 16384 on the software GL these panes run
-    /// on over VNC), so an image wider than that is decimated however far in it
-    /// is zoomed — `texture_fit_step`. Without it a 25000² tile at 1:1 asked
-    /// egui for a 25000² texture and the upload asserted, taking the process
-    /// down. A heavy pane keeps `step 1` regardless (decimating changes what the
-    /// operator computes); `stage` refuses that upload instead of decimating it.
+    /// limit** (`GL_MAX_TEXTURE_SIZE`, 16384 on software GL; egui asserts on a
+    /// larger upload), so an image wider than that is decimated however far in
+    /// it is zoomed — `texture_fit_step`. A heavy pane keeps `step 1`
+    /// regardless; `stage` refuses that upload instead.
     ///
     /// **Adaptive rendering** changes both rules for the pane's *base* texture,
     /// since the sharp pixels then come from the viewport region
@@ -783,12 +780,9 @@ impl CimApp {
     ///   refuses the upload outright and the pane shows `tex_error`), and a
     ///   `BASE_MAX` base with nothing over it still beats an undisplayable pane.
     ///   Where full resolution *does* fit, an operator pane whose plan declined
-    ///   falls back to the classic `step 1` render exactly as it does with the
-    ///   setting off. It used to take the cap on the setting alone, which left
-    ///   any ordinary-sized operator pane (e.g. 3000x4096, well inside the
-    ///   16384 limit) showing a 188x256 base magnified over the whole cell as
-    ///   soon as the zoom dropped below `roi_plan`'s engagement point — the
-    ///   permanently-blurry failure, and only for the operator tones.
+    ///   renders at `step 1`, as with the setting off: capping it on the setting
+    ///   alone would leave it permanently blurry below `roi_plan`'s engagement
+    ///   zoom.
     fn want_step(
         &self,
         idx: usize,
@@ -891,7 +885,7 @@ impl CimApp {
         };
         self.panes[idx].media.touch(target, self.clock); // staging keeps it hot
 
-        let contrast = self.contrast_of(idx);
+        let contrast = self.visual(idx).contrast;
         // Colormap is a plain (mono-only) palette render, done synchronously; it
         // takes precedence over the proprietary operators (details is ignored).
         let cmap = crate::tone::uses_colormap(contrast, &frame);
@@ -900,44 +894,23 @@ impl CimApp {
         // render, so there's nothing heavy to push off-thread.
         let ops = self.ops_of(idx);
         let heavy = !cmap && crate::imageproc::ops_active(&frame, ops);
-        // A plain LUT render of a *large* frame is itself tens of milliseconds —
-        // done synchronously it blocks this whole update, which reads as a
-        // regular hitch when playback steps while the user pans at 60 Hz. Push
-        // it to the render pool (the worker's plain-LUT path is pixel-identical
-        // by test), leaving only the texture upload on the UI thread.
-        //
-        // Measured on the **output** texel count, which is what the render
-        // actually writes: a heavily minified pane stays synchronous because its
-        // output is genuinely small, while a lightly decimated render of a very
-        // large frame is still tens of megapixels and belongs off-thread. This
-        // deliberately does *not* require `step == 1` — the worker renders at the
-        // job's region (`renderer::RenderJob::region`) and `upload_tex` tags the
-        // result with its step, so a decimated result commits like any other. Demanding
-        // `step == 1` here put an **adaptive** pane's `BASE_MAX`-capped base
-        // render (§7.1) back on the UI thread on every playback frame, where it
-        // also lost `fill_lut`'s parallel path (which needs a contiguous grid) —
-        // panning while playing went sluggish for exactly that reason.
+        // A plain LUT render of a *large* output is tens of milliseconds, a
+        // hitch if done here while the user pans; it goes to the render pool
+        // (pixel-identical by test), leaving only the upload on the UI thread.
+        // Judged on the output texel count, at any `step`: the worker renders
+        // the job's region and `upload_tex` tags the result with its step.
         let bulk = !heavy && out[0] * out[1] >= ASYNC_RENDER_PIXELS;
 
-        // GPU mode takes those renders itself, Colormap included (as does the
-        // CPU render pool now — see below). It is
-        // synchronous but not expensive: the dispatch is queued rather than
-        // awaited, and a frame already resident in VRAM (the pane is being
-        // re-toned rather than stepped) uploads nothing at all — which is the
-        // interaction the whole path exists for. Heavy panes are excluded
-        // outright: the proprietary operators are CPU code owned by the pane's
-        // render thread and cannot be part of this.
-        //
-        // `step == 1` **is** required here, unlike `bulk` itself: `tone_into`
-        // always tone-maps the whole frame at full resolution and tags the
-        // texture `step: 1`, so handing it a decimated pane would stage a
-        // texture the commit can never match — re-rendering it every frame.
+        // GPU mode takes those renders itself (queued, not awaited). Heavy panes
+        // are excluded: the operators are CPU code owned by the pane's render
+        // thread. `step == 1` is required because `tone_into` always renders at
+        // full resolution; a decimated pane would never match the commit.
         if bulk && step == 1 && self.gpu.is_some() {
             let (lo, hi) = self.tone_bounds(idx, &frame);
             let tone = crate::gpu::Tone {
                 lo,
                 hi,
-                palette: cmap.then(|| self.tone_of(idx).palette),
+                palette: cmap.then(|| self.visual(idx).tone.palette),
             };
             let pane_id = self.panes[idx].id;
             let t = crate::debug::enabled().then(std::time::Instant::now);
@@ -967,17 +940,13 @@ impl CimApp {
             }
         }
 
-        // Colormap used to be excluded here — the pool had no palette, so a
-        // Colormap job would have come back grey. It carries one now
-        // (`imageproc::Display`), so a big false-coloured frame goes off-thread
-        // like any other.
         if heavy || bulk {
             // Render off-thread. One render per pane at a time, so rapid tone /
             // frame changes coalesce instead of piling up jobs.
             let id = self.panes[idx].id;
-            if !self.render_inflight.contains(&id) {
+            if !self.work.render_inflight.contains(&id) {
                 let (lo, hi) = self.tone_bounds(idx, &frame);
-                self.renderer.request(crate::renderer::RenderJob {
+                self.work.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: target,
                     sig,
@@ -985,7 +954,7 @@ impl CimApp {
                     tone: crate::imageproc::Display {
                         lo,
                         hi,
-                        palette: cmap.then(|| self.tone_of(idx).palette),
+                        palette: cmap.then(|| self.visual(idx).tone.palette),
                         ops,
                     },
                     // The whole image; `step` is 1 except for an adaptive pane's
@@ -994,7 +963,7 @@ impl CimApp {
                     region: media::Region::whole(frame.size, step),
                     target: crate::renderer::Target::Base,
                 });
-                self.render_inflight.insert(id);
+                self.work.render_inflight.insert(id);
             }
             false // lands in `pending` when the render finishes
         } else {
@@ -1017,7 +986,7 @@ impl CimApp {
             // across cores (`media::render`), and this is the *synchronous* path
             // on the UI thread, so it must draw from the instance's share rather
             // than rayon's machine-sized global pool (`crate::cpu`).
-            let palette = cmap.then(|| self.tone_of(idx).palette);
+            let palette = cmap.then(|| self.visual(idx).tone.palette);
             let region = media::Region::whole(frame.size, step);
             let lut = &mut self.panes[idx].tex.lut;
             crate::cpu::install(|| match palette {
@@ -1086,16 +1055,21 @@ impl CimApp {
     /// rendered RGBA for a given frame. Deliberately excludes the frame index (the
     /// texture's `shown` covers that) and never touches the pixels, so it's cheap
     /// to compute every frame.
+    ///
+    /// A tone edit therefore needs no texture invalidation: the changed signature
+    /// makes `stage` re-render while the pane keeps its last committed frame.
+    /// Clearing `tex` instead would blank the pane until an off-thread render
+    /// lands.
     pub(super) fn tone_sig(&self, idx: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        let c = match self.contrast_of(idx) {
+        let c = match self.visual(idx).contrast {
             ContrastMode::Linear => 0u8,
             ContrastMode::LutAlpha => 1,
             ContrastMode::Colormap => 2,
             ContrastMode::Boost => 3,
         };
-        let tone = self.tone_of(idx);
+        let tone = self.visual(idx).tone;
         c.hash(&mut h);
         // The clip toggle and its percentile both change the Linear mapping.
         tone.clip.enabled.hash(&mut h);
@@ -1110,8 +1084,8 @@ impl CimApp {
             if let Some((ci, ptr)) = self.control_frame_key() {
                 ci.hash(&mut h);
                 ptr.hash(&mut h);
-                let ct = self.tone_of(ci);
-                self.contrast_of(ci).label().hash(&mut h);
+                let ct = self.visual(ci).tone;
+                self.visual(ci).contrast.label().hash(&mut h);
                 ct.clip.enabled.hash(&mut h);
                 ct.clip.percent.to_bits().hash(&mut h);
                 let creg = self.panes[ci].region_tone;
@@ -1123,7 +1097,7 @@ impl CimApp {
         }
         // The Colormap palette changes the rendered colour.
         tone.palette.id().hash(&mut h);
-        self.details_of(idx).hash(&mut h);
+        self.visual(idx).details.hash(&mut h);
         let region = self.panes[idx].region_tone;
         region.hash(&mut h);
         if region {
@@ -1134,7 +1108,7 @@ impl CimApp {
         // LUT to that region (`own_tone_bounds`), so fold it in to re-render when
         // the crop changes or clears — and, transitively, for Share-clip panes
         // whose Control adopts it.
-        if self.export.show && !self.contrast_of(idx).is_operator() {
+        if self.export.show && !self.visual(idx).contrast.is_operator() {
             if let Some(reg) = self.export.region {
                 for v in [reg.min.x, reg.min.y, reg.max.x, reg.max.y] {
                     v.to_bits().hash(&mut h);
@@ -1154,8 +1128,8 @@ impl CimApp {
     /// clip" on, the Control media's bounds are used instead so panes lock to
     /// identical bounds.
     pub(super) fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
-        let contrast = self.contrast_of(idx);
-        let tone = self.tone_of(idx);
+        let contrast = self.visual(idx).contrast;
+        let tone = self.visual(idx).tone;
         // "Share clip" locks the bounds to the Control media's own bounds (but
         // not for an operator tone, which does its own contrast). Falls through
         // to this pane's own bounds when the Control frame isn't resident yet.
@@ -1171,7 +1145,7 @@ impl CimApp {
     /// bounds when region-tone is pinned) — ignoring "Share clip", so it can be
     /// read for the Control media itself without recursing.
     fn own_tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
-        let clip = crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx));
+        let clip = crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone);
         let region = self.tone_region(idx);
         // On the budgeted pool: an unmemoized bound runs a whole-image percentile
         // scan, which splits across cores, and this is called from the UI thread
@@ -1192,7 +1166,7 @@ impl CimApp {
     /// The operator tones (LUT_ALPHA / Boost) are excluded throughout: they run
     /// over the whole image with their own contrast.
     pub(super) fn tone_region(&self, idx: usize) -> Option<Rect> {
-        if self.contrast_of(idx).is_operator() {
+        if self.visual(idx).contrast.is_operator() {
             return None;
         }
         if self.export.show {
@@ -1236,7 +1210,7 @@ impl CimApp {
 
     /// Ensure the tinted overlay texture for pane `idx` is current, returning it
     /// to draw over the pane's image. The overlay config is the pane's
-    /// *effective* one (`overlay_of` — shared when tone-synced); the mask is
+    /// *effective* one (`visual(idx).overlay` — shared when tone-synced); the mask is
     /// taken from the referenced pane at its currently shown frame, and the
     /// tinted texture is cached in `Pane.overlay_tex`. Returns `None` when
     /// there's no overlay, the mask pane is gone, or this is itself a mask pane.
@@ -1248,7 +1222,7 @@ impl CimApp {
         if self.panes[idx].media.is_mask() {
             return None; // don't tint an overlay onto a mask pane itself
         }
-        let ov = self.overlay_of(idx)?;
+        let ov = self.visual(idx).overlay?;
         let (src_id, color, opacity) = (ov.src_id, ov.color, ov.opacity);
         let src = self.panes.iter().position(|p| p.id == src_id)?;
         let f = self.frame_disp(src);

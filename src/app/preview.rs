@@ -95,7 +95,7 @@ impl CimApp {
     fn queue_thumb(&mut self, idx: usize, f: usize, frame: &Arc<media::FrameData>) {
         let subst = self.preview_substitutes(idx, frame);
         let key = self.preview_key(idx, f, subst);
-        if self.thumb_cache.contains(&key) || self.preview.inflight.contains(&key) {
+        if self.work.thumb_cache.contains(&key) || self.preview.inflight.contains(&key) {
             return;
         }
         // The window. A preview whose pane runs the operators is rendered as
@@ -109,26 +109,26 @@ impl CimApp {
                 clip: Some(ClipOptions::default().percent),
                 region: None,
             }
-        } else if self.tone_of(idx).share_clip {
+        } else if self.visual(idx).tone.share_clip {
             // "Share clip" pins this pane to the Control media's bounds, which
             // are computed from the Control's *shown* frame — already memoized,
             // so there is nothing to push to the worker.
             match self.control_clip_bounds() {
                 Some((lo, hi)) => crate::thumbs::Window::Fixed(lo, hi),
                 None => crate::thumbs::Window::Compute {
-                    clip: crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx)),
+                    clip: crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone),
                     region: self.tone_region(idx),
                 },
             }
         } else {
             crate::thumbs::Window::Compute {
-                clip: crate::tone::clip_pct(self.contrast_of(idx), &self.tone_of(idx)),
+                clip: crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone),
                 region: self.tone_region(idx),
             }
         };
-        let palette = (!subst && crate::tone::uses_colormap(self.contrast_of(idx), frame))
-            .then(|| self.tone_of(idx).palette);
-        self.thumbs.request(crate::thumbs::ThumbJob {
+        let palette = (!subst && crate::tone::uses_colormap(self.visual(idx).contrast, frame))
+            .then(|| self.visual(idx).tone.palette);
+        self.work.thumbs.request(crate::thumbs::ThumbJob {
             key,
             data: frame.clone(),
             window,
@@ -141,9 +141,9 @@ impl CimApp {
     /// Drain landed thumbnails, then act on the frame the cursor was over: render
     /// it if it is resident, else start the dwell that may fetch it.
     pub(super) fn drive_preview(&mut self, ctx: &egui::Context) {
-        for done in self.thumbs.drain() {
+        for done in self.work.thumbs.drain() {
             self.preview.inflight.remove(&done.key);
-            self.thumb_cache.insert(ctx, done.key, done.image);
+            self.work.thumb_cache.insert(ctx, done.key, done.image);
         }
         let Some((t, _)) = self.preview.hover else {
             // Off the track: stop waiting on any cold fetch. It may still land,
@@ -179,7 +179,7 @@ impl CimApp {
         // has already landed (or was dropped by a pool rebuild) frees the slot.
         let id = self.panes[idx].id;
         if let Some(prev) = self.preview.decoding {
-            if prev != (id, f) && self.inflight.contains(&prev) {
+            if prev != (id, f) && self.work.inflight.contains(&prev) {
                 return;
             }
         }
@@ -215,7 +215,7 @@ impl CimApp {
             .resident(f)
             .is_some_and(|fr| self.preview_substitutes(idx, &fr));
         let key = self.preview_key(idx, f, subst);
-        let tex = self.thumb_cache.get(&key).cloned();
+        let tex = self.work.thumb_cache.get(&key).cloned();
         // The plate: the shape this pane's thumbnails come out at, reserved
         // whether or not this one has landed, so nothing resizes when it does.
         let size = self.preview_plate(idx);

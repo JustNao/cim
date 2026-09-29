@@ -15,6 +15,7 @@
 mod canvas;
 mod compute;
 mod lifecycle;
+pub use lifecycle::Preload;
 mod util;
 mod watch;
 
@@ -27,6 +28,7 @@ mod panels;
 mod preview;
 mod profile;
 mod roi;
+mod workers;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -41,7 +43,7 @@ use eframe::egui::{
 use rust_i18n::t;
 
 use crate::cli;
-use crate::decoder::{BackgroundDecoder, Decoded};
+use crate::decoder::Decoded;
 use crate::export::{
     self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell, LabelAnchor,
     LabelBitmap, LabelStyle, SourceInput,
@@ -61,18 +63,13 @@ const HANDLE_HIT: f32 = 24.0; // px around the A/B divider that grabs it
 /// grid/single and A/B paths can't drift to different shades.
 const PANE_BG: Color32 = Color32::from_gray(24);
 
-/// Shortest right-drag (screen px, measured on the diagonal) that counts as
-/// selecting a rectangle rather than a click. Below it the export crop and the
-/// stats region both treat the gesture as "clear". Shared so the two agree —
-/// they previously disagreed in *shape*, the crop testing each axis separately,
-/// which silently discarded a long thin crop the stats region accepted.
-///
-/// The profile line's own threshold is deliberately **not** this: it measures in
-/// image space, a different unit.
+/// Shortest right-drag (screen px, on the diagonal) that counts as selecting a
+/// rectangle rather than a click; below it the export crop and the stats region
+/// both treat the gesture as "clear". The profile line has its own threshold,
+/// in image space.
 const MIN_DRAG_PX: f32 = 4.0;
 /// Hairline that separates a floating chrome bar (pane header/footer, global
-/// toolbar / frame bar) from the image it overlays — the panels used to draw
-/// their own separators; the overlays paint this instead.
+/// toolbar / frame bar) from the image it overlays.
 const CHROME_BORDER: Color32 = Color32::from_gray(50);
 
 /// The single background gray shared by **every chrome bar**: the global toolbar
@@ -90,9 +87,8 @@ const ACCENT: Color32 = Color32::from_rgb(56, 104, 162);
 /// The **hover** fill shared by every button: egui's toolbar / frame-bar /
 /// panel buttons (via `visuals.widgets.hovered`, set in `new`) and the
 /// hand-painted per-pane header buttons (Reload / Auto-reload / Hide / Close).
-/// Matches egui's default dark hover, so wiring it in is a no-op today — but it
-/// makes the one value the source of truth. `ACCENT` is the *activated* button
-/// fill (a toggle that's on); this is the transient on-hover fill.
+/// `ACCENT` is the *activated* fill (a toggle that's on); this is the transient
+/// on-hover one.
 const BUTTON_HOVER_FILL: Color32 = Color32::from_gray(70);
 
 /// The four shared **text** tones, the foreground counterpart to `BAR_FILL` /
@@ -109,10 +105,9 @@ const TEXT_BUTTON: Color32 = TEXT_DEFAULT;
 const TEXT_BUTTON_HOVER: Color32 = Color32::from_gray(235);
 const TEXT_BUTTON_ACTIVE: Color32 = Color32::from_gray(230);
 
-/// How often to repaint while background decodes are pending (and we're not
-/// playing or exporting): often enough to pick up landed frames and keep the
-/// loading spinner turning, but far below monitor rate so we don't busy-spin —
-/// the dominant idle cost over VNC / software rendering. ~30 fps.
+/// How often to repaint while background work is pending (and we're not
+/// playing): enough to pick up landed results, far below monitor rate so we
+/// don't busy-spin — the dominant idle cost over VNC. ~30 fps.
 const DECODE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// Renders producing at least this many **output texels** run their plain LUT
@@ -160,9 +155,6 @@ const WATCH_DEBOUNCE: f64 = 0.25;
 /// watcher thread; see [`crate::watcher::sign_paths`].
 use crate::watcher::FileSig;
 
-/// How many frames ahead of the shown one playback pre-decodes for each on-screen
-/// pane (`prefetch_playback`), so it overlaps decode with display instead of
-/// stalling on decode latency when it reaches a not-yet-resident frame.
 /// Ceiling on the playback rate offered by the frame bar's fps slider.
 ///
 /// Playback is gated by the lock-step commit, not by this — a sequence whose
@@ -177,12 +169,10 @@ const MAX_PLAY_FPS: f32 = 160.0;
 /// by the slider rather than silently by this.
 const MIN_PLAY_WAIT: f32 = 1.0 / (MAX_PLAY_FPS * 1.5);
 
+/// How many frames ahead of the shown one playback pre-decodes for each on-screen
+/// pane at least (`prefetch_playback`), so decode overlaps display.
 const PLAY_PREFETCH: usize = 3;
 
-/// How many undiscovered pages the frontier is probed for at once
-/// (`CimApp::probe_ahead`). Matches the prefetch cap, since the point is to keep
-/// the known length far enough ahead that `prefetch_playback` always has frames
-/// to queue. Header-only reads, so over-probing costs a few hundred bytes.
 /// How long the cursor must rest on a **non-resident** frame before the timeline
 /// hover preview decodes it. A frame already in memory previews with no delay at
 /// all; a cold one costs a real read (~150 ms for one page on a shared mount),
@@ -199,6 +189,9 @@ const PREVIEW_GAP: f32 = 8.0;
 /// smallest vertical drift. See `draw_scrubber`.
 const PREVIEW_SLACK: f32 = 8.0;
 
+/// How many undiscovered pages the frontier is probed for at once
+/// (`CimApp::probe_ahead`), keeping the known length far enough ahead that
+/// `prefetch_playback` always has frames to queue. Header-only reads.
 const FRONTIER_PROBES: usize = 8;
 
 /// Opening more sequences than this at once triggers a resource-warning
@@ -219,11 +212,6 @@ const LINE_HANDLE: f32 = 8.0;
 /// Colour of the marker echoing the Line-profile plot's hovered position back
 /// onto the line itself — green, to read distinctly against the amber line.
 const LINE_HOVER_COL: Color32 = Color32::from_rgb(80, 230, 90);
-
-// Soft ceiling on decoded frames kept resident across all sequences. Beyond it
-// the least-recently-viewed frames are evicted (they re-decode on demand), so a
-// long sequence can't grow memory without bound. Configurable in Settings
-// (`config.cache_budget_mb`); see `CimApp::cache_budget_bytes`.
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -435,6 +423,19 @@ enum LineGrab {
     New(Pos2), // drawing a fresh line (A pinned at the given image-space anchor)
 }
 
+/// The **Visualization** sync group: the tone settings a `sync_tone` pane takes
+/// from the shared set instead of its own.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(super) struct Visual {
+    /// Linear, Colormap, or a proprietary operator tone (LUT_ALPHA / Boost).
+    contrast: ContrastMode,
+    /// Per-mode options (clip percentile, palette, …).
+    tone: ToneOptions,
+    /// Proprietary DETAILS_ENHANCED detail enhancement.
+    details: bool,
+    overlay: Option<OverlaySpec>,
+}
+
 /// Cached histogram for the media shown in the Visualise panel.
 struct HistCache {
     key: (u64, usize), // (pane id, frame) this was computed for
@@ -577,10 +578,8 @@ struct Preview {
     /// while the cursor rests on the same frame.
     inflight: HashSet<crate::thumbs::ThumbKey>,
     /// Height the box measured last time it was painted, used to place the next
-    /// one **fully above** the scrubber. Laying it out from an estimate instead
-    /// let a taller-than-expected box cover the track's top edge, which took the
-    /// pointer's hover off the scrubber — dropping the preview, which shrank the
-    /// box, which restored the hover: a flicker loop (see `draw_preview`).
+    /// one **fully above** the scrubber: a box covering the track would take the
+    /// pointer's hover off it and flicker (see `draw_preview`).
     box_h: f32,
 }
 
@@ -850,14 +849,8 @@ struct Pane {
     /// "Geometry" sync group, independent of `sync_tone`.
     sync_geometry: bool,
     visible: bool,
-    /// Per-pane tone-mapping mode (Linear, Colormap, or a proprietary operator
-    /// tone — LUT_ALPHA / Boost).
-    contrast: ContrastMode,
-    /// Per-mode tone options (clip percentile, LUT_ALPHA knobs, …), edited in
-    /// the Transformations panel.
-    tone: ToneOptions,
-    /// Per-pane proprietary DETAILS_ENHANCED detail enhancement.
-    details: bool,
+    /// This pane's own tone settings, used while `!sync_tone`.
+    visual: Visual,
     /// The media manager's **Scale** toggle: show this media nearest-resampled
     /// to the **Control** media's size, so a same-ratio image of another
     /// resolution lines up with it pixel for pixel. Applied (and kept following
@@ -867,9 +860,6 @@ struct Pane {
     /// Applied at draw time (the texture stays unrotated) and to the export;
     /// rides the Geometry sync (`sync_geometry`).
     rotation: f32,
-    /// Optional boolean-mask overlay drawn on top of this pane (config only;
-    /// shared across synced panes via `overlay_of`).
-    overlay: Option<OverlaySpec>,
     /// Cached tinted overlay texture for this pane (rebuilt when the effective
     /// overlay config or the mask's shown frame changes).
     overlay_tex: Option<CachedTex>,
@@ -1007,17 +997,11 @@ pub struct CimApp {
     // Shared view/timeline that every synced pane follows.
     shared_view: ViewTransform,
     shared_frame: usize,
-    /// Shared **Visualization** Transformations (tone mode + options + details)
-    /// that every `sync_tone` pane follows, so editing one synced pane updates
-    /// them all.
-    shared_contrast: ContrastMode,
-    shared_tone: ToneOptions,
-    shared_details: bool,
+    /// The tone settings every `sync_tone` pane follows.
+    shared_visual: Visual,
     /// Shared display rotation in degrees — the **Geometry** sync group
     /// (`sync_geometry`), independent of the Visualization sync.
     shared_rotation: f32,
-    /// Shared mask overlay (rides the same `sync_tone` as the tone).
-    shared_overlay: Option<OverlaySpec>,
     /// A requested timeline frame not yet reachable because the sequence's
     /// length is still being discovered (e.g. from `--frame` at launch). While
     /// set, discovery is driven forward until this frame exists, then the
@@ -1154,8 +1138,10 @@ pub struct CimApp {
     /// View state deferred alongside `pending_open` (the startup CLI path), so
     /// `--frame`/`--mode`/… still apply once the user confirms the open.
     pending_view: Option<cli::ViewState>,
+    /// Opens still loading in the background, oldest first.
+    opening: VecDeque<lifecycle::Preload>,
 
-    decoder: BackgroundDecoder,
+    work: workers::Workers,
     /// The `jp2_max_mp` the open JPEG 2000 panes were decoded at, so a change
     /// re-levels them once (see `relevel_jp2_panes`).
     jp2_max_mp_active: usize,
@@ -1166,42 +1152,6 @@ pub struct CimApp {
     /// from. When the setting changes, `update` retries loading from the new
     /// folder (`load_cpp_libs`) so a corrected path applies without a restart.
     cpp_dir_active: String,
-    inflight: HashSet<(u64, usize)>,
-    /// Off-thread tone renderer for panes using the heavy operators (LUT_ALPHA /
-    /// details); `render_inflight` holds the pane ids with a render in flight so
-    /// at most one runs per pane at a time (rapid tone/frame changes coalesce).
-    renderer: crate::renderer::RenderPool,
-    render_inflight: HashSet<u64>,
-    /// Finished adaptive-render region textures, LRU'd across all panes — the
-    /// pan-back cache (see [`roi`]).
-    regions: roi::RegionCache,
-    /// The region render in flight per **pane id**, with the cache key it will
-    /// land under. Keyed by pane so at most one is queued per pane at a time (the
-    /// invariant `RenderPool` documents) — keying by region identity would never
-    /// dedupe during playback, where every frame wants a new one. Holding the key
-    /// here rather than echoing its parts through the render pool is what lets
-    /// `land_region` file the result without re-deriving it from the geometry.
-    roi_inflight: HashMap<u64, roi::RegionKey>,
-    /// Off-UI-thread fast-offset scanner: on open/reload a fast-scannable
-    /// sequence's whole length is discovered here instead of the UI thread.
-    /// `offset_gen` tags each scan so a result returning after a reload (pane ids
-    /// are stable across reload) is recognised as stale and discarded.
-    scanner: crate::offsets::OffsetScanner,
-    offset_gen: u64,
-    /// Off-UI-thread source-file signer for the auto-reload watch: signing is file
-    /// I/O, so it never runs inline (it used to, on every repaint — see
-    /// `poll_watches`). `watch_gen` tags each request so a signature landing after
-    /// a reload / toggle is recognised as stale, and `watch_polled_at` rate-limits
-    /// requests to one per `WATCH_POLL` regardless of the repaint rate.
-    watcher: crate::watcher::FileWatcher,
-    watch_gen: u64,
-    watch_polled_at: f64,
-    /// Off-UI-thread renderer for the timeline hover preview's thumbnails, its
-    /// finished textures, and the hover/dwell bookkeeping that drives both. A
-    /// pool of its own rather than the per-pane `renderer`, whose results gate
-    /// the lock-step commit — see [`crate::thumbs`].
-    thumbs: crate::thumbs::ThumbPool,
-    thumb_cache: crate::thumbs::ThumbCache,
     preview: Preview,
     /// Pipeline timing profiler and its window toggle — only populated / shown
     /// when launched with `CIM_DEBUG=1` (see `crate::debug`).
@@ -1253,7 +1203,8 @@ pub struct CimApp {
 impl CimApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        inputs: Vec<cli::Input>,
+        config: Config,
+        preload: lifecycle::Preload,
         view: cli::ViewState,
     ) -> Self {
         let mut style = (*cc.egui_ctx.style()).clone();
@@ -1312,18 +1263,11 @@ impl CimApp {
         }
         cc.egui_ctx.set_fonts(fonts);
 
-        let config = Config::load();
-        // One budget covers both shared pools, so an instance on a shared host
-        // runs the thread count Settings shows (see `crate::cpu`). Size rayon
-        // before any parallel work, or it would build its machine-sized default.
+        // `main` already applied the CPU and JPEG 2000 budgets, before the
+        // startup files began loading.
         let cpu_budget = config.cpu_budget;
         let (threads, _) = crate::cpu::split(cpu_budget);
-        crate::cpu::set_budget(cpu_budget);
-        // Likewise the JPEG 2000 detail budget: every decode path reads it from
-        // one process-global (see `media::jp2`), so it must be set before the
-        // startup files open.
         let jp2_max_mp = config.jp2_max_mp;
-        crate::media::jp2::set_budget_px(jp2_max_mp.saturating_mul(1_000_000));
         // Load the optional proprietary operator libraries from the configured
         // folder (or, when unset, by their hard-coded names via LD_LIBRARY_PATH).
         // Each operator is independent; a missing library just leaves its feature
@@ -1350,8 +1294,8 @@ impl CimApp {
                     set_window_cloak(hwnd, true);
                     Some(hwnd)
                 }
-                // No handle (unexpected): skip cloaking — worst case is the
-                // old startup flash, never a stuck-invisible window.
+                // No handle (unexpected): skip cloaking — worst case a white
+                // flash, never a stuck-invisible window.
                 _ => None,
             }
         };
@@ -1365,11 +1309,8 @@ impl CimApp {
             next_id: 0,
             shared_view: ViewTransform::default(),
             shared_frame: 0,
-            shared_contrast: ContrastMode::Linear,
-            shared_tone: ToneOptions::default(),
-            shared_details: false,
+            shared_visual: Visual::default(),
             shared_rotation: 0.0,
-            shared_overlay: None,
             pending_seek: None,
             frame_edit: String::new(),
             mode: Mode::Grid,
@@ -1416,27 +1357,12 @@ impl CimApp {
             deferred: Vec::new(),
             pending_open: None,
             pending_view: None,
-            decoder: BackgroundDecoder::new(threads, cc.egui_ctx.clone()),
+            opening: VecDeque::new(),
+            work: workers::Workers::new(threads, &cc.egui_ctx),
             cpu_budget_active: cpu_budget,
             jp2_max_mp_active: jp2_max_mp,
             cpp_dir_active,
-            inflight: HashSet::new(),
-            // One render worker: serialises the proprietary operators (whose
-            // thread-safety we can't assume) while still keeping all of that work
-            // off the UI thread. Raise this once LUT_ALPHA / DETAILS_ENHANCED are
-            // known to be reentrant, to render several panes in parallel.
-            renderer: crate::renderer::RenderPool::new(cc.egui_ctx.clone()),
-            render_inflight: HashSet::new(),
-            regions: roi::RegionCache::default(),
-            roi_inflight: HashMap::new(),
-            scanner: crate::offsets::OffsetScanner::new(cc.egui_ctx.clone()),
-            offset_gen: 0,
-            watcher: crate::watcher::FileWatcher::new(cc.egui_ctx.clone()),
-            watch_gen: 0,
-            thumbs: crate::thumbs::ThumbPool::new(cc.egui_ctx.clone()),
-            thumb_cache: crate::thumbs::ThumbCache::default(),
             preview: Preview::default(),
-            watch_polled_at: f64::NEG_INFINITY,
             metrics: crate::debug::Metrics::default(),
             decode_ema_secs: 0.0,
             show_debug: false,
@@ -1454,14 +1380,10 @@ impl CimApp {
             #[cfg(windows)]
             cloaked_hwnd,
         };
-        app.open_inputs(inputs);
-        if app.pending_open.is_some() {
-            // The open is held behind the ">8 sequences" warning; apply the view
-            // once the user confirms and the panes actually exist.
-            app.pending_view = Some(view);
-        } else {
-            app.apply_view_state(view);
-        }
+        // The view applies once the panes exist (`commit_open`).
+        app.pending_view = Some(view);
+        preload.set_waker(&cc.egui_ctx);
+        app.opening.push_back(preload);
         app
     }
     /// What the acceleration toggle means on *this* machine, for the readout
@@ -1556,27 +1478,44 @@ impl CimApp {
 
     // ---- effective Transformations (own, or shared when `sync_tone`) ------
 
-    pub(super) fn contrast_of(&self, i: usize) -> ContrastMode {
+    pub(super) fn visual(&self, i: usize) -> &Visual {
         if self.panes[i].sync_tone {
-            self.shared_contrast
+            &self.shared_visual
         } else {
-            self.panes[i].contrast
+            &self.panes[i].visual
         }
     }
 
-    pub(super) fn tone_of(&self, i: usize) -> ToneOptions {
-        if self.panes[i].sync_tone {
-            self.shared_tone
-        } else {
-            self.panes[i].tone
+    /// Drop pane `id`'s worker state and GPU display table (see
+    /// [`workers::Workers::forget_pane`]).
+    pub(super) fn forget_pane_work(&mut self, id: u64) {
+        self.work.forget_pane(id);
+        if let Some(g) = &mut self.gpu {
+            g.forget_pane(id);
         }
     }
 
-    pub(super) fn details_of(&self, i: usize) -> bool {
+    /// Drop the tinted overlay textures drawn from pane `src` (whose frames
+    /// changed or which is gone).
+    pub(super) fn drop_overlays_from(&mut self, src: u64) {
+        let shared_src = self.shared_visual.overlay.map(|o| o.src_id);
+        for p in &mut self.panes {
+            let from = if p.sync_tone {
+                shared_src
+            } else {
+                p.visual.overlay.map(|o| o.src_id)
+            };
+            if from == Some(src) {
+                p.overlay_tex = None;
+            }
+        }
+    }
+
+    pub(super) fn visual_mut(&mut self, i: usize) -> &mut Visual {
         if self.panes[i].sync_tone {
-            self.shared_details
+            &mut self.shared_visual
         } else {
-            self.panes[i].details
+            &mut self.panes[i].visual
         }
     }
 
@@ -1633,17 +1572,9 @@ impl CimApp {
     /// loaded libraries: `imageproc::ops_active`.
     pub(super) fn ops_of(&self, i: usize) -> crate::imageproc::Ops {
         crate::imageproc::Ops {
-            lut_alpha: self.contrast_of(i) == ContrastMode::LutAlpha,
-            boost: self.contrast_of(i) == ContrastMode::Boost,
-            details: self.details_of(i),
-        }
-    }
-
-    pub(super) fn overlay_of(&self, i: usize) -> Option<OverlaySpec> {
-        if self.panes[i].sync_tone {
-            self.shared_overlay
-        } else {
-            self.panes[i].overlay
+            lut_alpha: self.visual(i).contrast == ContrastMode::LutAlpha,
+            boost: self.visual(i).contrast == ContrastMode::Boost,
+            details: self.visual(i).details,
         }
     }
 
@@ -1671,7 +1602,7 @@ impl CimApp {
         // Cached viewport regions were rendered without the newly loaded
         // operator, at unchanged keys (the tone signature doesn't see library
         // availability) — drop them all so they re-render with it.
-        self.regions.clear();
+        self.work.regions.clear();
         // Name only what this call added (`load_missing` never unloads).
         let added = crate::imageproc::Libs {
             lut_alpha: after.lut_alpha && !before.lut_alpha,
@@ -1690,15 +1621,9 @@ impl CimApp {
             return;
         }
         if !on {
-            self.panes[i].contrast = self.shared_contrast;
-            self.panes[i].tone = self.shared_tone;
-            self.panes[i].details = self.shared_details;
-            self.panes[i].overlay = self.shared_overlay;
+            self.panes[i].visual = self.shared_visual;
         }
         self.panes[i].sync_tone = on;
-        // The pane re-renders via `tone_sig` (its effective tone changed) while
-        // holding its last committed `tex`; nulling it would flash black for a
-        // heavy LUT_ALPHA/details render. Only the tinted overlay is dropped.
         self.panes[i].overlay_tex = None;
     }
 
@@ -1849,17 +1774,10 @@ impl CimApp {
     /// on-screen synced sequence that is **still discovering** and hasn't reached
     /// the timeline yet.
     ///
-    /// Without this, opening a second sequence next to an already-discovered one
-    /// let playback run at the fast pane's pace while the new pane, whose frontier
-    /// advances only as fast as it decodes, fell further and further behind —
-    /// `frame_disp` clamps it to its last discovered frame, so the panes drifted
-    /// onto different frames, which defeats the whole point of comparing them.
-    /// Holding at the slowest frontier keeps every pane on the same frame, exactly
-    /// as a single sequence already holds at its own frontier rather than wrapping
-    /// early (§4/§8).
-    ///
-    /// Only a **still-discovering** pane holds it back: a genuinely shorter but
-    /// fully-discovered sequence keeps the existing behaviour of holding on its
+    /// Holding at the slowest frontier keeps every pane on the same frame: a
+    /// pane discovers only as fast as it decodes, and `frame_disp` would clamp
+    /// it to its last discovered frame while the others ran on. A shorter but
+    /// fully-discovered sequence doesn't hold anything back; it rests on its
     /// last frame while the timeline plays on.
     pub(super) fn playback_limit(&self) -> (usize, bool) {
         let mut len = self.transport_len();
@@ -1926,7 +1844,6 @@ impl CimApp {
         self.panes[t].frame = target.min(len - 1);
     }
 
-    /// Run a committed **Fast jump** (0-based, like the frame readout) on the
     /// Seek the timeline to `target` (0-based, as the frame readout commits it),
     /// trying a **fast jump** first and falling back to the ordinary discovery.
     /// A target already inside the known length (or past a fully-known end) just
@@ -1934,8 +1851,8 @@ impl CimApp {
     /// validates + decodes `target` at its predicted file position and grows the
     /// known length through it in one step (`media::fast_jump`) — never riding or
     /// decoding the frames in between — then jumps there. If the prediction can't
-    /// be made or doesn't validate, it **falls back to the old way**: `seek_to`
-    /// arms `pending_seek` and rides the frontier to `target`.
+    /// be made or doesn't validate, `seek_to` arms `pending_seek` and rides the
+    /// frontier to `target`.
     pub(super) fn do_fast_jump(&mut self, target: usize) {
         let i = self.transport();
         let Some(pane) = self.panes.get_mut(i) else {
@@ -2009,18 +1926,7 @@ impl CimApp {
                 continue;
             }
             let id = self.panes[i].id;
-            // In-flight decodes land at the old target and are dropped by
-            // `pump_decoder`; clear them so the frames are asked for again.
-            self.inflight.retain(|(pid, _)| *pid != id);
-            // Operator instances and the GPU display table are keyed on the
-            // frame size; the adaptive regions describe the old frames.
-            self.renderer.forget(id);
-            if let Some(g) = &mut self.gpu {
-                g.forget_pane(id);
-            }
-            self.render_inflight.remove(&id);
-            self.roi_inflight.remove(&id);
-            self.regions.forget_pane(id);
+            self.forget_pane_work(id);
             let p = &mut self.panes[i];
             p.tex.clear();
             p.stats = None;
@@ -2028,17 +1934,7 @@ impl CimApp {
             p.overlay_tex = None;
             p.error = None;
             // An overlay drawn *from* this pane is the wrong size now too.
-            let shared_src = self.shared_overlay.map(|o| o.src_id);
-            for p in &mut self.panes {
-                let src = if p.sync_tone {
-                    shared_src
-                } else {
-                    p.overlay.map(|o| o.src_id)
-                };
-                if src == Some(id) {
-                    p.overlay_tex = None;
-                }
-            }
+            self.drop_overlays_from(id);
             // A synced pane shares the Control's image space, which scaling onto
             // it is the point of — so only a pane with its own view re-fits.
             if !self.panes[i].sync_spatial {
@@ -2066,14 +1962,6 @@ impl CimApp {
             .is_some_and(|fr| fr.color_channels() == 3)
     }
 
-    /// Pixel size of the frame actually on screen for pane `i`. Pages in a
-    /// sequence may differ in resolution, so this follows the **committed
-    /// texture's** frame, not the target: while navigating to a not-yet-decoded
-    /// frame the pane keeps showing its last committed frame (the lock-step
-    /// commit, §7), and its geometry/readout keep that frame's size until the new
-    /// one commits — so a differently sized page never briefly appears at the
-    /// page-0 fallback size while it decodes. Before the first commit, fall back to
-    /// the resident target frame's own size, then the page-0 size.
     /// How far the full-width global bars intrude into a cell's top and bottom
     /// edges. A pane header/footer flush to a window edge would be painted over
     /// by the toolbar / frame bar covering that edge; pushing it in by the bar's
@@ -2097,6 +1985,14 @@ impl CimApp {
         (top, bot)
     }
 
+    /// Pixel size of the frame actually on screen for pane `i`. Pages in a
+    /// sequence may differ in resolution, so this follows the **committed
+    /// texture's** frame, not the target: while navigating to a not-yet-decoded
+    /// frame the pane keeps showing its last committed frame (the lock-step
+    /// commit, §7), and its geometry/readout keep that frame's size until the new
+    /// one commits — so a differently sized page never briefly appears at the
+    /// page-0 fallback size while it decodes. Before the first commit, fall back to
+    /// the resident target frame's own size, then the page-0 size.
     pub(super) fn disp_size(&self, i: usize) -> [usize; 2] {
         if let Some(t) = &self.panes[i].tex.front {
             return t.size;
@@ -2270,21 +2166,14 @@ impl CimApp {
             if reg.is_none() && p.region_tone {
                 p.region_tone = false;
             }
-            // A region-tone pane re-renders on its own: `stats_gen` (and the
-            // region_tone flag) feed `tone_sig`, so `stage` re-derives the bounds
-            // and commits while the pane holds its last committed frame — no black.
         }
     }
 
     /// Turn region-driven tone on/off for every pane at once (the button is a
-    /// single control replicated across panes); each re-renders via `tone_sig`.
+    /// single control replicated across panes).
     pub(super) fn apply_region_tone(&mut self, on: bool) {
         for p in &mut self.panes {
-            if p.region_tone != on {
-                p.region_tone = on;
-                // Re-renders via `tone_sig` (region_tone changed) while holding
-                // the last committed frame — nulling `tex` would flash black.
-            }
+            p.region_tone = on;
         }
     }
 
@@ -2347,17 +2236,12 @@ impl CimApp {
             set_window_cloak(hwnd, false);
         }
 
-        // Resize both shared pools if the CPU budget changed (live-applied like
-        // the other config), so a user can raise the cap for one heavy job and
-        // drop it again without restarting. Orphaned in-flight decode jobs won't
-        // land on the new pool, so clear `inflight` to let them be re-requested;
-        // the old pool's persistent readers are dropped and reopen on demand.
-        // The rayon side needs no such care — `cpu::set_budget` lets in-flight
-        // jobs finish on the pool they started on.
+        // Resize both shared pools if the CPU budget changed. In-flight rayon
+        // jobs finish on the pool they started on (`cpu::set_budget`).
         if self.config.cpu_budget != self.cpu_budget_active {
             crate::cpu::set_budget(self.config.cpu_budget);
-            self.decoder = BackgroundDecoder::new(self.resolve_decode_threads(), ctx.clone());
-            self.inflight.clear();
+            let threads = self.resolve_decode_threads();
+            self.work.rebuild_decoder(threads, ctx);
             self.cpu_budget_active = self.config.cpu_budget;
         }
 
@@ -2379,6 +2263,7 @@ impl CimApp {
             self.load_cpp_libs();
         }
 
+        self.poll_opening();
         self.pump_decoder();
         self.pump_render(ctx);
         self.pump_offset_scans(); // apply finished background offset scans
@@ -2590,9 +2475,7 @@ impl eframe::App for CimApp {
         self.framebar_h = 0.0;
         if self.show_chrome {
             // A hairline border round the bar; since each bar spans the full
-            // width and is flush to a window edge, only its inner edge shows (the
-            // toolbar's bottom, the frame bar's top) — the separator the panels
-            // used to draw.
+            // width and is flush to a window edge, only its inner edge shows.
             let frame = egui::Frame::side_top_panel(&ctx.style())
                 .stroke(Stroke::new(1.0_f32, CHROME_BORDER));
             let m = frame.inner_margin;
@@ -2690,12 +2573,9 @@ impl eframe::App for CimApp {
             }
         }
 
-        // Keep animating, but pace repaints to what's actually happening rather
-        // than busy-spinning at monitor rate (pure waste over VNC / no-GPU).
-        // Playback needs its own frame interval; a pending background decode or a
-        // running export (which encodes on a worker thread — we just poll its
-        // progress) only needs an occasional wake-up. Idle with nothing pending:
-        // no repaint is requested at all.
+        // Pace repaints to what's actually happening rather than busy-spinning
+        // at monitor rate (pure waste over VNC): playback wakes per frame,
+        // pending background work polls slowly, idle requests nothing.
         if self.playback.playing {
             let step = 1.0 / self.playback.fps.max(1.0);
             let wait = if self.playback.prefetch.is_some() {
@@ -2706,9 +2586,8 @@ impl eframe::App for CimApp {
                 // if the commit is slow.
                 DECODE_POLL
             } else {
-                // Wake when the *next* frame is due: the time left for the
-                // accumulator to reach one step. A fixed `step` interval would
-                // drift late whenever a gate already consumed part of it.
+                // Wake when the *next* frame is due, not a fixed `step` later:
+                // a gate may already have consumed part of the interval.
                 let remaining = (step - self.playback.accum).clamp(MIN_PLAY_WAIT, 0.1);
                 std::time::Duration::from_secs_f32(remaining)
             };
@@ -2722,8 +2601,8 @@ impl eframe::App for CimApp {
             ctx.request_repaint();
         } else if self.export.run.is_some()
             || self.export.cancel
-            || !self.inflight.is_empty()
-            || !self.render_inflight.is_empty()
+            || self.work.busy()
+            || !self.opening.is_empty()
         {
             ctx.request_repaint_after(DECODE_POLL);
         } else if self.panes.iter().any(|p| p.watch.on) {
