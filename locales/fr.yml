@@ -73,6 +73,7 @@ pane.sync_pos: pos
 pane.sync_time: temps
 pane.in_memory: "%{n} en mémoire."
 pane.page_in_file: page %{page} dans ce fichier
+pane.rename_hover: Double-cliquer pour renommer
 pane.row: lig
 pane.col: col
 
@@ -544,6 +545,8 @@ cli.help: |
           --control <N>            Média Contrôle : source des bornes partagées
                                  (+ timeline si c'est une séquence)
           --loop <LO,HI>           Plage de boucle inclusive (à partir de 0)
+          --name <N=TEXTE>         Nomme le panneau N (à partir de 0) TEXTE ;
+                                 à répéter par panneau renommé
 
   COMPLÉTION SHELL :
       bash         eval "$(cim --completions bash)"

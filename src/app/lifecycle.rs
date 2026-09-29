@@ -32,6 +32,13 @@ impl CimApp {
             }
             self.ab_split = split.clamp(0.02, 0.98);
         }
+        // Names the user gave panes (renamed from their header).
+        for (i, name) in &vs.names {
+            if let Some(p) = self.panes.get_mut(*i) {
+                let name = name.trim();
+                p.custom_name = (!name.is_empty()).then(|| name.to_owned());
+            }
+        }
         if let Some(f) = vs.frame {
             // The sequence length isn't discovered yet, so we can't land on `f`
             // now — record it and let `drive_seek` walk discovery up to it.
@@ -213,6 +220,13 @@ impl CimApp {
             parts.push(format!("--frame {}", self.shared_frame));
         }
         let n = self.panes.len();
+        // Renamed panes, one `--name N=TEXT` each (a name may hold commas, so
+        // not a positional list).
+        for (i, p) in self.panes.iter().enumerate() {
+            if let Some(name) = &p.custom_name {
+                parts.push(format!("--name {}", quote_arg(&format!("{i}={name}"))));
+            }
+        }
         if n > 0 {
             // Per-pane tone mode (effective — shared when tone-synced). The mode
             // is Linear for every pane unless another tone is chosen, so omit
@@ -507,6 +521,7 @@ impl CimApp {
             id,
             source,
             media,
+            custom_name: None,
             tex: PaneTex::default(),
             transform: ViewTransform::default(),
             frame: 0,

@@ -70,6 +70,7 @@ pane.sync_pos: pos
 pane.sync_time: time
 pane.in_memory: "%{n} in mem"
 pane.page_in_file: page %{page} in this file
+pane.rename_hover: Double-click to rename
 pane.row: row
 pane.col: col
 
@@ -515,6 +516,7 @@ cli.help: |
           --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
           --control <N>            Control media: shared clip source (+ timeline if a sequence)
           --loop <LO,HI>           Inclusive playback loop range (0-based)
+          --name <N=TEXT>          Name pane N (0-based) TEXT; repeat per renamed pane
 
   SHELL COMPLETION:
       bash         eval "$(cim --completions bash)"

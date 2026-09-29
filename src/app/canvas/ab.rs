@@ -172,11 +172,7 @@ impl CimApp {
         if !self.show_chrome {
             return;
         }
-        let tag = format!(
-            "{}  {}",
-            if is_a { "A" } else { "B" },
-            self.panes[idx].media.name()
-        );
+        let tag = format!("{}  {}", if is_a { "A" } else { "B" }, self.pane_name(idx));
         let anchor = if is_a {
             (
                 clip.left_top() + Vec2::new(8.0, 8.0 + top_inset),

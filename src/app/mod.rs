@@ -786,6 +786,10 @@ struct Pane {
     id: u64,        // stable across reorder/close; matches background-decode results
     source: Source, // how to reload it / re-emit it in a replay command
     media: Media,
+    /// The user's name for this pane (renamed from its header), used in place
+    /// of the media's own name everywhere the pane is named (`pane_name`).
+    /// Kept across reloads; `None` = the media's name.
+    custom_name: Option<String>,
     /// The committed front texture plus the staged next one. See [`PaneTex`].
     tex: PaneTex,
     transform: ViewTransform, // used only when !sync_spatial
@@ -1091,6 +1095,10 @@ pub struct CimApp {
     rotate_drag: Option<(usize, Pos2, f32, f32)>,
     /// Row being dragged to reorder in the ☰ Media manager (a pane vec index).
     manager_drag: Option<usize>,
+    /// A pane title being renamed in place (double-click on the header title):
+    /// the pane's id and the text being edited. Committed on Enter or when the
+    /// field loses focus, dropped on Escape.
+    renaming: Option<(u64, String)>,
     /// Pane-lifecycle actions queued during the draw (buttons can't mutate
     /// `panes` mid-draw); drained in order by `apply_deferred` after drawing.
     deferred: Vec<Deferred>,
@@ -1358,6 +1366,7 @@ impl CimApp {
             drag_src: None,
             rotate_drag: None,
             manager_drag: None,
+            renaming: None,
             deferred: Vec::new(),
             pending_open: None,
             pending_view: None,

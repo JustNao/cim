@@ -38,9 +38,10 @@ impl CimApp {
         let me = self.panes[idx].id;
         self.panes
             .iter()
-            .filter(|p| p.id != me && !self.depends_on(p.id, me))
-            .filter(|p| kind.is_binary() || p.media.frame_count() > 1)
-            .map(|p| (p.id, p.media.name().to_string()))
+            .enumerate()
+            .filter(|(_, p)| p.id != me && !self.depends_on(p.id, me))
+            .filter(|(_, p)| kind.is_binary() || p.media.frame_count() > 1)
+            .map(|(i, p)| (p.id, self.pane_name(i)))
             .collect()
     }
 

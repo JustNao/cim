@@ -79,7 +79,7 @@ impl CimApp {
                     .into_iter()
                     .map(|i| {
                         (
-                            self.panes[i].media.name().to_string(),
+                            self.pane_name(i),
                             series_color(i),
                             self.line_samples(i, lp, npts),
                         )

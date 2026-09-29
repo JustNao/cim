@@ -132,6 +132,10 @@ pub struct ViewState {
     pub control: Option<usize>,
     /// Inclusive playback loop range `LO,HI` (`--loop`), 0-based.
     pub loop_range: Option<(usize, usize)>,
+    /// Panes renamed by the user (`--name N=TEXT`, repeatable): pane index and
+    /// name. Keyed by index rather than a positional list, since a name may hold
+    /// any character — commas included.
+    pub names: Vec<(usize, String)>,
 }
 
 /// Parse the arguments after argv[0].
@@ -241,6 +245,14 @@ pub fn parse(args: Vec<String>) -> Cli {
             }
             "--loop" => {
                 view.loop_range = next(i).and_then(parse_uint_pair);
+                i += 1;
+            }
+            "--name" => {
+                if let Some((n, name)) = next(i).and_then(|s| s.split_once('=')) {
+                    if let Ok(n) = n.trim().parse() {
+                        view.names.push((n, name.to_string()));
+                    }
+                }
                 i += 1;
             }
             other => expand_arg(other, &mut inputs),
@@ -938,6 +950,27 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(view.rotations, Some(vec![-90.0, 45.5]));
+    }
+
+    #[test]
+    fn parses_names() {
+        let args = vec![
+            "a.tif".into(),
+            "b.tif".into(),
+            "--name".into(),
+            "1=left, cam = 2".into(),
+            "--name".into(),
+            "bogus".into(),
+            "--name".into(),
+            "0=ref".into(),
+        ];
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(
+            view.names,
+            vec![(1, "left, cam = 2".to_string()), (0, "ref".to_string())]
+        );
     }
 
     #[test]

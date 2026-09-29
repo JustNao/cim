@@ -74,13 +74,7 @@ impl CimApp {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != idx && self.overlay_source_size(*i).is_some())
-            .map(|(i, p)| {
-                (
-                    p.id,
-                    p.media.name().to_string(),
-                    self.overlay_src_is_color(i),
-                )
-            })
+            .map(|(i, p)| (p.id, self.pane_name(i), self.overlay_src_is_color(i)))
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
         let (mut ov_src, mut ov_color, mut ov_alpha) = match self.overlay_of(idx) {
@@ -116,8 +110,7 @@ impl CimApp {
                 // The current media's name, so it's clear which pane the panel
                 // is acting on (it follows the selection).
                 ui.label(
-                    egui::RichText::new(format!("{}  {}", idx + 1, self.panes[idx].media.name()))
-                        .weak(),
+                    egui::RichText::new(format!("{}  {}", idx + 1, self.pane_name(idx))).weak(),
                 );
 
                 // ---- Visualization group (open by default) -------------------
@@ -399,7 +392,7 @@ impl CimApp {
                             if base == ov {
                                 true
                             } else {
-                                let sname = self.panes[src].media.name().to_string();
+                                let sname = self.pane_name(src);
                                 self.error_popup = Some(
                                     t!(
                                         "error.overlay_size",

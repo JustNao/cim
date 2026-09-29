@@ -63,7 +63,7 @@ impl CimApp {
         };
 
         let count = self.panes[idx].media.frame_count();
-        let name = self.header_name(idx);
+        let name = self.pane_name(idx);
         // The index number is the one part that must always show; the filename is
         // dropped below if the cell is too narrow for the full title.
         let idx_str = format!("{}", idx + 1);
@@ -118,13 +118,39 @@ impl CimApp {
         } else {
             title_short
         };
-        hp.text(
-            Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
-            Align2::LEFT_CENTER,
-            title,
-            font,
-            TEXT_DEFAULT,
+        let title_rect = Rect::from_min_max(
+            Pos2::new(title_x, header.min.y),
+            Pos2::new(title_right, header.max.y),
         );
+        let pane_id = self.panes[idx].id;
+        if self.renaming.as_ref().is_some_and(|(id, _)| *id == pane_id) {
+            // Being renamed: the index stays, the name becomes a text field.
+            let idx_w = ui.fonts(|f| {
+                f.layout_no_wrap(idx_str.clone(), font.clone(), Color32::WHITE)
+                    .rect
+                    .width()
+            });
+            hp.text(
+                Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
+                Align2::LEFT_CENTER,
+                idx_str,
+                font.clone(),
+                TEXT_DEFAULT,
+            );
+            let field = Rect::from_min_max(
+                Pos2::new(title_x + idx_w + 6.0, header.min.y + 1.0),
+                Pos2::new(title_right.max(title_x + idx_w + 60.0), header.max.y - 1.0),
+            );
+            self.draw_rename_field(ui, idx, field, font);
+        } else {
+            hp.text(
+                Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
+                Align2::LEFT_CENTER,
+                title,
+                font,
+                TEXT_DEFAULT,
+            );
+        }
 
         // A hover tooltip on the title reports the absolute path of the file the
         // currently shown frame comes from (works for any media type). For a
@@ -136,12 +162,11 @@ impl CimApp {
             .media
             .local_file(self.frame_disp(idx))
             .map(|(_, i)| i);
-        if cur_path.is_some() || local_page.is_some() {
-            let title_rect = Rect::from_min_max(
-                Pos2::new(title_x, header.min.y),
-                Pos2::new(title_right, header.max.y),
-            );
-            ui.interact(title_rect, Id::new(("title", idx)), Sense::hover())
+        // A double-click on the title renames the pane in place.
+        let renaming = self.renaming.as_ref().is_some_and(|(id, _)| *id == pane_id);
+        if !renaming {
+            let title_resp = ui
+                .interact(title_rect, Id::new(("title", idx)), Sense::click())
                 .on_hover_ui(|ui| {
                     if let Some(path) = &cur_path {
                         ui.add(egui::Label::new(path.display().to_string()).selectable(true));
@@ -149,7 +174,11 @@ impl CimApp {
                     if let Some(page) = local_page {
                         ui.label(t!("pane.page_in_file", page = page));
                     }
+                    ui.label(egui::RichText::new(t!("pane.rename_hover")).weak());
                 });
+            if title_resp.double_clicked() {
+                self.start_rename(ui.ctx(), idx);
+            }
         }
 
         let close = Rect::from_min_size(
@@ -284,20 +313,64 @@ impl CimApp {
         );
     }
 
-    /// Absolute path of the file backing the currently shown frame, for the
-    /// filename hover. A multi-file sequence resolves to the specific file its
-    /// current global frame maps to (`local_file`); any other file-backed media
-    /// (a still or one multi-page TIFF) resolves to its own source path. `None`
-    /// for a computed pane, or a sequence frame not yet mapped to a file.
-    /// The name shown in the pane title: the media's own name, prefixed by the
-    /// last `config.header_parents` folders of the file (or, for a numbered
-    /// sequence, the first frame file) it was opened from. A Compute pane has no
-    /// file, so it keeps its bare name.
-    pub(super) fn header_name(&self, idx: usize) -> String {
+    /// The pane's name wherever the UI names it — the header, the A/B tags and
+    /// pickers, the frame bar, the media manager, the Compute and overlay source
+    /// pickers, the line profile and the export labels. The user's name for it
+    /// (`custom_name`) or else the media's own, prefixed by the last
+    /// `config.header_parents` folders of the file (or, for a numbered sequence,
+    /// the first frame file) it was opened from. A Compute pane has no file, so
+    /// it keeps its bare name — which, until renamed, is built live from its
+    /// sources' names, so renaming a source renames the result too.
+    pub(in crate::app) fn pane_name(&self, idx: usize) -> String {
+        self.pane_name_at(idx, 0)
+    }
+
+    /// [`Self::pane_name`], `depth` panes down a Compute chain (bounded by the
+    /// pane count, so even a cycle wired in from a stale view command can't
+    /// recurse forever).
+    fn pane_name_at(&self, idx: usize, depth: usize) -> String {
         let pane = &self.panes[idx];
-        let name = pane.media.name();
+        let name = match &pane.custom_name {
+            Some(name) => name.clone(),
+            None => self.own_name_at(idx, depth),
+        };
+        self.with_header_parents(idx, &name)
+    }
+
+    /// What pane `idx` is called when it isn't renamed, without the folder
+    /// prefix: the media's name, or a Compute result's built from its sources.
+    fn own_name(&self, idx: usize) -> String {
+        self.own_name_at(idx, 0)
+    }
+
+    fn own_name_at(&self, idx: usize, depth: usize) -> String {
+        let pane = &self.panes[idx];
+        let src = |id: Option<u64>| {
+            id.and_then(|id| self.panes.iter().position(|p| p.id == id))
+                .filter(|_| depth < self.panes.len())
+                .map(|i| self.pane_name_at(i, depth + 1))
+        };
+        match &pane.compute {
+            Some(c) if c.computed && c.kind.is_binary() => {
+                if let (Some(a), Some(b)) = (src(c.source_id), src(c.source_b)) {
+                    return format!("{} · {} {} {}", c.kind.label(), a, c.kind.sign(), b);
+                }
+            }
+            Some(c) if c.computed => {
+                if let Some(a) = src(c.source_id) {
+                    return format!("{} · {}", c.kind.label(), a);
+                }
+            }
+            _ => {}
+        }
+        pane.media.name().to_owned()
+    }
+
+    /// `name` prefixed by the last `config.header_parents` folders of pane
+    /// `idx`'s file; unchanged for a Compute pane or with the setting at 0.
+    fn with_header_parents(&self, idx: usize, name: &str) -> String {
         let n = self.config.header_parents;
-        let file = match &pane.source {
+        let file = match &self.panes[idx].source {
             Source::File(p) => Some(p),
             Source::Sequence { files, .. } => files.first(),
             Source::Computed => None,
@@ -308,6 +381,58 @@ impl CimApp {
         }
     }
 
+    /// Open pane `idx`'s title for renaming, seeded with its current name (less
+    /// the folder prefix, which is the setting's, not part of the name).
+    fn start_rename(&mut self, ctx: &egui::Context, idx: usize) {
+        let pane = &self.panes[idx];
+        let text = pane
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| self.own_name(idx));
+        self.renaming = Some((pane.id, text));
+        // Focus is taken by the field when it is first drawn, next frame.
+        ctx.memory_mut(|m| m.request_focus(Id::new(("rename", pane.id))));
+        ctx.request_repaint();
+    }
+
+    /// The in-place rename field over pane `idx`'s title. Enter or clicking
+    /// anywhere else commits (the field loses focus either way); Escape drops
+    /// the edit. A blank name — or the media's own — clears the custom name, so
+    /// the pane goes back to following its media (and, for a Compute pane, its
+    /// sources' names).
+    fn draw_rename_field(&mut self, ui: &mut egui::Ui, idx: usize, rect: Rect, font: FontId) {
+        let Some((_, text)) = self.renaming.as_mut() else {
+            return;
+        };
+        let edit_id = Id::new(("rename", self.panes[idx].id));
+        let resp = ui.put(
+            rect,
+            egui::TextEdit::singleline(text)
+                .id(edit_id)
+                .font(font)
+                .margin(Vec2::new(4.0, 0.0)),
+        );
+        // `start_rename` asked for focus; anything else ends the edit (focus
+        // lost to a click elsewhere, Enter, Escape, or never taken at all).
+        if resp.has_focus() || ui.memory(|m| m.has_focus(edit_id)) {
+            return;
+        }
+        let Some((_, text)) = self.renaming.take() else {
+            return;
+        };
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        let name = text.trim();
+        let own = name.is_empty() || name == self.own_name(idx);
+        self.panes[idx].custom_name = (!own).then(|| name.to_owned());
+    }
+
+    /// Absolute path of the file backing the currently shown frame, for the
+    /// filename hover. A multi-file sequence resolves to the specific file its
+    /// current global frame maps to (`local_file`); any other file-backed media
+    /// (a still or one multi-page TIFF) resolves to its own source path. `None`
+    /// for a computed pane, or a sequence frame not yet mapped to a file.
     pub(super) fn current_file_path(&self, idx: usize) -> Option<PathBuf> {
         let pane = &self.panes[idx];
         if let Some((p, _)) = pane.media.local_file(self.frame_disp(idx)) {

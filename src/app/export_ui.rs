@@ -679,7 +679,18 @@ impl CimApp {
         let p = &self.panes[idx];
         match self.export.labels.get(&p.id).map(|s| s.trim()) {
             Some(s) if !s.is_empty() => s.to_string(),
-            _ => strip_extension(p.media.name()),
+            _ => self.default_label(idx),
+        }
+    }
+
+    /// The label pane `idx` gets without custom text: its name, less the file
+    /// extension — unless the user named the pane, whose name is used as typed.
+    fn default_label(&self, idx: usize) -> String {
+        let name = self.pane_name(idx);
+        if self.panes[idx].custom_name.is_some() {
+            name
+        } else {
+            strip_extension(&name)
         }
     }
 
@@ -990,13 +1001,7 @@ impl CimApp {
         // Snapshot (id, fallback name) so the map can be borrowed mutably below.
         let rows: Vec<(usize, u64, String)> = participants
             .iter()
-            .map(|&i| {
-                (
-                    i,
-                    self.panes[i].id,
-                    strip_extension(self.panes[i].media.name()),
-                )
-            })
+            .map(|&i| (i, self.panes[i].id, self.default_label(i)))
             .collect();
 
         // At most `LABEL_ROWS` fields show at once; past that the list scrolls, so
@@ -1144,7 +1149,7 @@ impl CimApp {
                 ui.label(t!("export.label_preview"));
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("exp_label_preview")
-                    .selected_text(ellipsize(self.panes[idx].media.name(), 24))
+                    .selected_text(ellipsize(&self.pane_name(idx), 24))
                     .show_ui(ui, |ui| {
                         for (i, _, name) in rows {
                             if ui
