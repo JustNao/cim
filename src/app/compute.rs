@@ -257,6 +257,45 @@ impl CimApp {
         crate::tone::synced_index(k, p.media.frame_count(), p.sync_temporal, p.frame)
     }
 
+    /// Whether input pane `j` has discovered far enough for result frame `k`.
+    /// A synced input still discovering its length short of `k` would clamp to
+    /// its last known frame (`binary_input_frame`), which is a *different*
+    /// frame from the one it will show at `k` — so frame `k` must wait rather
+    /// than be computed (and marked done) against the wrong input. This is what
+    /// a view command's `--frame` hits: the seek discovers only the Control, so
+    /// the other input is far behind the timeline when the result is built. An
+    /// upstream generated sequence has reached `k` when its own inputs have.
+    fn binary_input_reaches(&self, j: usize, k: usize, depth: usize) -> bool {
+        let p = &self.panes[j];
+        if !p.sync_temporal || k < p.media.frame_count() {
+            return true;
+        }
+        match self.binary_inputs(j) {
+            Some((_, a, b)) => {
+                depth <= self.panes.len()
+                    && self.binary_input_reaches(a, k, depth + 1)
+                    && self.binary_input_reaches(b, k, depth + 1)
+            }
+            None => p.media.at_end(),
+        }
+    }
+
+    /// Push input pane `j`'s length discovery toward result frame `k` — the
+    /// input may not be on screen, so nothing else would (`ensure_lookahead`
+    /// only discovers displayed panes). Probes are header-only.
+    fn discover_binary_input(&mut self, j: usize, k: usize, depth: usize) {
+        if depth > self.panes.len() || self.binary_input_reaches(j, k, depth) {
+            return;
+        }
+        match self.binary_inputs(j) {
+            Some((_, a, b)) => {
+                self.discover_binary_input(a, k, depth + 1);
+                self.discover_binary_input(b, k, depth + 1);
+            }
+            None => self.probe_ahead(j, FRONTIER_PROBES),
+        }
+    }
+
     /// `(kind, A pane, B pane)` of pane `i` when it is a binary Compute pane
     /// whose generated sequence exists and whose sources are both open.
     fn binary_inputs(&self, i: usize) -> Option<(Reduce, usize, usize)> {
@@ -321,6 +360,11 @@ impl CimApp {
         }
         let mut ready = true;
         for j in [a, b] {
+            if !self.binary_input_reaches(j, k, 0) {
+                self.discover_binary_input(j, k, 0);
+                ready = false;
+                continue;
+            }
             let f = self.binary_input_frame(j, k);
             let have = self.panes[j].media.resident(f).is_some()
                 || if self.panes[j].media.is_computed() {
@@ -347,6 +391,14 @@ impl CimApp {
         }
         let mut missing = false;
         for j in [a, b] {
+            if !self.binary_input_reaches(j, k, 0) {
+                // Still discovering toward `k` (unless that stopped on an error).
+                if self.panes[j].error.is_some() {
+                    return false;
+                }
+                missing = true;
+                continue;
+            }
             let f = self.binary_input_frame(j, k);
             if self.panes[j].media.resident(f).is_some() {
                 continue;
@@ -394,7 +446,11 @@ impl CimApp {
                 self.panes[i].media.grow_computed(span);
             }
         }
-        for &i in &panes {
+        // While a seek rides the frontier the shown frame is only a waypoint:
+        // asking for it would full-decode every input page the seek passes
+        // (which it walks by header alone), so wait for it to land.
+        let seeking = self.pending_seek.is_some();
+        for &i in panes.iter().filter(|_| !seeking) {
             let (shown, next) = (self.frame_disp(i), self.stage_target(i));
             self.ensure_binary_frame(i, shown, 0);
             if next != shown {
@@ -412,7 +468,10 @@ impl CimApp {
             let start = self.frame_disp(i).min(len - 1);
             let mut out_of_time = false;
             for k in (start..len).chain((0..start).rev()) {
-                if self.panes[i].media.computed_done(k) {
+                if self.panes[i].media.computed_done(k)
+                    || !self.binary_input_reaches(a, k, 0)
+                    || !self.binary_input_reaches(b, k, 0)
+                {
                     continue;
                 }
                 let (fa, fb) = (self.binary_input_frame(a, k), self.binary_input_frame(b, k));
