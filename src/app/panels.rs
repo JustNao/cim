@@ -249,6 +249,21 @@ impl CimApp {
                     .suffix(" fps")
                     .fixed_decimals(0),
             );
+            // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
+            // between by header only. Affects Load all and playback. 1 = every frame.
+            ui.label(t!("frame_bar.step"));
+            let mut ff = self.playback.fast_forward.max(1);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut ff)
+                        .range(1..=1_000_000)
+                        .speed(0.1),
+                )
+                .on_hover_text(t!("frame_bar.step_hover"))
+                .changed()
+            {
+                self.playback.fast_forward = ff.max(1);
+            }
             // While a bulk load runs, offer Stop; otherwise Load all / Load offsets.
             if self.decoding_all {
                 if ui
@@ -301,21 +316,6 @@ impl CimApp {
                     self.load_offsets();
                 }
             }
-            // Fast-forward stride: decode 1 of every N frames, skim the N-1 in
-            // between by header only. Affects Load all and playback. 1 = every frame.
-            ui.label(t!("frame_bar.step"));
-            let mut ff = self.playback.fast_forward.max(1);
-            if ui
-                .add(
-                    egui::DragValue::new(&mut ff)
-                        .range(1..=1_000_000)
-                        .speed(0.1),
-                )
-                .on_hover_text(t!("frame_bar.step_hover"))
-                .changed()
-            {
-                self.playback.fast_forward = ff.max(1);
-            }
             ui.separator();
             ui.strong(ellipsize(&name, 80));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -351,6 +351,17 @@ impl CimApp {
                     self.frame_edit = self.step_origin().to_string();
                 }
                 ui.monospace(t!("frame_bar.frame"));
+                // What actually reaches the screen, next to the fps asked for on
+                // the left — they part when decoding or rendering can't keep up.
+                let now = ui.input(|i| i.time);
+                let hz = self.playback.shown.hz(now);
+                ui.monospace(t!("frame_bar.shown_hz", hz = format!("{hz:.0}")))
+                    .on_hover_text(t!("frame_bar.shown_hz_hover"));
+                if hz > 0.0 {
+                    // Nothing else repaints once playback stops; let it fall to 0.
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(250));
+                }
                 // While a typed seek is riding the frontier (target past the
                 // discovered end), offer a Stop to abandon the look-ahead so the
                 // timeline stays where it is instead of chasing the frontier.

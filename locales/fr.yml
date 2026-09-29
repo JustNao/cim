@@ -52,6 +52,8 @@ frame_bar.load_offsets_slow: "La découverte rapide des offsets n'est pas possib
 frame_bar.step: Pas
 frame_bar.step_hover: Pas d'avance rapide
 frame_bar.frame: image
+frame_bar.shown_hz: "(%{hz} Hz)"
+frame_bar.shown_hz_hover: Images réellement affichées par seconde, mesurées — le curseur fps à gauche est la cadence demandée
 
 # ---- zone centrale ---------------------------------------------------------
 canvas.empty: Ouvrez des images ou déposez des fichiers ici

@@ -28,7 +28,7 @@ mod preview;
 mod profile;
 mod roi;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
@@ -618,6 +618,51 @@ struct Playback {
     /// the swap and applies it), so the frame counter never runs ahead of the
     /// image and all panes flip in step. `None` when idle / paused / seeking.
     prefetch: Option<usize>,
+    /// The rate new frames actually reach the screen, for the frame bar's Hz
+    /// readout — against `fps`, the rate asked for.
+    shown: ShownRate,
+}
+
+/// Measures how many **new** frames the lock-step commit puts on screen per
+/// second (`refresh_textures` notes each commit). Over the last second, so it
+/// follows a slowdown quickly and falls to zero within a second of stopping.
+#[derive(Default)]
+struct ShownRate {
+    /// The frame the last commit showed, so a re-render of the same frame (a
+    /// tone change, a pan) doesn't count.
+    last: Option<usize>,
+    /// When each new frame landed, within the window.
+    times: VecDeque<f64>,
+}
+
+impl ShownRate {
+    const WINDOW: f64 = 1.0;
+
+    /// A commit put `frame` on screen at `now`.
+    fn note(&mut self, frame: usize, now: f64) {
+        if self.last != Some(frame) {
+            self.last = Some(frame);
+            self.times.push_back(now);
+        }
+        self.trim(now);
+    }
+
+    fn trim(&mut self, now: f64) {
+        while self.times.front().is_some_and(|&t| now - t > Self::WINDOW) {
+            self.times.pop_front();
+        }
+    }
+
+    /// Frames per second over the window at `now`: the intervals between the
+    /// frames that landed in it (not a bare count, which only moves in whole
+    /// steps); zero with fewer than two.
+    fn hz(&mut self, now: f64) -> f32 {
+        self.trim(now);
+        match (self.times.front(), self.times.back()) {
+            (Some(&a), Some(&b)) if b > a => ((self.times.len() - 1) as f64 / (b - a)) as f32,
+            _ => 0.0,
+        }
+    }
 }
 
 impl Default for Playback {
@@ -632,6 +677,7 @@ impl Default for Playback {
             last_tick: None,
             fast_forward: 1,
             prefetch: None,
+            shown: ShownRate::default(),
         }
     }
 }

@@ -53,6 +53,8 @@ frame_bar.load_offsets_slow: "Fast offset discovery isn't available here: %{reas
 frame_bar.step: Step
 frame_bar.step_hover: Fast-forward stride
 frame_bar.frame: frame
+frame_bar.shown_hz: "(%{hz} Hz)"
+frame_bar.shown_hz_hover: Frames actually shown per second, measured — the fps slider on the left is the rate asked for
 
 # ---- central canvas --------------------------------------------------------
 canvas.empty: Open images or drop files here

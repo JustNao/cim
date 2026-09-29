@@ -677,7 +677,7 @@ impl CimApp {
         // and making the image flicker between frames. The swap keeps the old
         // texture in `pending` so its handle is reused next frame (no per-frame
         // texture allocation during playback).
-        for (idx, target, adaptive) in staged {
+        for &(idx, target, adaptive) in &staged {
             let sig = self.tone_sig(idx);
             let step = self.want_step(idx, target, ppp, max_side, adaptive);
             self.panes[idx]
@@ -686,6 +686,13 @@ impl CimApp {
             // Promote the staged region alongside its base, so drawing never
             // pairs a freshly committed base with the previous frame's region.
             self.panes[idx].region_show = self.panes[idx].region_want;
+        }
+        // The panes flip together, so the first one's frame is the one shown.
+        if let Some(t) = staged
+            .first()
+            .and_then(|&(idx, ..)| self.panes[idx].tex.front.as_ref())
+        {
+            self.playback.shown.note(t.shown, now);
         }
         // A committed playback step advances the transport's playhead to the frame
         // we just showed — so the counter and the image stay on the same frame.

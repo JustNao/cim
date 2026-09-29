@@ -1287,6 +1287,11 @@ timeline only (see above). With a
 (clamped to the window end), skimming those in between; `prefetch_playback` strides to
 match and `ensure_lookahead` probes (headers) rather than decoding the jumped-over
 frontier frames, so playback skims a big sequence without reading every frame.
+The frame bar reads, left to right: transport, loop window, then `fps` slider · **Step**
+(the stride) · Load all / Load offset; on the right, **`(N Hz)`** — the rate new frames
+actually reach the screen (`Playback.shown`, a `ShownRate` fed by each lock-step commit
+over the last second; a re-render of the same frame doesn't count), against the `fps`
+asked for — then the frame readout.
 
 **Render-gated playback (`play_prefetch`).** Playback does **not** bump `shared_frame`
 directly. When the accumulator is due, `advance_playback` picks the next frame and parks
