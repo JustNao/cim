@@ -124,11 +124,20 @@ impl CimApp {
         );
         let pane_id = self.panes[idx].id;
         if self.renaming.as_ref().is_some_and(|(id, _)| *id == pane_id) {
-            // Being renamed: the index stays, the name becomes a text field.
-            let idx_w = ui.fonts(|f| {
-                f.layout_no_wrap(idx_str.clone(), font.clone(), Color32::WHITE)
-                    .rect
-                    .width()
+            // Being renamed: the index stays, the name becomes a text field
+            // whose text sits exactly where the title's name is drawn — same
+            // font, same left edge (the width of the "N  " before the name),
+            // same vertically centred row.
+            let (name_x, row_h) = ui.fonts(|f| {
+                let w = |s: String| {
+                    f.layout_no_wrap(s, font.clone(), Color32::WHITE)
+                        .rect
+                        .width()
+                };
+                (
+                    w(format!("{idx_str}  x")) - w("x".into()),
+                    f.row_height(&font),
+                )
             });
             hp.text(
                 Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
@@ -137,11 +146,12 @@ impl CimApp {
                 font.clone(),
                 TEXT_DEFAULT,
             );
-            let field = Rect::from_min_max(
-                Pos2::new(title_x + idx_w + 6.0, header.min.y + 1.0),
-                Pos2::new(title_right.max(title_x + idx_w + 60.0), header.max.y - 1.0),
+            let mid = header.min.y + HEADER_H / 2.0;
+            let text_rect = Rect::from_min_max(
+                Pos2::new(title_x + name_x, mid - row_h / 2.0),
+                Pos2::new(title_right.max(title_x + name_x + 60.0), mid + row_h / 2.0),
             );
-            self.draw_rename_field(ui, idx, field, font);
+            self.draw_rename_field(ui, idx, text_rect, header, font);
         } else {
             hp.text(
                 Pos2::new(title_x, header.min.y + HEADER_H / 2.0),
@@ -316,7 +326,8 @@ impl CimApp {
     /// The pane's name wherever the UI names it — the header, the A/B tags and
     /// pickers, the frame bar, the media manager, the Compute and overlay source
     /// pickers, the line profile and the export labels. The user's name for it
-    /// (`custom_name`) or else the media's own, prefixed by the last
+    /// (`custom_name`) exactly as typed — it replaces the folder prefix too — or
+    /// else the media's own, prefixed by the last
     /// `config.header_parents` folders of the file (or, for a numbered sequence,
     /// the first frame file) it was opened from. A Compute pane has no file, so
     /// it keeps its bare name — which, until renamed, is built live from its
@@ -330,11 +341,12 @@ impl CimApp {
     /// recurse forever).
     fn pane_name_at(&self, idx: usize, depth: usize) -> String {
         let pane = &self.panes[idx];
-        let name = match &pane.custom_name {
+        match &pane.custom_name {
+            // Shown exactly as typed: the folder prefix is part of what the user
+            // edited (it's in the field), so deleting it removes it.
             Some(name) => name.clone(),
-            None => self.own_name_at(idx, depth),
-        };
-        self.with_header_parents(idx, &name)
+            None => self.with_header_parents(idx, &self.own_name_at(idx, depth)),
+        }
     }
 
     /// What pane `idx` is called when it isn't renamed, without the folder
@@ -381,37 +393,65 @@ impl CimApp {
         }
     }
 
-    /// Open pane `idx`'s title for renaming, seeded with its current name (less
-    /// the folder prefix, which is the setting's, not part of the name).
+    /// Open pane `idx`'s title for renaming, seeded with the name as shown —
+    /// folder prefix included — and all of it selected, so typing replaces it.
     fn start_rename(&mut self, ctx: &egui::Context, idx: usize) {
-        let pane = &self.panes[idx];
-        let text = pane
-            .custom_name
-            .clone()
-            .unwrap_or_else(|| self.own_name(idx));
-        self.renaming = Some((pane.id, text));
+        let text = self.pane_name(idx);
+        let id = Id::new(("rename", self.panes[idx].id));
+        let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text_selection::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+        state.store(ctx, id);
+        self.renaming = Some((self.panes[idx].id, text));
         // Focus is taken by the field when it is first drawn, next frame.
-        ctx.memory_mut(|m| m.request_focus(Id::new(("rename", pane.id))));
+        ctx.memory_mut(|m| m.request_focus(id));
         ctx.request_repaint();
     }
 
-    /// The in-place rename field over pane `idx`'s title. Enter or clicking
-    /// anywhere else commits (the field loses focus either way); Escape drops
-    /// the edit. A blank name — or the media's own — clears the custom name, so
-    /// the pane goes back to following its media (and, for a Compute pane, its
-    /// sources' names).
-    fn draw_rename_field(&mut self, ui: &mut egui::Ui, idx: usize, rect: Rect, font: FontId) {
+    /// The in-place rename field over pane `idx`'s title: black on a white
+    /// box inside the `header`, with no frame, its text in `text_rect` (where
+    /// the title's name is drawn). Enter or clicking anywhere else commits (the
+    /// field loses focus either way); Escape drops the edit. A blank name — or
+    /// the one the pane shows un-renamed — clears the custom name, so the pane
+    /// goes back to following its media (and, for a Compute pane, its sources'
+    /// names) and the folder prefix setting.
+    fn draw_rename_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        text_rect: Rect,
+        header: Rect,
+        font: FontId,
+    ) {
         let Some((_, text)) = self.renaming.as_mut() else {
             return;
         };
         let edit_id = Id::new(("rename", self.panes[idx].id));
-        let resp = ui.put(
-            rect,
-            egui::TextEdit::singleline(text)
-                .id(edit_id)
-                .font(font)
-                .margin(Vec2::new(4.0, 0.0)),
+        let bg = Rect::from_min_max(
+            Pos2::new(text_rect.min.x - 4.0, header.min.y + 3.0),
+            Pos2::new(text_rect.max.x, header.max.y - 3.0),
         );
+        ui.painter().rect_filled(bg, 2.0, Color32::WHITE);
+        let resp = ui
+            .scope(|ui| {
+                // The caret is drawn in the theme's (light) cursor colour, which
+                // would vanish on white.
+                ui.visuals_mut().text_cursor.stroke.color = Color32::BLACK;
+                ui.put(
+                    text_rect,
+                    egui::TextEdit::singleline(text)
+                        .id(edit_id)
+                        .font(font)
+                        .text_color(Color32::BLACK)
+                        .frame(false)
+                        .margin(Vec2::ZERO),
+                )
+            })
+            .inner;
         // `start_rename` asked for focus; anything else ends the edit (focus
         // lost to a click elsewhere, Enter, Escape, or never taken at all).
         if resp.has_focus() || ui.memory(|m| m.has_focus(edit_id)) {
@@ -424,8 +464,8 @@ impl CimApp {
             return;
         }
         let name = text.trim();
-        let own = name.is_empty() || name == self.own_name(idx);
-        self.panes[idx].custom_name = (!own).then(|| name.to_owned());
+        let own = self.with_header_parents(idx, &self.own_name(idx));
+        self.panes[idx].custom_name = (!name.is_empty() && name != own).then(|| name.to_owned());
     }
 
     /// Absolute path of the file backing the currently shown frame, for the

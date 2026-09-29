@@ -1386,12 +1386,16 @@ under the cursor.
 
 **Pane names:** every place the UI names a pane — header, A/B tags and pickers, frame
 bar, media manager, Compute / overlay source pickers, line profile, export labels —
-goes through `CimApp::pane_name`: the user's `Pane.custom_name` or the media's own
-name, with the *parent folders* prefix (`config.header_parents`). A Compute pane's
+goes through `CimApp::pane_name`: the user's `Pane.custom_name` exactly as typed, or
+the media's own name with the *parent folders* prefix (`config.header_parents`). The
+rename field is seeded with the shown name, prefix included and all selected, so a
+custom name overrides the prefix (deleting the folders removes them for that pane). A Compute pane's
 un-renamed name is built live from its sources' `pane_name`s, so renaming a source
 renames the result. **Double-clicking a header title** renames in place
 (`start_rename` / `draw_rename_field`, state in `CimApp.renaming`): Enter or a click
-elsewhere commits, Escape cancels, and a blank name (or the media's own) clears it.
+elsewhere commits, Escape cancels, and a blank name (or the un-renamed one) clears it. The field is
+black on white, frameless, inside the header, with its text laid over exactly where the
+title's name is drawn.
 The name survives reloads and round-trips through the view command (`--name N=TEXT`).
 An un-renamed export label still drops the file extension; a user-given name is
 used as typed.
