@@ -137,7 +137,7 @@ src/
     canvas/      Central image area, split by feature:
       mod.rs         Layout core: draw_central, draw_pane, grid, reorder, export
                      crop overlay.
-      chrome.rs      Per-pane header/footer/error text, shared-cursor dot.
+      chrome.rs      Per-pane header/footer/error text, shared-cursor square.
       transform.rs   Rotation-aware image<->screen math + region selection +
                      angle/paint helpers.
       ab.rs          A/B wipe view.
@@ -1439,10 +1439,12 @@ are suppressed).
 
 **Shared cursor (`cursor_img`/`cursor_pane`).** `draw_central` records the hovered
 pane's cursor in **image space** (only when it's over a real pixel, via
-`hover_img_pos`) plus which pane it came from, then every pane replicates it: a red dot
-(`draw_cursor_dot`, image→screen per pane's own view) and its own native value at that
+`hover_img_pos`) plus which pane it came from, then every pane replicates it: a red
+**square on the pixel grid** (`draw_cursor_dot`) and its own native value at that
 pixel in the footer (`value_string`). So the same source pixel is read across all panes
-at once. The dot is **not** drawn on `cursor_pane` (its OS cursor already marks the
+at once. The square is exactly the hovered pixel at every zoom, its corners mapped
+image→screen through the pane's own view and rotation so it sits on the pixel's edges; outline or filled per `config.cursor_square_filled` (the
+Settings checkbox beside *Cursor square*, shown only while that is on). The dot is **not** drawn on `cursor_pane` (its OS cursor already marks the
 spot) and the whole dot is gated on `config.cursor_dot` (a Settings toggle); the
 per-pane footer values are always shown. In A/B the single footer (`draw_ab_footer`)
 shows the shared position with **both** A and B values, each preceded by its own native
@@ -2071,7 +2073,7 @@ saved as JSON via `ProjectDirs("dev","cim","cim")` — Windows
 `%APPDATA%\cim\cim\config\config.json`, Linux `~/.config/cim/cim.json`. Loaded on
 start; **written automatically** once an edit settles — there is no Save button.
 The window groups them: **Interface** (language, max columns, UI scale, parent folders
-in the title, cursor dot, timeline preview), **Performance** (adaptive rendering, frame
+in the title, cursor square + filled, timeline preview), **Performance** (adaptive rendering, frame
 cache, CPU threads, JPEG 2000 detail, and the shelved hardware toggle), then the C++
 operators and the keyboard shortcuts. `adaptive_render` defaults to `true` (serde
 `default_true` too), but a config file that already saved `false` keeps it.

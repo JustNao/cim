@@ -459,10 +459,14 @@ pub struct Config {
     /// codestream, without re-reading the file.
     #[serde(default = "default_jp2_max_mp")]
     pub jp2_max_mp: usize,
-    /// Replicate the hovered pixel onto the other panes as a red dot (the pane
-    /// under the cursor is skipped — its own cursor marks the spot).
+    /// Replicate the hovered pixel onto the other panes as a red square on the
+    /// pixel grid (the pane under the cursor is skipped — its own cursor marks
+    /// the spot).
     #[serde(default = "default_true")]
     pub cursor_dot: bool,
+    /// Draw that square filled rather than as an outline.
+    #[serde(default)]
+    pub cursor_square_filled: bool,
     /// Show a thumbnail of the hovered frame above the frame bar's scrubber
     /// (see `app::preview`). On by default; worth turning off on a busy shared
     /// mount, where previewing a frame that isn't in memory costs a real read.
@@ -534,6 +538,7 @@ impl Default for Config {
             cpu_budget: default_cpu_budget(),
             jp2_max_mp: default_jp2_max_mp(),
             cursor_dot: true,
+            cursor_square_filled: false,
             timeline_preview: true,
             adaptive_render: true,
             cpp_lib_dir: String::new(),

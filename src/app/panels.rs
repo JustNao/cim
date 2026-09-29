@@ -1170,8 +1170,18 @@ impl CimApp {
                     ui.add(egui::Slider::new(&mut self.config.header_parents, 0..=5))
                         .on_hover_text(t!("settings.header_parents_hover"));
                 });
-                ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
-                    .on_hover_text(t!("settings.cursor_dot_hover"));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.config.cursor_dot, t!("settings.cursor_dot"))
+                        .on_hover_text(t!("settings.cursor_dot_hover"));
+                    // How the square is drawn — only meaningful while it's on.
+                    if self.config.cursor_dot {
+                        ui.checkbox(
+                            &mut self.config.cursor_square_filled,
+                            t!("settings.cursor_square_filled"),
+                        )
+                        .on_hover_text(t!("settings.cursor_square_filled_hover"));
+                    }
+                });
                 ui.checkbox(
                     &mut self.config.timeline_preview,
                     t!("settings.timeline_preview"),

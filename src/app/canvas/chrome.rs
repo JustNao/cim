@@ -600,11 +600,29 @@ impl CimApp {
         if !clip.contains(sp) {
             return;
         }
-        painter.circle_filled(sp, 3.5, Color32::from_rgb(235, 40, 40));
-        painter.circle_stroke(
-            sp,
-            3.5,
-            Stroke::new(1.0_f32, Color32::from_black_alpha(160)),
-        );
+        // The hovered pixel's own square, on its edges. Its corners go through
+        // the pane's mapping one by one, so a rotated pane gets a square turned
+        // with its pixels.
+        let (x0, y0) = (ci.x.floor(), ci.y.floor());
+        let corners: Vec<Pos2> = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .iter()
+            .map(|&(dx, dy)| self.rot_img_to_screen(idx, Vec2::new(x0 + dx, y0 + dy), coord_area))
+            .collect();
+        let red = Color32::from_rgb(235, 40, 40);
+        let dark = Color32::from_black_alpha(160);
+        if self.config.cursor_square_filled {
+            painter.add(egui::Shape::convex_polygon(
+                corners,
+                red,
+                Stroke::new(1.0_f32, dark),
+            ));
+        } else {
+            // A dark halo under the red outline keeps it visible on red or
+            // bright pixels.
+            let ring =
+                |w: f32, c: Color32| egui::Shape::closed_line(corners.clone(), Stroke::new(w, c));
+            painter.add(ring(3.0, dark));
+            painter.add(ring(1.5, red));
+        }
     }
 }

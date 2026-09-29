@@ -347,10 +347,12 @@ settings.hardware_accel_hover: >-
   utilisé tant que vous ne demandez pas cette option, et c'est aussi ce vers quoi
   une machine sans carte graphique se replie. Les panneaux utilisant les
   opérateurs C++ restent toujours sur le CPU. Prend effet au redémarrage.
-settings.cursor_dot: Point du curseur sur les autres panneaux
+settings.cursor_dot: Carré du curseur sur les autres panneaux
 settings.cursor_dot_hover: >-
-  Marquer le pixel survolé d'un point rouge sur tous les autres panneaux, pour
+  Encadrer le pixel survolé d'un carré rouge sur tous les autres panneaux, pour
   comparer le même endroit d'un panneau à l'autre.
+settings.cursor_square_filled: Plein
+settings.cursor_square_filled_hover: Dessiner le carré du curseur plein plutôt qu'en contour
 settings.timeline_preview: Aperçu au survol de la timeline
 settings.timeline_preview_hover: >-
   Survoler la barre de lecture affiche un petit aperçu de l'image sous le
