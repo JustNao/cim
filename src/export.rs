@@ -60,7 +60,7 @@ pub enum ExportSource {
     /// panes nest here too. The per-pixel maths is `media::combine_frames` — the
     /// same function the live pane calls.
     ///
-    /// The **reductions** (mean/std) never appear here: they reduce whatever
+    /// The **reductions** (mean/median/std) never appear here: they reduce whatever
     /// frames are *resident*, which is a property of the live cache, so the plan
     /// snapshots the on-screen result as a `Still` — the only way to replicate
     /// the view exactly.

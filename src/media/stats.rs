@@ -26,12 +26,13 @@ pub struct RegionStats {
     pub count: usize,
 }
 
-/// A Compute-panel operation. `Mean`/`Std` reduce a stack of frames from one
+/// A Compute-panel operation. `Mean`/`Median`/`Std` reduce a stack of frames from one
 /// source (see [`reduce_frames`]); `Add`/`Sub` are binary per-pixel operations
 /// on two sources' current frames (see [`combine_frames`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
     Mean,
+    Median,
     Std,
     Add,
     Sub,
@@ -64,6 +65,7 @@ impl Reduce {
     pub fn token(self) -> &'static str {
         match self {
             Reduce::Mean => "mean",
+            Reduce::Median => "median",
             Reduce::Std => "std",
             Reduce::Add => "add",
             Reduce::Sub => "sub",
@@ -74,6 +76,7 @@ impl Reduce {
     pub fn from_token(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "mean" => Some(Reduce::Mean),
+            "median" => Some(Reduce::Median),
             "std" => Some(Reduce::Std),
             "add" => Some(Reduce::Add),
             // `diff` is the old name of the (signed) subtraction, kept so an
@@ -85,7 +88,8 @@ impl Reduce {
 }
 
 /// Reduce a stack of same-shape frames to a single frame, per pixel and per
-/// channel: the arithmetic **mean** or population **standard deviation**. Frames
+/// channel: the arithmetic **mean**, the **median** or the population **standard
+/// deviation**. Frames
 /// whose size / channel count differ from the first are skipped. Returns `None`
 /// if nothing usable was supplied. The result is always float, so fractional
 /// means and small deviations aren't quantised.
@@ -105,6 +109,13 @@ pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameDat
     let count = stack.len();
     if count == 0 {
         return None;
+    }
+    if kind == Reduce::Median {
+        return Some(FrameData::new(
+            size,
+            ch,
+            Samples::F32(median_stack(&stack, n)),
+        ));
     }
     let inv = 1.0 / count as f64;
 
@@ -135,6 +146,40 @@ pub fn reduce_frames(frames: &[Arc<FrameData>], kind: Reduce) -> Option<FrameDat
         (0..n).map(sample).collect()
     };
     Some(FrameData::new(size, ch, Samples::F32(out)))
+}
+
+/// Per-sample median of a uniform stack of `n`-sample frames. An even stack
+/// averages its two middle values; NaN samples are skipped (an all-NaN stack
+/// gives NaN). Each sample selects over its own copy of the stack, so the split
+/// can't change the result; the scratch buffer is reused per worker.
+fn median_stack(stack: &[&Arc<FrameData>], n: usize) -> Vec<f32> {
+    let sample = |buf: &mut Vec<f32>, i: usize| {
+        buf.clear();
+        buf.extend(stack.iter().map(|f| f.sample_f(i)).filter(|v| !v.is_nan()));
+        let len = buf.len();
+        if len == 0 {
+            return f32::NAN;
+        }
+        let mid = len / 2;
+        let (lo, &mut hi, _) = buf.select_nth_unstable_by(mid, f32::total_cmp);
+        if len % 2 == 1 {
+            hi
+        } else {
+            // The lower middle is the largest of the left partition.
+            let lo = lo.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            ((lo as f64 + hi as f64) * 0.5) as f32
+        }
+    };
+    let cap = stack.len();
+    if n >= PAR_MIN_SCAN_PX {
+        (0..n)
+            .into_par_iter()
+            .map_init(|| Vec::with_capacity(cap), sample)
+            .collect()
+    } else {
+        let mut buf = Vec::with_capacity(cap);
+        (0..n).map(|i| sample(&mut buf, i)).collect()
+    }
 }
 
 /// Per-pixel `a + b` / `a − b` of two same-shape frames, as a float frame so
@@ -388,7 +433,7 @@ mod tests {
         assert_eq!(f.display_bounds(false), (0.0, 255.0));
     }
 
-    /// Reducing a stack of frames yields the per-pixel mean / std, and the
+    /// Reducing a stack of frames yields the per-pixel mean / median / std, and the
     /// result round-trips through a float TIFF and an 8-bit PNG.
     #[test]
     fn reduce_frames_and_save_roundtrip() {
@@ -399,9 +444,18 @@ mod tests {
         let mean = reduce_frames(&[a.clone(), b.clone()], Reduce::Mean).expect("mean");
         assert_eq!(mean.color_f32().1, vec![2.0, 15.0]);
 
-        let std = reduce_frames(&[a, b], Reduce::Std).expect("std");
+        let std = reduce_frames(&[a.clone(), b.clone()], Reduce::Std).expect("std");
         let sv = std.color_f32().1; // population std of {0,4}=2, {10,20}=5
         assert!((sv[0] - 2.0).abs() < 1e-4 && (sv[1] - 5.0).abs() < 1e-4);
+
+        // Median: odd stacks pick the middle, even stacks average the two
+        // middle values, and an outlier doesn't drag it like it drags the mean.
+        let c = Arc::new(FrameData::new([2, 1], 1, Samples::U8(vec![200, 12])));
+        let med = reduce_frames(&[a.clone(), b.clone(), c], Reduce::Median).expect("median");
+        assert_eq!(med.color_f32().1, vec![4.0, 12.0]);
+        let med2 = reduce_frames(&[a.clone(), b.clone()], Reduce::Median).expect("median");
+        assert_eq!(med2.color_f32().1, vec![2.0, 15.0]);
+        assert_eq!(Reduce::from_token("median"), Some(Reduce::Median));
 
         // Empty input reduces to nothing.
         assert!(reduce_frames(&[], Reduce::Mean).is_none());
@@ -537,7 +591,7 @@ mod tests {
             })
             .collect();
 
-        for kind in [Reduce::Mean, Reduce::Std] {
+        for kind in [Reduce::Mean, Reduce::Median, Reduce::Std] {
             let at = |t| match with_threads(t, || reduce_frames(&frames, kind).unwrap()).samples {
                 Samples::F32(v) => v,
                 _ => panic!("reduction is always float"),

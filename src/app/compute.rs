@@ -1,4 +1,4 @@
-//! Compute panes: generated media derived from other panes (mean / std of a
+//! Compute panes: generated media derived from other panes (mean / median / std of a
 //! stack, per-pixel add / subtract of two). Holds the recompute engine and the
 //! auto-refresh signature check; the in-pane form is canvas/compute_ui.rs.
 //!
@@ -31,7 +31,7 @@ impl CimApp {
     /// Panes usable as a Compute source for pane `idx` under `kind`: any pane
     /// except the pane itself and anything that (transitively) already depends
     /// on it, since that would close a recompute cycle. The binary ops accept
-    /// stills — a mean/std result among them — while the reductions need a
+    /// stills — a mean/median/std result among them — while the reductions need a
     /// real stack, so they also require ≥2 frames; an add/sub result is a
     /// sequence, so it feeds either.
     pub(super) fn compute_sources(&self, idx: usize, kind: Reduce) -> Vec<(u64, String)> {
@@ -180,7 +180,7 @@ impl CimApp {
         v.tone.share_clip = false;
     }
 
-    /// Mean/std reduction of a source's resident frames → (frame, name, status).
+    /// Mean/median/std reduction of a source's resident frames → (frame, name, status).
     fn compute_reduce(
         &self,
         source_id: Option<u64>,
@@ -210,7 +210,7 @@ impl CimApp {
     ///
     /// Result frame `k` combines the frame each input shows at timeline
     /// position `k` (`binary_input_frame`), so a **still** (one frame — a loaded
-    /// image, or a mean/std result) pairs with every frame of a sequence.
+    /// image, or a mean/median/std result) pairs with every frame of a sequence.
     fn compute_binary(
         &self,
         kind: Reduce,

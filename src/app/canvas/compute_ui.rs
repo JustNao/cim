@@ -121,7 +121,13 @@ fn compute_config_rows(
         egui::ComboBox::from_id_salt(("ckind", salt))
             .selected_text(kind.label())
             .show_ui(ui, |ui| {
-                for k in [Reduce::Mean, Reduce::Std, Reduce::Add, Reduce::Sub] {
+                for k in [
+                    Reduce::Mean,
+                    Reduce::Median,
+                    Reduce::Std,
+                    Reduce::Add,
+                    Reduce::Sub,
+                ] {
                     if ui.selectable_value(kind, k, k.label()).clicked() {
                         changed = true;
                     }

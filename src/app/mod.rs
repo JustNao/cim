@@ -796,7 +796,7 @@ impl OpenItem {
 }
 
 /// A Compute pane: derives a single displayed image from other panes — a
-/// mean/std reduction across one source's resident frames, or a per-pixel
+/// mean/median/std reduction across one source's resident frames, or a per-pixel
 /// add/subtract of two sources' current frames — with an inline Save. Its
 /// result is itself a usable source, so Compute panes chain.
 struct Compute {

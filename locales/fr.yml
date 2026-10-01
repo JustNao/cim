@@ -187,6 +187,7 @@ compute.source: Source
 compute.compute: Calculer
 compute.cancel: Annuler
 compute.reduce_mean: Moyenne
+compute.reduce_median: Médiane
 compute.reduce_std: Écart-type
 compute.reduce_add: Addition
 compute.reduce_sub: Soustraction

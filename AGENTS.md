@@ -215,7 +215,7 @@ Unified interface: `name`, `size`, `frame_count`, `hi_depth`; `resident(idx)` /
 `Tiff { file, page, path }` seeks in a persistent reader keyed by `(pane id,
 file)`, `File(path)` decodes a standalone still); lazy length `at_end()` /
 `frontier_ended()`; cache budget `resident_bytes()` / `touch` / `evict` /
-`resident_frames()`. `Media::still(name, frame)` wraps an in-memory frame (a Mean/Std
+`resident_frames()`. `Media::still(name, frame)` wraps an in-memory frame (a Mean/Median/Std
 Compute result); `Media::computed(name, size, len)` is an empty **generated sequence**
 (an Add/Sub Compute result, §9).
 
@@ -1737,9 +1737,10 @@ view command replayed the pane → it refreshes itself from now on). The two are
 so a compute that *failed* still retries: a replayed pane whose source frames aren't
 resident yet, or one waiting on an upstream Compute pane in a chain, recomputes as soon
 as they land. `media::Reduce` modes:
-- **Mean | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
+- **Mean | Median | Std** — `recompute_pane` → `compute_reduce` gathers **one** source's
   **resident** frames and calls `media::reduce_frames` (per-pixel/-channel, `f64`
-  accumulation → `f32`).
+  accumulation → `f32`; Median is a per-sample `select_nth` over the stack, NaNs
+  skipped, an even stack averaging its two middle values).
 - **Add | Sub** (`Reduce::is_binary`) — the result is a **generated sequence**
   (`Media::Computed`, §3), not a still: `compute_binary` builds it *empty*, spanning the
   inputs' timeline (`binary_span`: the longer input, an unsynced input counting as one
@@ -1764,7 +1765,7 @@ as they land. `media::Reduce` modes:
   `binary_frame_expected` says its inputs are still coming (decodable and not errored,
   or upstream-expected); an errored input or a size mismatch never stalls the others.
   Sources may be stills; reductions need ≥2 frames (`compute_sources`) — which an
-  Add/Sub result spanning a sequence has, so **Mean/Std can read an Add/Sub pane** like
+  Add/Sub result spanning a sequence has, so **Mean/Median/Std can read an Add/Sub pane** like
   any sequence (its resident frames).
 
 **A sequence paired with a still** needs no special case: a still shows its only frame
@@ -1887,7 +1888,7 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   Compute pane the span of its longest input (and `sync_temporal = true`) so `t` passes
   through to the inputs; without it a one-frame Compute media would map every `t` to
   frame 0 and the video would hold one image.
-  The **reductions** (mean/std) deliberately *don't* go this route: they reduce whatever
+  The **reductions** (mean/median/std) deliberately *don't* go this route: they reduce whatever
   frames are **resident**, a property of the live cache that the export can't reproduce,
   so the plan snapshots the on-screen result as a `Still` — which is exactly what the
   view shows (and, being constant across the timeline, loses nothing).

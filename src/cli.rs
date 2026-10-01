@@ -467,7 +467,7 @@ pub fn folder_files(token: &str) -> Option<Vec<PathBuf>> {
 }
 
 /// Parse a `compute:<kind>:<srcs>` token into an `Input::Compute`, or `None`
-/// when `arg` isn't such a token. `<kind>` is `mean`/`std`/`add`/`sub`;
+/// when `arg` isn't such a token. `<kind>` is `mean`/`median`/`std`/`add`/`sub`;
 /// `<srcs>` is one pane index for the reductions or `A,B` for the binary ops.
 /// Indices are 0-based over the pane list and resolved to panes once they all
 /// exist. A trailing `:auto` from an older view command is accepted and ignored

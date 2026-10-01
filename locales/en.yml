@@ -178,6 +178,7 @@ compute.source: Source
 compute.compute: Compute
 compute.cancel: Cancel
 compute.reduce_mean: Mean
+compute.reduce_median: Median
 compute.reduce_std: Std
 compute.reduce_add: Add
 compute.reduce_sub: Subtract

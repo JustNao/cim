@@ -34,7 +34,9 @@
 //!     index so the non-associative sum reproduces bit for bit. WGSL has no
 //!     `f64`, so a GPU version could not be the same number — and these are
 //!     measurements, read off as text and saved as data, not pixels where a
-//!     last-ulp difference would go unseen.
+//!     last-ulp difference would go unseen. **Median** is a per-sample
+//!     selection over the whole stack — branchy, with a scratch buffer per
+//!     sample — which suits the CPU just as poorly the other way round.
 //!   - **Add / Sub** would be exact (plain `f32`), but they lose on traffic. The
 //!     result is a float frame — *larger* than the 16-bit inputs — and the rest
 //!     of the app needs it in system memory anyway for the histogram, the region
