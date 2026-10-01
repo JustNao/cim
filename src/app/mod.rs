@@ -1274,6 +1274,7 @@ impl CimApp {
         // disabled and never blocks startup.
         let cpp_dir = cpp_lib_dir(&config);
         crate::imageproc::init(cpp_dir.as_deref());
+        crate::imageproc::set_force_non_u16(config.force_ops_non_u16);
         let cpp_dir_active = config.cpp_lib_dir.clone();
         let accel_active = config.hardware_accel;
 
@@ -1539,8 +1540,8 @@ impl CimApp {
         }
     }
 
-    /// Whether pane `i`'s currently shown frame is single-channel 16-bit — the
-    /// only input the proprietary operators accept. Used (with
+    /// Whether pane `i`'s currently shown frame is an input the proprietary
+    /// operators accept (`imageproc::accepts`). Used (with
     /// `ContrastMode::library_loaded` / `imageproc::details_available`) to gate
     /// the operator tones and the Details toggle in the popup. A not-yet-resident
     /// frame reads as unsupported until it loads.
@@ -1549,7 +1550,7 @@ impl CimApp {
         self.panes[i]
             .media
             .resident(f)
-            .map(|fr| fr.is_op_input())
+            .map(|fr| crate::imageproc::accepts(&fr))
             .unwrap_or(false)
     }
 
@@ -1594,15 +1595,7 @@ impl CimApp {
         if after == before {
             return; // nothing new loaded — don't thrash re-renders
         }
-        for p in &mut self.panes {
-            p.tex.clear();
-            p.overlay_tex = None;
-            p.region_show = None;
-        }
-        // Cached viewport regions were rendered without the newly loaded
-        // operator, at unchanged keys (the tone signature doesn't see library
-        // availability) — drop them all so they re-render with it.
-        self.work.regions.clear();
+        self.drop_all_renders();
         // Name only what this call added (`load_missing` never unloads).
         let added = crate::imageproc::Libs {
             lut_alpha: after.lut_alpha && !before.lut_alpha,
@@ -1611,6 +1604,19 @@ impl CimApp {
         };
         self.status
             .set(t!("status.libs_loaded", libs = added.names()).into_owned());
+    }
+
+    /// Drop every pane's rendered texture and the cached viewport regions, so
+    /// they all re-render. For a change in *which panes run an operator* — a
+    /// newly loaded library, or the force-non-uint16 setting — which the tone
+    /// signature keying those caches doesn't see.
+    fn drop_all_renders(&mut self) {
+        for p in &mut self.panes {
+            p.tex.clear();
+            p.overlay_tex = None;
+            p.region_show = None;
+        }
+        self.work.regions.clear();
     }
 
     /// Set a pane's **Visualization** sync flag. Turning it **off** snapshots the
@@ -2261,6 +2267,13 @@ impl CimApp {
         if self.config.cpp_lib_dir != self.cpp_dir_active {
             self.cpp_dir_active = self.config.cpp_lib_dir.clone();
             self.load_cpp_libs();
+        }
+
+        // Toggling "force operators on non-uint16" changes which panes run an
+        // operator, so everything re-renders under the new gate.
+        if self.config.force_ops_non_u16 != crate::imageproc::force_non_u16() {
+            crate::imageproc::set_force_non_u16(self.config.force_ops_non_u16);
+            self.drop_all_renders();
         }
 
         self.poll_opening();

@@ -196,7 +196,9 @@ impl FrameData {
     /// This is the input the proprietary operators receive (`crate::imageproc`):
     /// one 16-bit sample per pixel, at genuine 16-bit precision, expanded back to
     /// RGBA (and downscaled to 8 bits) for the texture only after the operators
-    /// have run. Only called for single-channel frames (see [`is_op_input`]); the
+    /// have run. A `uint8` or float frame is scaled across the full 16-bit range
+    /// by the same `[lo, hi]` map. Only called for single-channel frames (see
+    /// `crate::imageproc::accepts`); the
     /// first channel is taken for any wider source. Under adaptive rendering the
     /// region is cropped and decimated **before** the operators run, so their
     /// output reflects the visible region rather than the whole image — by

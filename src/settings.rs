@@ -485,6 +485,11 @@ pub struct Config {
     /// (`LD_LIBRARY_PATH`). Applied at startup (see `crate::imageproc::init`).
     #[serde(default)]
     pub cpp_lib_dir: String,
+    /// Run the proprietary operators on single-channel `uint8` / float frames
+    /// too, scaled to the 16-bit range first; off restricts them to native
+    /// `uint16`. On by default (see `crate::imageproc::accepts`).
+    #[serde(default = "default_true")]
+    pub force_ops_non_u16: bool,
     /// Build a pane's display pixels on the GPU when the machine has a hardware
     /// adapter (see `crate::gpu`). **Off by default:** the CPU path is what every
     /// run used before this existed, it is the one tested on every machine, and
@@ -542,6 +547,7 @@ impl Default for Config {
             timeline_preview: true,
             adaptive_render: true,
             cpp_lib_dir: String::new(),
+            force_ops_non_u16: true,
             hardware_accel: false,
             keybindings: Keybindings::default(),
         }

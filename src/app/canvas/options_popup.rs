@@ -42,7 +42,7 @@ impl CimApp {
         let mut rotation = self.rotation_of(idx);
 
         // The proprietary operators (LUT_ALPHA / Boost / Details) each need their
-        // own loaded library and a single-channel 16-bit frame; gate their
+        // own loaded library and an accepted frame (`imageproc::accepts`); gate their
         // controls independently and explain why when disabled.
         let op_input = self.pane_is_op_input(idx);
         let details_ok = crate::imageproc::details_available() && op_input;
@@ -53,7 +53,7 @@ impl CimApp {
             } else if !m.library_loaded() {
                 Some(t!("transform.op_missing_lib", lib = m.label()))
             } else if !op_input {
-                Some(t!("transform.op_needs_u16"))
+                Some(op_input_hint())
             } else {
                 None
             }
@@ -61,7 +61,7 @@ impl CimApp {
         let details_hint = if !crate::imageproc::details_available() {
             t!("transform.op_missing_lib", lib = "Details")
         } else {
-            t!("transform.op_needs_u16")
+            op_input_hint()
         };
 
         // Overlay: the media available to tint over this pane — a boolean mask, a
@@ -440,6 +440,17 @@ impl CimApp {
                 self.set_rotation(idx, rotation);
             }
         }
+    }
+}
+
+/// Why an operator is unavailable on an otherwise eligible pane: the frame isn't
+/// one the operators take (`imageproc::accepts`), which with the force setting
+/// on means it isn't single-channel, and off means it isn't `uint16` either.
+fn op_input_hint() -> std::borrow::Cow<'static, str> {
+    if crate::imageproc::force_non_u16() {
+        t!("transform.op_needs_mono")
+    } else {
+        t!("transform.op_needs_u16")
     }
 }
 

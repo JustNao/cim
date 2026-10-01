@@ -92,7 +92,7 @@ src/
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
                  (LUT_ALPHA, Boost, DETAILS_ENHANCED); C++ in cpp/ is built
                  separately into three .so, loaded by hard-coded name. PaneOps owns a pane's
-                 per-operator instances (create/apply/destroy; 16-bit only) and
+                 per-operator instances (create/apply/destroy; 16-bit buffers) and
                  the shared render tail render_display; ops_active gates them.
   cpu.rs         The instance's CPU thread budget (§5.1): splits config.cpu_budget
                  between the decode pool and the rayon pool, and owns the latter.
@@ -932,10 +932,15 @@ Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
 (`render_into_gray_u16`, mapping the same `[lo,hi]` bounds to `[0,65535]`, one
 sample per pixel) so they see full native precision, then the result is expanded
 back to grey RGBA and downscaled to 8-bit for the texture. **They run only for
-single-channel 16-bit (`uint16`) frames with the operator library loaded** —
-otherwise LUT_ALPHA / Boost / Details fall back to the plain 8-bit LUT render
+single-channel, non-mask frames with the operator library loaded** — native
+`uint16`, plus `uint8` / float while the **"Force operators on non-uint16"** setting
+(`Config::force_ops_non_u16`, on by default) is on. Those are scaled to `[0,65535]` by
+the same render: an operator tone uses full-range bounds, so `uint8` maps from
+`0..=255` and float from its value extent. The app mirrors the setting into the
+process-wide `imageproc::set_force_non_u16` (read off the UI thread by the render
+workers and the export) and drops every texture and cached region when it changes. Otherwise LUT_ALPHA / Boost / Details fall back to the plain 8-bit LUT render
 (`render_into`). **One predicate decides when the operators run —
-`imageproc::ops_active(frame, ops)`** (folding in `is_op_input` +
+`imageproc::ops_active(frame, ops)`** (folding in `imageproc::accepts` +
 `lut_alpha_available`/`boost_available`/`details_available`, and excluding masks); the UI-gating
 `pane_is_op_input` and the pane-indexed `CimApp::pane_ops_active` sit alongside it.
 The heavy render **tail** (gray16 render → operators → expand to RGBA, else plain
@@ -956,7 +961,7 @@ It runs in two places: the **export worker** (`export.rs::ExportPane::render` �
 the **cropped region only**, §10) and, for live view, the off-UI-thread
 `renderer.rs` `RenderPool` (`renderer::Worker::render`). `stage` splits by weight:
 **small renders stay synchronous**
-(cheap `render_lut`), while **LUT_ALPHA / details on a single-channel U16
+(cheap `render_lut`), while **LUT_ALPHA / details on an accepted
 frame — and any render producing ≥ `ASYNC_RENDER_PIXELS`
 (~1 MP) of *output texels*** — go off-thread to
 `render_display` (the worker's plain-LUT path is pixel-identical by test): a big

@@ -48,16 +48,20 @@
 //!
 //! All operators receive the frame as a **single-channel 16-bit** buffer
 //! (`width * height` u16 samples, one per pixel, row-major) and transform it
-//! **in place**, keeping the same dimensions. They are only ever invoked for
-//! frames whose native format is **single-channel 16-bit unsigned** (see the
-//! `is_op_input` gate in `app::decode::prepare` / `renderer` / `export`), so the
-//! operator sees genuine 16-bit precision rather than a value already crushed to
-//! 8 bits. cim expands the operator's output back to grey RGBA for display.
+//! **in place**, keeping the same dimensions. They run on **single-channel**
+//! frames only (see [`accepts`], the gate behind `ops_active`). A native
+//! `uint16` frame reaches them at genuine 16-bit precision. A `uint8` or float
+//! frame does too, as long as the "force operators on non-uint16" setting is on
+//! (the default, [`set_force_non_u16`]). Its samples are then scaled across
+//! `[0, 65535]` by the same full-range 16-bit render (`render_gray_u16_lut`): a
+//! `uint8` frame through its `0..=255` range, a float frame through its value
+//! extent. cim expands the operator's output back to grey RGBA for display.
 //!
 //! See `INTEGRATION_CPP.md` for how to build the libraries and the exact ABI.
 
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError, RwLock};
 
 /// The C symbols each operator library exports (see the module docs):
@@ -116,6 +120,34 @@ unsafe impl Sync for Operator {}
 static LUT_ALPHA: RwLock<Option<Operator>> = RwLock::new(None);
 static BOOST: RwLock<Option<Operator>> = RwLock::new(None);
 static DETAILS: RwLock<Option<Operator>> = RwLock::new(None);
+
+/// Whether the operators also run on single-channel `uint8` / float frames,
+/// scaled to the 16-bit range first (see the module docs). Mirrors
+/// `Config::force_ops_non_u16`, which the app pushes here at startup and on
+/// every change. A process-wide flag, like library availability, because the
+/// render workers and the export decide `ops_active` off the UI thread.
+static FORCE_NON_U16: AtomicBool = AtomicBool::new(true);
+
+/// Set whether the operators also run on non-`uint16` frames ([`FORCE_NON_U16`]).
+pub fn set_force_non_u16(on: bool) {
+    FORCE_NON_U16.store(on, Ordering::Relaxed);
+}
+
+/// Whether the operators also run on non-`uint16` frames ([`FORCE_NON_U16`]).
+pub fn force_non_u16() -> bool {
+    FORCE_NON_U16.load(Ordering::Relaxed)
+}
+
+/// Whether `frame` is an input the operators take: one channel, never a mask,
+/// and native `uint16` unless [`force_non_u16`] lets `uint8` / float through.
+pub fn accepts(frame: &crate::media::FrameData) -> bool {
+    accepts_with(frame, force_non_u16())
+}
+
+/// [`accepts`] with the force setting passed in rather than read globally.
+fn accepts_with(frame: &crate::media::FrameData, force: bool) -> bool {
+    frame.channels == 1 && !frame.is_mask() && (frame.is_u16() || force)
+}
 
 /// Process-wide lock serialising every operator **`create` and `destroy`** call.
 ///
@@ -278,14 +310,14 @@ pub fn details_available() -> bool {
 }
 
 /// Whether a proprietary operator actually runs on `frame` for the given tone.
-/// The operators only accept a single-channel 16-bit frame (`is_op_input`, and
-/// never a mask), and only when the wanted operator's library is loaded —
+/// The operators only accept a single-channel non-mask frame, native 16-bit
+/// unless the force setting is on ([`accepts`]), and only when the wanted
+/// operator's library is loaded —
 /// otherwise the render falls back to the plain LUT. This is the one predicate
 /// the three render paths (live sync `stage`, the render worker, and export)
 /// share, so "when do operators run" is decided in a single place.
 pub fn ops_active(frame: &crate::media::FrameData, ops: Ops) -> bool {
-    frame.is_op_input()
-        && !frame.is_mask()
+    accepts(frame)
         && ((ops.lut_alpha && lut_alpha_available())
             || (ops.boost && boost_available())
             || (ops.details && details_available()))
@@ -551,6 +583,41 @@ fn run_details(inst: &Instance, gray: &mut [u16], companion: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::{FrameData, Region, Samples, ToneLut};
+
+    /// The force setting lets single-channel `uint8` / float frames through the
+    /// gate; colour frames never pass, and native `uint16` always does.
+    #[test]
+    fn force_setting_widens_the_operator_gate() {
+        let u16f = FrameData::new([2, 1], 1, Samples::U16(vec![0, 65535]));
+        let u8f = FrameData::new([2, 1], 1, Samples::U8(vec![0, 255]));
+        let f32f = FrameData::new([2, 1], 1, Samples::F32(vec![-1.0, 3.0]));
+        let rgb = FrameData::new([1, 1], 3, Samples::U16(vec![0, 0, 0]));
+        for force in [false, true] {
+            assert!(accepts_with(&u16f, force));
+            assert_eq!(accepts_with(&u8f, force), force);
+            assert_eq!(accepts_with(&f32f, force), force);
+            assert!(!accepts_with(&rgb, force));
+        }
+    }
+
+    /// Under an operator tone's full-range bounds, a forced `uint8` or float
+    /// frame reaches the operators spread across the whole 16-bit range.
+    #[test]
+    fn forced_inputs_are_scaled_to_the_u16_range() {
+        let mut lut = ToneLut::default();
+        let mut gray = Vec::new();
+        for f in [
+            FrameData::new([3, 1], 1, Samples::U8(vec![0, 128, 255])),
+            FrameData::new([3, 1], 1, Samples::F32(vec![-2.0, 0.5, 6.0])),
+        ] {
+            let (lo, hi) = crate::tone::frame_bounds(&f, None, None);
+            f.render_gray_u16_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut gray);
+            assert_eq!(gray.first(), Some(&0));
+            assert_eq!(gray.last(), Some(&u16::MAX));
+            assert!(gray[1] > 0 && gray[1] < u16::MAX);
+        }
+    }
 
     #[test]
     fn libs_names_list_the_set_operators_in_order() {

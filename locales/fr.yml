@@ -139,6 +139,7 @@ transform.rc: RC
 transform.rc_hover: Rehaussement / netteté
 transform.op_missing_lib: "Bibliothèque de l'opérateur %{lib} introuvable"
 transform.op_needs_u16: Disponible uniquement pour les images 16 bits monocanal (uint16)
+transform.op_needs_mono: Disponible uniquement pour les images monocanal
 transform.overlay: Superposition
 transform.overlay_none: Aucune
 transform.overlay_none_available: aucun média compatible
@@ -365,7 +366,7 @@ settings.adaptive_render: Rendu adaptatif
 settings.adaptive_render_hover: >-
   En zoomant dans une grande image, ne rendre à pleine netteté que la région
   visible (plus une marge de déplacement) par-dessus une base entière réduite.
-settings.operators: Opérateurs d'image (C++)
+settings.operators: Opérateurs d'image
 settings.library_folder: Dossier des bibliothèques
 settings.library_folder_hover: >-
   Dossier contenant les bibliothèques d'opérateurs propriétaires (LUT_ALPHA /
@@ -379,6 +380,12 @@ settings.libs_none: Aucune bibliothèque d'opérateur trouvée dans ce dossier
 settings.libs_some: "Trouvées seulement : %{libs}"
 settings.libs_loaded: "chargées : %{libs}"
 settings.libs_loaded_none: "chargées : aucune"
+settings.force_ops_non_u16: Forcer les opérateurs hors uint16
+settings.force_ops_non_u16_hover: >-
+  Applique aussi les opérateurs aux images monocanal uint8 et flottantes. Leurs
+  valeurs sont d'abord ramenées à la plage uint16 : 0–255 pour l'uint8, le
+  min–max de l'image pour le flottant. Désactivé, les opérateurs ne
+  s'appliquent qu'aux images uint16.
 settings.shortcuts: Raccourcis clavier
 settings.shortcuts_help: >-
   Cliquez sur Réassigner, puis appuyez sur une touche — maintenez Ctrl / Maj /

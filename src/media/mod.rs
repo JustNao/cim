@@ -273,20 +273,11 @@ impl FrameData {
         matches!(self.samples, Samples::F32(_))
     }
 
-    /// 16-bit unsigned samples — the underlying sample format the proprietary
-    /// operators require.
+    /// 16-bit unsigned samples — the proprietary operators' native input format
+    /// (`crate::imageproc::accepts`).
     #[inline]
     pub fn is_u16(&self) -> bool {
         matches!(self.samples, Samples::U16(_))
-    }
-
-    /// A **single-channel 16-bit** frame — the only input the proprietary
-    /// operators (LUT_ALPHA / DETAILS_ENHANCED) accept. Their availability is
-    /// gated on this (plus a loaded library): they receive one 16-bit sample per
-    /// pixel, not an interleaved RGBA buffer.
-    #[inline]
-    pub fn is_op_input(&self) -> bool {
-        self.channels == 1 && self.is_u16()
     }
 
     /// Short native-format label for the footer readout (`uint8` / `uint16` /

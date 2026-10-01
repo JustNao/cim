@@ -1325,6 +1325,11 @@ impl CimApp {
                     t!("settings.libs_loaded", libs = libs.names())
                 };
                 ui.label(egui::RichText::new(loaded).weak());
+                ui.checkbox(
+                    &mut self.config.force_ops_non_u16,
+                    t!("settings.force_ops_non_u16"),
+                )
+                .on_hover_text(t!("settings.force_ops_non_u16_hover"));
 
                 ui.add_space(8.0);
                 ui.separator();

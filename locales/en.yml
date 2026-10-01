@@ -130,6 +130,7 @@ transform.rc: RC
 transform.rc_hover: Enhancement / sharpening
 transform.op_missing_lib: "%{lib} operator library not found"
 transform.op_needs_u16: Only available for single-channel 16-bit (uint16) images
+transform.op_needs_mono: Only available for single-channel images
 transform.overlay: Overlay
 transform.overlay_none: None
 transform.overlay_none_available: no compatible media
@@ -349,7 +350,7 @@ settings.adaptive_render: Adaptive rendering
 settings.adaptive_render_hover: >-
   When zoomed into a large image, render only the visible region (plus a pan
   margin) at full sharpness over a small downscaled base.
-settings.operators: Image operators (C++)
+settings.operators: Image operators
 settings.library_folder: Library folder
 settings.library_folder_hover: >-
   Folder holding the proprietary operator libraries (LUT_ALPHA / Boost / Details).
@@ -362,6 +363,11 @@ settings.libs_none: No operator libraries found in this folder
 settings.libs_some: "Only found: %{libs}"
 settings.libs_loaded: "loaded: %{libs}"
 settings.libs_loaded_none: "loaded: none"
+settings.force_ops_non_u16: Force operators on non-uint16
+settings.force_ops_non_u16_hover: >-
+  Also run the operators on single-channel uint8 and float images. Their values
+  are first scaled to the uint16 range: uint8 from 0–255, float from the image's
+  own min–max. When off, the operators only run on uint16 images.
 settings.shortcuts: Keyboard shortcuts
 settings.shortcuts_help: >-
   Rebind, then press a key — hold Ctrl / Shift / Alt for a chord (e.g. Ctrl+R).

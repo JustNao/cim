@@ -89,12 +89,15 @@ by transparently reconstructing the operator for the new size. Each pane's
 instance lives on that pane's **own worker thread**, so it is only ever touched by
 one thread (no thread-safety requirement on the proprietary class).
 
-**Single-channel 16-bit only.** cim invokes the operators *only* for images whose
-native format is single-channel (grayscale) 16-bit unsigned, rendering to a
-single-channel 16-bit buffer first so you see full precision; the result is
-expanded back to grey RGBA and downscaled to 8 bits for display *after* your
-operator runs. For multi-channel, 8-bit, or float images the operators are never
-called and the UI disables them.
+**Single-channel 16-bit buffers.** cim invokes the operators only for
+single-channel (grayscale) images, rendering to a single-channel 16-bit buffer
+first so you see full precision. The result is expanded back to grey RGBA and
+downscaled to 8 bits for display *after* your operator runs. A native `uint16`
+image always qualifies. With the **Force operators on non-uint16** setting on
+(the default), `uint8` and float images do too. Their values are scaled to the
+16-bit range first: `0..=255` for `uint8`, the image's own min–max for float.
+With the setting off they are never called. Multi-channel images are never
+called either way, and the UI disables the operators for them.
 
 **Only plain C crosses the boundary.** Inside the `.cpp` you may use any vendor
 C++ types (image classes, pixel-format enums, …). If a vendor value must reach cim,
