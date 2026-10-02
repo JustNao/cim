@@ -229,6 +229,13 @@ impl CimApp {
         self.export.show = !self.export.show;
         if self.export.show {
             self.export.mode = self.mode; // default to what's on screen
+                                          // Default the format to what's being exported: MP4 when anything in
+                                          // the output moves, a PNG still when it's all images.
+            let video = self
+                .export_participants()
+                .into_iter()
+                .any(|i| self.panes[i].media.is_sequence() || self.export_timeline(i).0 > 1);
+            self.export.name = name_for_format(&self.export.name, video);
         } else {
             // Panel closed mid-selection: abandon it and restore the view.
             self.cancel_region_select();
@@ -1528,8 +1535,50 @@ impl CimApp {
     }
 }
 
+/// `name` with the extension of the default format: `.mp4` for a `video`, else
+/// `.png` — unless it already names a format of that kind (a `.jpg` still stays a
+/// `.jpg`). An extension that isn't an export format is part of the stem
+/// (`clip.v2` → `clip.v2.mp4`); a blank name falls back to `comparison`.
+fn name_for_format(name: &str, video: bool) -> String {
+    let name = name.trim();
+    let path = Path::new(name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let (is_video, is_image) = match ext.as_deref() {
+        Some("mp4") => (true, false),
+        Some("png" | "jpg" | "jpeg") => (false, true),
+        _ => (false, false),
+    };
+    if (video && is_video) || (!video && is_image) {
+        return name.to_owned();
+    }
+    let stem = if is_video || is_image {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+    } else {
+        name
+    };
+    let stem = if stem.is_empty() { "comparison" } else { stem };
+    format!("{stem}.{}", if video { "mp4" } else { "png" })
+}
+
 #[cfg(test)]
 mod tests {
+    /// The export name follows the default format for what's exported, keeping
+    /// the stem and any extension of the right kind.
+    #[test]
+    fn name_follows_the_exported_media() {
+        use super::name_for_format as f;
+        assert_eq!(f("comparison.mp4", false), "comparison.png");
+        assert_eq!(f("comparison.png", true), "comparison.mp4");
+        assert_eq!(f("shot.jpg", false), "shot.jpg");
+        assert_eq!(f("shot.jpg", true), "shot.mp4");
+        assert_eq!(f("clip", true), "clip.mp4");
+        assert_eq!(f("clip.v2", false), "clip.v2.png");
+        assert_eq!(f("  ", true), "comparison.mp4");
+    }
+
     use super::*;
 
     #[test]
