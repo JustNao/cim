@@ -1214,7 +1214,8 @@ impl CimApp {
     /// taken from the referenced pane at its currently shown frame, and the
     /// tinted texture is cached in `Pane.overlay_tex`. Returns `None` when
     /// there's no overlay (or it's hidden), the mask pane is gone, or this is itself
-    /// a mask pane.
+    /// a mask pane — or the overlay's own source: a tone-synced overlay reaches every
+    /// synced pane, its source included, and a mask tinted over itself is noise.
     ///
     /// The mask is decoded on demand here, so the overlay works even when the
     /// mask pane itself isn't drawn (hidden in the manager, or just reloaded).
@@ -1223,7 +1224,10 @@ impl CimApp {
         if self.panes[idx].media.is_mask() {
             return None; // don't tint an overlay onto a mask pane itself
         }
-        let ov = self.visual(idx).overlay.filter(|o| o.shown)?;
+        let ov = self
+            .visual(idx)
+            .overlay
+            .filter(|o| o.shown && o.src_id != self.panes[idx].id)?;
         let (src_id, color, opacity) = (ov.src_id, ov.color, ov.opacity);
         let src = self.panes.iter().position(|p| p.id == src_id)?;
         let f = self.frame_disp(src);

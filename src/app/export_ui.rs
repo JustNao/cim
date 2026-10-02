@@ -403,11 +403,11 @@ impl CimApp {
         pane.rotation = self.rotation_of(idx).to_radians();
         // Use the effective overlay (shared when the pane is tone-synced), and
         // skip what prepare_overlay skips: mask panes (they don't take an overlay),
-        // and a hidden overlay.
+        // a hidden overlay, and the overlay's own source pane.
         if let Some(ov) = self
             .visual(idx)
             .overlay
-            .filter(|o| o.shown && !p.media.is_mask())
+            .filter(|o| o.shown && o.src_id != p.id && !p.media.is_mask())
         {
             if let Some(m) = self.panes.iter().position(|q| q.id == ov.src_id) {
                 let mp = &self.panes[m];

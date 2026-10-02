@@ -1643,7 +1643,9 @@ The spec is **config only**
 so it rides the Visualization sync; the tinted texture is cached separately per pane in
 `overlay_tex`. `prepare_overlay` builds it from the source's shown frame (decoded on
 demand, so it works even when the source pane isn't drawn) and returns `None` on a mask
-pane itself; a **boolean mask** tints where true (`render_mask_rgba`), any **other
+pane itself **or on the overlay's own source** (a tone-synced overlay reaches every
+synced pane, its source included — a grayscale source would tint over itself; the
+export skips it the same way); a **boolean mask** tints where true (`render_mask_rgba`), any **other
 single-channel** image tints by normalised intensity (`render_intensity_rgba`, alpha ∝
 value through the frame's display range), and a **colour (RGB)** image keeps its own
 toned colours at the chosen opacity with pure black transparent (`render_color_rgba`
