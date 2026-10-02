@@ -494,7 +494,9 @@ impl Default for LineSel {
     }
 }
 
-/// The export panel's state: output settings, the in-image region selection
+/// The export panel's state: output settings (those kept across runs —
+/// compression, fps, the label toggle and style — live in `Config::export`), the
+/// in-image region selection
 /// (a right-drag while the panel forces Single), and the running encode job.
 /// Decoupled from the composited [`crate::export::ExportPlan`], which is a
 /// self-contained snapshot handed to the worker thread.
@@ -514,18 +516,12 @@ struct Export {
     /// Mode to restore once region selection (forced Single) ends.
     pre_select_mode: Option<Mode>,
     out_height: u32,
-    crf: u32,
-    fps: f32,
     /// Output file name, saved in the current working directory. The user
     /// edits just the name — no save dialog / folder picker.
     name: String,
     run: Option<ExportRun>,
     cancel: bool,
     status: String,
-    /// Burn each media's name into the output ("Add names").
-    labels_on: bool,
-    /// One style shared by every label (colour, background, size, position).
-    label_style: LabelStyle,
     /// Which media the panel's label preview shows (pane id); falls back to the
     /// first exported pane when it's gone.
     label_preview: Option<u64>,
@@ -543,14 +539,10 @@ impl Default for Export {
             sel_rect: None,
             pre_select_mode: None,
             out_height: 720,
-            crf: 5,
-            fps: 25.0,
             name: "comparison.mp4".into(),
             run: None,
             cancel: false,
             status: String::new(),
-            labels_on: true,
-            label_style: LabelStyle::default(),
             label_preview: None,
         }
     }

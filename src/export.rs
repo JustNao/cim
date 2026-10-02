@@ -17,6 +17,7 @@ use std::thread;
 
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
@@ -648,7 +649,7 @@ impl PaneSampler<'_> {
 }
 
 /// Where a media's name label sits inside its cell of the output.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LabelAnchor {
     TopLeft,
     TopCenter,
@@ -697,11 +698,17 @@ impl LabelAnchor {
 /// How every exported media name is drawn (one global style for all labels).
 /// Sizes are in **output pixels**, so a label is the same size whatever the
 /// zoom or the composition scale.
-#[derive(Clone, Copy, PartialEq)]
+///
+/// Persisted in the config (`settings::ExportSettings`); colours are stored as
+/// their premultiplied `[r, g, b, a]` bytes.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LabelStyle {
     pub size_px: f32,
+    #[serde(with = "rgba")]
     pub color: Color32,
     pub background: bool,
+    #[serde(with = "rgba")]
     pub bg_color: Color32,
     pub anchor: LabelAnchor,
     /// Gap between the label (or its background box) and the cell edge.
@@ -717,6 +724,22 @@ impl LabelStyle {
     /// Padding around the text inside the background box.
     pub fn bg_pad(&self) -> f32 {
         (self.size_px * 0.35).round()
+    }
+}
+
+/// Serde for a `Color32` as its premultiplied `[r, g, b, a]` bytes (egui's own
+/// serde support is behind a feature this crate doesn't enable).
+mod rgba {
+    use eframe::egui::Color32;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(c: &Color32, s: S) -> Result<S::Ok, S::Error> {
+        c.to_array().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Color32, D::Error> {
+        let [r, g, b, a] = <[u8; 4]>::deserialize(d)?;
+        Ok(Color32::from_rgba_premultiplied(r, g, b, a))
     }
 }
 

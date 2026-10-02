@@ -1981,8 +1981,10 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   window) and showing the
   media's own name **without its file extension** until renamed (`label_text` / `strip_extension`, which
   keeps a decorated tail such as a JPEG 2000 `(1/8)` or a sequence token's `,START,END`); colour, size, optional background box, 9-way position
-  (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. All
-  export state is runtime-only (not persisted in the config).
+  (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. The
+  compression, fps, the names toggle and the `LabelStyle` are **persisted** as
+  `Config::export` (`ExportSettings`, §12) and edited there directly; the region, range,
+  file name and output height stay runtime-only.
   Labels are **rasterized once at plan time** on the UI thread (`export_ui::rasterize_label`)
   through **egui's own font atlas** — laying the text out adds its glyphs to the atlas, then
   `Fonts::image()` gives the coverage bitmap the glyph `uv_rect`s index into — producing a
@@ -2094,7 +2096,9 @@ opening never blocks the UI thread.
 ## 12. Settings & persistence (`settings.rs`)
 
 `Config { language, max_columns, header_parents, ui_scale, cache_budget_mb, cpu_budget, jp2_max_mp,
-cursor_dot, timeline_preview, adaptive_render, cpp_lib_dir, hardware_accel, keybindings }` (`header_parents` = how many
+cursor_dot, timeline_preview, adaptive_render, cpp_lib_dir, hardware_accel, export, keybindings }`
+(`export` = the export panel's lasting settings, §10 — every field `serde(default)`s on its
+own, colours as premultiplied `[r, g, b, a]`) (`header_parents` = how many
 parent folders prefixed to a pane's name — `CimApp::pane_name`, from
 the pane's `Source` file / first sequence file, bare name for a Compute pane; default `0`)
 (`jp2_max_mp` = the most

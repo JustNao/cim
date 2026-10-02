@@ -525,7 +525,38 @@ pub struct Config {
     /// comes back on the CPU, which is the point of the change.
     #[serde(default)]
     pub hardware_accel: bool,
+    /// The export panel's output settings, kept across runs.
+    #[serde(default)]
+    pub export: ExportSettings,
     pub keybindings: Keybindings,
+}
+
+/// The export panel's settings that persist (§10): the encoder's compression and
+/// frame rate, and the burnt-in names' toggle and style. The rest of the panel —
+/// region, frame range, file name, output height — describes one export and
+/// starts fresh each run. Every field defaults on its own, so a config saved
+/// before a field existed keeps the others.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExportSettings {
+    /// x264 CRF, 0 (lossless) – 51.
+    pub crf: u32,
+    pub fps: f32,
+    /// Burn each media's name into the output ("Add names").
+    pub labels_on: bool,
+    /// One style shared by every label (colour, background, size, position).
+    pub label_style: crate::export::LabelStyle,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            crf: 5,
+            fps: 25.0,
+            labels_on: true,
+            label_style: Default::default(),
+        }
+    }
 }
 
 fn default_language() -> String {
@@ -569,6 +600,7 @@ impl Default for Config {
             cpp_lib_dir: String::new(),
             force_ops_non_u16: true,
             hardware_accel: false,
+            export: ExportSettings::default(),
             keybindings: Keybindings::default(),
         }
     }
@@ -615,6 +647,29 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The export settings survive a save/load, a config from before they were
+    /// persisted loads with the defaults, and a partial block keeps what it has.
+    #[test]
+    fn export_settings_round_trip() {
+        let mut c = Config::default();
+        c.export.crf = 18;
+        c.export.fps = 12.5;
+        c.export.label_style.anchor = crate::export::LabelAnchor::TopRight;
+        c.export.label_style.bg_color = eframe::egui::Color32::from_rgba_premultiplied(9, 8, 7, 60);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.export == c.export);
+
+        let mut v = serde_json::to_value(Config::default()).unwrap();
+        v.as_object_mut().unwrap().remove("export");
+        let old: Config = serde_json::from_value(v.clone()).unwrap();
+        assert!(old.export == ExportSettings::default());
+
+        v["export"] = serde_json::json!({ "crf": 30 });
+        let partial: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(partial.export.crf, 30);
+        assert_eq!(partial.export.fps, ExportSettings::default().fps);
+    }
 
     /// Top-level keys of a version-1 locale file, in file order. The format is
     /// one flat `key: value` per entry, so the keys are exactly the lines that

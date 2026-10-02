@@ -702,10 +702,14 @@ impl CimApp {
 
     /// The rasterized label for pane `idx`, or `None` when names are off.
     fn export_label(&self, ctx: &egui::Context, idx: usize) -> Option<LabelBitmap> {
-        if !self.export.labels_on {
+        if !self.config.export.labels_on {
             return None;
         }
-        rasterize_label(ctx, &self.label_text(idx), self.export.label_style.size_px)
+        rasterize_label(
+            ctx,
+            &self.label_text(idx),
+            self.config.export.label_style.size_px,
+        )
     }
 
     pub(super) fn build_export_plan(&self, ctx: &egui::Context) -> Result<ExportPlan, String> {
@@ -819,7 +823,7 @@ impl CimApp {
             control: None,
             region,
             labels,
-            label_style: self.export.label_style,
+            label_style: self.config.export.label_style,
             out_w,
             out_h,
             start,
@@ -917,7 +921,8 @@ impl CimApp {
             }
         };
         let (w, h, total) = (plan.out_w, plan.out_h, plan.total);
-        let enc = match Encoder::start(&path, w, h, self.export.fps, self.export.crf) {
+        let enc = match Encoder::start(&path, w, h, self.config.export.fps, self.config.export.crf)
+        {
             Ok(enc) => enc,
             Err(e) => {
                 self.export.status = e;
@@ -1059,7 +1064,7 @@ impl CimApp {
         }
 
         ui.add_space(4.0);
-        let st = &mut self.export.label_style;
+        let st = &mut self.config.export.label_style;
         ui.horizontal(|ui| {
             ui.label(t!("export.label_text"));
             ui.color_edit_button_srgba(&mut st.color);
@@ -1244,7 +1249,7 @@ impl CimApp {
 
         // Same geometry as the export, scaled by the preview's share of the
         // output height, so the label keeps its true relative size.
-        let st = self.export.label_style;
+        let st = self.config.export.label_style;
         // Preview points per **output pixel** — the unit `size_px`, `margin` and
         // `bg_pad` are in. The label rect is a fraction of the composition, so
         // this goes through it: preview-per-composition × composition-per-output.
@@ -1409,22 +1414,24 @@ impl CimApp {
 
                             ui.label(t!("export.compression"));
                             ui.add(
-                                egui::Slider::new(&mut self.export.crf, 0..=51)
+                                egui::Slider::new(&mut self.config.export.crf, 0..=51)
                                     .text("CRF")
                                     .custom_formatter(|n, _| format!("{n:.0}")),
                             );
                             ui.end_row();
 
                             ui.label("FPS");
-                            ui.add(egui::DragValue::new(&mut self.export.fps).range(1.0..=60.0));
+                            ui.add(
+                                egui::DragValue::new(&mut self.config.export.fps).range(1.0..=60.0),
+                            );
                             ui.end_row();
 
                             ui.label(t!("export.add_labels"));
-                            ui.checkbox(&mut self.export.labels_on, "")
+                            ui.checkbox(&mut self.config.export.labels_on, "")
                                 .on_hover_text(t!("export.add_labels_hover"));
                             ui.end_row();
                         });
-                    if self.export.labels_on {
+                    if self.config.export.labels_on {
                         self.draw_label_options(ui);
                     }
                 });
@@ -1463,7 +1470,7 @@ impl CimApp {
                     ui.label(t!(
                         "export.summary_video",
                         n = total,
-                        secs = format!("{:.1}", total as f32 / self.export.fps.max(1.0))
+                        secs = format!("{:.1}", total as f32 / self.config.export.fps.max(1.0))
                     ));
                 }
 
