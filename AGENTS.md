@@ -2466,6 +2466,9 @@ of the prefix, each make the relevant test fail.
 
 - **Commits:** small, one concern; imperative summary + a short *why*. Committed
   directly to `main`.
+- **Commit and push each feature as it lands.** When a request lists several features,
+  commit each one separately (once it builds, is formatted and passes clippy/tests) and
+  `git push` to `main` right away — no branches or PRs — unless the user says otherwise.
 - **Always `cargo fmt` before committing** — the whole tree is rustfmt-clean
   (default settings, no `rustfmt.toml`), so `cargo fmt --check` must pass on every
   commit. Formatting-only churn then never rides along with a real change.
