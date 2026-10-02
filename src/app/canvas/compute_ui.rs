@@ -45,41 +45,47 @@ impl CimApp {
         let sources = |kind: Reduce| self.compute_sources(idx, kind);
         let mut recompute = false;
 
-        // Top-left of the cell, just under the header strip, constrained to the
-        // cell so it can't spill into a neighbour.
-        egui::Area::new(Id::new(("compute_ctrl", pane_id)))
+        // The config form sits in the middle of the (still empty) pane; once
+        // computed, the status line moves to the top-left of the cell, just under
+        // the header strip, off the result. Constrained to the cell either way so
+        // it can't spill into a neighbour.
+        let area = egui::Area::new(Id::new(("compute_ctrl", pane_id)))
             .order(egui::Order::Foreground)
             .movable(false)
-            .constrain_to(img_area)
-            .anchor(egui::Align2::LEFT_TOP, Vec2::new(6.0, header_bottom + 6.0))
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(240.0);
-                    if !computed {
-                        // Config form: pick the mode + source(s), then Compute.
-                        ui.label(egui::RichText::new(t!("compute.new")).strong());
-                        compute_config_rows(
-                            ui,
-                            pane_id,
-                            sources,
-                            &mut kind,
-                            &mut source_id,
-                            &mut source_b,
-                        );
-                        let ready =
-                            source_id.is_some() && (!kind.is_binary() || source_b.is_some());
-                        if ui
-                            .add_enabled(ready, egui::Button::new(t!("compute.compute")))
-                            .clicked()
-                        {
-                            recompute = true;
-                        }
+            .constrain_to(img_area);
+        let area = if computed {
+            area.anchor(egui::Align2::LEFT_TOP, Vec2::new(6.0, header_bottom + 6.0))
+        } else {
+            area.pivot(egui::Align2::CENTER_CENTER)
+                .fixed_pos(img_area.center())
+        };
+        area.show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(240.0);
+                if !computed {
+                    // Config form: pick the mode + source(s), then Compute.
+                    ui.label(egui::RichText::new(t!("compute.new")).strong());
+                    compute_config_rows(
+                        ui,
+                        pane_id,
+                        sources,
+                        &mut kind,
+                        &mut source_id,
+                        &mut source_b,
+                    );
+                    let ready = source_id.is_some() && (!kind.is_binary() || source_b.is_some());
+                    if ui
+                        .add_enabled(ready, egui::Button::new(t!("compute.compute")))
+                        .clicked()
+                    {
+                        recompute = true;
                     }
-                    if !status.is_empty() {
-                        ui.label(egui::RichText::new(&status).weak().small());
-                    }
-                });
+                }
+                if !status.is_empty() {
+                    ui.label(egui::RichText::new(&status).weak().small());
+                }
             });
+        });
 
         // Write edits back, then dispatch heavier work outside the closures.
         {

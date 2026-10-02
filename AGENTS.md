@@ -1737,12 +1737,14 @@ resets `line_hover` each frame and only re-sets it while hovered); since the pan
 **Compute panes.** A *generated* pane whose image is derived from other panes. The
 **toolbar** "Compute" button sets `pending_compute_create`; the deferred
 `add_compute_pane` adds an **unconfigured** Compute pane. `draw_compute_ui` (a
-top-left foreground `Area` over the pane) has two states keyed on `Compute.computed`:
-while `false` it shows the **config form** (mode + source combos + a **Compute**
-button); that button sets `pending_recompute` (run at the top of the next `update`,
+foreground `Area` over the pane) has two states keyed on `Compute.computed`:
+while `false` it shows the **config form** (mode + source combos — a binary op draws its
+`+` / `−` centred between A and B — and a **Compute** button), **centred** on the pane,
+which draws nothing else (`pane_texture` is `None` until computed, so the placeholder
+frame never shows); that button sets `pending_recompute` (run at the top of the next `update`,
 before `refresh_textures`, so the result never flashes black — §13) → `recompute_pane`,
 which on success sets `computed = true`, so the **result image** then shows with only
-its status line (no panel at all when that is empty) — there is **no Refresh or Save
+its status line (top-left, under the header) (no panel at all when that is empty) — there is **no Refresh or Save
 button**, since a computed pane refreshes itself (and exporting covers writing it out). `Pane.compute` holds the `kind`, source id(s), `computed` (a result
 exists → show it instead of the form) and `armed` (the user pressed **Compute**, or a
 view command replayed the pane → it refreshes itself from now on). The two are separate

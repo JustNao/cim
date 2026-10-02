@@ -706,8 +706,15 @@ impl CimApp {
     /// first commit lands — a freshly staged frame, so a pane isn't blank while its
     /// siblings are still rendering. After that `tex` is always present and holds
     /// until the group flips, so on-screen panes stay in step.
+    ///
+    /// `None` for a Compute pane that hasn't computed yet: its media is only the
+    /// placeholder frame, and the pane shows just its config form until then.
     pub(super) fn pane_texture(&self, idx: usize) -> Option<TextureId> {
-        self.panes[idx].tex.id()
+        let p = &self.panes[idx];
+        if p.compute.as_ref().is_some_and(|c| !c.computed) {
+            return None;
+        }
+        p.tex.id()
     }
 
     /// The frame `refresh_textures` should stage for pane `idx`: the frame it will
