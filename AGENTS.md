@@ -1870,7 +1870,10 @@ CPU, and either pipes raw RGBA to the `ffmpeg` CLI (**MP4**, H.264/libx264) or w
 single frame as a **still** (`export::save_image`). Because the plan is a snapshot, the
 video compose+encode loop runs on a **worker thread** — the UI stays responsive and
 interaction can't corrupt the export. The output **format is chosen by the file
-extension** (`export_format`): a bare name or `.mp4` → video; `.png`/`.jpg`/`.jpeg` → a
+extension** (`export_format`), which **opening the panel** points at the media
+(`toggle_export` → `name_for_format`): `.mp4` when any exported pane is a sequence (or a
+Compute pane spanning several frames), `.png` when they're all stills — keeping the stem,
+and an extension already of the right kind (`.jpg`). A bare name or `.mp4` → video; `.png`/`.jpg`/`.jpeg` → a
 still of the frame currently on screen (`export_still_image`, composed inline — one
 frame is cheap).
 
