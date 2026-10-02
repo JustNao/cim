@@ -215,6 +215,7 @@ export.select_hover: >-
   bouton gauche déplace, la molette zoome) ; il s'applique ensuite à tous les
   panneaux de la comparaison
 export.full_view: Vue entière
+export.select_hint: Clic droit et glisser sur l'image pour sélectionner la région
 export.frames: Images
 export.frames_all: toutes
 export.frames_from: de

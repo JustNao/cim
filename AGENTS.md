@@ -1945,7 +1945,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `sample` / `sample_base` / `blend_overlay`, and `pane_boxes` maps corners through it too,
   so there is a single sampling implementation. `par_composite_matches_serial_composite`
   pins the split against the LUT render at several thread counts.
-- **Region crop** is chosen in image space ("Select…" forces Single): a **right-drag**
+- **Region crop** is chosen in image space ("Select…" forces Single, and a hint row under
+  it says to right-drag until the selection ends): a **right-drag**
   draws the crop (secondary-button edge detection in `region_overlay`, like the stats
   region) while **left-drag pans and the wheel zooms** so the user can move around first;
   `screen_rect_to_image` on release maps it to image space, applied to every pane as a

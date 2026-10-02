@@ -205,6 +205,7 @@ export.select_hover: >-
   Right-drag the crop on a single image (left-drag pans, wheel zooms); it then
   applies to every pane of the comparison
 export.full_view: Full view
+export.select_hint: Right-click and drag on the image to select the region
 export.frames: Frames
 export.frames_all: all
 export.frames_from: from

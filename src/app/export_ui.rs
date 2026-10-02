@@ -1367,6 +1367,16 @@ impl CimApp {
                                 };
                             });
                             ui.end_row();
+                            // While a crop is being chosen, say how — under the
+                            // button, gone once the drag lands (or is cancelled).
+                            if self.export.selecting {
+                                ui.label("");
+                                ui.label(
+                                    egui::RichText::new(t!("export.select_hint"))
+                                        .color(ui.visuals().warn_fg_color),
+                                );
+                                ui.end_row();
+                            }
 
                             ui.label(t!("export.frames"));
                             ui.horizontal(|ui| {
