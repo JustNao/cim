@@ -377,8 +377,8 @@ settings.shortcuts_help: >-
 settings.press_key: press a key or chord…
 settings.rebind: Rebind
 settings.clear: Clear
-settings.reset: Reset to defaults
-settings.reset_hover: Restore every setting above — including the keyboard shortcuts — to its default.
+settings.reset: Reset shortcuts
+settings.reset_hover: Restore the default keyboard shortcuts. The other settings are left as they are.
 settings.autosave_note: Changes are saved automatically.
 
 # ---- bindable actions (key = action.<id>) ----------------------------------
@@ -416,7 +416,7 @@ status.load_stopped: Stopped loading
 status.libs_loaded: "Operators loaded: %{libs}"
 status.cache_full: Frame cache full — continuing with offsets only (headers) for the rest
 status.view_command_copied: View command copied to clipboard
-status.settings_reset: Settings reset to defaults
+status.settings_reset: Keyboard shortcuts reset to defaults
 modal.error: Error
 modal.warning: Warning
 modal.many_sequences: Many sequences

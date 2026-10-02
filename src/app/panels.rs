@@ -1390,15 +1390,15 @@ impl CimApp {
                 ui.separator();
                 // Settings save themselves shortly after an edit settles (see
                 // `autosave_config`), so there's nothing to press — only a way
-                // back to the shipped defaults, which is saved the same way.
+                // back to the default **shortcuts** (the other settings are each a
+                // single control, put back by hand), saved the same way.
                 ui.horizontal(|ui| {
                     if ui
                         .button(t!("settings.reset"))
                         .on_hover_text(t!("settings.reset_hover"))
                         .clicked()
                     {
-                        self.config = Config::default();
-                        crate::settings::apply_locale(&self.config.language);
+                        self.config.keybindings = Default::default();
                         self.status.set(t!("status.settings_reset"));
                     }
                     ui.label(

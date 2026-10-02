@@ -2129,8 +2129,9 @@ notices a change by comparing against `seen_config`, arms `autosave_at` for
 `CONFIG_AUTOSAVE_DEBOUNCE` (0.5 s), and writes on expiry only if `config != saved_config`
 (the on-disk copy) — the debounce is what keeps a slider drag from rewriting the JSON every
 frame, and the comparisons need `PartialEq`. It requests a repaint at the deadline so an
-otherwise-idle app still writes. Settings' footer offers only **Reset to defaults**
-(`Config::default()`, keybindings included), which is then saved the same way.
+otherwise-idle app still writes. Settings' footer offers only **Reset shortcuts**
+(`Keybindings::default()` — the keybindings alone; every other setting is left as is),
+which is then saved the same way.
 
 ### 12.1 Localisation (`locales/*.yml`, `rust-i18n`)
 

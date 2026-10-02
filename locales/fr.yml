@@ -395,10 +395,8 @@ settings.shortcuts_help: >-
 settings.press_key: appuyez sur une touche ou un accord…
 settings.rebind: Réassigner
 settings.clear: Effacer
-settings.reset: Valeurs par défaut
-settings.reset_hover: >-
-  Rétablir tous les réglages ci-dessus — raccourcis clavier compris — à leur
-  valeur par défaut.
+settings.reset: Réinitialiser les raccourcis
+settings.reset_hover: Rétablir les raccourcis clavier par défaut. Les autres réglages restent inchangés.
 settings.autosave_note: Les modifications sont enregistrées automatiquement.
 # ---- actions assignables (clé = action.<id>) -------------------------------
 action.toggle_view: Basculer entre les vues grille / unique / A-B
@@ -436,7 +434,7 @@ status.libs_loaded: "Opérateurs chargés : %{libs}"
 status.cache_full: >-
   Cache d'images plein — la suite se poursuit en offsets (en-têtes) seulement
 status.view_command_copied: Commande de vue copiée dans le presse-papiers
-status.settings_reset: Réglages rétablis par défaut
+status.settings_reset: Raccourcis clavier rétablis par défaut
 modal.error: Erreur
 modal.warning: Avertissement
 modal.many_sequences: Nombreuses séquences

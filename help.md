@@ -43,4 +43,4 @@
   current files at the current view — from anywhere in the app.
 - Hovering a button shows its keyboard shortcut, read live from your bindings.
 - Settings are **saved automatically** a moment after you stop editing;
-  _Reset to defaults_ puts everything, shortcuts included, back.
+  _Reset shortcuts_ puts the default keyboard shortcuts back (and only those).
