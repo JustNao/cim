@@ -1993,7 +1993,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `ExportPlan::draw_labels` blends them at the **end of `compose`**, in **output-pixel**
   space (after the resample — so text is crisp and its size is independent of zoom, output
   height and composition scale), into the rect `label_rects` gives each pane: its grid slot,
-  the single image area, or its half of the A/B wipe. Labelled pixels are forced **opaque**
+  the single image area, or its half of the A/B wipe. The blend (`blend_px`) is **egui's
+  own**: label colours are premultiplied `Color32`s (linear-space premultiplied, as the
+  picker stores them) composited in gamma space as `dst·(1 − a·cov) + c·cov`, so a
+  translucent box or text matches the preview — applying the alpha a second time made a
+  coloured background fainter in the output. Labelled pixels are forced **opaque**
   so a still's `crop_to_content` never trims a label off. Because this lives in `compose`,
   MP4, still, and all three layouts get it with no per-path code.
   The panel also shows a **preview**: the chosen media's live texture with the label drawn by
