@@ -1013,22 +1013,17 @@ impl ExportPlan {
             let bx = cell.min.x + st.margin + free_x * fx;
             let by = cell.min.y + st.margin + free_y * fy;
 
-            if st.background {
-                let a = st.bg_color.a() as f32 / 255.0;
-                if a > 0.0 {
-                    blend_rect(
-                        out,
-                        w,
-                        h,
-                        Rect::from_min_size(Pos2::new(bx, by), Vec2::new(bw, bh)),
-                        |dst| blend_px(dst, st.bg_color.to_array(), a),
-                    );
-                }
+            if st.background && st.bg_color != Color32::TRANSPARENT {
+                blend_rect(
+                    out,
+                    w,
+                    h,
+                    Rect::from_min_size(Pos2::new(bx, by), Vec2::new(bw, bh)),
+                    |dst| blend_px(dst, st.bg_color, 1.0),
+                );
             }
             // The glyph coverage, tinted with the text colour.
             let (tx, ty) = ((bx + pad).round() as i64, (by + pad).round() as i64);
-            let col = st.color.to_array();
-            let col_a = st.color.a() as f32 / 255.0;
             for gy in 0..lb.h {
                 let oy = ty + gy as i64;
                 if oy < 0 || oy >= h as i64 {
@@ -1039,12 +1034,12 @@ impl ExportPlan {
                     if ox < 0 || ox >= w as i64 {
                         continue;
                     }
-                    let cov = lb.alpha[gy * lb.w + gx] as f32 / 255.0 * col_a;
+                    let cov = lb.alpha[gy * lb.w + gx] as f32 / 255.0;
                     if cov <= 0.0 {
                         continue;
                     }
                     let o = (oy as usize * w + ox as usize) * 4;
-                    blend_px(&mut out[o..o + 4], col, cov);
+                    blend_px(&mut out[o..o + 4], st.color, cov);
                 }
             }
         }
@@ -1147,10 +1142,17 @@ impl ExportPlan {
     }
 }
 
-/// Blend `col` at coverage `a` over one RGBA pixel, forcing it opaque: a label
-/// pixel is content, so a still's `crop_to_content` must keep it even when it
-/// falls on the transparent background.
-fn blend_px(dst: &mut [u8], col: [u8; 4], a: f32) {
+/// Blend the label colour `col` at coverage `cov` over one RGBA pixel, forcing
+/// it opaque: a label pixel is content, so a still's `crop_to_content` must keep
+/// it even when it falls on the transparent background.
+///
+/// This is the blend the label preview gets from egui's painter, so the two
+/// match: a `Color32` is **premultiplied** (in linear space, which is how the
+/// colour picker stores it), and egui composites it in gamma space as
+/// `dst·(1 − a·cov) + c·cov`. Unmultiplying it and applying the alpha here
+/// instead lands somewhere else — a translucent coloured background came out
+/// visibly fainter in the export than in the preview.
+fn blend_px(dst: &mut [u8], col: Color32, cov: f32) {
     // An uncovered (alpha-0) pixel holds the background colour but isn't really
     // there — blend against `BG` explicitly, so a label hanging over the gutter
     // fades into the same dark background the video shows.
@@ -1159,8 +1161,12 @@ fn blend_px(dst: &mut [u8], col: [u8; 4], a: f32) {
     } else {
         [dst[0], dst[1], dst[2], 255]
     };
+    let keep = 1.0 - col.a() as f32 / 255.0 * cov;
+    let col = col.to_array();
     for k in 0..3 {
-        dst[k] = (base[k] as f32 * (1.0 - a) + col[k] as f32 * a).round() as u8;
+        dst[k] = (base[k] as f32 * keep + col[k] as f32 * cov)
+            .round()
+            .clamp(0.0, 255.0) as u8;
     }
     dst[3] = 255;
 }
@@ -1330,6 +1336,20 @@ pub fn out_dims(region: Rect, target_h: u32) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    /// A translucent label colour blends like egui's painter blends it in the
+    /// preview (premultiplied `dst·(1−a) + c`), not with its alpha applied twice.
+    #[test]
+    fn label_colour_blends_like_the_preview() {
+        use super::*;
+        // As the colour picker stores a half-transparent white: premultiplied
+        // in linear space, so its channels sit well above 128.
+        let c = Color32::from_rgba_unmultiplied(255, 255, 255, 128);
+        let mut px = [100u8, 100, 100, 255];
+        blend_px(&mut px, c, 1.0);
+        let preview = (100.0 * (1.0 - c.a() as f32 / 255.0) + c.r() as f32).round() as u8;
+        assert!(px[0].abs_diff(preview) <= 1, "{} vs {}", px[0], preview);
+    }
+
     use super::*;
     use crate::media::Samples;
 
