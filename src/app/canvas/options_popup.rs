@@ -77,9 +77,10 @@ impl CimApp {
             .map(|(i, p)| (p.id, self.pane_name(i), self.overlay_src_is_color(i)))
             .collect();
         let self_is_mask = self.panes[idx].media.is_mask();
-        let (mut ov_src, mut ov_color, mut ov_alpha) = match self.visual(idx).overlay {
-            Some(o) => (Some(o.src_id), o.color, o.opacity),
-            None => (None, Color32::from_rgb(240, 60, 60), 0.5),
+        let (mut ov_src, mut ov_color, mut ov_alpha, mut ov_shown) = match self.visual(idx).overlay
+        {
+            Some(o) => (Some(o.src_id), o.color, o.opacity, o.shown),
+            None => (None, Color32::from_rgb(240, 60, 60), 0.5, true),
         };
 
         // Histogram of this pane's current frame.
@@ -249,6 +250,11 @@ impl CimApp {
                                         .fixed_decimals(2)
                                         .prefix("α "),
                                 );
+                                ui.checkbox(&mut ov_shown, t!("transform.overlay_shown"))
+                                    .on_hover_text(self.hover_for(
+                                        Action::ToggleOverlay,
+                                        &t!("transform.overlay_shown_hover"),
+                                    ));
                             });
                         }
                     }
@@ -382,6 +388,7 @@ impl CimApp {
                 src_id,
                 color: ov_color,
                 opacity: ov_alpha,
+                shown: ov_shown,
             });
             if cur != new {
                 let src_changed = new.map(|n| n.src_id) != cur.map(|c| c.src_id);

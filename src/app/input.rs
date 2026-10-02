@@ -112,6 +112,13 @@ impl CimApp {
                 self.reselect_if_hidden();
             }
             Action::ToggleChrome => self.show_chrome = !self.show_chrome,
+            Action::ToggleOverlay if n > 0 => {
+                // The selected pane's effective overlay (the shared one when
+                // tone-synced, so every synced pane follows), as the panel's toggle.
+                if let Some(ov) = &mut self.visual_mut(self.current.min(n - 1)).overlay {
+                    ov.shown = !ov.shown;
+                }
+            }
             Action::SelectMedia(i) if i < n => {
                 self.current = i;
                 self.mode = Mode::Single;

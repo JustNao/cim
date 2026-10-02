@@ -134,6 +134,8 @@ transform.op_needs_mono: Only available for single-channel images
 transform.overlay: Overlay
 transform.overlay_none: None
 transform.overlay_none_available: no compatible media
+transform.overlay_shown: Show
+transform.overlay_shown_hover: Show or hide the overlay (its source and tint are kept)
 transform.palette: Palette
 transform.clip: Clip
 transform.clip_hover: Clip a percentile off each tail before the stretch
@@ -404,6 +406,7 @@ action.reload_media: Reload focused media from disk
 action.reload_all: Reload all media from disk
 action.hide_media: Hide focused media
 action.toggle_chrome: Show/hide all UI elements
+action.toggle_overlay: Show/hide the selected media's overlay
 action.select_media: Select media %{n}
 
 # ---- transient status line & modals ----------------------------------------

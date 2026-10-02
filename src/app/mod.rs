@@ -402,6 +402,9 @@ pub(super) struct OverlaySpec {
     src_id: u64, // stable id of the pane supplying the overlay
     color: Color32,
     opacity: f32, // 0..1
+    /// Drawn at all — the panel's eye toggle / `Action::ToggleOverlay`. A hidden
+    /// overlay keeps its source and tint, so showing it again restores it.
+    shown: bool,
 }
 
 /// An editable line drawn over the images with **shift + right-drag**, stored in

@@ -1653,6 +1653,10 @@ the base image's rect (1:1), so overlays show in Grid, Single and A/B alike; cle
 its source closes. **Sizes must match:** a newly selected source whose pixel size differs
 from the target is rejected with an `error_popup`, and `prepare_overlay` skips drawing
 (never stretches) on any later per-frame size drift.
+**Show/hide** is the spec's `shown` flag — the **Show** checkbox right of the alpha, or
+`Action::ToggleOverlay` (default `M`) on the selected pane — so a hidden overlay keeps
+its source and tint, rides the Visualization sync like the rest of the spec, and is
+left out of the export too (the export replicates the view).
 
 **Statistics region (right-drag).** A **right-button drag** selects a rectangle,
 stored in **image space** (`stats_region`) so the region and each pane's own stats

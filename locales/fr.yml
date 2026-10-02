@@ -143,6 +143,8 @@ transform.op_needs_mono: Disponible uniquement pour les images monocanal
 transform.overlay: Superposition
 transform.overlay_none: Aucune
 transform.overlay_none_available: aucun média compatible
+transform.overlay_shown: Afficher
+transform.overlay_shown_hover: Afficher ou masquer la superposition (sa source et sa teinte sont conservées)
 transform.palette: Palette
 transform.clip: Écrêtage
 transform.clip_hover: Écrêter un percentile de chaque extrémité avant l'étirement
@@ -423,6 +425,7 @@ action.reload_media: Recharger le média sélectionné depuis le disque
 action.reload_all: Recharger tous les médias depuis le disque
 action.hide_media: Masquer le média sélectionné
 action.toggle_chrome: Afficher / masquer toute l'interface
+action.toggle_overlay: Afficher / masquer la superposition du média sélectionné
 action.select_media: Sélectionner le média %{n}
 
 # ---- notifications & fenêtres modales --------------------------------------

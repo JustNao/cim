@@ -56,6 +56,7 @@ pub enum Action {
     ReloadAll,
     HideMedia,
     ToggleChrome,
+    ToggleOverlay,
     SelectMedia(usize),
 }
 
@@ -87,6 +88,7 @@ impl Action {
             Action::ReloadAll => "reload_all".into(),
             Action::HideMedia => "hide_media".into(),
             Action::ToggleChrome => "toggle_chrome".into(),
+            Action::ToggleOverlay => "toggle_overlay".into(),
             Action::SelectMedia(i) => format!("select_media_{}", i + 1),
         }
     }
@@ -128,6 +130,7 @@ impl Action {
             Action::ReloadAll,
             Action::HideMedia,
             Action::ToggleChrome,
+            Action::ToggleOverlay,
         ];
         v.extend((0..12).map(Action::SelectMedia));
         v
@@ -258,6 +261,7 @@ impl Default for Keybindings {
         set(Action::ReloadMedia, Key::R);
         set(Action::HideMedia, Key::T);
         set(Action::ToggleChrome, Key::A);
+        set(Action::ToggleOverlay, Key::M);
         // Media 1..=9 -> digit keys; 10..12 left unbound by default (rebindable).
         let digits = [
             Key::Num1,
@@ -302,16 +306,32 @@ impl Keybindings {
         self.map.insert(this, name);
     }
 
+    /// Unbind `action`. Stored as an empty chord (not removed), so `migrate`
+    /// can tell a deliberately cleared action from one the config predates.
     pub fn clear(&mut self, action: Action) {
-        self.map.remove(&action.id());
+        self.map.insert(action.id(), String::new());
     }
 
     /// Rename legacy action ids in a loaded config so old bindings carry over
     /// (`toggle_headers` — the removed auto-hide-headers toggle — became
-    /// `toggle_chrome`, the show/hide-all-UI toggle).
+    /// `toggle_chrome`, the show/hide-all-UI toggle), and give an action added
+    /// since the config was saved its default chord — unless another action
+    /// already holds that chord.
     fn migrate(&mut self) {
         if let Some(v) = self.map.remove("toggle_headers") {
             self.map.entry(Action::ToggleChrome.id()).or_insert(v);
+        }
+        let defaults = Self::default();
+        for action in Action::all() {
+            let id = action.id();
+            if self.map.contains_key(&id) {
+                continue;
+            }
+            if let Some(d) = defaults.map.get(&id) {
+                if !self.map.values().any(|v| v == d) {
+                    self.map.insert(id, d.clone());
+                }
+            }
         }
     }
 }
