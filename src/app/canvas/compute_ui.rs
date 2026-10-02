@@ -168,6 +168,18 @@ fn compute_config_rows(
         source_id,
     );
     if binary {
+        // The operator between the two pickers, centred across the panel, so
+        // the form reads as the sum / difference it computes.
+        let span = ui.min_rect().x_range();
+        let font = egui::TextStyle::Heading.resolve(ui.style());
+        let color = ui.visuals().strong_text_color();
+        let galley = ui.painter().layout_no_wrap(kind.sign().into(), font, color);
+        let (row, _) = ui.allocate_exact_size(
+            Vec2::new(span.span(), galley.size().y),
+            egui::Sense::hover(),
+        );
+        let pos = egui::pos2(span.center() - galley.size().x / 2.0, row.top());
+        ui.painter().galley(pos, galley, color);
         pick(ui, "B ", "csrcb", source_b);
     }
     changed
