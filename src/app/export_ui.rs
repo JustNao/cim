@@ -678,25 +678,26 @@ impl CimApp {
         (s, e.clamp(s, tl - 1))
     }
 
-    /// The name burnt in for pane `idx`: the user's custom text, falling back to
-    /// the media's own name (without its file extension) when unset or blank.
+    /// The name burnt in for pane `idx`: its name, less the file extension —
+    /// unless the user named the pane (from its header or the label field, which
+    /// both set `custom_name`), whose name is used as typed.
     pub(super) fn label_text(&self, idx: usize) -> String {
-        let p = &self.panes[idx];
-        match self.export.labels.get(&p.id).map(|s| s.trim()) {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => self.default_label(idx),
-        }
-    }
-
-    /// The label pane `idx` gets without custom text: its name, less the file
-    /// extension — unless the user named the pane, whose name is used as typed.
-    fn default_label(&self, idx: usize) -> String {
         let name = self.pane_name(idx);
         if self.panes[idx].custom_name.is_some() {
             name
         } else {
             strip_extension(&name)
         }
+    }
+
+    /// Rename pane `idx` from its export label field. A blank name, or the label
+    /// it would get un-renamed (with or without the file extension), clears the
+    /// custom name so the pane follows its media again — as a header rename.
+    fn rename_from_label(&mut self, idx: usize, text: &str) {
+        let name = text.trim();
+        let own = self.pane_name_unrenamed(idx);
+        let is_default = name.is_empty() || name == own || name == strip_extension(&own);
+        self.panes[idx].custom_name = (!is_default).then(|| name.to_owned());
     }
 
     /// The rasterized label for pane `idx`, or `None` when names are off.
@@ -1003,10 +1004,9 @@ impl CimApp {
     fn draw_label_options(&mut self, ui: &mut egui::Ui) {
         // Only the media that actually end up in the output, in output order.
         let participants = self.export_participants();
-        // Snapshot (id, fallback name) so the map can be borrowed mutably below.
-        let rows: Vec<(usize, u64, String)> = participants
+        let rows: Vec<(usize, u64)> = participants
             .iter()
-            .map(|&i| (i, self.panes[i].id, self.default_label(i)))
+            .map(|&i| (i, self.panes[i].id))
             .collect();
 
         // At most `LABEL_ROWS` fields show at once; past that the list scrolls, so
@@ -1026,14 +1026,29 @@ impl CimApp {
                 .id_salt("exp_labels")
                 .max_height(row_h * LABEL_ROWS - ui.spacing().item_spacing.y)
                 .show(ui, |ui| {
-                    for (idx, id, fallback) in &rows {
+                    for &(idx, id) in &rows {
                         ui.horizontal(|ui| {
-                            let text = self
-                                .export
-                                .labels
-                                .entry(*id)
-                                .or_insert_with(|| fallback.clone());
-                            ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                            // The field *is* the pane's name: an edit renames the
+                            // media as a header rename does. While focused it edits
+                            // its own buffer, so clearing the text on the way to
+                            // a new name doesn't snap back to the default.
+                            let edit_id = Id::new(("exp_label", id));
+                            let focused = ui.memory(|m| m.has_focus(edit_id));
+                            let mut text = focused
+                                .then(|| ui.data(|d| d.get_temp::<String>(edit_id)))
+                                .flatten()
+                                .unwrap_or_else(|| self.label_text(idx));
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut text)
+                                    .id(edit_id)
+                                    .desired_width(200.0),
+                            );
+                            if resp.changed() {
+                                self.rename_from_label(idx, &text);
+                            }
+                            if resp.has_focus() {
+                                ui.data_mut(|d| d.insert_temp(edit_id, text));
+                            }
                             ui.label(egui::RichText::new((idx + 1).to_string()).weak().small());
                         });
                     }
@@ -1140,15 +1155,15 @@ impl CimApp {
     /// drawn over it, using the same anchor / margin / padding maths as
     /// `ExportPlan::draw_labels`, scaled to the preview. Not a re-run of the
     /// compositor — just enough to see where the text lands and how it reads.
-    fn draw_label_preview(&mut self, ui: &mut egui::Ui, rows: &[(usize, u64, String)]) {
+    fn draw_label_preview(&mut self, ui: &mut egui::Ui, rows: &[(usize, u64)]) {
         if rows.is_empty() {
             return;
         }
         // Which media to preview (defaults to the first exported one).
         let mut idx = rows
             .iter()
-            .find(|(_, id, _)| Some(*id) == self.export.label_preview)
-            .map_or(rows[0].0, |(i, _, _)| *i);
+            .find(|(_, id)| Some(*id) == self.export.label_preview)
+            .map_or(rows[0].0, |(i, _)| *i);
         if rows.len() > 1 {
             ui.horizontal(|ui| {
                 ui.label(t!("export.label_preview"));
@@ -1156,12 +1171,12 @@ impl CimApp {
                 egui::ComboBox::from_id_salt("exp_label_preview")
                     .selected_text(ellipsize(&self.pane_name(idx), 24))
                     .show_ui(ui, |ui| {
-                        for (i, _, name) in rows {
+                        for &(i, _) in rows {
                             if ui
-                                .selectable_label(*i == idx, ellipsize(name, 30))
+                                .selectable_label(i == idx, ellipsize(&self.label_text(i), 30))
                                 .clicked()
                             {
-                                idx = *i;
+                                idx = i;
                             }
                         }
                     });

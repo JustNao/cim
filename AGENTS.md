@@ -1972,11 +1972,14 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   can't deadlock. A still skips all that and saves synchronously.
 - **Media names burnt into the output ("Add names").** The panel's toggle
   (`Export.labels_on`) draws one text label per media in every layout and both formats.
-  The text is per media, keyed by **pane id** (`Export.labels: HashMap<u64, String>`, so it
-  survives reorder/close), edited in a list of fields under the toggle (at most **6** shown,
+  The text **is the pane's name**: each field edits `Pane.custom_name` exactly as a
+  header rename does (`rename_from_label` — blank, or the un-renamed name with or without
+  its extension, clears it), so renaming a label renames the media everywhere. The field
+  keeps its own buffer (egui temp data) while focused so clearing it mid-edit doesn't snap
+  back to the default. The fields are listed under the toggle (at most **6** shown,
   the rest in a solid-bar `ScrollArea`, so many media can't push the Export button off the
-  window) and defaulting to the
-  media's own name **without its file extension** (`label_text` / `strip_extension`, which
+  window) and showing the
+  media's own name **without its file extension** until renamed (`label_text` / `strip_extension`, which
   keeps a decorated tail such as a JPEG 2000 `(1/8)` or a sequence token's `,START,END`); colour, size, optional background box, 9-way position
   (`LabelAnchor`) and margin are **one global `LabelStyle`** shared by every label. All
   export state is runtime-only (not persisted in the config).

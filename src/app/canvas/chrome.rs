@@ -349,6 +349,11 @@ impl CimApp {
         }
     }
 
+    /// What [`Self::pane_name`] gives pane `idx` without its `custom_name`.
+    pub(in crate::app) fn pane_name_unrenamed(&self, idx: usize) -> String {
+        self.with_header_parents(idx, &self.own_name(idx))
+    }
+
     /// What pane `idx` is called when it isn't renamed, without the folder
     /// prefix: the media's name, or a Compute result's built from its sources.
     fn own_name(&self, idx: usize) -> String {
@@ -464,7 +469,7 @@ impl CimApp {
             return;
         }
         let name = text.trim();
-        let own = self.with_header_parents(idx, &self.own_name(idx));
+        let own = self.pane_name_unrenamed(idx);
         self.panes[idx].custom_name = (!name.is_empty() && name != own).then(|| name.to_owned());
     }
 

@@ -524,10 +524,6 @@ struct Export {
     status: String,
     /// Burn each media's name into the output ("Add names").
     labels_on: bool,
-    /// Custom name per media, keyed by **pane id** (stable across reorder/close)
-    /// so the text follows its media. A missing / blank entry falls back to the
-    /// media's own name.
-    labels: HashMap<u64, String>,
     /// One style shared by every label (colour, background, size, position).
     label_style: LabelStyle,
     /// Which media the panel's label preview shows (pane id); falls back to the
@@ -554,7 +550,6 @@ impl Default for Export {
             cancel: false,
             status: String::new(),
             labels_on: true,
-            labels: HashMap::new(),
             label_style: LabelStyle::default(),
             label_preview: None,
         }
