@@ -1636,7 +1636,8 @@ is per-pane so it unsyncs Visualization, `--rotate` unsyncs Geometry, then `--ts
 single-channel media** (a boolean mask **or** a grayscale image/sequence) tinted over
 it, **or any colour (RGB) media** drawn in its own colours. The source list
 (`overlay_source_size`, single-channel or RGB resident frame, excluding the pane
-itself) is offered in the panel's **Overlay** row; for a colour source the row hides
+itself) is offered in the panel's **Overlay** row (full names, never ellipsized — the
+combo grows the panel instead); for a colour source the row hides
 the tint picker (`overlay_src_is_color`) since only the opacity applies to it — the
 stored `color` is kept untouched so switching back to a mono source restores it.
 The spec is **config only**

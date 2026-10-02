@@ -213,12 +213,17 @@ impl CimApp {
                             } else {
                                 let sel = ov_src
                                     .and_then(|id| sources.iter().find(|(m, ..)| *m == id))
-                                    .map(|(_, n, _)| ellipsize(n, 12))
+                                    .map(|(_, n, _)| n.clone())
                                     .unwrap_or_else(|| t!("transform.overlay_none").into_owned());
+                                // The full name, never ellipsized: telling two
+                                // similarly named sources apart beats fitting the
+                                // panel, so a long one may run past its right edge.
                                 egui::ComboBox::from_id_salt(("opt_overlay", pane_id))
                                     .selected_text(sel)
                                     .width(120.0)
+                                    .wrap_mode(egui::TextWrapMode::Extend)
                                     .show_ui(ui, |ui| {
+                                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                                         ui.selectable_value(
                                             &mut ov_src,
                                             None,
@@ -228,7 +233,7 @@ impl CimApp {
                                             ui.selectable_value(
                                                 &mut ov_src,
                                                 Some(*mid),
-                                                ellipsize(mname, 18),
+                                                mname.as_str(),
                                             );
                                         }
                                     });
