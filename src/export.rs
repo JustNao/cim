@@ -134,8 +134,9 @@ pub struct ExportPane {
     /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
     /// `Some`. For a "Share clip" pane (`share_clip`) this is refreshed **per
     /// exported frame** by `ExportPlan::compose` from the Control media's bounds
-    /// (so an animated Control is tracked, matching the live view); otherwise it
-    /// stays `None`.
+    /// (so an animated Control is tracked, matching the live view). A pane on
+    /// **global statistics** — its own, or a Control's it shares — gets the live
+    /// global window here once, fixed for the whole export. Otherwise `None`.
     pub window: Option<(f32, f32)>,
     /// Region (full-image space) this pane's bounds are computed over, or `None`
     /// for the whole frame — snapshotted from `CimApp::tone_region`, so a pane

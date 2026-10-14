@@ -494,40 +494,27 @@ fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone:
     }
 }
 
-/// The clip toggle/percentile and the "Share clip" row, shared by the Linear and
-/// Colormap tones (both stretch the native range the same way before display).
+/// The clip toggle/percentile, the "Global statistics" and "Share clip" rows,
+/// shared by the Linear and Colormap tones (both stretch the native range the
+/// same way before display).
 fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     // Clip toggle + its per-tail percentile (percentile greyed only when the
     // toggle is off). On for >8-bit by default, off for 8-bit (set in add_pane).
     // These are NOT greyed out under "Share clip": since Share clip rides the
     // Transformations sync, the clip toggle/percentile edited on any synced pane
     // is the very statistic the Control media derives its shared [lo, hi] from.
+    // Global statistics do replace the clip outright, so the row greys under them.
     ui.label(t!("transform.clip"));
-    ui.horizontal(|ui| {
-        ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
-            .on_hover_text(t!("transform.clip_hover"));
-        ui.add_enabled(
-            tone.clip.enabled,
-            egui::DragValue::new(&mut tone.clip.percent)
-                .speed(0.01)
-                .range(0.0..=49.0)
-                .max_decimals(2)
-                .suffix(" %"),
-        )
-        .on_hover_text(t!("transform.clip_percent_hover"));
-        // Reset the percentile back to the default.
-        let default_pct = crate::settings::ClipOptions::default().percent;
-        if ui
-            .add_enabled(
-                tone.clip.enabled && tone.clip.percent != default_pct,
-                egui::Button::new(t!("transform.reset")),
-            )
-            .on_hover_text(t!("transform.clip_reset_hover", pct = default_pct))
-            .clicked()
-        {
-            tone.clip.percent = default_pct;
-        }
+    ui.add_enabled_ui(!tone.global, |ui| {
+        ui.horizontal(|ui| draw_clip(ui, tone));
     });
+    ui.end_row();
+
+    // Global statistics: the min/max over every frame of the media in memory,
+    // one fixed stretch for the whole sequence.
+    ui.label(t!("transform.global_stats"));
+    ui.add(egui::Checkbox::without_text(&mut tone.global))
+        .on_hover_text(t!("transform.global_stats_hover"));
     ui.end_row();
 
     // Share clip: apply the Control media's exact [lo, hi] LUT to every pane, so
@@ -537,4 +524,31 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     ui.add(egui::Checkbox::without_text(&mut tone.share_clip))
         .on_hover_text(t!("transform.share_clip_hover"));
     ui.end_row();
+}
+
+/// The clip toggle, its percentile and the reset button.
+fn draw_clip(ui: &mut egui::Ui, tone: &mut ToneOptions) {
+    ui.add(egui::Checkbox::without_text(&mut tone.clip.enabled))
+        .on_hover_text(t!("transform.clip_hover"));
+    ui.add_enabled(
+        tone.clip.enabled,
+        egui::DragValue::new(&mut tone.clip.percent)
+            .speed(0.01)
+            .range(0.0..=49.0)
+            .max_decimals(2)
+            .suffix(" %"),
+    )
+    .on_hover_text(t!("transform.clip_percent_hover"));
+    // Reset the percentile back to the default.
+    let default_pct = crate::settings::ClipOptions::default().percent;
+    if ui
+        .add_enabled(
+            tone.clip.enabled && tone.clip.percent != default_pct,
+            egui::Button::new(t!("transform.reset")),
+        )
+        .on_hover_text(t!("transform.clip_reset_hover", pct = default_pct))
+        .clicked()
+    {
+        tone.clip.percent = default_pct;
+    }
 }

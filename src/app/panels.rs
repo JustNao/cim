@@ -812,6 +812,41 @@ impl CimApp {
                                                 p.sync_geometry = all_geom;
                                             }
                                         }
+                                        // Scale every media to the Control's size at
+                                        // once. The Control never scales, so "all"
+                                        // means every other pane; nothing to do with
+                                        // a single media.
+                                        let control = self.control;
+                                        let others = || {
+                                            self.panes
+                                                .iter()
+                                                .enumerate()
+                                                .filter(move |&(i, _)| i != control)
+                                        };
+                                        let any_other = others().next().is_some();
+                                        let all_scale = any_other && others().all(|(_, p)| p.scale);
+                                        let [w, h] = self.panes[control].media.native_size();
+                                        if ui
+                                            .add_enabled(
+                                                any_other,
+                                                egui::SelectableLabel::new(
+                                                    all_scale,
+                                                    t!("manager.scale"),
+                                                ),
+                                            )
+                                            .on_hover_text(t!(
+                                                "manager.scale_all_hover",
+                                                w = w,
+                                                h = h
+                                            ))
+                                            .clicked()
+                                        {
+                                            for (i, p) in self.panes.iter_mut().enumerate() {
+                                                if i != control {
+                                                    p.scale = !all_scale;
+                                                }
+                                            }
+                                        }
                                     });
                                     if ui
                                         .small_button("⟳")

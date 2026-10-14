@@ -86,7 +86,9 @@ impl CimApp {
     /// or the Control's shared clip).
     fn bounds_hint(&self, idx: usize) -> Option<Option<f32>> {
         let v = self.visual(idx);
-        if self.tone_region(idx).is_some() || (!v.contrast.is_operator() && v.tone.share_clip) {
+        if self.tone_region(idx).is_some()
+            || (!v.contrast.is_operator() && (v.tone.share_clip || v.tone.global))
+        {
             return None;
         }
         Some(crate::tone::clip_pct(v.contrast, &v.tone))
@@ -1095,6 +1097,9 @@ impl CimApp {
                 self.visual(ci).contrast.label().hash(&mut h);
                 ct.clip.enabled.hash(&mut h);
                 ct.clip.percent.to_bits().hash(&mut h);
+                // The Control's global bounds move as its frames load / evict.
+                ct.global.hash(&mut h);
+                hash_bounds(self.global_bounds(ci), &mut h);
                 let creg = self.panes[ci].region_tone;
                 creg.hash(&mut h);
                 if creg {
@@ -1102,6 +1107,10 @@ impl CimApp {
                 }
             }
         }
+        // Global statistics: the bounds widen as more of the media is decoded
+        // (and may narrow on eviction), so hash the bounds themselves.
+        tone.global.hash(&mut h);
+        hash_bounds(self.global_bounds(idx), &mut h);
         // The Colormap palette changes the rendered colour.
         tone.palette.id().hash(&mut h);
         self.visual(idx).details.hash(&mut h);
@@ -1152,12 +1161,38 @@ impl CimApp {
     /// bounds when region-tone is pinned) — ignoring "Share clip", so it can be
     /// read for the Control media itself without recursing.
     fn own_tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
+        if let Some(b) = self.global_bounds(idx) {
+            return b;
+        }
         let clip = crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone);
         let region = self.tone_region(idx);
         // On the budgeted pool: an unmemoized bound runs a whole-image percentile
         // scan, which splits across cores, and this is called from the UI thread
         // (`crate::cpu`). Memoized hits never reach the scan, so this is cheap.
         crate::cpu::install(|| crate::tone::frame_bounds(frame, clip, region))
+    }
+
+    /// Pane `idx`'s **global statistics** bounds — `[min, max]` over every frame
+    /// of its media in memory — when its tone uses them: a non-operator tone
+    /// with "Global statistics" on and no region to restrict it (a region is the
+    /// more specific request, as it is over the clip). `None` otherwise, or while
+    /// nothing is resident. A fold over memoized per-frame extents, so cheap
+    /// enough for `tone_sig` to call every frame.
+    pub(super) fn global_bounds(&self, idx: usize) -> Option<(f32, f32)> {
+        let v = self.visual(idx);
+        if v.contrast.is_operator() || !v.tone.global || self.tone_region(idx).is_some() {
+            return None;
+        }
+        self.panes[idx].media.resident_extent()
+    }
+
+    /// The Control media's global-statistics bounds, when it uses them — what a
+    /// "Share clip" pane locks to then.
+    pub(super) fn control_global_bounds(&self) -> Option<(f32, f32)> {
+        if self.panes.is_empty() {
+            return None;
+        }
+        self.global_bounds(self.control.min(self.panes.len() - 1))
     }
 
     /// The region pane `idx`'s display bounds are computed over, or `None` for
@@ -1361,6 +1396,12 @@ pub(super) fn texture_fit_step(size: [usize; 2], max_side: usize) -> usize {
         return 1;
     }
     size[0].max(size[1]).div_ceil(max_side).max(1)
+}
+
+/// Fold optional display bounds into a `tone_sig` hash, by bit pattern.
+fn hash_bounds(b: Option<(f32, f32)>, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    b.map(|(lo, hi)| (lo.to_bits(), hi.to_bits())).hash(h);
 }
 
 /// The message a pane shows when its image can't be made into a texture at all.

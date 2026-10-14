@@ -433,6 +433,13 @@ pub struct ToneOptions {
     /// overrides this pane's own clip when on. Ignored by LUT_ALPHA / Boost, which
     /// do their own contrast.
     pub share_clip: bool,
+    /// **Global statistics**: map `[min, max]` of the samples over **every frame
+    /// of this media in memory** (`Media::resident_extent`) instead of this
+    /// frame's own bounds, so a sequence keeps one fixed stretch while it plays.
+    /// Overrides the clip; a pinned region / export crop still wins (it is the
+    /// more specific request). Ignored by LUT_ALPHA / Boost. The Control's global
+    /// bounds are what "Share clip" panes then lock to.
+    pub global: bool,
     /// Palette for the Colormap tone (ignored by other modes).
     pub palette: crate::palette::Palette,
 }

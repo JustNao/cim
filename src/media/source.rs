@@ -116,6 +116,11 @@ impl SeqCache {
             Some(size) if frame.size != size => Arc::new(frame.resample_nearest(size)),
             _ => frame,
         };
+        // Its sample min/max, for the global statistics (`resident_extent`).
+        // Already memoized for a frame from the decode worker; this covers the
+        // ones that reach the cache another way (a synchronous jump, a Computed
+        // result, a resample to the Scale target just above).
+        frame.value_extent();
         if idx < self.cache.len() {
             if let Some(old) = &self.cache[idx] {
                 self.resident_bytes -= old.byte_len(); // already in `lru` at its tick
@@ -181,6 +186,16 @@ impl SeqCache {
         for idx in 0..self.cache.len() {
             self.evict(idx);
         }
+    }
+
+    /// `[min, max]` over every resident frame's memoized sample extent, or
+    /// `None` when nothing is resident.
+    fn resident_extent(&self) -> Option<(f32, f32)> {
+        self.cache
+            .iter()
+            .flatten()
+            .map(|f| f.value_extent())
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
     fn resident_frames(&self) -> Vec<(usize, u64, usize)> {
@@ -661,6 +676,21 @@ impl Media {
             Media::ConcatSeq(c) => c.frames.resident_bytes,
             Media::Video(v) => v.frames.resident_bytes,
             Media::Computed(c) => c.frames.resident_bytes,
+        }
+    }
+
+    /// The **global statistics**: `[min, max]` of the samples over every frame
+    /// in memory, folded from each frame's memoized extent (computed by the
+    /// decode worker, so this never scans pixels for a decoded frame). A still
+    /// is its one frame. `None` when nothing is resident.
+    pub fn resident_extent(&self) -> Option<(f32, f32)> {
+        match self {
+            Media::Still(s) => Some(s.frame.value_extent()),
+            Media::TiffSeq(t) => t.frames.resident_extent(),
+            Media::FileSeq(f) => f.frames.resident_extent(),
+            Media::ConcatSeq(c) => c.frames.resident_extent(),
+            Media::Video(v) => v.frames.resident_extent(),
+            Media::Computed(c) => c.frames.resident_extent(),
         }
     }
 

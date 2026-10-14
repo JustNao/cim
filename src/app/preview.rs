@@ -120,6 +120,9 @@ impl CimApp {
                     region: self.tone_region(idx),
                 },
             }
+        } else if let Some((lo, hi)) = self.global_bounds(idx) {
+            // Global statistics: the one window over the frames in memory.
+            crate::thumbs::Window::Fixed(lo, hi)
         } else {
             crate::thumbs::Window::Compute {
                 clip: crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone),

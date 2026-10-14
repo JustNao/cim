@@ -927,6 +927,21 @@ its bounds with the same `tone::frame_bounds` the live path calls, and pushes th
 window onto every share-clip pane — so an animated Control is tracked exactly as the live view
 tracks it.
 
+Plus a per-pane **Global statistics** toggle (`ToneOptions.global`, popup row between Clip
+and Share clip, `--global-stats`): a non-operator tone maps `[min, max]` over **every frame of
+its media in memory** (`Media::resident_extent`) instead of the frame's own bounds — one fixed
+stretch while a sequence plays. It overrides the clip (the clip row greys out) but not a region
+(`tone_region` still wins). `CimApp::global_bounds` is the one predicate, read first in
+`own_tone_bounds` — so a **Share clip** pane whose Control is on global statistics locks to the
+Control's global bounds with no extra path. **Cached, never scanned on the UI thread:** each
+frame's sample extent is memoized on the frame (`FrameData::value_extent`, a `OnceLock`) and
+computed **on the decode worker** as the frame is decoded (and in `SeqCache::insert` for the
+frames that arrive another way), so `resident_extent` is a fold over known values. Bounds
+grow / shrink as frames load / evict, so `tone_sig` hashes the bounds themselves (the pane's,
+and the Control's for a Share-clip pane), as does the hover preview's key through it. Export
+pins the live global window as the pane's fixed `ExportPane::window` (for a Share-clip pane
+with a global Control too, instead of the per-frame `ControlBounds`).
+
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
 Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
@@ -1244,7 +1259,8 @@ no longer repoints onto a sequence). The Control pane is **separate from `curren
 focused pane for Single/keyboard/tint), so viewing a still doesn't hijack playback. Picking
 a new Control drops the `loop_range` only when `loop_control()` actually changes.
 
-**Scale to the Control (`Pane.scale`, manager's **Scale** toggle, left of Control;
+**Scale to the Control (`Pane.scale`, manager's **Scale** toggle, left of Control —
+plus one in the manager's "all" row that sets every non-Control pane at once;
 `--scale` per pane).** For comparing a same-ratio image of another resolution: the pane's
 media is shown **nearest-resampled to the Control's own size** (`FrameData::resample_nearest`
 — whole samples copied, never blended, so every shown value is still a true source sample).

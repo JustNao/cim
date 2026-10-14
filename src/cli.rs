@@ -107,6 +107,8 @@ pub struct ViewState {
     pub clips: Option<Vec<ClipSpec>>,
     /// Per-pane "Share clip" toggles (`--share-clip`), in pane order.
     pub share_clip: Option<Vec<bool>>,
+    /// Per-pane "Global statistics" toggles (`--global-stats`), in pane order.
+    pub global_stats: Option<Vec<bool>>,
     /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
@@ -205,6 +207,10 @@ pub fn parse(args: Vec<String>) -> Cli {
             }
             "--share-clip" => {
                 view.share_clip = next(i).and_then(parse_details);
+                i += 1;
+            }
+            "--global-stats" => {
+                view.global_stats = next(i).and_then(parse_details);
                 i += 1;
             }
             "--detail" => {
@@ -323,7 +329,7 @@ fn parse_floats(s: &str) -> Option<Vec<f32>> {
 }
 
 /// Parse a comma-separated per-pane on/off list (`1`/`0`), shared by `--detail`,
-/// `--share-clip`, `--show`, `--scale` and `--tsync`.
+/// `--share-clip`, `--global-stats`, `--show`, `--scale` and `--tsync`.
 fn parse_details(s: &str) -> Option<Vec<bool>> {
     Some(
         s.split(',')
@@ -814,6 +820,18 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(view.share_clip, Some(vec![true, false]));
+    }
+
+    #[test]
+    fn parses_global_stats() {
+        let args = "a.tif b.tif --global-stats 0,1"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(view.global_stats, Some(vec![false, true]));
     }
 
     #[test]

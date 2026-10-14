@@ -297,8 +297,15 @@ impl BackgroundDecoder {
                     }
                     (r, _) => r,
                 };
-                if let (Ok(Decoded::Frame(f)), Some(clip)) = (&result, job.bounds) {
-                    crate::cpu::install(|| crate::tone::frame_bounds(f, clip, None));
+                if let Ok(Decoded::Frame(f)) = &result {
+                    crate::cpu::install(|| {
+                        // The frame's sample min/max, memoized before it enters
+                        // the cache: what the per-media global statistics fold.
+                        f.value_extent();
+                        if let Some(clip) = job.bounds {
+                            crate::tone::frame_bounds(f, clip, None);
+                        }
+                    });
                 }
                 if done_tx
                     .send(Done {

@@ -91,6 +91,9 @@ pub struct FrameData {
     /// path otherwise re-scans the whole image on every redraw.
     bounds_full: OnceLock<(f32, f32)>,
     bounds_clip: OnceLock<(f32, f32)>,
+    /// The actual sample `[min, max]` ([`FrameData::value_extent`]), memoized
+    /// for the same reason.
+    extent: OnceLock<(f32, f32)>,
     /// The whole-image percentile histogram and its sample total, memoized for
     /// the same reason the bounds above are — it is content-invariant — but for
     /// a different caller: the *non-default* clip percentile.
@@ -131,6 +134,7 @@ impl FrameData {
             uid: NEXT_FRAME_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             bounds_full: OnceLock::new(),
             bounds_clip: OnceLock::new(),
+            extent: OnceLock::new(),
             hist_int: OnceLock::new(),
             hist_float: OnceLock::new(),
             mask: false,
@@ -309,12 +313,22 @@ impl FrameData {
     /// Actual [min, max] of the colour samples, in native units (NaN-skipping).
     /// Falls back to the nominal range for empty / all-NaN frames.
     ///
+    /// Memoized: the decode worker computes it as each frame is decoded, before
+    /// it enters the cache, so the per-media **global statistics**
+    /// (`Media::resident_extent`) fold already-known values instead of scanning
+    /// every resident frame on the UI thread.
+    pub fn value_extent(&self) -> (f32, f32) {
+        *self.extent.get_or_init(|| self.compute_value_extent())
+    }
+
+    /// The scan behind [`FrameData::value_extent`].
+    ///
     /// Past [`PAR_MIN_SCAN_PX`] the scan splits across cores: min/max is
     /// associative, so the per-chunk extents merge to exactly the serial answer
     /// whatever order the chunks finish in. NaN survives the split too — a NaN
     /// sample fails both `<` and `>`, so it never enters a local extent, and the
     /// merge below uses `f32::min`/`max`, which return the non-NaN operand.
-    fn value_extent(&self) -> (f32, f32) {
+    fn compute_value_extent(&self) -> (f32, f32) {
         let cc = self.color_channels();
         let px = self.size[0] * self.size[1];
         let none = (f32::INFINITY, f32::NEG_INFINITY);
@@ -772,6 +786,41 @@ mod tests {
             len,
             "eviction must not change known length"
         );
+    }
+
+    /// The global statistics are the min/max over exactly the frames in memory:
+    /// they widen as frames arrive and narrow again when one is evicted.
+    #[test]
+    fn resident_extent_folds_the_frames_in_memory() {
+        let dir = fixture_dir("extent");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[2, 1], [2, 1], [2, 1]]);
+        let mut m = load(&path).expect("open tiff");
+        assert_eq!(m.resident_extent(), None);
+
+        let frame = |a, b| Arc::new(FrameData::new([2, 1], 1, Samples::U16(vec![a, b])));
+        m.insert(0, frame(100, 200));
+        assert_eq!(m.resident_extent(), Some((100.0, 200.0)));
+        m.insert(1, frame(50, 150));
+        m.insert(2, frame(120, 900));
+        assert_eq!(m.resident_extent(), Some((50.0, 900.0)));
+        m.evict(2);
+        assert_eq!(m.resident_extent(), Some((50.0, 200.0)));
+    }
+
+    /// The extent is memoized on the frame — computed once, as it enters the
+    /// cache — and is the true sample range, not the nominal one.
+    #[test]
+    fn value_extent_is_memoized_on_insert() {
+        let dir = fixture_dir("extent_memo");
+        let path = dir.join("seq.tif");
+        write_multipage_tiff_u16(&path, &[[2, 2]]);
+        let mut m = load(&path).expect("open tiff");
+        let f = Arc::new(FrameData::new([2, 2], 1, Samples::U16(vec![7, 3, 9, 4])));
+        assert!(f.extent.get().is_none());
+        m.insert(0, f.clone());
+        assert_eq!(f.extent.get(), Some(&(3.0, 9.0)));
+        assert_eq!(f.value_extent(), (3.0, 9.0));
     }
 
     /// The incremental LRU peeks the oldest resident frame (by `last_used`),

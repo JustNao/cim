@@ -110,6 +110,9 @@ manager.scale_hover: >-
   Show this media resized to the Control media's size (%{w}×%{h}), nearest
   neighbour, so an image of the same ratio at another resolution lines up with
   it pixel for pixel
+manager.scale_all_hover: >-
+  Show every media resized to the Control media's size (%{w}×%{h}), nearest
+  neighbour
 manager.scale_control_hover: This is the Control media — the others scale to its size
 manager.reload: Reload
 manager.reload_hover: Reload this media from disk
@@ -141,6 +144,11 @@ transform.clip: Clip
 transform.clip_hover: Clip a percentile off each tail before the stretch
 transform.clip_percent_hover: Percentile clipped at each tail before the stretch
 transform.clip_reset_hover: Reset to the default (%{pct} %)
+transform.global_stats: Global statistics
+transform.global_stats_hover: >-
+  Stretch from the min/max over every frame of this media in memory, instead of
+  each frame's own bounds — one fixed mapping while a sequence plays. Replaces
+  the clip; Share clip panes follow the Control's global bounds
 transform.share_clip: Share clip
 transform.share_clip_hover: >-
   Apply the Control media's exact LUT (lo/hi) to every pane — identical
@@ -523,6 +531,7 @@ cli.help: |
                                  colormap[:viridis|turbo|diverging]
           --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
           --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
+          --global-stats <B,B,...> Per-pane min/max over all frames in memory (1/0)
           --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
           --show <B,B,...>         Per-pane visibility / show-hide (1/0)
           --scale <B,B,...>        Per-pane scale to the Control media's size (1/0)

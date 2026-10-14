@@ -163,6 +163,13 @@ impl CimApp {
                 p.sync_tone = false;
             }
         }
+        // Per-pane "Global statistics" (`--global-stats`), likewise per-pane.
+        if let Some(globals) = &vs.global_stats {
+            for (p, g) in self.panes.iter_mut().zip(globals) {
+                p.visual.tone.global = *g;
+                p.sync_tone = false;
+            }
+        }
         if let Some(details) = &vs.details {
             for (p, d) in self.panes.iter_mut().zip(details) {
                 p.visual.details = *d;
@@ -358,6 +365,13 @@ impl CimApp {
                 parts.push(format!(
                     "--share-clip {}",
                     flags(&|i| self.visual(i).tone.share_clip)
+                ));
+                per_pane_transform = true;
+            }
+            if (0..n).any(|i| self.visual(i).tone.global) {
+                parts.push(format!(
+                    "--global-stats {}",
+                    flags(&|i| self.visual(i).tone.global)
                 ));
                 per_pane_transform = true;
             }
