@@ -10,6 +10,9 @@
 //                                    here; it runs once per (pane, image size).
 //   * cim_lut_alpha_apply(h, ...) — the per-frame call; transform the buffer in
 //                                    place, reusing the instance from `create`.
+//                                    `stats8` is a small 8-bit render of the
+//                                    WHOLE frame for global statistics (`data`
+//                                    may be only the visible region).
 //   * cim_lut_alpha_destroy(h)    — free it (pane closed / reloaded / resized).
 //
 // ---- Wiring in your proprietary code ----------------------------------------
@@ -26,12 +29,15 @@
 //     extern "C" void* cim_lut_alpha_create(std::size_t w, std::size_t h) {
 //         return new vendor_alpha::AutoContrast(w, h);          // heavy, once
 //     }
-//     extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len) {
+//     extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len,
+//                                         const std::uint8_t* stats8, std::size_t sw,
+//                                         std::size_t sh) {
 //         auto* op = static_cast<vendor_alpha::AutoContrast*>(handle);
-//         // Wrap cim's raw single-channel 16-bit buffer as the vendor image type
-//         // (a zero-copy view if the API allows, else copy in, run, copy back):
+//         // Wrap cim's raw buffers as the vendor image types (zero-copy views if
+//         // the API allows, else copy in, run, copy back):
 //         vendor_alpha::Image img(data, len, vendor_alpha::PixelFormat::Gray16);
-//         op->run(img);                                         // transforms in place
+//         vendor_alpha::Image stats(stats8, sw, sh, vendor_alpha::PixelFormat::Gray8);
+//         op->run(img, stats);                // global stats from `stats`, transforms `img`
 //     }
 //     extern "C" void cim_lut_alpha_destroy(void* handle) {
 //         delete static_cast<vendor_alpha::AutoContrast*>(handle);
@@ -51,8 +57,9 @@ namespace {
 
 // PLACEHOLDER for the proprietary LUT_ALPHA class. It keeps the image size (as a
 // real size-dependent operator would) and does a per-image min/max contrast
-// stretch, so the library builds and cim's whole pipeline — the create/apply/
-// destroy lifecycle, per-pane instance reuse, the off-thread render — can be
+// stretch whose min/max come from the whole-frame `stats8` buffer, so the
+// library builds and cim's whole pipeline — the create/apply/destroy lifecycle,
+// per-pane instance reuse, the off-thread render, the statistics input — can be
 // exercised end-to-end before the proprietary code is available. Swap it out.
 struct LutAlpha {
     std::size_t width;
@@ -60,16 +67,21 @@ struct LutAlpha {
 
     LutAlpha(std::size_t w, std::size_t h) : width(w), height(h) {}
 
-    void apply(std::uint16_t* data, std::size_t len) const {
+    void apply(std::uint16_t* data, std::size_t len, const std::uint8_t* stats8,
+               std::size_t stats_w, std::size_t stats_h) const {
         const std::size_t px = width * height;
-        if (px == 0 || len < px) {
+        const std::size_t stats_px = stats_w * stats_h;
+        if (px == 0 || len < px || stats_px == 0) {
             return;
         }
-        std::uint16_t lo = 65535, hi = 0;
-        for (std::size_t i = 0; i < px; ++i) {
-            lo = std::min(lo, data[i]);
-            hi = std::max(hi, data[i]);
+        std::uint8_t lo8 = 255, hi8 = 0;
+        for (std::size_t i = 0; i < stats_px; ++i) {
+            lo8 = std::min(lo8, stats8[i]);
+            hi8 = std::max(hi8, stats8[i]);
         }
+        // Back to the 16-bit scale: an 8-bit sample `v` stands for `v << 8 ..= v << 8 | 255`.
+        const std::uint16_t lo = static_cast<std::uint16_t>(lo8 << 8);
+        const std::uint16_t hi = static_cast<std::uint16_t>((hi8 << 8) | 0xFF);
         if (hi <= lo) {
             return; // flat image, nothing to stretch
         }
@@ -87,8 +99,10 @@ extern "C" void* cim_lut_alpha_create(std::size_t width, std::size_t height) {
     return new LutAlpha(width, height);
 }
 
-extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len) {
-    static_cast<LutAlpha*>(handle)->apply(data, len);
+extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len,
+                                    const std::uint8_t* stats8, std::size_t stats_w,
+                                    std::size_t stats_h) {
+    static_cast<LutAlpha*>(handle)->apply(data, len, stats8, stats_w, stats_h);
 }
 
 extern "C" void cim_lut_alpha_destroy(void* handle) {
