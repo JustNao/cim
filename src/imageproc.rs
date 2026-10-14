@@ -23,6 +23,22 @@
 //! void  cim_<op>_destroy(void* handle);                       // free the instance
 //! ```
 //!
+//! **LUT_ALPHA takes a global-statistics buffer.** Its `apply` additionally
+//! receives a small, heavily decimated 8-bit render of the **whole** frame, so its
+//! global statistics come from the whole image even when `data` is only the
+//! adaptive viewport region:
+//!
+//! ```c
+//! void  cim_lut_alpha_apply(void* handle, uint16_t* data, size_t len,
+//!                           const uint8_t* stats8, size_t stats_w, size_t stats_h);
+//! ```
+//!
+//! `stats8` is `stats_w * stats_h` samples, row-major, read-only: the frame's
+//! full-range 16-bit render (the same one `data` is cropped from) at a
+//! [`stats_step`] decimation that keeps its longer side at most [`STATS_MAX`],
+//! downscaled to 8 bits. It depends only on the frame, never on the region, so a
+//! base, a viewport region and an export of one frame all see the same statistics.
+//!
 //! **DETAILS_ENHANCED takes a second buffer.** Its `apply` additionally receives
 //! the **after-LUT 8-bit** companion of the same frame — the display-tone look —
 //! so the operator can key its enhancement off it, not just the raw 16-bit data:
@@ -67,8 +83,11 @@ use std::sync::{Mutex, PoisonError, RwLock};
 /// The C symbols each operator library exports (see the module docs):
 /// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
 type CreateFn = unsafe extern "C" fn(usize, usize) -> *mut c_void;
-/// LUT_ALPHA's and Boost's `apply`: raw 16-bit buffer, transformed in place.
+/// Boost's `apply`: raw 16-bit buffer, transformed in place.
 type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
+/// LUT_ALPHA's `apply`: the raw 16-bit buffer (in place) **plus** the read-only
+/// whole-frame 8-bit statistics buffer and its width and height.
+type LutAlphaApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize, *const u8, usize, usize);
 /// DETAILS_ENHANCED's `apply`: the raw 16-bit buffer (in place) **plus** the
 /// after-LUT 8-bit companion (read-only), both `len` samples.
 type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usize);
@@ -100,11 +119,12 @@ fn resolve(dir: Option<&Path>, name: &str) -> PathBuf {
 struct Operator {
     _lib: libloading::Library,
     create: CreateFn,
-    /// The `<stem>_apply` symbol. LUT_ALPHA / Boost and DETAILS_ENHANCED export different
-    /// `apply` signatures ([`ApplyFn`] vs [`DetailsApplyFn`]); it is stored as the
-    /// canonical [`ApplyFn`] and the DETAILS call site transmutes it to
-    /// [`DetailsApplyFn`] (all fn pointers share a representation, so this is
-    /// sound — the resolved symbol address is the same either way).
+    /// The `<stem>_apply` symbol. Boost, LUT_ALPHA and DETAILS_ENHANCED export
+    /// different `apply` signatures ([`ApplyFn`], [`LutAlphaApplyFn`],
+    /// [`DetailsApplyFn`]); it is stored as the canonical [`ApplyFn`] and the
+    /// LUT_ALPHA / DETAILS call sites transmute it to their own type (all fn
+    /// pointers share a representation, so this is sound — the resolved symbol
+    /// address is the same either way).
     apply: ApplyFn,
     destroy: DestroyFn,
 }
@@ -178,8 +198,8 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
         let lib = libloading::Library::new(lib_path)?;
         let create: libloading::Symbol<CreateFn> =
             lib.get(format!("{stem}_create\0").as_bytes())?;
-        // Resolved as the canonical `ApplyFn`; DETAILS_ENHANCED's call site
-        // transmutes it to its own `DetailsApplyFn` (same fn-pointer address).
+        // Resolved as the canonical `ApplyFn`; LUT_ALPHA's and DETAILS_ENHANCED's
+        // call sites transmute it to their own type (same fn-pointer address).
         let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
         let destroy: libloading::Symbol<DestroyFn> =
             lib.get(format!("{stem}_destroy\0").as_bytes())?;
@@ -357,6 +377,43 @@ pub struct Ops {
     pub details: bool,
 }
 
+/// Longest side, in texels, of LUT_ALPHA's whole-frame statistics buffer. Enough
+/// for a rough histogram / percentiles; small enough that rendering it per job
+/// costs next to nothing beside the render it accompanies.
+pub const STATS_MAX: usize = 512;
+
+/// The decimation step that brings a `size` frame's longer side down to at most
+/// [`STATS_MAX`]. A function of the frame size alone, so every render of a frame
+/// — base, region, export, adaptive on or off — builds the same statistics.
+pub fn stats_step(size: [usize; 2]) -> usize {
+    size[0].max(size[1]).div_ceil(STATS_MAX).max(1)
+}
+
+/// LUT_ALPHA's whole-frame 8-bit statistics input: `data` is `size[0] * size[1]`
+/// samples, row-major (see the module docs).
+#[derive(Clone, Copy)]
+pub struct Stats<'a> {
+    pub data: &'a [u8],
+    pub size: [usize; 2],
+}
+
+/// Build `frame`'s statistics buffer into `out`: its 16-bit render over
+/// `[lo, hi]` at [`stats_step`], downscaled to 8 bits. Returns its size.
+fn render_stats(
+    frame: &crate::media::FrameData,
+    lo: f32,
+    hi: f32,
+    lut: &mut crate::media::ToneLut,
+    out: &mut Vec<u8>,
+) -> [usize; 2] {
+    let region = crate::media::Region::whole(frame.size, stats_step(frame.size));
+    let mut gray = Vec::new();
+    frame.render_gray_u16_lut(lo, hi, region, lut, &mut gray);
+    out.clear();
+    out.extend(gray.iter().map(|&s| (s >> 8) as u8));
+    region.out
+}
+
 /// One live proprietary operator instance: the opaque C++ handle from `create`,
 /// the `(width, height)` it was built for, and the fn pointers to drive/free it.
 /// Owned by a single pane's worker thread; `Drop` frees the handle on that thread.
@@ -421,14 +478,17 @@ impl PaneOps {
     /// the very pixels the pane would show without details. It is built here, so the
     /// operator always sees whichever LUT the view is currently using.
     ///
+    /// LUT_ALPHA additionally receives `stats`, the whole-frame statistics buffer
+    /// ([`Stats`]); the other operators ignore it.
+    ///
     /// This is the operator step of the render tail; [`PaneOps::render_display`]
     /// wraps it (render the 16-bit input, `apply`, expand to RGBA) and is what the
     /// live render worker and the export worker both call, so the two match
     /// pixel-for-pixel.
-    pub fn apply(&mut self, gray: &mut [u16], width: usize, height: usize, ops: Ops) {
+    pub fn apply(&mut self, gray: &mut [u16], width: usize, height: usize, ops: Ops, stats: Stats) {
         if ops.lut_alpha {
             if let Some(inst) = Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
-                run(inst, gray);
+                run_lut_alpha(inst, gray, stats);
             }
         }
         if ops.boost {
@@ -462,11 +522,11 @@ impl PaneOps {
     ///
     /// The crop and decimation happen **before** the operators run, so under
     /// adaptive rendering they see the visible region rather than the whole
-    /// image and their output (e.g. LUT_ALPHA's auto-contrast) adapts to the
-    /// view. Their instance is keyed on `region.out`, which the region geometry
-    /// deliberately keeps stable while panning (see `app::roi`). Export renders
-    /// whole-image regions, so the two are expected to differ under adaptive
-    /// rendering — the Settings hover says so.
+    /// image. LUT_ALPHA's global statistics are the exception: they come from a
+    /// separate decimated render of the **whole** frame ([`render_stats`]), so
+    /// they do not follow the view, and match export's. Their instance is keyed
+    /// on `region.out`, which the region geometry deliberately keeps stable while
+    /// panning (see `app::roi`).
     pub fn render_display<S: crate::media::RgbaSink>(
         &mut self,
         frame: &crate::media::FrameData,
@@ -494,9 +554,20 @@ impl PaneOps {
         let mut gray = Vec::new();
         let t = Instant::now();
         frame.render_gray_u16_lut(lo, hi, region, lut, &mut gray);
+        // LUT_ALPHA's whole-frame statistics, built only when it will run.
+        let mut stats = Vec::new();
+        let stats_size = if ops.lut_alpha && lut_alpha_available() {
+            render_stats(frame, lo, hi, lut, &mut stats)
+        } else {
+            [0, 0]
+        };
         let lut_time = t.elapsed();
         let t = Instant::now();
-        self.apply(&mut gray, w, h, ops);
+        let stats = Stats {
+            data: &stats,
+            size: stats_size,
+        };
+        self.apply(&mut gray, w, h, ops, stats);
         let ops_time = t.elapsed();
         // Expand the processed grey back to 8-bit RGBA for the texture.
         out.begin(gray.len());
@@ -552,12 +623,34 @@ impl PaneOps {
     }
 }
 
-/// Run one instance's LUT_ALPHA-style operator (LUT_ALPHA or Boost) over `gray`
-/// in place.
+/// Run one instance's Boost operator over `gray` in place.
 fn run(inst: &Instance, gray: &mut [u16]) {
     // SAFETY: `gray` is a valid `len`-element buffer; the callee only reads/writes
     // within it and keeps the dimensions (per the ABI). `handle` matches `apply`.
     unsafe { (inst.apply)(inst.handle, gray.as_mut_ptr(), gray.len()) };
+}
+
+/// Run LUT_ALPHA over `gray` in place, passing the read-only whole-frame
+/// statistics buffer `stats` alongside.
+fn run_lut_alpha(inst: &Instance, gray: &mut [u16], stats: Stats) {
+    debug_assert_eq!(stats.data.len(), stats.size[0] * stats.size[1]);
+    // SAFETY: `gray` is a valid `len`-element buffer the callee transforms in
+    // place; `stats.data` holds exactly `stats_w * stats_h` samples and is only
+    // read, per the LUT_ALPHA ABI. `handle` matches `apply`. The stored `apply` is
+    // the same symbol address for either signature; LUT_ALPHA was loaded from a
+    // library exporting the `LutAlphaApplyFn` shape, so this transmute recovers
+    // the correct type.
+    unsafe {
+        let apply: LutAlphaApplyFn = std::mem::transmute(inst.apply);
+        apply(
+            inst.handle,
+            gray.as_mut_ptr(),
+            gray.len(),
+            stats.data.as_ptr(),
+            stats.size[0],
+            stats.size[1],
+        );
+    }
 }
 
 /// Run DETAILS_ENHANCED over `gray` in place, passing the read-only after-LUT
@@ -617,6 +710,44 @@ mod tests {
             assert_eq!(gray.last(), Some(&u16::MAX));
             assert!(gray[1] > 0 && gray[1] < u16::MAX);
         }
+    }
+
+    /// The statistics buffer's longer side never exceeds `STATS_MAX`, a frame
+    /// already that small stays at full resolution, and the step depends on the
+    /// frame size alone.
+    #[test]
+    fn stats_step_caps_the_longer_side() {
+        for size in [[1, 1], [512, 300], [513, 10], [3000, 4096], [16384, 200]] {
+            let r = Region::whole(size, stats_step(size));
+            assert!(
+                r.out[0].max(r.out[1]) <= STATS_MAX,
+                "{size:?} -> {:?}",
+                r.out
+            );
+        }
+        assert_eq!(stats_step([512, 300]), 1);
+        assert_eq!(stats_step([3000, 4096]), 8);
+    }
+
+    /// The statistics are the whole frame's 8-bit render at `stats_step`.
+    #[test]
+    fn stats_cover_the_whole_frame() {
+        let f = FrameData::new(
+            [1100, 700],
+            1,
+            Samples::U16(crate::testutil::gray16_page(1100, 700, 5)),
+        );
+        let (lo, hi) = crate::tone::frame_bounds(&f, None, None);
+        let mut lut = ToneLut::default();
+        let mut stats = Vec::new();
+        let size = render_stats(&f, lo, hi, &mut lut, &mut stats);
+        assert_eq!(size, [367, 234]);
+        assert_eq!(stats.len(), 367 * 234);
+
+        let mut gray = Vec::new();
+        f.render_gray_u16_lut(lo, hi, Region::whole(f.size, 3), &mut lut, &mut gray);
+        let want: Vec<u8> = gray.iter().map(|&s| (s >> 8) as u8).collect();
+        assert_eq!(stats, want);
     }
 
     #[test]

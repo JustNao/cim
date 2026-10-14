@@ -845,10 +845,12 @@ to a 188x256 base magnified over the whole cell the moment the zoom fell below t
 point, playing or paused, while the identical pane on Linear was perfect
 (`an_operator_pane_without_a_region_renders_full_resolution`). An operator pane whose plan
 declines now renders classically, exactly as with the setting off; only a huge one still sits on
-a bare `BASE_MAX` base, where a displayable pane beats an undisplayable one. So
-LUT_ALPHA's
-auto-contrast becomes **view-dependent**, and the **export — still whole-image ops — differs**
-from the adaptive display; both are accepted and the Settings hover says so. `PaneOps` keeps a
+a bare `BASE_MAX` base, where a displayable pane beats an undisplayable one. The operators
+therefore transform only the reduced region, and the **export — still whole-image ops —
+differs** from the adaptive display. LUT_ALPHA's **global statistics** do not: its `apply`
+also takes `stats8`, a ≤ `STATS_MAX` (512) px 8-bit render of the **whole** frame
+(`imageproc::render_stats`, at `stats_step`, a function of the frame size alone), so its
+auto-contrast does not re-stretch to the view and matches export's. `PaneOps` keeps a
 per-size instance LRU (`INSTANCES_PER_OP` = 3) so base/region size alternation can't thrash
 the heavy C++ `create`/`destroy`.
 
