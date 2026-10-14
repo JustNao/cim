@@ -1774,27 +1774,27 @@ impl CimApp {
     /// pane discovers only as fast as it decodes, and `frame_disp` would clamp
     /// it to its last discovered frame while the others ran on. A shorter but
     /// fully-discovered sequence doesn't hold anything back; it rests on its
-    /// last frame while the timeline plays on.
+    /// last frame while the timeline plays on — and neither does a still-
+    /// discovering one that already reaches past the timeline (see
+    /// [`limit_by_frontiers`]).
     pub(super) fn playback_limit(&self) -> (usize, bool) {
-        let mut len = self.transport_len();
-        let mut at_end = self.transport_at_end();
+        let len = self.transport_len();
+        let at_end = self.transport_at_end();
         // An unsynced pane owning the transport plays *alone* — no other pane's
         // frontier can hold it back, since no other pane advances with it.
         if self.transport_own() {
             return (len, at_end);
         }
         let ctrl = self.loop_control();
-        for i in self.displayed_indices() {
+        let frontiers = self.displayed_indices().into_iter().filter_map(|i| {
             let p = &self.panes[i];
             // An errored pane has stopped discovering — don't stall playback on a
             // frontier that will never move.
-            if i == ctrl || !p.sync_temporal || p.media.at_end() || p.error.is_some() {
-                continue;
-            }
-            len = len.min(p.media.frame_count().max(1));
-            at_end = false;
-        }
-        (len, at_end)
+            let discovering =
+                i != ctrl && p.sync_temporal && !p.media.at_end() && p.error.is_none();
+            discovering.then(|| p.media.frame_count().max(1))
+        });
+        limit_by_frontiers(len, at_end, frontiers)
     }
 
     /// Jump the shared timeline to `target`. Within the discovered length this is
@@ -2635,6 +2635,31 @@ pub(super) fn cpp_lib_dir(config: &Config) -> Option<PathBuf> {
     default_cpp_lib_dir()
 }
 
+/// The playback length and end-state for a timeline of `len` frames (`at_end`
+/// once its true end is known), held back by the `frontiers` — the discovered
+/// lengths of the other on-screen synced sequences still discovering theirs.
+///
+/// Only a frontier **short of the timeline** holds it: there the other pane
+/// would be clamped to its last discovered frame while this one ran on, so
+/// playback waits for it (length cut to that frontier, end not yet known).
+/// One that already reaches `len` covers every frame the timeline will show,
+/// so it can't hold anything back — counting it anyway is what kept a short
+/// Control from ever wrapping: playback sat at its last frame, "waiting" for a
+/// longer sequence's undiscovered end that the loop never needs.
+fn limit_by_frontiers(
+    mut len: usize,
+    mut at_end: bool,
+    frontiers: impl IntoIterator<Item = usize>,
+) -> (usize, bool) {
+    for n in frontiers {
+        if n < len {
+            len = n;
+            at_end = false;
+        }
+    }
+    (len, at_end)
+}
+
 /// Wrap a degree value into the (-180, 180] range used by the rotation control.
 fn wrap180(mut d: f32) -> f32 {
     d %= 360.0;
@@ -2755,5 +2780,29 @@ fn region_view(reg: Rect) -> ViewTransform {
         zoom: 1.0,
         center: reg.center().to_vec2(),
         needs_fit: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::limit_by_frontiers;
+
+    /// A short, fully-discovered Control beside longer sequences still
+    /// discovering their length: they already cover its every frame, so the
+    /// timeline keeps its true end and playback can wrap. Only a frontier short
+    /// of the timeline holds it back.
+    #[test]
+    fn only_a_frontier_short_of_the_timeline_holds_playback() {
+        // Nothing else discovering: the timeline as is.
+        assert_eq!(limit_by_frontiers(50, true, []), (50, true));
+        // Longer sequences still discovering (frontiers at 80 and exactly 50)
+        // can't hold a 50-frame timeline: it wraps at its known end.
+        assert_eq!(limit_by_frontiers(50, true, [80, 50]), (50, true));
+        // One behind the timeline holds it at its frontier, end not yet known.
+        assert_eq!(limit_by_frontiers(50, true, [80, 30]), (30, false));
+        // The slowest frontier wins.
+        assert_eq!(limit_by_frontiers(50, true, [40, 30, 45]), (30, false));
+        // A Control still discovering its own end stays not-at-end.
+        assert_eq!(limit_by_frontiers(50, false, [80]), (50, false));
     }
 }

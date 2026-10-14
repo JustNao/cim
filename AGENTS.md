@@ -1295,7 +1295,11 @@ the fast pane's pace while the new pane's frontier only crept forward as it deco
 `frame_disp` clamped it to its last discovered frame, so the panes drifted onto
 *different* frames while appearing to play together. Only a **still-discovering** pane
 holds it back: a genuinely shorter, fully-discovered sequence keeps holding on its last
-frame as before, and an errored one (discovery stopped) never stalls playback. The pane
+frame as before, and an errored one (discovery stopped) never stalls playback. Nor does
+a still-discovering one whose frontier **already reaches the timeline length**
+(`limit_by_frontiers`): it covers every frame the timeline shows, and counting it (clearing
+`at_end`) left a short Control unable to wrap — playback held on its last frame waiting
+for the longer sequence's end, which the loop never needs. The pane
 being waited on catches up by **probe**, not decode (`catching_up`, §4), and a
 fast-scannable one usually needs no wait at all — the background offset scan (§4)
 completes its length outright. **The manual next/previous-frame controls obey the same window**
