@@ -26,13 +26,6 @@
 //   * `data` is a single-channel 16-bit buffer, `len == width * height` u16
 //     samples, one per pixel, row-major (`len` is passed so you can bounds-check).
 //   * `apply` transforms it IN PLACE and keeps the same dimensions.
-//   * LUT_ALPHA's `apply` also takes `stats8`, a small 8-bit render of the WHOLE
-//     frame for its global statistics: `stats_w * stats_h` samples, row-major,
-//     READ-ONLY. It is the same full-range render `data` comes from, decimated so
-//     its longer side is at most 512, then downscaled to 8 bits. Under adaptive
-//     rendering `data` may be only the visible region (and `len` its size), but
-//     `stats8` always covers the whole frame — so derive global statistics from
-//     `stats8`, and transform `data`.
 //   * DETAILS_ENHANCED's `apply` takes a SECOND buffer, `lut8`: the after-LUT
 //     8-bit companion of the same frame — the CURRENT VIEW LUT output, i.e. the
 //     exact grayscale the pane is showing (LUT_ALPHA / Boost applied if that's the
@@ -60,16 +53,12 @@ extern "C" {
 
 // ---- LUT_ALPHA: auto-contrast tone mapping (libcim_lut_alpha.so) -----------
 CIM_EXPORT void* cim_lut_alpha_create(std::size_t width, std::size_t height);
-// `stats8` (read-only, `stats_w * stats_h` samples) is the whole-frame statistics
-// buffer; transform `data` (16-bit, `len` samples) in place.
-CIM_EXPORT void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len,
-                                    const std::uint8_t* stats8, std::size_t stats_w,
-                                    std::size_t stats_h);
+CIM_EXPORT void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len);
 CIM_EXPORT void cim_lut_alpha_destroy(void* handle);
 
 // ---- Boost: alternative auto-contrast tone mapping (libcim_boost.so) --------
-// Same tone contract as LUT_ALPHA (full native range in, its own contrast out),
-// but no statistics buffer; a pane uses one or the other, never both.
+// Same contract as LUT_ALPHA (full native range in, its own contrast out); a
+// pane uses one or the other, never both.
 CIM_EXPORT void* cim_boost_create(std::size_t width, std::size_t height);
 CIM_EXPORT void cim_boost_apply(void* handle, std::uint16_t* data, std::size_t len);
 CIM_EXPORT void cim_boost_destroy(void* handle);

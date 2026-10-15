@@ -40,11 +40,10 @@ names (`extern "C"`, unmangled):
 ```cpp
 // libcim_lut_alpha.so
 extern "C" void* cim_lut_alpha_create(size_t width, size_t height);
-extern "C" void  cim_lut_alpha_apply(void* handle, uint16_t* data, size_t len,
-                                     const uint8_t* stats8, size_t stats_w, size_t stats_h);
+extern "C" void  cim_lut_alpha_apply(void* handle, uint16_t* data, size_t len);
 extern "C" void  cim_lut_alpha_destroy(void* handle);
 
-// libcim_boost.so — same tone contract as LUT_ALPHA, without `stats8`
+// libcim_boost.so — same shape and contract as LUT_ALPHA
 extern "C" void* cim_boost_create(size_t width, size_t height);
 extern "C" void  cim_boost_apply(void* handle, uint16_t* data, size_t len);
 extern "C" void  cim_boost_destroy(void* handle);
@@ -61,15 +60,6 @@ native range** (the clip, Share clip, region-tone and export-crop windows all sk
 both — one predicate, `ContrastMode::is_operator`), computes its own contrast, and
 a pane runs one or the other, never both. DETAILS_ENHANCED, when on, runs after
 whichever it is.
-
-**LUT_ALPHA's `apply` takes a whole-frame statistics buffer, `stats8`**: a
-small 8-bit render of the **whole** frame, `stats_w * stats_h` samples, row-major,
-**read-only**. It is the same full-range render `data` comes from, decimated so
-its longer side is at most 512 (`STATS_MAX` / `stats_step` in
-`src/imageproc.rs`), then downscaled to 8 bits. Under adaptive rendering `data`
-may be only the visible region, but `stats8` always covers the whole frame and
-depends on nothing but the frame — so take **global statistics** from `stats8`
-and transform `data`. The live view and the export then agree on them.
 
 **DETAILS_ENHANCED's `apply` takes a second buffer, `lut8`** — the **after-LUT
 8-bit** companion of the same frame: the **current view LUT output**, i.e. the
@@ -88,8 +78,7 @@ context; never write `lut8`.
 - **`apply(handle, data, len)`** runs per frame. `data` is a **single-channel
   16-bit** buffer, `len == width * height` samples (one per pixel), row-major.
   Transform it **in place**, keep the same dimensions. cim reuses the instance
-  across the pane's frames. **LUT_ALPHA's `apply` additionally takes `stats8`,
-  `stats_w`, `stats_h`** after `len` (see above). **DETAILS_ENHANCED's `apply` additionally takes
+  across the pane's frames. **DETAILS_ENHANCED's `apply` additionally takes
   `lut8`** — a read-only `len`-sample 8-bit companion (the after-LUT look) —
   before `len` (see the ABI block above).
 - **`destroy(handle)`** frees the instance (pane closed / reloaded / resized).
