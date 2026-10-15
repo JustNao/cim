@@ -153,6 +153,12 @@ transform.clip: Écrêtage
 transform.clip_hover: Écrêter un percentile de chaque extrémité avant l'étirement
 transform.clip_percent_hover: Percentile écrêté à chaque extrémité avant l'étirement
 transform.clip_reset_hover: Rétablir la valeur par défaut (%{pct} %)
+transform.manual: Manuel
+transform.manual_hover: La courbe de tons a été modifiée sur l'histogramme
+transform.manual_reset_hover: Revenir à la courbe automatique (percentile d'écrêtage)
+transform.curve_hover: >-
+  Courbe de tons (valeur → niveau affiché). Glissez un point pour le déplacer,
+  cliquez pour en ajouter un, clic droit sur un point pour le supprimer.
 transform.global_stats: Statistiques globales
 transform.global_stats_hover: >-
   Étirer depuis le min/max de toutes les images de ce média en mémoire, au lieu
@@ -559,6 +565,7 @@ cli.help: |
           --clip <C,C,...>         Écrêtage linéaire par panneau : off | POURCENT
           --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)
           --global-stats <B,B,...> Min/max de toutes les images en mémoire par panneau (1/0)
+          --curve <K,K,...>        Courbe de tons par panneau : auto | VALEUR:NIVEAU/VALEUR:NIVEAU/...
           --detail <B,B,...>       Bascules DETAILS_ENHANCED par panneau (1/0)
           --show <B,B,...>         Visibilité par panneau (1/0)
           --scale <B,B,...>        Mise à la taille du média Contrôle par panneau (1/0)

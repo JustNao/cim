@@ -913,12 +913,16 @@ impl CimApp {
         // GPU mode takes those renders itself (queued, not awaited). Heavy panes
         // are excluded: the operators are CPU code owned by the pane's render
         // thread. `step == 1` is required because `tone_into` always renders at
-        // full resolution; a decimated pane would never match the commit.
-        if bulk && step == 1 && self.gpu.is_some() {
-            let (lo, hi) = self.tone_bounds(idx, &frame);
+        // full resolution; a decimated pane would never match the commit. A
+        // float frame is mapped arithmetically by the shader from `[lo, hi]`
+        // alone, so one on a bent (manual) curve stays on the CPU.
+        if bulk
+            && step == 1
+            && self.gpu.is_some()
+            && (!frame.is_float() || self.tone_curve(idx, &frame).is_linear())
+        {
             let tone = crate::gpu::Tone {
-                lo,
-                hi,
+                curve: self.tone_curve(idx, &frame),
                 palette: cmap.then(|| self.visual(idx).tone.palette),
             };
             let pane_id = self.panes[idx].id;
@@ -954,15 +958,13 @@ impl CimApp {
             // frame changes coalesce instead of piling up jobs.
             let id = self.panes[idx].id;
             if !self.work.render_inflight.contains(&id) {
-                let (lo, hi) = self.tone_bounds(idx, &frame);
                 self.work.renderer.request(crate::renderer::RenderJob {
                     id,
                     frame: target,
                     sig,
                     data: frame.clone(),
                     tone: crate::imageproc::Display {
-                        lo,
-                        hi,
+                        curve: self.tone_curve(idx, &frame),
                         palette: cmap.then(|| self.visual(idx).tone.palette),
                         ops,
                     },
@@ -982,7 +984,7 @@ impl CimApp {
             // the full-resolution band, decimate to ~display resolution so a grid
             // of panes doesn't render/copy/upload far more pixels than the screen
             // can show (each dropped sample is still a true source value).
-            let (lo, hi) = self.tone_bounds(idx, &frame);
+            let curve = self.tone_curve(idx, &frame);
             let debug = crate::debug::enabled();
             let t = debug.then(std::time::Instant::now);
             // Rendered straight into egui's pixel type (see `media::RgbaSink`):
@@ -1000,8 +1002,8 @@ impl CimApp {
             let lut = &mut self.panes[idx].tex.lut;
             crate::cpu::install(|| match palette {
                 // Colormap: false-colour the mono frame through the palette.
-                Some(pal) => frame.render_cmap(lo, hi, region, pal, lut, &mut pixels),
-                None => frame.render_lut(lo, hi, region, lut, &mut pixels),
+                Some(pal) => frame.render_cmap(curve, region, pal, lut, &mut pixels),
+                None => frame.render_lut(curve, region, lut, &mut pixels),
             });
             if let Some(t) = t {
                 self.metrics.lut.record(t.elapsed());
@@ -1097,6 +1099,7 @@ impl CimApp {
                 self.visual(ci).contrast.label().hash(&mut h);
                 ct.clip.enabled.hash(&mut h);
                 ct.clip.percent.to_bits().hash(&mut h);
+                self.manual_curve(ci).hash(&mut h);
                 // The Control's global bounds move as its frames load / evict.
                 ct.global.hash(&mut h);
                 hash_bounds(self.global_bounds(ci), &mut h);
@@ -1111,6 +1114,8 @@ impl CimApp {
         // (and may narrow on eviction), so hash the bounds themselves.
         tone.global.hash(&mut h);
         hash_bounds(self.global_bounds(idx), &mut h);
+        // A manual curve replaces the computed window outright.
+        tone.curve.hash(&mut h);
         // The Colormap palette changes the rendered colour.
         tone.palette.id().hash(&mut h);
         self.visual(idx).details.hash(&mut h);
@@ -1138,23 +1143,38 @@ impl CimApp {
         h.finish()
     }
 
-    /// The linear display bounds `[lo, hi]` for pane `idx`'s current tone: the
-    /// per-tail percentile clip, the full range / float extent, or — when
-    /// region-tone is pinned — the shared stats region's bounds. With "Share
-    /// clip" on, the Control media's bounds are used instead so panes lock to
-    /// identical bounds.
-    pub(super) fn tone_bounds(&self, idx: usize, frame: &media::FrameData) -> (f32, f32) {
+    /// The tone curve pane `idx` renders through. With "Share clip" on, the
+    /// Control media's own curve, so panes lock to an identical tone; otherwise
+    /// this pane's own ([`own_tone_curve`](Self::own_tone_curve)).
+    pub(super) fn tone_curve(&self, idx: usize, frame: &media::FrameData) -> Curve {
         let contrast = self.visual(idx).contrast;
         let tone = self.visual(idx).tone;
-        // "Share clip" locks the bounds to the Control media's own bounds (but
-        // not for an operator tone, which does its own contrast). Falls through
-        // to this pane's own bounds when the Control frame isn't resident yet.
+        // "Share clip" locks the tone to the Control media's own (but not for an
+        // operator tone, which does its own contrast). Falls through to this
+        // pane's own tone when the Control frame isn't resident yet.
         if !contrast.is_operator() && tone.share_clip {
-            if let Some(b) = self.control_clip_bounds() {
-                return b;
+            if let Some(c) = self.control_curve() {
+                return c;
             }
         }
-        self.own_tone_bounds(idx, frame)
+        self.own_tone_curve(idx, frame)
+    }
+
+    /// A pane's *own* tone curve, ignoring "Share clip" (so it can be read for
+    /// the Control media itself without recursing): its manual curve, else the
+    /// linear window over its own display bounds.
+    fn own_tone_curve(&self, idx: usize, frame: &media::FrameData) -> Curve {
+        self.manual_curve(idx).unwrap_or_else(|| {
+            let (lo, hi) = self.own_tone_bounds(idx, frame);
+            Curve::linear(lo, hi)
+        })
+    }
+
+    /// Pane `idx`'s manual tone curve, when it has one and its tone uses it (not
+    /// an operator tone, which does its own contrast).
+    pub(super) fn manual_curve(&self, idx: usize) -> Option<Curve> {
+        let v = self.visual(idx);
+        v.tone.curve.filter(|_| !v.contrast.is_operator())
     }
 
     /// A pane's *own* display bounds (its clip / full-range map, or its region
@@ -1242,12 +1262,12 @@ impl CimApp {
             .map(|(c, fr)| (c, std::sync::Arc::as_ptr(&fr) as usize))
     }
 
-    /// The Control media's own display bounds `[lo, hi]` for its current frame,
-    /// applied to any pane with "Share clip" on. `None` when the Control frame
-    /// isn't resident yet (the pane then falls back to its own bounds).
-    pub(super) fn control_clip_bounds(&self) -> Option<(f32, f32)> {
+    /// The Control media's own tone curve for its current frame, applied to any
+    /// pane with "Share clip" on. `None` when the Control frame isn't resident
+    /// yet (the pane then falls back to its own tone).
+    pub(super) fn control_curve(&self) -> Option<Curve> {
         let (c, fr) = self.control_frame()?;
-        Some(self.own_tone_bounds(c, &fr))
+        Some(self.own_tone_curve(c, &fr))
     }
 
     /// Ensure the tinted overlay texture for pane `idx` is current, returning it

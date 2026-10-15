@@ -118,6 +118,9 @@ src/
                  plain parameters, so both sides can call it without either's state.
   view.rs        ViewTransform: zoom/pan/fit math (screen <-> image space).
   palette.rs     Colour palettes (viridis/turbo/diverging) for the Colormap tone.
+  curve.rs       Curve: the piecewise-linear tone curve (value -> 0..=255 level)
+                 every render maps through; `Curve::linear(lo, hi)` is the
+                 classic window. Fixed capacity (16 points) so it stays `Copy`.
   settings.rs    Config, keybindings, ContrastMode/ToneOptions; JSON persist.
   export.rs      Export engine: ExportPlan composition + ffmpeg Encoder.
   testutil.rs    #[cfg(test)] synthetic fixture generators (multi-page TIFF, PNG
@@ -942,6 +945,21 @@ with a global Control too, instead of the per-frame `ControlBounds`).
 
 (The old separate **Linear + Clip** mode was folded into Linear's clip toggle.)
 
+**Tone curve (`crate::curve::Curve`).** Every render maps through a `Curve` — points
+`(native value, display level 0..=255)` joined linearly and held flat past either end — not
+a bare `(lo, hi)`. All the bounds machinery above still yields `[lo, hi]`, wrapped as
+`Curve::linear(lo, hi)`, whose map is **bit-identical** to the old `(s - lo) * 255/(hi - lo)`
+(empty and inverted windows included; `a_linear_curve_maps_exactly_like_the_old_window`). A
+**manual** curve, `ToneOptions::curve` (`None` = automatic), is edited on the
+Transformations histogram (§9) and **overrides the clip, global statistics and region tone**,
+but not Share clip, which locks to the Control's curve (`tone_curve` → `control_curve` →
+`own_tone_curve`, falling back to `own_tone_bounds`; `manual_curve` is the one predicate,
+ignoring operator tones). `ToneLut`, `imageproc::Display`, `gpu::Tone`, thumbnails
+(`thumbs::Window::Fixed`) and `ExportPane::window` all carry the curve; the 16-bit operator
+input scales its levels by 257. The GPU's **float** kernel only maps `[lo, hi]`
+arithmetically, so `stage` keeps a float frame on a non-linear curve on the CPU (integer
+frames index the table, which carries any curve). Round-tripped by `--curve`.
+
 Plus a per-pane **DETAILS_ENHANCED** toggle. The proprietary operators
 (`imageproc.rs`) run on a **single-channel 16-bit** render
 (`render_into_gray_u16`, mapping the same `[lo,hi]` bounds to `[0,65535]`, one
@@ -1623,7 +1641,13 @@ into two collapsible groups, each with its own **Sync** toggle:
 - **Geometry** (collapsed by default): the **Rotate** control. Its Sync toggle drives
   `set_sync_geometry`.
 Below the groups the pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`,
-cached per pane) is **always** shown. Flipping a group's Sync toggle skips that group's
+cached per pane) is **always** shown. For a Linear / Colormap, non-mask pane it carries the
+pane's **tone curve** (§7): value across (the frame's extent, widened to the curve's ends),
+level up. Its points are handles — **drag** to move (clamped between neighbours), **left-click**
+empty graph to add a point (and keep dragging it), **right-click** a point to remove it (≥ 2
+stay). The first edit seeds `ToneOptions::curve` from the automatic curve on screen, so
+nothing jumps; the clip row then reads **Manual** with a Reset back to automatic, and the
+Global statistics checkbox greys. Under Share clip the curve is the Control's, read-only. Flipping a group's Sync toggle skips that group's
 edit writeback that frame (`vis_sync_changed`/`geo_sync_changed`) so enabling sync makes
 the pane *adopt* the shared set rather than push its own values into it.
 A tone edit **does not null the texture**: it only changes the pane's `tone_sig`,
@@ -2073,7 +2097,9 @@ opening never blocks the UI thread.
   `linearclip`/`clip` are accepted as deprecated aliases for `linear`), `--clip`
   (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
   at each pane's depth default), `--share-clip` (per-pane `1`/`0` — lock the pane's bounds
-  to the Control media's), `--detail` (per-pane `1`/`0`),
+  to the Control media's), `--curve` (per-pane tone curve: `auto` or a manual curve's
+  points `VALUE:LEVEL/VALUE:LEVEL/...`, emitted only when some pane is manual),
+  `--detail` (per-pane `1`/`0`),
   `--show` (per-pane visibility), `--scale` (per-pane Scale to the Control's size), `--tsync` (per-pane Visualization-sync),
   `--gsync` (per-pane Geometry-sync — rotation), `--rotate` (per-pane display rotation
   in degrees, `-180..180`), `--loop LO,HI`, `--name N=TEXT` (repeatable: pane `N`'s

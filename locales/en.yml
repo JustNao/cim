@@ -144,6 +144,12 @@ transform.clip: Clip
 transform.clip_hover: Clip a percentile off each tail before the stretch
 transform.clip_percent_hover: Percentile clipped at each tail before the stretch
 transform.clip_reset_hover: Reset to the default (%{pct} %)
+transform.manual: Manual
+transform.manual_hover: The tone curve was edited on the histogram
+transform.manual_reset_hover: Back to the automatic curve (clip percentile)
+transform.curve_hover: >-
+  Tone curve (value → display level). Drag a point to move it, click to add one,
+  right-click a point to remove it.
 transform.global_stats: Global statistics
 transform.global_stats_hover: >-
   Stretch from the min/max over every frame of this media in memory, instead of
@@ -532,6 +538,7 @@ cli.help: |
           --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
           --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)
           --global-stats <B,B,...> Per-pane min/max over all frames in memory (1/0)
+          --curve <K,K,...>        Per-pane tone curve: auto | VALUE:LEVEL/VALUE:LEVEL/...
           --detail <B,B,...>       Per-pane DETAILS_ENHANCED toggles (1/0)
           --show <B,B,...>         Per-pane visibility / show-hide (1/0)
           --scale <B,B,...>        Per-pane scale to the Control media's size (1/0)

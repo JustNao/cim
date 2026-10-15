@@ -170,6 +170,13 @@ impl CimApp {
                 p.sync_tone = false;
             }
         }
+        // Per-pane manual tone curves (`--curve`), likewise per-pane.
+        if let Some(curves) = &vs.curves {
+            for (p, c) in self.panes.iter_mut().zip(curves) {
+                p.visual.tone.curve = *c;
+                p.sync_tone = false;
+            }
+        }
         if let Some(details) = &vs.details {
             for (p, d) in self.panes.iter_mut().zip(details) {
                 p.visual.details = *d;
@@ -373,6 +380,13 @@ impl CimApp {
                     "--global-stats {}",
                     flags(&|i| self.visual(i).tone.global)
                 ));
+                per_pane_transform = true;
+            }
+            if (0..n).any(|i| self.visual(i).tone.curve.is_some()) {
+                let curves: Vec<String> = (0..n)
+                    .map(|i| cli::curve_arg(self.visual(i).tone.curve.as_ref()))
+                    .collect();
+                parts.push(format!("--curve {}", curves.join(",")));
                 per_pane_transform = true;
             }
             if (0..n).any(|i| self.visual(i).details) {

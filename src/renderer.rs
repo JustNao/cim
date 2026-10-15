@@ -255,6 +255,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::Curve;
     use crate::media::{Region, Samples};
 
     /// The worker's output must equal the plain LUT render byte-for-byte when
@@ -296,8 +297,7 @@ mod tests {
                 sig: 9,
                 data: frame.clone(),
                 tone: crate::imageproc::Display {
-                    lo,
-                    hi,
+                    curve: Curve::linear(lo, hi),
                     palette: None,
                     ops,
                 },
@@ -336,8 +336,7 @@ mod tests {
             sig: 9,
             data: frame.clone(),
             tone: crate::imageproc::Display {
-                lo,
-                hi,
+                curve: Curve::linear(lo, hi),
                 palette: None,
                 // Library absent → plain fallback, still the region path.
                 ops: crate::imageproc::Ops {
@@ -353,7 +352,12 @@ mod tests {
         assert_eq!((done.region, done.target), (region, Target::Viewport));
 
         let mut reference = Vec::<Color32>::new();
-        frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut reference);
+        frame.render_lut(
+            Curve::linear(lo, hi),
+            region,
+            &mut ToneLut::default(),
+            &mut reference,
+        );
         assert_eq!(done.image.pixels, reference);
 
         // A decimated whole-image job (an adaptive base) sizes to the decimated
@@ -365,8 +369,7 @@ mod tests {
             sig: 9,
             data: frame.clone(),
             tone: crate::imageproc::Display {
-                lo,
-                hi,
+                curve: Curve::linear(lo, hi),
                 palette: None,
                 ops: crate::imageproc::Ops::default(),
             },
@@ -402,8 +405,7 @@ mod tests {
         let (lo, hi) = (500.0, 60000.0);
         let pal = Palette::Viridis;
         let tone = crate::imageproc::Display {
-            lo,
-            hi,
+            curve: Curve::linear(lo, hi),
             palette: Some(pal),
             // A Colormap pane never runs operators; set them anyway to pin that
             // the palette branch wins regardless.
@@ -434,13 +436,24 @@ mod tests {
                 target: Target::Viewport,
             });
             let mut want = Vec::<Color32>::new();
-            frame.render_cmap(lo, hi, region, pal, &mut ToneLut::default(), &mut want);
+            frame.render_cmap(
+                Curve::linear(lo, hi),
+                region,
+                pal,
+                &mut ToneLut::default(),
+                &mut want,
+            );
             assert_eq!(done.image.pixels, want, "{region:?}");
 
             // And it is genuinely not the grey render — otherwise this test
             // would pass on the very bug it exists for.
             let mut grey = Vec::<Color32>::new();
-            frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut grey);
+            frame.render_lut(
+                Curve::linear(lo, hi),
+                region,
+                &mut ToneLut::default(),
+                &mut grey,
+            );
             assert_ne!(done.image.pixels, grey, "{region:?} rendered grey");
         }
     }
@@ -466,10 +479,20 @@ mod tests {
         // The byte sink has no parallel path, so it *is* the serial reference.
         let whole = Region::whole(f.size, 1);
         let mut serial = Vec::<u8>::new();
-        f.render_lut(lo, hi, whole, &mut ToneLut::default(), &mut serial);
+        f.render_lut(
+            Curve::linear(lo, hi),
+            whole,
+            &mut ToneLut::default(),
+            &mut serial,
+        );
 
         let mut par = Vec::<Color32>::new();
-        f.render_lut(lo, hi, whole, &mut ToneLut::default(), &mut par);
+        f.render_lut(
+            Curve::linear(lo, hi),
+            whole,
+            &mut ToneLut::default(),
+            &mut par,
+        );
         assert_eq!(par.len() * 4, serial.len());
         for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
             assert_eq!(p.to_array(), s, "grey pixel {i}");
@@ -478,9 +501,21 @@ mod tests {
         // Same for the Colormap tone, which takes the `par_rgb` branch.
         let pal = crate::palette::Palette::Viridis;
         let mut serial = Vec::<u8>::new();
-        f.render_cmap(lo, hi, whole, pal, &mut ToneLut::default(), &mut serial);
+        f.render_cmap(
+            Curve::linear(lo, hi),
+            whole,
+            pal,
+            &mut ToneLut::default(),
+            &mut serial,
+        );
         let mut par = Vec::<Color32>::new();
-        f.render_cmap(lo, hi, whole, pal, &mut ToneLut::default(), &mut par);
+        f.render_cmap(
+            Curve::linear(lo, hi),
+            whole,
+            pal,
+            &mut ToneLut::default(),
+            &mut par,
+        );
         for (i, (p, s)) in par.iter().zip(serial.chunks_exact(4)).enumerate() {
             assert_eq!(p.to_array(), s, "colormap pixel {i}");
         }

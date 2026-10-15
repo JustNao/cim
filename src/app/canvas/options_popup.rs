@@ -367,7 +367,7 @@ impl CimApp {
                 ui.separator();
                 ui.strong(t!("transform.histogram"));
                 if have_hist {
-                    self.draw_histogram(ui, idx);
+                    self.draw_histogram(ui, idx, contrast, &mut tone);
                 } else {
                     ui.label(
                         egui::RichText::new(t!("transform.frame_not_loaded"))
@@ -504,17 +504,26 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     // Transformations sync, the clip toggle/percentile edited on any synced pane
     // is the very statistic the Control media derives its shared [lo, hi] from.
     // Global statistics do replace the clip outright, so the row greys under them.
+    // A manual curve (edited on the histogram) replaces both: the row then says
+    // so, and its Reset returns to the automatic curve.
     ui.label(t!("transform.clip"));
-    ui.add_enabled_ui(!tone.global, |ui| {
-        ui.horizontal(|ui| draw_clip(ui, tone));
-    });
+    if tone.curve.is_some() {
+        ui.horizontal(|ui| draw_manual(ui, tone));
+    } else {
+        ui.add_enabled_ui(!tone.global, |ui| {
+            ui.horizontal(|ui| draw_clip(ui, tone));
+        });
+    }
     ui.end_row();
 
     // Global statistics: the min/max over every frame of the media in memory,
     // one fixed stretch for the whole sequence.
     ui.label(t!("transform.global_stats"));
-    ui.add(egui::Checkbox::without_text(&mut tone.global))
-        .on_hover_text(t!("transform.global_stats_hover"));
+    ui.add_enabled(
+        tone.curve.is_none(),
+        egui::Checkbox::without_text(&mut tone.global),
+    )
+    .on_hover_text(t!("transform.global_stats_hover"));
     ui.end_row();
 
     // Share clip: apply the Control media's exact [lo, hi] LUT to every pane, so
@@ -524,6 +533,20 @@ fn draw_clip_and_share(ui: &mut egui::Ui, tone: &mut ToneOptions) {
     ui.add(egui::Checkbox::without_text(&mut tone.share_clip))
         .on_hover_text(t!("transform.share_clip_hover"));
     ui.end_row();
+}
+
+/// The clip row under a manual curve: "Manual" in place of the percentile, and
+/// the reset button back to the automatic curve.
+fn draw_manual(ui: &mut egui::Ui, tone: &mut ToneOptions) {
+    ui.label(egui::RichText::new(t!("transform.manual")).italics())
+        .on_hover_text(t!("transform.manual_hover"));
+    if ui
+        .button(t!("transform.reset"))
+        .on_hover_text(t!("transform.manual_reset_hover"))
+        .clicked()
+    {
+        tone.curve = None;
+    }
 }
 
 /// The clip toggle, its percentile and the reset button.

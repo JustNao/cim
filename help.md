@@ -31,6 +31,16 @@
 - **Drag a bracket** (`[` or `]`) — set the loop range; playback and _Use loop
   range_ in the Export panel follow it.
 
+## Transformations histogram (tone curve)
+
+- The line over the histogram is the **tone curve**: native value across,
+  display level (0–255) up. By default it runs from 0 to 255 between the two
+  clip points.
+- **Drag a point** — move it. **Click** the graph — add a point there (keep
+  holding to drag it). **Right-click a point** — remove it.
+- Once edited, the clip row shows **Manual**; its **Reset** returns to the
+  automatic curve.
+
 ## Media manager
 
 - **Drag the ⠿ handle** — reorder the media rows.

@@ -19,6 +19,7 @@ use eframe::egui::{Color32, Pos2, Rect, Vec2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::curve::Curve;
 use crate::media::{FrameData, SeqReader, VideoReader};
 use crate::settings::ContrastMode;
 use crate::tone::{frame_bounds, synced_index};
@@ -131,13 +132,14 @@ pub struct ExportPane {
     /// `None` maps the full range. Snapshotted from the pane's tone (LUT_ALPHA
     /// always `None` — it takes the full range and does its own contrast).
     pub clip: Option<f32>,
-    /// Explicit display window `[lo, hi]` in native units, overriding `clip` when
-    /// `Some`. For a "Share clip" pane (`share_clip`) this is refreshed **per
-    /// exported frame** by `ExportPlan::compose` from the Control media's bounds
-    /// (so an animated Control is tracked, matching the live view). A pane on
-    /// **global statistics** — its own, or a Control's it shares — gets the live
-    /// global window here once, fixed for the whole export. Otherwise `None`.
-    pub window: Option<(f32, f32)>,
+    /// Explicit tone curve, overriding `clip` when `Some`. For a "Share clip"
+    /// pane (`share_clip`) this is refreshed **per exported frame** by
+    /// `ExportPlan::compose` from the Control media's bounds (so an animated
+    /// Control is tracked, matching the live view). A pane on a **manual curve**
+    /// or **global statistics** — its own, or a Control's it shares — gets that
+    /// curve / the live global window here once, fixed for the whole export.
+    /// Otherwise `None`.
+    pub window: Option<Curve>,
     /// Region (full-image space) this pane's bounds are computed over, or `None`
     /// for the whole frame — snapshotted from `CimApp::tone_region`, so a pane
     /// whose tone is pinned to the stats region exports with the bounds it
@@ -485,12 +487,15 @@ impl ExportPane {
         // coincide with the sampled crop box; with no region the cropped `sub` is
         // the subject, so a crop's auto-contrast is computed on the region the
         // output actually shows (and a full-view export skips the copy entirely).
-        let (lo, hi) = match self.window {
+        let curve = match self.window {
             Some(win) => win,
-            None => match self.region {
-                Some(_) => frame_bounds(&frame, self.clip, self.region),
-                None => frame_bounds(sub, self.clip, None),
-            },
+            None => {
+                let (lo, hi) = match self.region {
+                    Some(_) => frame_bounds(&frame, self.clip, self.region),
+                    None => frame_bounds(sub, self.clip, None),
+                };
+                Curve::linear(lo, hi)
+            }
         };
         let mut rgba = Vec::new();
         // Export always renders the whole (already cropped) sub-frame at full
@@ -507,8 +512,7 @@ impl ExportPane {
         self.ops.render_display(
             sub,
             crate::imageproc::Display {
-                lo,
-                hi,
+                curve,
                 palette: self
                     .palette
                     .filter(|_| crate::tone::uses_colormap(self.contrast, sub)),
@@ -895,7 +899,7 @@ impl ExportPlan {
             let win = ctrl.bounds_at(start + t);
             for p in &mut self.panes {
                 if p.share_clip {
-                    p.window = win;
+                    p.window = win.map(|(lo, hi)| Curve::linear(lo, hi));
                 }
             }
         }
@@ -2390,11 +2394,13 @@ mod tests {
             .expect("dec0")
             .expect("page0")
             .clip_bounds(0.5);
+        let want0 = Curve::linear(want0.0, want0.1);
         let want1 = reader
             .decode(1)
             .expect("dec1")
             .expect("page1")
             .clip_bounds(0.5);
+        let want1 = Curve::linear(want1.0, want1.1);
         assert_ne!(
             want0, want1,
             "control pages must differ so the test is meaningful"

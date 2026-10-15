@@ -1098,20 +1098,36 @@ impl CimApp {
         }
     }
 
-    pub(super) fn draw_histogram(&self, ui: &mut egui::Ui, idx: usize) {
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 140.0), Sense::hover());
+    /// The pane's histogram, with its **tone curve** over it whenever the tone
+    /// maps through one (Linear / Colormap, not a mask): native value across —
+    /// the histogram's own axis, widened to take in the curve's ends — display
+    /// level `0..=255` up.
+    ///
+    /// The curve's points are handles: drag one to move it, left-click the
+    /// graph to add one there (and keep dragging it), right-click one to remove
+    /// it. Any edit makes `tone` a **manual** curve (`ToneOptions::curve`),
+    /// seeded from the automatic one on screen so nothing jumps; the clip row's
+    /// Reset returns to automatic. Under "Share clip" the curve is the Control's
+    /// and is shown read-only.
+    pub(super) fn draw_histogram(
+        &self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        contrast: ContrastMode,
+        tone: &mut ToneOptions,
+    ) {
+        let (rect, resp) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), 140.0),
+            Sense::click_and_drag(),
+        );
         let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, Color32::from_gray(16));
 
         let Some(hist) = &self.panes[idx].hist else {
-            painter.rect_filled(rect, 0.0, Color32::from_gray(16));
             return;
         };
         let data = &hist.data;
-        let peak_val = draw_hist_curves(&painter, rect, data);
 
-        // True value extent under the graph: min at left, max at right, and the
-        // peak (mode) value centred between them in the tick's amber (mono only).
         // Whole numbers (integer sources) print plainly; floats get 4 digits.
         let fmt = |v: f32| -> String {
             if v.fract() == 0.0 {
@@ -1120,6 +1136,144 @@ impl CimApp {
                 format!("{v:.4}")
             }
         };
+
+        // The curve this pane renders through: the one being edited, else the
+        // automatic one `stage` computes (or the Control's, under Share clip).
+        let frame = self.panes[idx].media.resident(self.frame_disp(idx));
+        let integer = frame.as_ref().is_some_and(|f| !f.is_float());
+        let mut curve = frame
+            .filter(|f| !contrast.is_operator() && !f.is_mask())
+            .map(|f| match tone.curve.filter(|_| !tone.share_clip) {
+                Some(c) => c,
+                None => self.tone_curve(idx, &f),
+            });
+        let editable = curve.is_some() && !tone.share_clip;
+
+        // The value axis: the frame's extent, widened to the curve's ends.
+        let (mut a0, mut a1) = (data.min, data.max);
+        if let Some(c) = &curve {
+            a0 = a0.min(c.lo());
+            a1 = a1.max(c.hi());
+        }
+        if a1.partial_cmp(&a0) != Some(std::cmp::Ordering::Greater) {
+            a1 = a0 + 1.0; // a flat frame: any non-empty axis
+        }
+        let span = a1 - a0;
+        let x_of = |v: f32| rect.left() + (v - a0) / span * rect.width();
+        let y_of = |l: f32| rect.bottom() - l / crate::curve::LEVEL_MAX * rect.height();
+        // A pointer position as a curve point: values whole for an integer
+        // source, levels whole always, both inside the graph.
+        let point_at = |pos: Pos2| -> [f32; 2] {
+            let x = pos.x.clamp(rect.left(), rect.right());
+            let mut v = a0 + (x - rect.left()) / rect.width() * span;
+            if integer {
+                v = v.round();
+            }
+            let y = pos.y.clamp(rect.top(), rect.bottom());
+            let l = (rect.bottom() - y) / rect.height() * crate::curve::LEVEL_MAX;
+            [v.clamp(a0, a1), l.round()]
+        };
+        // The handle under `pos`, nearest first.
+        let hit = |c: &Curve, pos: Pos2| -> Option<usize> {
+            c.points()
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, Pos2::new(x_of(p[0]), y_of(p[1])).distance(pos)))
+                .filter(|&(_, d)| d <= CURVE_HANDLE_HIT)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+
+        let hist_rect = if curve.is_some() {
+            Rect::from_x_y_ranges(x_of(data.min)..=x_of(data.max), rect.y_range())
+        } else {
+            rect
+        };
+        let peak_val = draw_hist_curves(&painter, hist_rect, data);
+
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let drag_id = resp.id.with("curve_drag");
+        let mut active = None;
+        if let (Some(c), true) = (curve.as_mut(), editable) {
+            let mut edited = false;
+            let mut dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+            if !ui.input(|i| i.pointer.primary_down()) {
+                dragging = None;
+            }
+            if let Some(pos) = pointer {
+                // Press: grab the handle under the pointer, or add a point there.
+                if resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed()) {
+                    dragging = hit(c, pos).or_else(|| {
+                        edited = true;
+                        c.insert(point_at(pos))
+                    });
+                }
+                if let Some(i) = dragging.filter(|_| resp.dragged()) {
+                    c.set(i, point_at(pos));
+                    edited = true;
+                }
+                if resp.secondary_clicked() {
+                    if let Some(i) = hit(c, pos) {
+                        edited |= c.remove(i);
+                    }
+                }
+            }
+            ui.data_mut(|d| match dragging {
+                Some(i) => d.insert_temp(drag_id, i),
+                None => d.remove::<usize>(drag_id),
+            });
+            if edited {
+                tone.curve = Some(*c);
+            }
+            active =
+                dragging.or_else(|| pointer.filter(|_| resp.hovered()).and_then(|p| hit(c, p)));
+            if resp.hovered() || dragging.is_some() {
+                ui.ctx().set_cursor_icon(match (dragging, active) {
+                    (Some(_), _) => egui::CursorIcon::Grabbing,
+                    (None, Some(_)) => egui::CursorIcon::Grab,
+                    (None, None) => egui::CursorIcon::Crosshair,
+                });
+            }
+        }
+
+        if let Some(c) = &curve {
+            let col = Color32::from_rgb(90, 170, 255);
+            let mut line = vec![Pos2::new(rect.left(), y_of(c.level(a0)))];
+            line.extend(c.points().iter().map(|p| Pos2::new(x_of(p[0]), y_of(p[1]))));
+            line.push(Pos2::new(rect.right(), y_of(c.level(a1))));
+            painter.add(egui::Shape::line(line, Stroke::new(1.5_f32, col)));
+            if editable {
+                for (i, p) in c.points().iter().enumerate() {
+                    let fill = if active == Some(i) {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(16)
+                    };
+                    painter.circle(
+                        Pos2::new(x_of(p[0]), y_of(p[1])),
+                        4.0,
+                        fill,
+                        Stroke::new(1.5_f32, col),
+                    );
+                }
+            }
+            // The grabbed / hovered point's exact mapping, top left.
+            if let Some([v, l]) = active.map(|i| c.points()[i]) {
+                painter.text(
+                    rect.left_top() + Vec2::new(4.0, 2.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{} → {}", fmt(v), l as u8),
+                    egui::FontId::monospace(11.0),
+                    Color32::WHITE,
+                );
+            }
+        }
+        if editable && active.is_none() {
+            resp.on_hover_text(t!("transform.curve_hover"));
+        }
+
+        // True value extent under the graph: min at left, max at right, and the
+        // peak (mode) value centred between them in the tick's amber (mono only).
         // Bound this row to one text line: `ui.columns` passes the full available
         // height down to its children, and the centered layouts below would grab it
         // — in a `scroll(false)` window (unbounded height) that inflates the content

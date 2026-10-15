@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod cpu;
+mod curve;
 mod debug;
 mod decoder;
 mod export;

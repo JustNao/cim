@@ -113,16 +113,19 @@ impl CimApp {
             // "Share clip" pins this pane to the Control media's bounds, which
             // are computed from the Control's *shown* frame — already memoized,
             // so there is nothing to push to the worker.
-            match self.control_clip_bounds() {
-                Some((lo, hi)) => crate::thumbs::Window::Fixed(lo, hi),
+            match self.control_curve() {
+                Some(curve) => crate::thumbs::Window::Fixed(curve),
                 None => crate::thumbs::Window::Compute {
                     clip: crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone),
                     region: self.tone_region(idx),
                 },
             }
+        } else if let Some(curve) = self.manual_curve(idx) {
+            // A manual curve is fixed: nothing to compute per frame.
+            crate::thumbs::Window::Fixed(curve)
         } else if let Some((lo, hi)) = self.global_bounds(idx) {
             // Global statistics: the one window over the frames in memory.
-            crate::thumbs::Window::Fixed(lo, hi)
+            crate::thumbs::Window::Fixed(Curve::linear(lo, hi))
         } else {
             crate::thumbs::Window::Compute {
                 clip: crate::tone::clip_pct(self.visual(idx).contrast, &self.visual(idx).tone),

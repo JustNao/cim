@@ -1,6 +1,6 @@
 //! `FrameData` display rendering — the tone-mapping half of the frame type.
 //!
-//! Everything here is a pure function of `(samples, lo, hi)`: display-bounds /
+//! Everything here is a pure function of the samples and a tone [`Curve`]: display-bounds /
 //! percentile computation, the LUT render (`render_into` and its decimated /
 //! gray16 variants), and the mask / intensity overlay tints. No media,
 //! caching or decoding concerns — those stay in the parent module.
@@ -8,6 +8,7 @@
 use rayon::prelude::*;
 
 use super::{FrameData, Samples};
+use crate::curve::Curve;
 
 impl FrameData {
     /// Display range [lo, hi] mapped to [0, 255], memoized per mapping. With
@@ -92,13 +93,13 @@ impl FrameData {
     /// at full resolution ([`Region::whole`] at step 1), a decimated whole image
     /// (a minified pane — see `CimApp::stage_step`), or the adaptive mode's
     /// viewport region (`app::roi`). Integer sources map through the table (256
-    /// or 64 Ki entries), rebuilt only when `(lo, hi, mask)` change, so a run of
+    /// or 64 Ki entries), rebuilt only when `(curve, mask)` change, so a run of
     /// frames at a fixed tone reuses one table instead of rebuilding it each
     /// frame; float sources have no bounded domain to tabulate and map
     /// arithmetically, leaving `lut` untouched. A small output skips the 64 Ki
     /// table and maps arithmetically too — cheaper than tabulating for a few
     /// thousand pixels, and bit-identical because the table's entries *are*
-    /// [`map_u8`] of their index.
+    /// [`Curve::map_u8`] of their index.
     ///
     /// Decimation only **drops** whole samples and never blends, so every output
     /// texel is still a true source value (the pixel-accuracy invariant holds);
@@ -108,15 +109,14 @@ impl FrameData {
     /// locks it down), so it can be composed over a whole-image texture without a
     /// visible boundary.
     ///
-    /// `lo`/`hi` must be the **pane's** display bounds (whole-image or region
-    /// statistics chosen by the tone policy), never bounds derived from the
+    /// `curve` must be the **pane's** tone (its display bounds — whole-image or
+    /// region statistics chosen by the tone policy — or its manual curve), never bounds derived from the
     /// region itself — a region-local window would change contrast as the view
     /// pans. `region` must lie inside the frame (see [`Region::whole`] and
     /// `app::roi`, which clamps).
     pub fn render_lut<S: RgbaSink>(
         &self,
-        lo: f32,
-        hi: f32,
+        curve: Curve,
         region: Region,
         lut: &mut ToneLut,
         out: &mut S,
@@ -125,41 +125,40 @@ impl FrameData {
         match &self.samples {
             // A 256-entry table is always cheaper than a per-pixel map.
             Samples::U8(v) => {
-                let tab = lut.map8(lo, hi, self.mask, 256);
+                let tab = lut.map8(curve, self.mask, 256);
                 fill_lut(out, v, grid, |s| tab[s as usize]);
             }
             Samples::U16(v) if region.texels() < (1 << 16) => {
                 if self.mask {
                     fill_lut(out, v, grid, |s| if s != 0 { 255 } else { 0 });
                 } else {
-                    let map_f = map_u8(lo, hi);
+                    let map_f = curve.map_u8();
                     fill_lut(out, v, grid, |s| map_f(s as f32));
                 }
             }
             Samples::U16(v) => {
-                let tab = lut.map8(lo, hi, self.mask, 1 << 16);
+                let tab = lut.map8(curve, self.mask, 1 << 16);
                 fill_lut(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) if self.mask => {
                 fill_lut(out, v, grid, |s| if s != 0.0 { 255 } else { 0 });
             }
             Samples::F32(v) => {
-                let map_f = map_u8(lo, hi);
+                let map_f = curve.map_u8();
                 fill_lut(out, v, grid, map_f);
             }
         }
     }
 
     /// [`render_lut`](Self::render_lut) through a colour `palette` (the Colormap
-    /// tone): each source sample is toned to an 8-bit index via `[lo, hi]` then
+    /// tone): each source sample is toned to an 8-bit index via `curve` then
     /// looked up in the palette's 256 entries. Each output texel is still a
     /// single true source sample — only its *colour* comes from the palette, so
     /// pixel-accuracy holds and the readout still reports native values. The
     /// caller ensures the frame is single-channel and non-mask.
     pub fn render_cmap<S: RgbaSink>(
         &self,
-        lo: f32,
-        hi: f32,
+        curve: Curve,
         region: Region,
         palette: crate::palette::Palette,
         lut: &mut ToneLut,
@@ -171,19 +170,19 @@ impl FrameData {
         let (tab_src, id) = (palette.table(), palette.id());
         match &self.samples {
             Samples::U8(v) => {
-                let tab = lut.map_rgb(lo, hi, tab_src, id, 256);
+                let tab = lut.map_rgb(curve, tab_src, id, 256);
                 fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
             Samples::U16(v) if region.texels() < (1 << 16) => {
-                let map_f = map_u8(lo, hi);
+                let map_f = curve.map_u8();
                 fill_cmap(out, v, grid, |s| tab_src[map_f(s as f32) as usize]);
             }
             Samples::U16(v) => {
-                let tab = lut.map_rgb(lo, hi, tab_src, id, 1 << 16);
+                let tab = lut.map_rgb(curve, tab_src, id, 1 << 16);
                 fill_cmap(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) => {
-                let map_f = map_u8(lo, hi);
+                let map_f = curve.map_u8();
                 fill_cmap(out, v, grid, |s| tab_src[map_f(s) as usize]);
             }
         }
@@ -191,13 +190,13 @@ impl FrameData {
 
     /// Render a **single-channel 16-bit** buffer for `region` into `out` (cleared
     /// and refilled with `region.texels()` samples), mapping native samples
-    /// through `[lo, hi] → [0, 65535]`.
+    /// through `curve`, its levels scaled to `[0, 65535]`.
     ///
     /// This is the input the proprietary operators receive (`crate::imageproc`):
     /// one 16-bit sample per pixel, at genuine 16-bit precision, expanded back to
     /// RGBA (and downscaled to 8 bits) for the texture only after the operators
     /// have run. A `uint8` or float frame is scaled across the full 16-bit range
-    /// by the same `[lo, hi]` map. Only called for single-channel frames (see
+    /// by the same curve. Only called for single-channel frames (see
     /// `crate::imageproc::accepts`); the
     /// first channel is taken for any wider source. Under adaptive rendering the
     /// region is cropped and decimated **before** the operators run, so their
@@ -205,8 +204,7 @@ impl FrameData {
     /// design (see `app::roi`).
     pub fn render_gray_u16_lut(
         &self,
-        lo: f32,
-        hi: f32,
+        curve: Curve,
         region: Region,
         lut: &mut ToneLut,
         out: &mut Vec<u16>,
@@ -224,18 +222,18 @@ impl FrameData {
 
         match &self.samples {
             Samples::U8(v) => {
-                let tab = lut.map16(lo, hi, self.mask, 256);
+                let tab = lut.map16(curve, self.mask, 256);
                 fill(out, v, grid, |s| tab[s as usize]);
             }
             Samples::U16(v) => {
-                let tab = lut.map16(lo, hi, self.mask, 1 << 16);
+                let tab = lut.map16(curve, self.mask, 1 << 16);
                 fill(out, v, grid, |s| tab[s as usize]);
             }
             Samples::F32(v) if self.mask => {
                 fill(out, v, grid, |s| if s != 0.0 { u16::MAX } else { 0 });
             }
             Samples::F32(v) => {
-                let map_f = map_u16(lo, hi);
+                let map_f = curve.map_u16();
                 fill(out, v, grid, map_f);
             }
         }
@@ -246,7 +244,7 @@ impl FrameData {
     /// don't have to build a [`Region`].
     #[cfg(test)]
     pub fn render_into_lut<S: RgbaSink>(&self, lo: f32, hi: f32, lut: &mut ToneLut, out: &mut S) {
-        self.render_lut(lo, hi, Region::whole(self.size, 1), lut, out);
+        self.render_lut(Curve::linear(lo, hi), Region::whole(self.size, 1), lut, out);
     }
 
     /// The display table the GPU tone map indexes (`gpu/tone.wgsl`), one opaque
@@ -260,15 +258,15 @@ impl FrameData {
     /// drift from. A float source has no bounded domain to tabulate (the same
     /// reason [`render_lut`](Self::render_lut) maps it
     /// per pixel), so its table is indexed by the toned 8-bit level the shader
-    /// computes itself, mirroring [`map_u8`], and supplies only the colour.
+    /// computes itself, mirroring [`Curve::map_u8`] (a linear curve only — see
+    /// `gpu::Tone`), and supplies only the colour.
     ///
     /// Entry count is therefore the sample domain for integers (256 / 64 Ki) and
     /// a flat 256 for floats. `palette` is the Colormap tone's table and id, as
     /// [`render_cmap`](Self::render_cmap) takes them.
     pub fn tone_table_rgba(
         &self,
-        lo: f32,
-        hi: f32,
+        curve: Curve,
         palette: Option<(&[[u8; 3]; 256], u8)>,
         out: &mut Vec<u32>,
     ) {
@@ -288,12 +286,12 @@ impl FrameData {
             (Samples::F32(_), Some((pal, _))) => out.extend(pal.iter().map(|&c| pack(c))),
             (Samples::F32(_), None) => out.extend((0..256).map(|g| pack([g as u8; 3]))),
             (_, Some((pal, id))) => out.extend(
-                lut.map_rgb(lo, hi, pal, id, entries)
+                lut.map_rgb(curve, pal, id, entries)
                     .iter()
                     .map(|&c| pack(c)),
             ),
             (_, None) => out.extend(
-                lut.map8(lo, hi, self.mask, entries)
+                lut.map8(curve, self.mask, entries)
                     .iter()
                     .map(|&g| pack([g; 3])),
             ),
@@ -368,7 +366,7 @@ impl FrameData {
         let px = self.size[0] * self.size[1];
         let ch = self.channels;
         let (lo, hi) = self.display_bounds(false);
-        let map = map_u8(lo, hi);
+        let map = Curve::linear(lo, hi).map_u8();
         out.clear();
         out.resize(px * 4, 0); // transparent by default
         for i in 0..px {
@@ -389,25 +387,8 @@ impl FrameData {
     }
 }
 
-/// The arithmetic `[lo, hi] → [0, 255]` map, shared by the float path and by
-/// [`ToneLut`]'s table build so a tabulated and a per-pixel render map identically.
-#[inline]
-fn map_u8(lo: f32, hi: f32) -> impl Fn(f32) -> u8 {
-    let denom = hi - lo;
-    let scale = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-    move |s: f32| (((s - lo) * scale).clamp(0.0, 255.0)) as u8
-}
-
-/// The arithmetic `[lo, hi] → [0, 65535]` map (16-bit operator input path).
-#[inline]
-fn map_u16(lo: f32, hi: f32) -> impl Fn(f32) -> u16 {
-    let denom = hi - lo;
-    let scale = if denom > 0.0 { 65535.0 / denom } else { 0.0 };
-    move |s: f32| (((s - lo) * scale).clamp(0.0, 65535.0)) as u16
-}
-
 /// A cached value→display lookup table, rebuilt only when its key
-/// `(lo, hi, mask, entries)` changes. A long run of frames at a fixed tone reuses
+/// `(curve, mask, entries)` changes. A long run of frames at a fixed tone reuses
 /// one table instead of rebuilding a 64 Ki-entry LUT each frame — the dominant
 /// per-frame CPU cost on a large integer image. Owned per pane by the render path
 /// (`stage` for cheap panes, `renderer::Worker` for heavy ones); float sources
@@ -416,19 +397,19 @@ fn map_u16(lo: f32, hi: f32) -> impl Fn(f32) -> u16 {
 /// only rebuilds the one in use.
 #[derive(Default)]
 pub struct ToneLut {
-    key8: Option<(u32, u32, bool, usize)>,
+    key8: Option<(Curve, bool, usize)>,
     tab8: Vec<u8>,
-    key16: Option<(u32, u32, bool, usize)>,
+    key16: Option<(Curve, bool, usize)>,
     tab16: Vec<u16>,
-    key_rgb: Option<(u32, u32, u8, usize)>,
+    key_rgb: Option<(Curve, u8, usize)>,
     tab_rgb: Vec<[u8; 3]>,
 }
 
 impl ToneLut {
     /// The 8-bit table over `[0, entries)` sample values: `mask` folds in the
-    /// black/white rule (0 → 0, else 255), otherwise the linear `[lo,hi]` map.
-    fn map8(&mut self, lo: f32, hi: f32, mask: bool, entries: usize) -> &[u8] {
-        let key = (lo.to_bits(), hi.to_bits(), mask, entries);
+    /// black/white rule (0 → 0, else 255), otherwise the tone curve.
+    fn map8(&mut self, curve: Curve, mask: bool, entries: usize) -> &[u8] {
+        let key = (curve, mask, entries);
         if self.key8 != Some(key) {
             self.tab8.clear();
             self.tab8.reserve(entries);
@@ -436,7 +417,7 @@ impl ToneLut {
                 self.tab8
                     .extend((0..entries).map(|s| if s != 0 { 255u8 } else { 0 }));
             } else {
-                let map_f = map_u8(lo, hi);
+                let map_f = curve.map_u8();
                 self.tab8.extend((0..entries).map(|s| map_f(s as f32)));
             }
             self.key8 = Some(key);
@@ -445,19 +426,18 @@ impl ToneLut {
     }
 
     /// The per-value RGB table for the Colormap tone: each sample value is toned
-    /// to an 8-bit index (`map_u8`) and looked up in `palette`. Keyed on
-    /// `(lo, hi, palette_id, entries)` so a fixed palette/window reuses it.
+    /// to an 8-bit index (`Curve::map_u8`) and looked up in `palette`. Keyed on
+    /// `(curve, palette_id, entries)` so a fixed palette/window reuses it.
     fn map_rgb(
         &mut self,
-        lo: f32,
-        hi: f32,
+        curve: Curve,
         palette: &[[u8; 3]; 256],
         palette_id: u8,
         entries: usize,
     ) -> &[[u8; 3]] {
-        let key = (lo.to_bits(), hi.to_bits(), palette_id, entries);
+        let key = (curve, palette_id, entries);
         if self.key_rgb != Some(key) {
-            let map_f = map_u8(lo, hi);
+            let map_f = curve.map_u8();
             self.tab_rgb.clear();
             self.tab_rgb.reserve(entries);
             self.tab_rgb
@@ -468,8 +448,8 @@ impl ToneLut {
     }
 
     /// The 16-bit counterpart of [`map8`](Self::map8) (operator input range).
-    fn map16(&mut self, lo: f32, hi: f32, mask: bool, entries: usize) -> &[u16] {
-        let key = (lo.to_bits(), hi.to_bits(), mask, entries);
+    fn map16(&mut self, curve: Curve, mask: bool, entries: usize) -> &[u16] {
+        let key = (curve, mask, entries);
         if self.key16 != Some(key) {
             self.tab16.clear();
             self.tab16.reserve(entries);
@@ -477,7 +457,7 @@ impl ToneLut {
                 self.tab16
                     .extend((0..entries).map(|s| if s != 0 { u16::MAX } else { 0 }));
             } else {
-                let map_f = map_u16(lo, hi);
+                let map_f = curve.map_u16();
                 self.tab16.extend((0..entries).map(|s| map_f(s as f32)));
             }
             self.key16 = Some(key);
@@ -745,6 +725,7 @@ fn fill_cmap<S: RgbaSink, T: Copy + Sync>(
 
 #[cfg(test)]
 mod tests {
+    use crate::curve::Curve;
     use crate::media::{FrameData, Region, Samples};
 
     /// A boolean mask renders as pure black/white regardless of the tone
@@ -870,14 +851,14 @@ mod tests {
         let mut one = Vec::<u8>::new();
         let r = Region::whole([4, 2], 1);
         assert_eq!(r.out, [4, 2]);
-        f.render_lut(lo, hi, r, &mut lut, &mut one);
+        f.render_lut(Curve::linear(lo, hi), r, &mut lut, &mut one);
         assert_eq!(one, full);
 
         // step 2 -> ceil(4/2) x ceil(2/2) = 2x1, sampling (0,0) and (2,0): 0, 20.
         let mut half = Vec::<u8>::new();
         let r = Region::whole([4, 2], 2);
         assert_eq!(r.out, [2, 1]);
-        f.render_lut(lo, hi, r, &mut lut, &mut half);
+        f.render_lut(Curve::linear(lo, hi), r, &mut lut, &mut half);
         assert_eq!(half.len(), 2 * 4); // 2x1 RGBA
         assert_eq!([half[0], half[4]], [0, 20]); // grey channels = the source values
         assert_eq!([half[3], half[7]], [255, 255]); // alpha preserved
@@ -886,7 +867,7 @@ mod tests {
         let mut third = Vec::<u8>::new();
         let r = Region::whole([4, 2], 3);
         assert_eq!(r.out, [2, 1]);
-        f.render_lut(lo, hi, r, &mut lut, &mut third);
+        f.render_lut(Curve::linear(lo, hi), r, &mut lut, &mut third);
         assert_eq!([third[0], third[4]], [0, 30]);
     }
 
@@ -913,29 +894,70 @@ mod tests {
             let mut plain = Vec::new();
             f.render_into(lo, hi, &mut plain);
             let mut cached = Vec::<u8>::new();
-            f.render_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut cached);
+            f.render_lut(
+                Curve::linear(lo, hi),
+                Region::whole(f.size, 1),
+                &mut lut,
+                &mut cached,
+            );
             assert_eq!(cached, plain, "cached render must equal the plain render");
         }
         // The table was built once and reused (key unchanged across both frames).
         assert_eq!(lut.tab8.len(), 1 << 16);
-        assert_eq!(lut.key8, Some((lo.to_bits(), hi.to_bits(), false, 1 << 16)));
+        assert_eq!(lut.key8, Some((Curve::linear(lo, hi), false, 1 << 16)));
 
         // Changing the window rebuilds the table (new key).
         let mut cached = Vec::<u8>::new();
         a.render_lut(
-            500.0,
-            40000.0,
+            Curve::linear(500.0, 40000.0),
             Region::whole(a.size, 1),
             &mut lut,
             &mut cached,
         );
         assert_eq!(
             lut.key8,
-            Some((500f32.to_bits(), 40000f32.to_bits(), false, 1 << 16))
+            Some((Curve::linear(500.0, 40000.0), false, 1 << 16))
         );
         let mut plain = Vec::new();
         a.render_into(500.0, 40000.0, &mut plain);
         assert_eq!(cached, plain);
+    }
+
+    /// A manual (bent) curve renders every sample through the curve — through
+    /// the 64 Ki table, the small-output arithmetic map, the float path and the
+    /// 16-bit operator input alike — and a new curve rebuilds the cached table.
+    #[test]
+    fn a_manual_curve_renders_through_its_points() {
+        use crate::media::ToneLut;
+        let curve = Curve::from_points(&[[1000.0, 0.0], [5000.0, 200.0], [9000.0, 120.0]]);
+        let vals: Vec<u16> = (0..300 * 300).map(|i| (i % 12000) as u16).collect();
+        let big = FrameData::new([300, 300], 1, Samples::U16(vals.clone()));
+        let small = FrameData::new([10, 10], 1, Samples::U16(vals[..100].to_vec()));
+        let float = FrameData::new(
+            [10, 10],
+            1,
+            Samples::F32(vals[..100].iter().map(|&v| v as f32 * 120.0).collect()),
+        );
+        let m8 = curve.map_u8();
+        let mut lut = ToneLut::default();
+        for f in [&big, &small] {
+            let mut out = Vec::<u8>::new();
+            f.render_lut(curve, Region::whole(f.size, 1), &mut lut, &mut out);
+            for (i, px) in out.chunks(4).enumerate() {
+                assert_eq!(px[0], m8(vals[i] as f32), "sample {i}");
+            }
+        }
+        let mut out = Vec::<u8>::new();
+        float.render_lut(curve, Region::whole(float.size, 1), &mut lut, &mut out);
+        for (i, px) in out.chunks(4).enumerate() {
+            assert_eq!(px[0], m8(vals[i] as f32 * 120.0));
+        }
+        assert_eq!(lut.key8.map(|k| k.0), Some(curve));
+        let mut gray = Vec::new();
+        big.render_gray_u16_lut(curve, Region::whole(big.size, 1), &mut lut, &mut gray);
+        assert_eq!(gray[5000], 200 * 257);
+        assert_eq!(gray[11000], 120 * 257);
+        assert_eq!(gray[0], 0);
     }
 
     /// The small-output micro-win (arithmetic map instead of a 64 Ki table) is
@@ -955,11 +977,13 @@ mod tests {
         let mut scaled = Vec::<u8>::new();
         let r = Region::whole([8, 8], 4);
         assert_eq!(r.out, [2, 2]); // 4 px < 65536 → arithmetic path
-        f.render_lut(lo, hi, r, &mut lut, &mut scaled);
+        f.render_lut(Curve::linear(lo, hi), r, &mut lut, &mut scaled);
 
         // Reference: same decimation, but forced through the table via render_into.
         let mut reference = ToneLut::default();
-        let full_tab = reference.map8(lo, hi, false, 1 << 16).to_vec();
+        let full_tab = reference
+            .map8(Curve::linear(lo, hi), false, 1 << 16)
+            .to_vec();
         // Output texels sample source pixels (0,0),(4,0),(0,4),(4,4).
         for (ox, oy, x, y) in [(0, 0, 0, 0), (1, 0, 4, 0), (0, 1, 0, 4), (1, 1, 4, 4)] {
             let value = ((y * 8 + x) * 1000) as usize;
@@ -1026,7 +1050,12 @@ mod tests {
                 let mut lut = ToneLut::default();
                 let mut full = Vec::<u8>::new();
                 let [fw, fh] = Region::whole(f.size, step).out;
-                f.render_lut(lo, hi, Region::whole(f.size, step), &mut lut, &mut full);
+                f.render_lut(
+                    Curve::linear(lo, hi),
+                    Region::whole(f.size, step),
+                    &mut lut,
+                    &mut full,
+                );
 
                 // Interior region, plus regions pinned to each far edge.
                 for (ox0, oy0) in [(0, 0), (1, 1), (fw - 2, fh - 2)] {
@@ -1037,7 +1066,7 @@ mod tests {
                         out: [ow, oh],
                         step,
                     };
-                    f.render_lut(lo, hi, r, &mut lut, &mut region);
+                    f.render_lut(Curve::linear(lo, hi), r, &mut lut, &mut region);
                     assert_eq!(
                         region,
                         subrect(&full, fw, ox0, oy0, ow, oh),
@@ -1069,8 +1098,7 @@ mod tests {
             let mut full = Vec::<u8>::new();
             let [fw, fh] = Region::whole(f.size, step).out;
             f.render_cmap(
-                lo,
-                hi,
+                Curve::linear(lo, hi),
                 Region::whole(f.size, step),
                 pal,
                 &mut lut,
@@ -1083,7 +1111,7 @@ mod tests {
                 out: [ow, oh],
                 step,
             };
-            f.render_cmap(lo, hi, r, pal, &mut lut, &mut region);
+            f.render_cmap(Curve::linear(lo, hi), r, pal, &mut lut, &mut region);
             let mut want = Vec::new();
             for oy in 0..oh {
                 let start = ((1 + oy) * fw + 1) * 4;
@@ -1096,14 +1124,19 @@ mod tests {
         // must pick every other sample of it.
         let mut lut = ToneLut::default();
         let mut full16 = Vec::new();
-        f.render_gray_u16_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut full16);
+        f.render_gray_u16_lut(
+            Curve::linear(lo, hi),
+            Region::whole(f.size, 1),
+            &mut lut,
+            &mut full16,
+        );
         let mut region16 = Vec::new();
         let r = Region {
             origin: [1, 1],
             out: [3, 2],
             step: 2,
         };
-        f.render_gray_u16_lut(lo, hi, r, &mut lut, &mut region16);
+        f.render_gray_u16_lut(Curve::linear(lo, hi), r, &mut lut, &mut region16);
         let mut want16 = Vec::new();
         for oy in 0..2 {
             for ox in 0..3 {
@@ -1128,8 +1161,7 @@ mod tests {
         let mut out = Vec::<u8>::new();
         let size = Region::whole(f.size, 1).out;
         f.render_cmap(
-            0.0,
-            255.0,
+            Curve::linear(0.0, 255.0),
             Region::whole(f.size, 1),
             pal,
             &mut lut,
@@ -1148,7 +1180,13 @@ mod tests {
 
         // A flat window (lo == hi) collapses every sample to one palette colour.
         let mut flat = Vec::<u8>::new();
-        f.render_cmap(5.0, 5.0, Region::whole(f.size, 1), pal, &mut lut, &mut flat);
+        f.render_cmap(
+            Curve::linear(5.0, 5.0),
+            Region::whole(f.size, 1),
+            pal,
+            &mut lut,
+            &mut flat,
+        );
         assert_eq!([flat[0], flat[1], flat[2]], [flat[4], flat[5], flat[6]]);
         assert_eq!([flat[4], flat[5], flat[6]], [flat[8], flat[9], flat[10]]);
     }

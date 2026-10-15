@@ -331,9 +331,9 @@ pub fn ops_active(frame: &crate::media::FrameData, ops: Ops) -> bool {
 /// way to the render pool is exactly how a Colormap pane came back grey.
 #[derive(Clone, Copy, Debug)]
 pub struct Display {
-    /// Display bounds `[lo, hi] -> [0, 255]`, computed on the UI thread.
-    pub lo: f32,
-    pub hi: f32,
+    /// The tone curve `value -> [0, 255]` (the display bounds, or the pane's
+    /// manual curve), computed on the UI thread.
+    pub curve: crate::curve::Curve,
     /// The Colormap tone: false-colour through this palette instead of grey.
     /// Mutually exclusive with the operators in practice — `uses_colormap` and
     /// `ops_active` can't both hold for one pane — and [`PaneOps::render_display`]
@@ -476,24 +476,24 @@ impl PaneOps {
         out: &mut S,
     ) -> (std::time::Duration, std::time::Duration) {
         use std::time::{Duration, Instant};
-        let Display { lo, hi, ops, .. } = tone;
+        let Display { curve, ops, .. } = tone;
         // Colormap first: it is a display-only tone, so no operator runs under
         // it. The caller has already checked `uses_colormap` (mono, non-mask),
         // which is what `render_cmap` requires.
         if let Some(pal) = tone.palette {
             let t = Instant::now();
-            frame.render_cmap(lo, hi, region, pal, lut, out);
+            frame.render_cmap(curve, region, pal, lut, out);
             return (t.elapsed(), Duration::ZERO);
         }
         if !ops_active(frame, ops) {
             let t = Instant::now();
-            frame.render_lut(lo, hi, region, lut, out);
+            frame.render_lut(curve, region, lut, out);
             return (t.elapsed(), Duration::ZERO);
         }
         let [w, h] = region.out;
         let mut gray = Vec::new();
         let t = Instant::now();
-        frame.render_gray_u16_lut(lo, hi, region, lut, &mut gray);
+        frame.render_gray_u16_lut(curve, region, lut, &mut gray);
         let lut_time = t.elapsed();
         let t = Instant::now();
         self.apply(&mut gray, w, h, ops);
@@ -612,7 +612,12 @@ mod tests {
             FrameData::new([3, 1], 1, Samples::F32(vec![-2.0, 0.5, 6.0])),
         ] {
             let (lo, hi) = crate::tone::frame_bounds(&f, None, None);
-            f.render_gray_u16_lut(lo, hi, Region::whole(f.size, 1), &mut lut, &mut gray);
+            f.render_gray_u16_lut(
+                crate::curve::Curve::linear(lo, hi),
+                Region::whole(f.size, 1),
+                &mut lut,
+                &mut gray,
+            );
             assert_eq!(gray.first(), Some(&0));
             assert_eq!(gray.last(), Some(&u16::MAX));
             assert!(gray[1] > 0 && gray[1] < u16::MAX);

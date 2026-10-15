@@ -273,7 +273,7 @@ impl FrameData {
     }
 
     #[inline]
-    fn is_float(&self) -> bool {
+    pub fn is_float(&self) -> bool {
         matches!(self.samples, Samples::F32(_))
     }
 

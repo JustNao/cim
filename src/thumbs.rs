@@ -39,12 +39,12 @@ const CACHE_CAP: usize = 128;
 /// was substituted — a preview must not be filed under a tone it didn't render).
 pub type ThumbKey = (u64, usize, u64);
 
-/// How a thumbnail's display bounds are obtained.
+/// How a thumbnail's tone curve is obtained.
 pub enum Window {
-    /// Already known on the UI thread: "Share clip" locks the pane to the
-    /// Control media's bounds, which are computed from the Control's *shown*
-    /// frame and so are memoized already.
-    Fixed(f32, f32),
+    /// Already known on the UI thread: a manual curve, global statistics, or
+    /// "Share clip" locking the pane to the Control media's tone, which is
+    /// computed from the Control's *shown* frame and so is memoized already.
+    Fixed(crate::curve::Curve),
     /// Computed here, from the pane's clip percentile and tone region. A frame
     /// the user has never displayed has no memoized bounds, so this is a
     /// whole-image percentile scan — exactly what must not run on the UI thread
@@ -144,15 +144,18 @@ fn render(job: &ThumbJob, lut: &mut ToneLut) -> egui::ColorImage {
     // On the instance's budgeted pool, not rayon's machine-sized global one: both
     // the percentile scan and the render below split across cores (`crate::cpu`).
     crate::cpu::install(|| {
-        let (lo, hi) = match job.window {
-            Window::Fixed(lo, hi) => (lo, hi),
-            Window::Compute { clip, region } => crate::tone::frame_bounds(&job.data, clip, region),
+        let curve = match job.window {
+            Window::Fixed(curve) => curve,
+            Window::Compute { clip, region } => {
+                let (lo, hi) = crate::tone::frame_bounds(&job.data, clip, region);
+                crate::curve::Curve::linear(lo, hi)
+            }
         };
         let region = Region::whole(job.data.size, job.step);
         let mut pixels: Vec<egui::Color32> = Vec::new();
         match job.palette {
-            Some(pal) => job.data.render_cmap(lo, hi, region, pal, lut, &mut pixels),
-            None => job.data.render_lut(lo, hi, region, lut, &mut pixels),
+            Some(pal) => job.data.render_cmap(curve, region, pal, lut, &mut pixels),
+            None => job.data.render_lut(curve, region, lut, &mut pixels),
         }
         egui::ColorImage {
             size: region.out,
@@ -241,7 +244,12 @@ mod tests {
 
         let region = Region::whole(size, step);
         let mut want: Vec<egui::Color32> = Vec::new();
-        frame.render_lut(lo, hi, region, &mut ToneLut::default(), &mut want);
+        frame.render_lut(
+            crate::curve::Curve::linear(lo, hi),
+            region,
+            &mut ToneLut::default(),
+            &mut want,
+        );
         assert_eq!(got.size, region.out);
         assert_eq!(got.pixels, want);
     }

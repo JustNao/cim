@@ -19,9 +19,11 @@ use crate::palette::Palette;
 /// The tone a pane wants applied, as `stage` already resolved it.
 #[derive(Clone, Copy)]
 pub struct Tone {
-    /// Linear display bounds `[lo, hi] → [0, 255]`, as the CPU path computes them.
-    pub lo: f32,
-    pub hi: f32,
+    /// The tone curve, as the CPU path computes it. An integer source's table
+    /// carries any curve; a **float** source is mapped arithmetically by the
+    /// shader from the curve's `[lo, hi]`, so `stage` only sends one here when
+    /// its curve [`is_linear`](crate::curve::Curve::is_linear).
+    pub curve: crate::curve::Curve,
     /// The Colormap palette, or `None` for the plain grey render. Mono frames
     /// only, exactly as `FrameData::render_cmap` requires.
     pub palette: Option<Palette>,
@@ -144,8 +146,7 @@ struct LutBuf {
 /// would reuse the other's table and render a tone window it was never given.
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct TableKey {
-    lo: u32,
-    hi: u32,
+    curve: crate::curve::Curve,
     mask: bool,
     palette: Option<u8>,
     entries: usize,
@@ -345,14 +346,15 @@ impl GpuToneMapper {
         let src = &self.frames[&frame.uid()].buf;
         let lut = &self.luts[&pane_id].buf;
 
-        let denom = tone.hi - tone.lo;
+        let (lo, hi) = (tone.curve.lo(), tone.curve.hi());
+        let denom = hi - lo;
         let params = Params {
             w: w as u32,
             h: h as u32,
             ch: frame.channels as u32,
             cc: frame.color_channels() as u32,
             row_words: output.row_words,
-            lo: tone.lo,
+            lo,
             // Exactly `map_u8`'s scale, including its empty-window rule.
             scale: if denom > 0.0 { 255.0 / denom } else { 0.0 },
             mask: u32::from(frame.is_mask()),
@@ -440,8 +442,7 @@ impl GpuToneMapper {
     /// it only when its tone changed. This is the one upload a slider drag pays.
     fn resident_lut(&mut self, gpu: &GpuContext, pane_id: u64, frame: &FrameData, tone: Tone) {
         let key = TableKey {
-            lo: tone.lo.to_bits(),
-            hi: tone.hi.to_bits(),
+            curve: tone.curve,
             mask: frame.is_mask(),
             palette: tone.palette.map(|p| p.id()),
             entries: frame.tone_table_entries(),
@@ -451,7 +452,7 @@ impl GpuToneMapper {
             return;
         }
         let pal = tone.palette.map(|p| (p.table(), p.id()));
-        frame.tone_table_rgba(tone.lo, tone.hi, pal, &mut self.table);
+        frame.tone_table_rgba(tone.curve, pal, &mut self.table);
         let buf = gpu
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -572,8 +573,8 @@ mod tests {
         let mut lut = ToneLut::default();
         let whole = crate::media::Region::whole(frame.size, 1);
         match tone.palette {
-            Some(p) => frame.render_cmap(tone.lo, tone.hi, whole, p, &mut lut, &mut out),
-            None => frame.render_lut(tone.lo, tone.hi, whole, &mut lut, &mut out),
+            Some(p) => frame.render_cmap(tone.curve, whole, p, &mut lut, &mut out),
+            None => frame.render_lut(tone.curve, whole, &mut lut, &mut out),
         }
         out.chunks_exact(4)
             .map(|p| [p[0], p[1], p[2], p[3]])
@@ -591,8 +592,7 @@ mod tests {
 
     fn plain(lo: f32, hi: f32) -> Tone {
         Tone {
-            lo,
-            hi,
+            curve: crate::curve::Curve::linear(lo, hi),
             palette: None,
         }
     }
@@ -691,8 +691,7 @@ mod tests {
         );
         for frame in [&u8f, &u16f] {
             let tone = Tone {
-                lo: 10.0,
-                hi: 40000.0,
+                curve: crate::curve::Curve::linear(10.0, 40000.0),
                 palette: Some(pal),
             };
             assert_eq!(gpu_render(&gpu, frame, tone), cpu_render(frame, tone));

@@ -693,10 +693,9 @@ impl CimApp {
         let ops = self.ops_of(idx);
         let cmap = crate::tone::uses_colormap(contrast, frame);
         let heavy = !cmap && crate::imageproc::ops_active(frame, ops);
-        let (lo, hi) = self.tone_bounds(idx, frame);
+        let curve = self.tone_curve(idx, frame);
         let tone = crate::imageproc::Display {
-            lo,
-            hi,
+            curve,
             // Carried into the job as well as used inline: a Colormap region big
             // enough to render off-thread must still come back false-coloured.
             palette: cmap.then(|| self.visual(idx).tone.palette),
@@ -736,8 +735,8 @@ impl CimApp {
         let mut pixels = Vec::new();
         let lut = &mut self.panes[idx].tex.lut;
         crate::cpu::install(|| match tone.palette {
-            Some(pal) => frame.render_cmap(lo, hi, region, pal, lut, &mut pixels),
-            None => frame.render_lut(lo, hi, region, lut, &mut pixels),
+            Some(pal) => frame.render_cmap(curve, region, pal, lut, &mut pixels),
+            None => frame.render_lut(curve, region, lut, &mut pixels),
         });
         if let Some(t) = t {
             self.metrics.lut.record(t.elapsed());

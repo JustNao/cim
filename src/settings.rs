@@ -442,6 +442,12 @@ pub struct ToneOptions {
     pub global: bool,
     /// Palette for the Colormap tone (ignored by other modes).
     pub palette: crate::palette::Palette,
+    /// A **manual** tone curve, edited by dragging / adding points on the
+    /// Transformations histogram: `None` is automatic (the linear window the
+    /// clip, global statistics or a region compute), `Some` maps through these
+    /// points instead and overrides all of them — but not "Share clip", which
+    /// still locks the pane to the Control's tone. Ignored by LUT_ALPHA / Boost.
+    pub curve: Option<crate::curve::Curve>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

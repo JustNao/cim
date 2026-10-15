@@ -43,6 +43,7 @@ use eframe::egui::{
 use rust_i18n::t;
 
 use crate::cli;
+use crate::curve::Curve;
 use crate::decoder::Decoded;
 use crate::export::{
     self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell, LabelAnchor,
@@ -2700,6 +2701,10 @@ fn set_window_cloak(hwnd: isize, cloak: bool) {
         );
     }
 }
+
+/// How close (in points) the pointer must be to a tone-curve handle on the
+/// Transformations histogram to grab or remove it.
+const CURVE_HANDLE_HIT: f32 = 7.0;
 
 /// `<cim executable directory>/LIBS`, used when no library folder is configured.
 fn default_cpp_lib_dir() -> Option<PathBuf> {

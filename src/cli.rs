@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use rust_i18n::t;
 
+use crate::curve::Curve;
 use crate::media::Format;
 pub use crate::media::{LOADABLE_EXTS, VIDEO_EXTS};
 
@@ -109,6 +110,9 @@ pub struct ViewState {
     pub share_clip: Option<Vec<bool>>,
     /// Per-pane "Global statistics" toggles (`--global-stats`), in pane order.
     pub global_stats: Option<Vec<bool>>,
+    /// Per-pane manual tone curves (`--curve`), in pane order: `None` for an
+    /// automatic one.
+    pub curves: Option<Vec<Option<Curve>>>,
     /// Per-pane DETAILS_ENHANCED toggles (`--detail`), in pane order.
     pub details: Option<Vec<bool>>,
     /// Per-pane visibility / show-hide (`--show`), in pane order.
@@ -211,6 +215,10 @@ pub fn parse(args: Vec<String>) -> Cli {
             }
             "--global-stats" => {
                 view.global_stats = next(i).and_then(parse_details);
+                i += 1;
+            }
+            "--curve" => {
+                view.curves = next(i).and_then(parse_curves);
                 i += 1;
             }
             "--detail" => {
@@ -320,6 +328,42 @@ fn parse_clips(s: &str) -> Option<Vec<ClipSpec>> {
             num => num.parse::<f32>().ok().map(ClipSpec::On),
         })
         .collect()
+}
+
+/// Parse a comma-separated per-pane tone-curve list for `--curve`. Each token
+/// is `auto` (the automatic curve) or the manual curve's points as
+/// `VALUE:LEVEL` joined by `/` (e.g. `100:0/900:180/4000:255`). Any malformed
+/// token makes the whole flag ignored.
+fn parse_curves(s: &str) -> Option<Vec<Option<Curve>>> {
+    s.split(',')
+        .map(|t| match t.trim().to_ascii_lowercase().as_str() {
+            "auto" | "off" => Some(None),
+            pts => {
+                let pts: Option<Vec<[f32; 2]>> = pts
+                    .split('/')
+                    .map(|p| {
+                        let (v, l) = p.split_once(':')?;
+                        Some([v.trim().parse().ok()?, l.trim().parse().ok()?])
+                    })
+                    .collect();
+                pts.filter(|p| p.len() >= 2)
+                    .map(|p| Some(Curve::from_points(&p)))
+            }
+        })
+        .collect()
+}
+
+/// The `--curve` token for one pane's manual curve (see [`parse_curves`]).
+pub fn curve_arg(curve: Option<&Curve>) -> String {
+    match curve {
+        None => "auto".into(),
+        Some(c) => c
+            .points()
+            .iter()
+            .map(|[v, l]| format!("{v}:{l}"))
+            .collect::<Vec<_>>()
+            .join("/"),
+    }
 }
 
 /// Parse a comma-separated per-pane float list for `--rotate` (degrees). Any
@@ -832,6 +876,27 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(view.global_stats, Some(vec![false, true]));
+    }
+
+    #[test]
+    fn parses_curves_and_round_trips_them() {
+        let args = "a.tif b.tif --curve auto,100:0/900:180.5/4000:255"
+            .split(' ')
+            .map(String::from)
+            .collect();
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        let want = Curve::from_points(&[[100.0, 0.0], [900.0, 180.5], [4000.0, 255.0]]);
+        assert_eq!(view.curves, Some(vec![None, Some(want)]));
+        assert_eq!(curve_arg(Some(&want)), "100:0/900:180.5/4000:255");
+        assert_eq!(
+            parse_curves(&curve_arg(Some(&want))),
+            Some(vec![Some(want)])
+        );
+        // A malformed or one-point curve drops the flag.
+        assert_eq!(parse_curves("auto,5:x"), None);
+        assert_eq!(parse_curves("5:1"), None);
     }
 
     #[test]

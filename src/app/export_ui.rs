@@ -401,13 +401,21 @@ impl CimApp {
                 // A Control on global statistics has one window for the whole
                 // timeline — the live one, over the frames in memory — so pin it
                 // rather than re-derive per-frame bounds the live view never shows.
-                match self.control_global_bounds() {
-                    Some(b) => pane.window = Some(b),
-                    None => pane.share_clip = true,
+                // A Control on a manual curve likewise has one fixed curve.
+                let c = self.control.min(self.panes.len() - 1);
+                match self.manual_curve(c) {
+                    Some(curve) => pane.window = Some(curve),
+                    None => match self.control_global_bounds() {
+                        Some((lo, hi)) => pane.window = Some(Curve::linear(lo, hi)),
+                        None => pane.share_clip = true,
+                    },
                 }
-            } else if let Some(b) = self.global_bounds(idx) {
+            } else if let Some(curve) = self.manual_curve(idx) {
+                // A manual curve: the very curve the live view maps.
+                pane.window = Some(curve);
+            } else if let Some((lo, hi)) = self.global_bounds(idx) {
                 // Global statistics: the same fixed window the live view maps.
-                pane.window = Some(b);
+                pane.window = Some(Curve::linear(lo, hi));
             }
             if self.visual(idx).contrast == ContrastMode::Colormap {
                 pane.palette = Some(t.palette);
