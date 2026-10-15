@@ -7,7 +7,9 @@
 //! ([`Curve::linear`]), so the clip percentile, Share clip, global statistics and
 //! a region tone all still produce `[lo, hi]` and simply wrap it; only a
 //! **manual** curve (`ToneOptions::curve`, edited on the Transformations
-//! histogram) has more points or levels other than 0 and 255.
+//! histogram) has more points. Its ends stay pinned: the first point always
+//! maps to level 0 and the last to 255, so a curve only reshapes the stretch
+//! between them.
 //!
 //! The capacity is fixed ([`MAX_POINTS`]) so a curve is `Copy` and rides the
 //! `Copy` tone options and render jobs by value, like the palette does.
@@ -24,8 +26,9 @@ pub const LEVEL_MAX: f32 = 255.0;
 /// A piecewise-linear `value → level` map; see the module docs.
 ///
 /// Invariants: at least two points, sorted by value (equal values allowed),
-/// levels within `0..=255` — except an inverted [`linear`](Self::linear)
-/// window, kept as given so it maps (everything to 0) as it always did.
+/// levels within `0..=255`, the first point at level 0 and the last at 255 —
+/// except an inverted [`linear`](Self::linear) window, kept as given so it
+/// maps (everything to 0) as it always did.
 #[derive(Clone, Copy, Debug)]
 pub struct Curve {
     len: u8,
@@ -41,9 +44,9 @@ impl Curve {
         Self { len: 2, pts }
     }
 
-    /// A curve through `pts`, sorted by value, levels clamped to `0..=255` and
-    /// truncated to [`MAX_POINTS`]. A single point (or none) is padded into a
-    /// flat curve so the invariants hold.
+    /// A curve through `pts`, sorted by value, levels clamped to `0..=255`,
+    /// truncated to [`MAX_POINTS`] and its ends pinned to 0 and 255. A single
+    /// point (or none) is doubled so the invariants hold.
     pub fn from_points(pts: &[[f32; 2]]) -> Self {
         let mut c = Self {
             len: 0,
@@ -59,7 +62,15 @@ impl Curve {
             c.pts[c.len as usize] = p;
             c.len += 1;
         }
+        c.pin_ends();
         c
+    }
+
+    /// Hold the first point at level 0 and the last at 255.
+    fn pin_ends(&mut self) {
+        let last = self.len as usize - 1;
+        self.pts[0][1] = 0.0;
+        self.pts[last][1] = LEVEL_MAX;
     }
 
     pub fn points(&self) -> &[[f32; 2]] {
@@ -122,7 +133,8 @@ impl Curve {
     }
 
     /// Insert `[x, y]` in value order, returning its index, or `None` when the
-    /// curve is full.
+    /// curve is full. A point added past either end becomes that end, so it
+    /// takes the end's pinned level.
     pub fn insert(&mut self, [x, y]: [f32; 2]) -> Option<usize> {
         let n = self.len as usize;
         if n >= MAX_POINTS {
@@ -132,6 +144,7 @@ impl Curve {
         self.pts.copy_within(at..n, at + 1);
         self.pts[at] = [x, y.clamp(0.0, LEVEL_MAX)];
         self.len += 1;
+        self.pin_ends();
         Some(at)
     }
 
@@ -143,12 +156,13 @@ impl Curve {
         }
         self.pts.copy_within(i + 1..n, i);
         self.len -= 1;
+        self.pin_ends();
         true
     }
 
     /// Move point `i` to `[x, y]`: the value stays between its neighbours' (so
     /// the order, and every other point, is untouched), the level within
-    /// `0..=255`.
+    /// `0..=255` — an end point only moves sideways, its level stays pinned.
     pub fn set(&mut self, i: usize, [x, y]: [f32; 2]) {
         let p = self.points();
         let lo = if i > 0 {
@@ -158,6 +172,7 @@ impl Curve {
         };
         let hi = p.get(i + 1).map_or(f32::INFINITY, |q| q[0]);
         self.pts[i] = [x.clamp(lo, hi), y.clamp(0.0, LEVEL_MAX)];
+        self.pin_ends();
     }
 }
 
@@ -235,14 +250,16 @@ mod tests {
 
     #[test]
     fn a_curve_interpolates_between_points_and_holds_past_its_ends() {
-        let c = Curve::from_points(&[[100.0, 20.0], [200.0, 220.0], [300.0, 120.0]]);
-        assert_eq!(c.level(0.0), 20.0);
-        assert_eq!(c.level(100.0), 20.0);
-        assert_eq!(c.level(150.0), 120.0);
+        let c = Curve::from_points(&[[100.0, 0.0], [200.0, 220.0], [300.0, 120.0]]);
+        // The last point's level is pinned to 255 whatever was asked.
+        assert_eq!(c.points()[2], [300.0, 255.0]);
+        assert_eq!(c.level(0.0), 0.0);
+        assert_eq!(c.level(100.0), 0.0);
+        assert_eq!(c.level(150.0), 110.0);
         assert_eq!(c.level(200.0), 220.0);
-        assert_eq!(c.level(250.0), 170.0);
-        assert_eq!(c.level(300.0), 120.0);
-        assert_eq!(c.level(1e9), 120.0);
+        assert_eq!(c.level(250.0), 237.5);
+        assert_eq!(c.level(300.0), 255.0);
+        assert_eq!(c.level(1e9), 255.0);
         assert_eq!(c.map_u16()(200.0), 220 * 257);
     }
 
@@ -254,6 +271,17 @@ mod tests {
         // Dragging past a neighbour stops at it.
         c.set(1, [150.0, -4.0]);
         assert_eq!(c.points()[1], [100.0, 0.0]);
+        // The ends move sideways only: their levels stay 0 and 255.
+        c.set(0, [-10.0, 99.0]);
+        c.set(2, [120.0, 7.0]);
+        assert_eq!(c.points(), &[[-10.0, 0.0], [100.0, 0.0], [120.0, 255.0]]);
+        // A point added past an end becomes that end, at its level (the old
+        // end keeps its own); removing an end re-pins the new one.
+        assert_eq!(c.insert([200.0, 30.0]), Some(3));
+        assert_eq!(c.points()[2..], [[120.0, 255.0], [200.0, 255.0]]);
+        c.set(2, [120.0, 40.0]);
+        assert!(c.remove(3));
+        assert_eq!(c.points()[2], [120.0, 255.0]);
         assert!(c.remove(1));
         // Both ends stay.
         assert!(!c.remove(0));

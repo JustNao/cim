@@ -1243,6 +1243,14 @@ impl CimApp {
             line.push(Pos2::new(rect.right(), y_of(c.level(a1))));
             painter.add(egui::Shape::line(line, Stroke::new(1.5_f32, col)));
             if editable {
+                // The handles sit on their own layer just above the panel's,
+                // unclipped by the graph and the window, so a point at an
+                // edge (the ends usually are) shows whole, over the border
+                // and the rows below rather than half-hidden under them.
+                let parent = ui.layer_id();
+                let layer = egui::LayerId::new(parent.order, parent.id.with("curve_handles"));
+                ui.ctx().set_sublayer(parent, layer);
+                let painter = ui.ctx().layer_painter(layer);
                 for (i, p) in c.points().iter().enumerate() {
                     let fill = if active == Some(i) {
                         Color32::WHITE

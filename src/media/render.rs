@@ -956,7 +956,8 @@ mod tests {
         let mut gray = Vec::new();
         big.render_gray_u16_lut(curve, Region::whole(big.size, 1), &mut lut, &mut gray);
         assert_eq!(gray[5000], 200 * 257);
-        assert_eq!(gray[11000], 120 * 257);
+        // The last point is pinned to 255 (asked 120), so past it is white.
+        assert_eq!(gray[11000], u16::MAX);
         assert_eq!(gray[0], 0);
     }
 

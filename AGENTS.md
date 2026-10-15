@@ -1645,7 +1645,10 @@ cached per pane) is **always** shown. For a Linear / Colormap, non-mask pane it 
 pane's **tone curve** (§7): value across (the frame's extent, widened to the curve's ends),
 level up. Its points are handles — **drag** to move (clamped between neighbours), **left-click**
 empty graph to add a point (and keep dragging it), **right-click** a point to remove it (≥ 2
-stay). The first edit seeds `ToneOptions::curve` from the automatic curve on screen, so
+stay). The **ends are pinned**: the first point is always level 0 and the last 255 (`Curve`
+re-pins after every edit), so an end only moves sideways and a point added past an end takes
+its level. The handles paint on a **sublayer** of the panel (`set_sublayer`), unclipped, so a
+point on the graph's edge shows whole above the window border and the rows below. The first edit seeds `ToneOptions::curve` from the automatic curve on screen, so
 nothing jumps; the clip row then reads **Manual** with a Reset back to automatic, and the
 Global statistics checkbox greys. Under Share clip the curve is the Control's, read-only. Flipping a group's Sync toggle skips that group's
 edit writeback that frame (`vis_sync_changed`/`geo_sync_changed`) so enabling sync makes

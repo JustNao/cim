@@ -37,7 +37,8 @@
   display level (0–255) up. By default it runs from 0 to 255 between the two
   clip points.
 - **Drag a point** — move it. **Click** the graph — add a point there (keep
-  holding to drag it). **Right-click a point** — remove it.
+  holding to drag it). **Right-click a point** — remove it. The first point
+  always maps to 0 and the last to 255: the ends only move sideways.
 - Once edited, the clip row shows **Manual**; its **Reset** returns to the
   automatic curve.
 
