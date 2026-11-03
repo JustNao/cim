@@ -910,7 +910,7 @@ impl CimApp {
                                         ))
                                         .clicked()
                                     {
-                                        self.current = i;
+                                        self.focus_media(i);
                                         self.mode = Mode::Single;
                                     }
 
@@ -1073,6 +1073,9 @@ impl CimApp {
                 let p = self.panes.remove(from);
                 self.panes.insert(to, p);
                 remap_move(&mut self.current, from, to);
+                if let Some(p) = &mut self.pending_current {
+                    remap_move(p, from, to);
+                }
                 remap_move(&mut self.control, from, to);
                 remap_move(&mut self.slot_a, from, to);
                 remap_move(&mut self.slot_b, from, to);

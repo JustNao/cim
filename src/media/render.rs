@@ -239,6 +239,55 @@ impl FrameData {
         }
     }
 
+    /// [`render_lut`](Self::render_lut) at **16-bit**: three samples (R, G, B)
+    /// per output pixel appended to `out` (cleared first), each mapped through
+    /// `curve` with its levels scaled to `[0, 65535]` — the same map
+    /// [`render_gray_u16_lut`](Self::render_gray_u16_lut) gives the operators. A
+    /// mono frame replicates its grey. The plain render of a high-depth TIFF
+    /// export (`imageproc::PaneOps::render_display16`).
+    pub fn render_rgb_u16_lut(
+        &self,
+        curve: Curve,
+        region: Region,
+        lut: &mut ToneLut,
+        out: &mut Vec<u16>,
+    ) {
+        let grid = region.grid(self, self.color_channels());
+        out.clear();
+        out.reserve(region.texels() * 3);
+
+        fn fill<T: Copy>(out: &mut Vec<u16>, v: &[T], grid: Grid, map: impl Fn(T) -> u16) {
+            for oy in 0..grid.oh {
+                for s in grid.row(v, oy) {
+                    if grid.cc == 1 {
+                        let g = map(s[0]);
+                        out.extend([g, g, g]);
+                    } else {
+                        out.extend([map(s[0]), map(s[1]), map(s[2])]);
+                    }
+                }
+            }
+        }
+
+        match &self.samples {
+            Samples::U8(v) => {
+                let tab = lut.map16(curve, self.mask, 256);
+                fill(out, v, grid, |s| tab[s as usize]);
+            }
+            Samples::U16(v) => {
+                let tab = lut.map16(curve, self.mask, 1 << 16);
+                fill(out, v, grid, |s| tab[s as usize]);
+            }
+            Samples::F32(v) if self.mask => {
+                fill(out, v, grid, |s| if s != 0.0 { u16::MAX } else { 0 });
+            }
+            Samples::F32(v) => {
+                let map_f = curve.map_u16();
+                fill(out, v, grid, map_f);
+            }
+        }
+    }
+
     /// [`render_lut`](Self::render_lut) over the whole image at full resolution,
     /// reusing `lut`. The common case, spelled out so callers that never crop
     /// don't have to build a [`Region`].

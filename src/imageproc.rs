@@ -506,6 +506,43 @@ impl PaneOps {
         (lut_time, ops_time)
     }
 
+    /// [`render_display`](Self::render_display) at **16-bit**, for a
+    /// high-depth TIFF export: the same tone, palette and operators, written as
+    /// three samples (R, G, B) per pixel into `out`. The operators already run
+    /// on a 16-bit buffer, so this keeps their output before the 8-bit
+    /// downscale; a plain render maps straight to 16 bits
+    /// (`render_rgb_u16_lut`); a Colormap palette has only 8-bit entries, which
+    /// are widened (×257).
+    pub fn render_display16(
+        &mut self,
+        frame: &crate::media::FrameData,
+        tone: Display,
+        region: crate::media::Region,
+        lut: &mut crate::media::ToneLut,
+        out: &mut Vec<u16>,
+    ) {
+        let Display { curve, ops, .. } = tone;
+        out.clear();
+        if let Some(pal) = tone.palette {
+            let mut rgba: Vec<u8> = Vec::new();
+            frame.render_cmap(curve, region, pal, lut, &mut rgba);
+            out.extend(
+                rgba.chunks_exact(4)
+                    .flat_map(|p| [p[0], p[1], p[2]].map(|c| c as u16 * 257)),
+            );
+            return;
+        }
+        if !ops_active(frame, ops) {
+            frame.render_rgb_u16_lut(curve, region, lut, out);
+            return;
+        }
+        let [w, h] = region.out;
+        let mut gray = Vec::new();
+        frame.render_gray_u16_lut(curve, region, lut, &mut gray);
+        self.apply(&mut gray, w, h, ops);
+        out.extend(gray.iter().flat_map(|&g| [g, g, g]));
+    }
+
     /// The instance of `op` built for `(w, h)`, reusing a cached one (moved to
     /// the front, most recently used) or creating it — evicting the
     /// least-recently-used instance beyond [`INSTANCES_PER_OP`] *before* the

@@ -47,7 +47,7 @@ use crate::curve::Curve;
 use crate::decoder::Decoded;
 use crate::export::{
     self, Encoder, ExportLayout, ExportPane, ExportPlan, ExportSource, GridCell, LabelAnchor,
-    LabelBitmap, LabelStyle, SourceInput,
+    LabelBitmap, LabelStyle, SourceInput, TiffWriter,
 };
 use crate::media::{self, HistData, Media, Reduce, RegionStats};
 use crate::settings::{Action, Chord, Config, ContrastMode, ToneOptions};
@@ -1006,6 +1006,13 @@ pub struct CimApp {
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
+    /// A Single-view switch to another media that waits for that media's
+    /// texture of the shown frame (`focus_media`). Its texture is otherwise from
+    /// whenever it was last on screen — an older frame — and with an off-thread
+    /// render (a C++ operator) that stale frame showed until the new one landed,
+    /// reading as a jump back and forth. `refresh_textures` stages it beside
+    /// `current` and makes it `current` with the lock-step commit.
+    pending_current: Option<usize>,
     /// Pane whose sequence drives the shared timeline / playback / scrubber.
     /// Decoupled from `current` so selecting a still to view doesn't take over
     /// (or hide) the transport. Kept pointing at a sequence by `ensure_control`.
@@ -1307,6 +1314,7 @@ impl CimApp {
             frame_edit: String::new(),
             mode: Mode::Grid,
             current: 0,
+            pending_current: None,
             control: 0,
             slot_a: 0,
             slot_b: 0,
@@ -2026,6 +2034,20 @@ impl CimApp {
         }
         if let Some(i) = self.nearest_visible(self.current) {
             self.current = i;
+        }
+    }
+
+    /// Focus media `i`. Already in Single view, the switch is deferred to the
+    /// commit that has `i`'s texture for the shown frame ready
+    /// (`pending_current`) — immediate for a synchronous render, a frame or two
+    /// later for an operator pane — so the old media stays up until then instead
+    /// of `i` flashing whatever frame it last rendered.
+    pub(super) fn focus_media(&mut self, i: usize) {
+        if self.mode == Mode::Single && i != self.current {
+            self.pending_current = Some(i);
+        } else {
+            self.current = i;
+            self.pending_current = None;
         }
     }
 

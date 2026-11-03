@@ -271,10 +271,13 @@ export.summary_image: 1 image fixe (l'image courante)
 export.summary_video: "%{n} images · %{secs} s"
 export.save_as: Enregistrer sous
 export.save_as_hover: >-
-  L'extension choisit le format : .mp4 (vidéo), ou .png / .jpg pour une image
-  fixe
+  L'extension choisit le format : .mp4 (vidéo), .tif (une page par image — une
+  seule image pour une seule frame ; les médias en niveaux de gris sont écrits
+  sur un canal, en 16 bits si un média dépasse 8 bits), ou .png / .jpg pour une
+  image fixe
 export.run_image: Exporter l'image
 export.run_video: Exporter en MP4
+export.run_tiff: Exporter en TIFF
 export.running: Export de %{n} images…
 export.cancelling: Annulation…
 export.cancelled: Export annulé

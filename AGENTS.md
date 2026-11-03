@@ -759,7 +759,8 @@ regions, that would stall a pane rather than merely look blurry.
 (`decode::decimated_size`, i.e. `media::Region::whole`'s sizing).
 Dims = `COVER` × the rotation-aware visible span (`COVER_PAUSED` 2 for interactive pan
 runway; **`COVER_PLAYING` 1** — runway is worthless when every frame needs a new region
-anyway) plus `2 * QUANTUM`, rounded up to **`QUANTUM` (128)**-texel multiples, clamped to the
+anyway; an **operator pane always takes `COVER_PLAYING`**, since its output depends on the
+whole input and a region that doubled on pause visibly shifted LUT_ALPHA's tone) plus `2 * QUANTUM`, rounded up to **`QUANTUM` (128)**-texel multiples, clamped to the
 image. The `2 * QUANTUM` allowance is not optional: snapping the origin down displaces the
 region centre by up to `QUANTUM`, so covering the viewport needs that margin on *each* side —
 one `QUANTUM` left the far edge landing at the view centre, blurring half the pane
@@ -1363,6 +1364,14 @@ pause, any manual next/prev/seek, and length clamping; when an unsynced pane own
 transport the commit lands on **its** `frame` instead of `shared_frame`, staged the
 same way.
 
+**Switching media in Single view waits for its texture** (`focus_media` →
+`pending_current`). Only displayed panes are staged, so a pane brought back into Single
+view still holds the texture of whatever frame it last showed; with an off-thread render
+(a C++ operator) that stale frame was drawn until the new one landed — a visible jump back
+and forth. `refresh_textures` stages the pending pane beside `current` and makes it
+`current` with the lock-step commit (the same update for a synchronous render). One that
+can't stage (unfitted, catching up) switches at once.
+
 ### 8.1 Timeline hover preview (`app/preview.rs`, `thumbs.rs`)
 
 Hovering the frame bar's scrubber shows a thumbnail of the frame under the cursor plus
@@ -1956,6 +1965,28 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   frames are **resident**, a property of the live cache that the export can't reproduce,
   so the plan snapshots the on-screen result as a `Still` — which is exactly what the
   view shows (and, being constant across the timeline, loses nothing).
+- **TIFF** (`.tif`/`.tiff`) runs the video path (range, worker thread) with a
+  `TiffWriter` in place of the ffmpeg `Encoder` — both are `export::FrameSink`s, which
+  `run_export` drives. One page per frame: a one-frame range is a single image
+  (`crop_to_content`-trimmed like a still), a longer one a multi-page stack at the full
+  output size. A page whose pixels are all grey is written **single-channel** (`H×W`, so
+  a stack reads as `N×H×W`), else RGB — decided per page. LZW, BigTIFF past ~2 GiB of raw
+  pixels. `name_for_format` keeps a `.tif` for either kind.
+  **Depth is the highest precision among the exported views** (`export_wide`): 16 bits
+  per channel when any participating pane's source is deeper than 8 bits or runs the
+  operators, else 8. Still the *view* (tone, operators, overlay, labels), not the raw
+  samples — just without the 8-bit rounding. `ExportPlan::set_wide` makes each pane render
+  through `PaneOps::render_display16` (the operators' 16-bit buffer before its downscale,
+  or `FrameData::render_rgb_u16_lut` — the same `map16` the operator input uses; a
+  Colormap palette is widened ×257), and `compose16` composites it. The compositor is
+  **one generic body** over `export::Channel` (`u8` / `u16`) — sampling, overlay and
+  label blending are shared, with 8-bit values scaled ×257 — and `run_export` hands
+  either depth to its `FrameSink` as a `Composite`.
+- **Tone is the pane's, never the crop's.** `ExportPane::render` takes bounds from
+  `frame_bounds` on the **full** frame (plus `tone_region`'s region), and a pane whose
+  operators run (`ops_active`) renders the **whole** frame rather than its sampled box —
+  LUT_ALPHA's auto-contrast is over its input, so feeding it the visible crop made a
+  zoomed-in export differ from the classic view. Plain renders still render only the box.
 - `ExportPane` holds a snapshot view/clip/source plus its **own reader**
   (`ExportReader = Tiff(SeqReader) | Video(VideoReader)`) and a 1-frame
   decode+render cache. A pane's **mask overlay** is snapshotted too
@@ -1973,9 +2004,9 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `view.screen_to_img` + `unrotate` (the map is a pure affine, so the corner bound is exact
   for **any rotation**; a rotated crop yields the tight source rectangle covering its rotated
   region). `render` then `FrameData::crop`s to that box and runs the **whole** tone pipeline
-  — LUT bounds (`clip_bounds`/`display_bounds`), the LUT render, **and the LUT_ALPHA /
-  details operators** — on just that sub-frame, so a small crop never processes the full
-  image (and the operators' auto-contrast is computed on the region). A full-frame box skips
+  — LUT bounds (`clip_bounds`/`display_bounds`), the LUT render — on just that sub-frame, so a small crop never processes the full image. The
+  **operators** are the exception: they render the whole frame (see "Tone is the pane's"
+  above), and the bounds always come from the full frame. A full-frame box skips
   the copy (no regression for a full-view export); `cur_origin`/`cur_render_size` offset the
   sample lookup into the cropped buffer, while `cur_size` (full frame) still anchors the
   rotation centre and overlay mapping. A pane the output never samples isn't rendered at all.

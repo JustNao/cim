@@ -44,6 +44,7 @@ struct PreviewGeom {
 #[derive(PartialEq)]
 enum ExportFormat {
     Video, // .mp4 (or a bare name) → ffmpeg H.264
+    Tiff,  // .tif / .tiff → one page per frame of the range (one page = a still)
     Image, // .png / .jpg / .jpeg → one composited still
 }
 
@@ -54,8 +55,10 @@ enum ExportOutcome {
     Failed(String),
 }
 
-/// Worker body: compose + encode every frame, publishing progress and honouring
-/// a cancel request between frames. Runs on its own thread.
+/// Worker body: compose + encode every frame into `enc` (ffmpeg, or a TIFF
+/// stack), publishing progress and honouring a cancel request between frames.
+/// Runs on its own thread. `wide` composes at 16 bits per channel (a high-depth
+/// TIFF; the plan must have been [`ExportPlan::set_wide`]).
 ///
 /// **Pipelined**: composition runs on a second thread, double-buffered against
 /// the encode through a bounded channel (capacity 1 → at most two frames in
@@ -63,13 +66,14 @@ enum ExportOutcome {
 /// at the pace of the slower of the two stages instead of their sum. The
 /// composer owns the plan; this thread owns the encoder.
 fn run_export(
-    mut enc: Encoder,
+    mut enc: Box<dyn export::FrameSink>,
     mut plan: ExportPlan,
+    wide: bool,
     total: usize,
     progress: Arc<AtomicUsize>,
     cancel: Arc<AtomicBool>,
 ) -> ExportOutcome {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<export::Composite>(1);
     let cancel2 = Arc::clone(&cancel);
     let composer = thread::spawn(move || {
         for t in 0..total {
@@ -79,7 +83,13 @@ fn run_export(
             // On the budgeted rayon pool: the composite splits by row and each
             // pane's render splits internally, so an export must not be able to
             // take the whole machine (`crate::cpu`).
-            let buf = crate::cpu::install(|| plan.compose(t));
+            let buf = crate::cpu::install(|| {
+                if wide {
+                    export::Composite::U16(plan.compose16(t))
+                } else {
+                    export::Composite::U8(plan.compose(t))
+                }
+            });
             if tx.send(buf).is_err() {
                 return; // encoder side bailed (write error / cancel): stop
             }
@@ -671,6 +681,20 @@ impl CimApp {
         }
     }
 
+    /// Whether a TIFF export is written at 16 bits per channel: the highest
+    /// precision among the exported views — any source deeper than 8 bits, or a
+    /// pane running the operators (which work at 16-bit). Otherwise 8-bit,
+    /// where 16 would only repeat each level.
+    fn export_wide(&self) -> bool {
+        self.export_participants().into_iter().any(|i| {
+            self.pane_ops_active(i)
+                || self.panes[i]
+                    .media
+                    .resident(self.frame_disp(i))
+                    .is_some_and(|f| !matches!(f.samples, media::Samples::U8(_)))
+        })
+    }
+
     /// Whether the selected export range could still be cut short (or change) by
     /// lazy length discovery — the only case the "not fully loaded" warning is
     /// meaningful. `false` once the chosen range is fully discovered: an explicit
@@ -893,6 +917,7 @@ impl CimApp {
             .as_deref()
         {
             Some("png") | Some("jpg") | Some("jpeg") => ExportFormat::Image,
+            Some("tif") | Some("tiff") => ExportFormat::Tiff,
             _ => ExportFormat::Video,
         }
     }
@@ -913,10 +938,17 @@ impl CimApp {
             .map(|s| s.to_ascii_lowercase())
         {
             None => format!("{name}.mp4"),
-            Some(ext) if matches!(ext.as_str(), "mp4" | "png" | "jpg" | "jpeg") => name.to_string(),
+            Some(ext)
+                if matches!(
+                    ext.as_str(),
+                    "mp4" | "png" | "jpg" | "jpeg" | "tif" | "tiff"
+                ) =>
+            {
+                name.to_string()
+            }
             Some(ext) => {
                 self.export.status = format!(
-                    "Unsupported extension '.{ext}' — use .mp4, .png or .jpg \
+                    "Unsupported extension '.{ext}' — use .mp4, .tif, .png or .jpg \
                      (or no extension for MP4)"
                 );
                 return;
@@ -937,16 +969,22 @@ impl CimApp {
             self.export_still_image(ctx, path);
             return;
         }
-        let plan = match self.build_export_plan(ctx) {
+        let mut plan = match self.build_export_plan(ctx) {
             Ok(p) => p,
             Err(e) => {
                 self.export.status = e;
                 return;
             }
         };
+        let wide = self.export_format() == ExportFormat::Tiff && self.export_wide();
+        plan.set_wide(wide);
         let (w, h, total) = (plan.out_w, plan.out_h, plan.total);
-        let enc = match Encoder::start(&path, w, h, self.config.export.fps, self.config.export.crf)
-        {
+        let enc: Result<Box<dyn export::FrameSink>, String> = match self.export_format() {
+            ExportFormat::Tiff => TiffWriter::start(&path, w, h, total).map(|e| Box::new(e) as _),
+            _ => Encoder::start(&path, w, h, self.config.export.fps, self.config.export.crf)
+                .map(|e| Box::new(e) as _),
+        };
+        let enc = match enc {
             Ok(enc) => enc,
             Err(e) => {
                 self.export.status = e;
@@ -958,7 +996,7 @@ impl CimApp {
         let progress = Arc::new(AtomicUsize::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let (pc, cc) = (progress.clone(), cancel.clone());
-        let handle = thread::spawn(move || run_export(enc, plan, total, pc, cc));
+        let handle = thread::spawn(move || run_export(enc, plan, wide, total, pc, cc));
         self.export.status = t!("export.running", n = total).into_owned();
         self.export.run = Some(ExportRun {
             handle: Some(handle),
@@ -1539,10 +1577,10 @@ impl CimApp {
                     }
                 } else {
                     let ready = !self.export.name.trim().is_empty();
-                    let label = if self.export_format() == ExportFormat::Image {
-                        t!("export.run_image")
-                    } else {
-                        t!("export.run_video")
+                    let label = match self.export_format() {
+                        ExportFormat::Image => t!("export.run_image"),
+                        ExportFormat::Tiff => t!("export.run_tiff"),
+                        ExportFormat::Video => t!("export.run_video"),
                     };
                     if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
                         self.start_export(ctx);
@@ -1576,6 +1614,8 @@ fn name_for_format(name: &str, video: bool) -> String {
     let (is_video, is_image) = match ext.as_deref() {
         Some("mp4") => (true, false),
         Some("png" | "jpg" | "jpeg") => (false, true),
+        // A TIFF holds either: one page for a still, a stack for a sequence.
+        Some("tif" | "tiff") => (true, true),
         _ => (false, false),
     };
     if (video && is_video) || (!video && is_image) {
@@ -1604,6 +1644,9 @@ mod tests {
         assert_eq!(f("clip", true), "clip.mp4");
         assert_eq!(f("clip.v2", false), "clip.v2.png");
         assert_eq!(f("  ", true), "comparison.mp4");
+        // A TIFF suits both, so it is kept either way.
+        assert_eq!(f("stack.tif", true), "stack.tif");
+        assert_eq!(f("stack.TIFF", false), "stack.TIFF");
     }
 
     use super::*;

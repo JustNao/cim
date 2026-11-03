@@ -557,7 +557,13 @@ impl CimApp {
         let theta = self.pane_theta(idx);
         let stage_step = self.stage_step(idx, ppp);
         let step = roi_step(stage_step);
-        let cover = if self.playback.playing {
+        // An operator's output depends on its whole input (LUT_ALPHA / Boost
+        // auto-contrast over it), so its region must not change size on
+        // play/pause: the paused runway doubled the input and visibly shifted
+        // the tone the moment playback stopped. Such a pane keeps the playing
+        // size throughout and gives up the pan runway.
+        let ops = self.pane_ops_active(idx);
+        let cover = if self.playback.playing || ops {
             COVER_PLAYING
         } else {
             COVER_PAUSED
@@ -575,7 +581,7 @@ impl CimApp {
         }
         // The base `want_step` will actually render (an operator pane takes the
         // reduced base whenever the setting is on, so `ops` alone decides there).
-        let base = base_step(stage_step, size, max_side, self.pane_ops_active(idx));
+        let base = base_step(stage_step, size, max_side, ops);
         (gain(size, stage_step, dims, base) >= MIN_GAIN as f64).then(|| RegionPlan {
             step,
             dims,

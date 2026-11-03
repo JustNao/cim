@@ -61,7 +61,9 @@ impl CimApp {
         };
         area.show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_max_width(240.0);
+                // Narrower in a small pane, so a long media name is elided by
+                // the pickers instead of pushing the form past the cell.
+                ui.set_max_width(240f32.min(img_area.width() - 24.0).max(80.0));
                 if !computed {
                     // Config form: pick the mode + source(s), then Compute.
                     ui.label(egui::RichText::new(t!("compute.new")).strong());
@@ -149,18 +151,28 @@ fn compute_config_rows(
                 .and_then(|s| sources.iter().find(|(m, _)| *m == s))
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| "—".into());
+            // Names are elided ("…") to the form's width, in the button and the
+            // list alike; the full name is on hover.
+            let max_w = ui.max_rect().width();
             egui::ComboBox::from_id_salt((id, salt))
-                .selected_text(cur)
+                .selected_text(cur.clone())
+                .truncate()
                 .show_ui(ui, |ui| {
+                    ui.set_max_width(max_w);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     for (mid, mname) in &sources {
+                        let text = format!("{} {}", mid, mname);
                         if ui
-                            .selectable_value(sel, Some(*mid), format!("{} {}", mid, mname))
+                            .selectable_value(sel, Some(*mid), text.clone())
+                            .on_hover_text(text)
                             .clicked()
                         {
                             changed = true;
                         }
                     }
-                });
+                })
+                .response
+                .on_hover_text(cur);
         });
     };
     pick(

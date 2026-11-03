@@ -616,10 +616,23 @@ impl CimApp {
         if self.pending_seek.is_some() {
             return;
         }
-        let panes = self.displayed_indices();
+        // A deferred Single-view switch (`focus_media`) is staged beside the
+        // shown pane and takes over at the commit below. One that can't stage
+        // yet — never drawn, so never fitted, or discovering toward its frame —
+        // would hold the switch indefinitely, so it switches now as before.
+        if let Some(p) = self.pending_current {
+            if self.mode != Mode::Single || p >= self.panes.len() || p == self.current {
+                self.pending_current = None;
+            } else if self.view_ref(p).needs_fit || self.catching_up(p) {
+                self.current = p;
+                self.pending_current = None;
+            }
+        }
+        let mut panes = self.displayed_indices();
         if panes.is_empty() {
             return;
         }
+        panes.extend(self.pending_current);
         // Physical pixels per point (OS DPI × UI-scale zoom factor), so decimation
         // is judged against real screen resolution, not view-space points.
         let ppp = ctx.pixels_per_point();
@@ -687,6 +700,9 @@ impl CimApp {
             // Promote the staged region alongside its base, so drawing never
             // pairs a freshly committed base with the previous frame's region.
             self.panes[idx].region_show = self.panes[idx].region_want;
+        }
+        if let Some(p) = self.pending_current.take() {
+            self.current = p;
         }
         // The panes flip together, so the first one's frame is the one shown.
         if let Some(t) = staged

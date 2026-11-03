@@ -257,9 +257,10 @@ export.load_frames_hover: >-
 export.summary_image: 1 still image (the current frame)
 export.summary_video: "%{n} frames · %{secs}s"
 export.save_as: Save as
-export.save_as_hover: "Extension picks the format: .mp4 (video), or .png / .jpg for a still"
+export.save_as_hover: "Extension picks the format: .mp4 (video), .tif (one page per frame — a single image for one frame; grey media are written single-channel, at 16 bits when a media is deeper than 8 bits), or .png / .jpg for a still"
 export.run_image: Export image
 export.run_video: Export MP4
+export.run_tiff: Export TIFF
 export.running: Exporting %{n} frames…
 export.cancelling: Cancelling…
 export.cancelled: Export cancelled

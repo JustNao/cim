@@ -1,4 +1,4 @@
-//! Comparison export (MP4 video or a single PNG/JPEG still).
+//! Comparison export (MP4 video, a TIFF stack, or a single PNG/JPEG still).
 //!
 //! The app builds a self-contained [`ExportPlan`] (a snapshot of layout, views,
 //! tone/detail settings and media sources), then composites each timeline frame on the CPU.
@@ -9,8 +9,9 @@
 //! in the dark background (MP4 ignores alpha, keeping its `BG`).
 
 use rust_i18n::t;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -26,6 +27,57 @@ use crate::tone::{frame_bounds, synced_index};
 use crate::view::ViewTransform;
 
 const BG: [u8; 4] = [24, 24, 24, 255];
+
+/// One channel of a composited output pixel: `u8` for MP4, stills and an 8-bit
+/// TIFF, `u16` for a high-depth TIFF ([`ExportPlan::compose16`]). The
+/// compositor is written once over this, so both depths share every step —
+/// sampling, overlay, labels — and differ only in the panes' rendered buffers.
+pub trait Channel: Copy + Default + PartialEq + Send + Sync + 'static {
+    /// An 8-bit level at this depth (`v × 257` for 16-bit, so 255 is full scale).
+    fn from_u8(v: u8) -> Self;
+    /// A 16-bit level at this depth.
+    fn from_u16(v: u16) -> Self;
+    /// Round and clamp a value in this depth's units.
+    fn from_f32(v: f32) -> Self;
+    fn to_f32(self) -> f32;
+}
+
+impl Channel for u8 {
+    fn from_u8(v: u8) -> Self {
+        v
+    }
+    fn from_u16(v: u16) -> Self {
+        ((v as u32 + 128) / 257) as u8
+    }
+    fn from_f32(v: f32) -> Self {
+        v.round().clamp(0.0, 255.0) as u8
+    }
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+}
+
+impl Channel for u16 {
+    fn from_u8(v: u8) -> Self {
+        v as u16 * 257
+    }
+    fn from_u16(v: u16) -> Self {
+        v
+    }
+    fn from_f32(v: f32) -> Self {
+        v.round().clamp(0.0, 65535.0) as u16
+    }
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+}
+
+/// A composited RGBA frame at either depth, as the export worker hands it to a
+/// [`FrameSink`].
+pub enum Composite {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
 
 /// Output pixels below which a composite stays serial. Far lower than the
 /// display render's threshold (`media::render`'s `PAR_MIN_PX`, 1M): a pixel here
@@ -177,6 +229,12 @@ pub struct ExportPane {
     /// The rendered display RGBA — **only the cropped region** (`cur_render_size`),
     /// whose top-left is `cur_origin` in full-image pixels.
     cur_display: Option<Vec<u8>>,
+    /// The 16-bit counterpart of `cur_display` (RGB, three samples per pixel),
+    /// rendered instead of it while `wide` is set.
+    cur_wide: Option<Vec<u16>>,
+    /// Render at 16-bit (`render_display16`) for a high-depth export
+    /// ([`ExportPlan::set_wide`]).
+    wide: bool,
     cur_origin: [usize; 2],
     cur_render_size: [usize; 2],
     /// Full source-frame size (kept for the rotation centre and overlay mapping,
@@ -351,6 +409,8 @@ impl ExportPane {
             cur_idx: None,
             cur_box: None,
             cur_display: None,
+            cur_wide: None,
+            wide: false,
             cur_origin: [0, 0],
             cur_render_size: [0, 0],
             cur_size: [0, 0],
@@ -458,20 +518,38 @@ impl ExportPane {
         };
         let Some([x0, y0, cw, ch]) = b else {
             self.cur_display = None;
+            self.cur_wide = None;
             self.cur_box = None;
             self.cur_idx = self.raw_idx;
             return;
         };
-        // Crop first, so bounds / LUT / operators all see only the region. The
-        // Linear clip toggle + its per-tail percentile (`self.clip`) mirror the
-        // pane's tone; LUT_ALPHA takes the full range (`clip == None`). The
-        // operators run on a single-channel 16-bit render, only for single-channel
-        // 16-bit frames with the library loaded; everything else is the plain
-        // 8-bit render. Matches the live view (on the cropped region).
+        // The tone is the pane's, never the crop's: the view computes bounds and
+        // runs the operators on the whole frame, so an export showing part of
+        // the image (zoomed in, or an export crop) must too, or its contrast
+        // drifts from what was on screen. Bounds come from `frame_bounds` on the
+        // full frame (memoized there, so no cost), restricted only by a region
+        // the view also uses (`tone_region`). The Linear clip toggle + its
+        // per-tail percentile (`self.clip`) mirror the pane's tone; LUT_ALPHA
+        // takes the full range (`clip == None`).
         //
+        // A plain render is a per-pixel map, so it only renders the sampled box.
+        // An operator's output depends on its whole input (LUT_ALPHA's
+        // auto-contrast over it), so it renders the whole frame — exactly the
+        // classic (non-adaptive) view; adaptive regions are view-dependent by
+        // design and are not reproduced.
+        let ops = crate::imageproc::Ops {
+            lut_alpha: self.contrast == ContrastMode::LutAlpha,
+            boost: self.contrast == ContrastMode::Boost,
+            details: self.details,
+        };
+        let [fw, fh] = frame.size;
+        let [x0, y0, cw, ch] = if crate::imageproc::ops_active(&frame, ops) {
+            [0, 0, fw, fh]
+        } else {
+            [x0, y0, cw, ch]
+        };
         // Skip the copy when the box already covers the whole frame (e.g. a
         // full-view export), so that common case is no slower than before.
-        let [fw, fh] = frame.size;
         let cropped;
         let sub: &FrameData = if x0 == 0 && y0 == 0 && cw == fw && ch == fh {
             &frame
@@ -481,52 +559,41 @@ impl ExportPane {
         };
         // Explicit bounds (from "Share clip" — the Control media's [lo, hi])
         // override everything else, exactly as `tone_bounds` does live.
-        //
-        // Otherwise the shared `frame_bounds`. A pinned region is measured on the
-        // **full** frame, since it is in full-image coordinates and need not
-        // coincide with the sampled crop box; with no region the cropped `sub` is
-        // the subject, so a crop's auto-contrast is computed on the region the
-        // output actually shows (and a full-view export skips the copy entirely).
         let curve = match self.window {
             Some(win) => win,
             None => {
-                let (lo, hi) = match self.region {
-                    Some(_) => frame_bounds(&frame, self.clip, self.region),
-                    None => frame_bounds(sub, self.clip, None),
-                };
+                let (lo, hi) = frame_bounds(&frame, self.clip, self.region);
                 Curve::linear(lo, hi)
             }
         };
-        let mut rgba = Vec::new();
-        // Export always renders the whole (already cropped) sub-frame at full
-        // resolution — the adaptive display's decimated regions never apply here,
-        // which is why an operator's output can differ between the two.
+        // Export always renders at full resolution — the adaptive display's
+        // decimated regions never apply here.
         let whole = crate::media::Region::whole(sub.size, 1);
-        // Colormap is a plain mono-only palette render (mirrors the live sync
-        // path); everything else goes through the shared operator render tail.
-        // Same mono-only gate as the live view, so a multi-channel or mask frame
-        // falls back to the plain render on both sides.
         // The one shared render tail (Colormap palette, plain LUT, or operators
         // on a full-precision 16-bit render) — identical to the live view by
         // construction, which is the whole point of it being one function.
-        self.ops.render_display(
-            sub,
-            crate::imageproc::Display {
-                curve,
-                palette: self
-                    .palette
-                    .filter(|_| crate::tone::uses_colormap(self.contrast, sub)),
-                ops: crate::imageproc::Ops {
-                    lut_alpha: self.contrast == ContrastMode::LutAlpha,
-                    boost: self.contrast == ContrastMode::Boost,
-                    details: self.details,
-                },
-            },
-            whole,
-            &mut self.lut,
-            &mut rgba,
-        );
-        self.cur_display = Some(rgba);
+        // Same mono-only Colormap gate as the live view, so a multi-channel or
+        // mask frame falls back to the plain render on both sides.
+        let display = crate::imageproc::Display {
+            curve,
+            palette: self
+                .palette
+                .filter(|_| crate::tone::uses_colormap(self.contrast, sub)),
+            ops,
+        };
+        if self.wide {
+            let mut rgb = self.cur_wide.take().unwrap_or_default();
+            self.ops
+                .render_display16(sub, display, whole, &mut self.lut, &mut rgb);
+            self.cur_wide = Some(rgb);
+            self.cur_display = None;
+        } else {
+            let mut rgba = self.cur_display.take().unwrap_or_default();
+            self.ops
+                .render_display(sub, display, whole, &mut self.lut, &mut rgba);
+            self.cur_display = Some(rgba);
+            self.cur_wide = None;
+        }
         self.cur_origin = [x0, y0];
         self.cur_render_size = [cw, ch];
         self.cur_box = b;
@@ -540,6 +607,7 @@ impl ExportPane {
             view: self.view,
             rotation: self.rotation,
             cur_display: self.cur_display.as_deref(),
+            cur_wide: self.cur_wide.as_deref(),
             cur_origin: self.cur_origin,
             cur_render_size: self.cur_render_size,
             cur_size: self.cur_size,
@@ -566,6 +634,7 @@ struct PaneSampler<'a> {
     view: ViewTransform,
     rotation: f32,
     cur_display: Option<&'a [u8]>,
+    cur_wide: Option<&'a [u16]>,
     cur_origin: [usize; 2],
     cur_render_size: [usize; 2],
     cur_size: [usize; 2],
@@ -596,7 +665,7 @@ impl PaneSampler<'_> {
 
     /// Sample the composited pane colour (base image with the mask overlay, if
     /// any, blended on top) at image-space point `ip`.
-    fn sample(&self, ip: Vec2) -> Option<[u8; 3]> {
+    fn sample<P: Channel>(&self, ip: Vec2) -> Option<[P; 3]> {
         let base = self.sample_base(ip)?;
         Some(self.blend_overlay(base, ip))
     }
@@ -609,7 +678,7 @@ impl PaneSampler<'_> {
     /// newly selected mismatched source is rejected up front with an error popup,
     /// so this only guards later per-frame size drift within a sequence; stretching
     /// it here would put an overlay in the video that the panes never showed.
-    fn blend_overlay(&self, base: [u8; 3], ip: Vec2) -> [u8; 3] {
+    fn blend_overlay<P: Channel>(&self, base: [P; 3], ip: Vec2) -> [P; 3] {
         let Some(ov) = &self.overlay else {
             return base;
         };
@@ -629,7 +698,8 @@ impl PaneSampler<'_> {
         }
         let mut out = base;
         for k in 0..3 {
-            out[k] = (base[k] as f32 * (1.0 - a) + buf[i + k] as f32 * a).round() as u8;
+            out[k] =
+                P::from_f32(base[k].to_f32() * (1.0 - a) + P::from_u8(buf[i + k]).to_f32() * a);
         }
         out
     }
@@ -637,8 +707,7 @@ impl PaneSampler<'_> {
     /// Nearest-neighbour sample of the base image at image point `ip`. Always
     /// nearest so every exported pixel is a true source value, never a blend —
     /// upscaling just replicates source pixels.
-    fn sample_base(&self, ip: Vec2) -> Option<[u8; 3]> {
-        let buf = self.cur_display?;
+    fn sample_base<P: Channel>(&self, ip: Vec2) -> Option<[P; 3]> {
         // `cur_display` covers only the crop box (`cur_render_size`) whose top-left
         // is `cur_origin` in full-image pixels — shift `ip` into that sub-buffer.
         let [ox, oy] = self.cur_origin;
@@ -648,8 +717,14 @@ impl PaneSampler<'_> {
         if cw == 0 || ch == 0 || x < 0.0 || y < 0.0 || x >= cw as f32 || y >= ch as f32 {
             return None;
         }
-        let i = (y as usize * cw + x as usize) * 4;
-        Some([buf[i], buf[i + 1], buf[i + 2]])
+        let px = y as usize * cw + x as usize;
+        if let Some(buf) = self.cur_wide {
+            let i = px * 3;
+            return Some([buf[i], buf[i + 1], buf[i + 2]].map(P::from_u16));
+        }
+        let buf = self.cur_display?;
+        let i = px * 4;
+        Some([buf[i], buf[i + 1], buf[i + 2]].map(P::from_u8))
     }
 }
 
@@ -878,6 +953,26 @@ impl ExportPlan {
 
     /// Composite output frame `t` (of `total`) into an RGBA buffer.
     pub fn compose(&mut self, t: usize) -> Vec<u8> {
+        self.compose_px(t)
+    }
+
+    /// [`compose`](Self::compose) at 16 bits per channel, for a high-depth TIFF
+    /// — after [`set_wide`](Self::set_wide), or the panes are still 8-bit.
+    pub fn compose16(&mut self, t: usize) -> Vec<u16> {
+        self.compose_px(t)
+    }
+
+    /// Render the panes at 16-bit (`true`) or 8-bit. Set before composing.
+    pub fn set_wide(&mut self, wide: bool) {
+        for p in &mut self.panes {
+            if p.wide != wide {
+                p.wide = wide;
+                p.cur_idx = None; // re-render at the new depth
+            }
+        }
+    }
+
+    fn compose_px<P: Channel>(&mut self, t: usize) -> Vec<P> {
         // Decode every pane's source frame first (so their sizes are known), then
         // compute the source-space crop box each one actually needs and render
         // only that sub-rectangle — the tone pipeline (LUT + operators) never
@@ -924,7 +1019,7 @@ impl ExportPlan {
         }
         let (w, h) = (self.out_w, self.out_h);
         let (rw, rh) = (self.region.width(), self.region.height());
-        let mut out = vec![0u8; w * h * 4];
+        let mut out = vec![P::default(); w * h * 4];
         // The panes are fully rendered by now, so the resample below only *reads*
         // them — every output pixel is an independent function of that read-only
         // state. Rows are therefore disjoint and the buffer splits by row.
@@ -936,7 +1031,8 @@ impl ExportPlan {
             &self.layout,
             self.region,
         );
-        let row = |oy: usize, dst: &mut [u8]| {
+        let bg = [BG[0], BG[1], BG[2]].map(P::from_u8);
+        let row = |oy: usize, dst: &mut [P]| {
             let cy = region.min.y + (oy as f32 + 0.5) / h as f32 * rh;
             for ox in 0..w {
                 let cx = region.min.x + (ox as f32 + 0.5) / w as f32 * rw;
@@ -945,12 +1041,12 @@ impl ExportPlan {
                 // image) get alpha 0 — flagged as background. The still export
                 // crops them off (`crop_to_content`); MP4 (yuv420p) ignores alpha,
                 // so its dark `BG` is unchanged.
-                let mut col = [BG[0], BG[1], BG[2], 0];
+                let mut col = [bg[0], bg[1], bg[2], P::default()];
                 if let Some(loc) = layout.locate(c) {
                     let pane = &samplers[loc.pane];
                     let ip = pane.unrotate(pane.view.screen_to_img(loc.sample, loc.area));
-                    if let Some(rgb) = pane.sample(ip) {
-                        col = [rgb[0], rgb[1], rgb[2], 255];
+                    if let Some(rgb) = pane.sample::<P>(ip) {
+                        col = [rgb[0], rgb[1], rgb[2], P::from_u8(255)];
                     }
                 }
                 dst[ox * 4..ox * 4 + 4].copy_from_slice(&col);
@@ -1007,7 +1103,7 @@ impl ExportPlan {
     /// Blend every pane's name label into the composited output buffer (RGBA,
     /// `out_w × out_h`). Labelled pixels are forced opaque so a still's
     /// `crop_to_content` keeps them and never trims a label off.
-    fn draw_labels(&self, out: &mut [u8]) {
+    fn draw_labels<P: Channel>(&self, out: &mut [P]) {
         if self.labels.iter().all(|l| l.is_none()) {
             return;
         }
@@ -1180,27 +1276,25 @@ impl ExportPlan {
 /// `dst·(1 − a·cov) + c·cov`. Unmultiplying it and applying the alpha here
 /// instead lands somewhere else — a translucent coloured background came out
 /// visibly fainter in the export than in the preview.
-fn blend_px(dst: &mut [u8], col: Color32, cov: f32) {
+fn blend_px<P: Channel>(dst: &mut [P], col: Color32, cov: f32) {
     // An uncovered (alpha-0) pixel holds the background colour but isn't really
     // there — blend against `BG` explicitly, so a label hanging over the gutter
     // fades into the same dark background the video shows.
-    let base = if dst[3] == 0 {
-        BG
+    let base = if dst[3] == P::default() {
+        [BG[0], BG[1], BG[2]].map(P::from_u8)
     } else {
-        [dst[0], dst[1], dst[2], 255]
+        [dst[0], dst[1], dst[2]]
     };
     let keep = 1.0 - col.a() as f32 / 255.0 * cov;
     let col = col.to_array();
     for k in 0..3 {
-        dst[k] = (base[k] as f32 * keep + col[k] as f32 * cov)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+        dst[k] = P::from_f32(base[k].to_f32() * keep + P::from_u8(col[k]).to_f32() * cov);
     }
-    dst[3] = 255;
+    dst[3] = P::from_u8(255);
 }
 
 /// Apply `f` to every output pixel inside `r` (clipped to the `w × h` buffer).
-fn blend_rect(out: &mut [u8], w: usize, h: usize, r: Rect, f: impl Fn(&mut [u8])) {
+fn blend_rect<P>(out: &mut [P], w: usize, h: usize, r: Rect, f: impl Fn(&mut [P])) {
     let x0 = (r.min.x.round() as i64).clamp(0, w as i64) as usize;
     let y0 = (r.min.y.round() as i64).clamp(0, h as i64) as usize;
     let x1 = (r.max.x.round() as i64).clamp(0, w as i64) as usize;
@@ -1211,6 +1305,16 @@ fn blend_rect(out: &mut [u8], w: usize, h: usize, r: Rect, f: impl Fn(&mut [u8])
             f(&mut out[o..o + 4]);
         }
     }
+}
+
+/// Where the export worker (`run_export`) writes each composited RGBA frame, in
+/// timeline order: the ffmpeg [`Encoder`] or a [`TiffWriter`].
+pub trait FrameSink: Send {
+    fn write_frame(&mut self, frame: &Composite) -> Result<(), String>;
+    /// Finalise the output after the last frame.
+    fn finish(&mut self) -> Result<(), String>;
+    /// Abandon the output (cancel / error).
+    fn kill(&mut self);
 }
 
 /// A running ffmpeg encoder fed raw RGBA frames over stdin.
@@ -1267,8 +1371,14 @@ impl Encoder {
         }
         Ok(Self { child, stdin, log })
     }
+}
 
-    pub fn write_frame(&mut self, buf: &[u8]) -> Result<(), String> {
+impl FrameSink for Encoder {
+    fn write_frame(&mut self, frame: &Composite) -> Result<(), String> {
+        // Video is always composed at 8 bits.
+        let Composite::U8(buf) = frame else {
+            return Err("ffmpeg takes 8-bit frames".into());
+        };
         self.stdin
             .as_mut()
             .ok_or_else(|| "encoder stdin closed".to_string())?
@@ -1276,7 +1386,7 @@ impl Encoder {
             .map_err(|e| format!("write to ffmpeg: {e}"))
     }
 
-    pub fn finish(&mut self) -> Result<(), String> {
+    fn finish(&mut self) -> Result<(), String> {
         self.stdin.take(); // closing stdin lets ffmpeg finalise the file
         let status = self.child.wait().map_err(|e| format!("wait ffmpeg: {e}"))?;
         if status.success() {
@@ -1288,10 +1398,138 @@ impl Encoder {
         }
     }
 
-    pub fn kill(&mut self) {
+    fn kill(&mut self) {
         self.stdin.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// A TIFF being written one page per exported frame — a one-frame range is a
+/// plain single image, a longer one a multi-page stack. 8-bit, like every
+/// other format: the export is the view, not the source samples. LZW, and
+/// BigTIFF once the raw pixels could pass the classic format's 4 GiB offsets.
+pub struct TiffWriter {
+    enc: Option<TiffOut>,
+    path: PathBuf,
+    w: usize,
+    h: usize,
+    /// A single page is a still: crop it to the content like a PNG
+    /// ([`crop_to_content`]). A stack keeps the full size, so every page has
+    /// the same shape.
+    single: bool,
+}
+
+enum TiffOut {
+    Classic(tiff::encoder::TiffEncoder<BufWriter<File>>),
+    Big(tiff::encoder::TiffEncoder<BufWriter<File>, tiff::encoder::TiffKindBig>),
+}
+
+impl TiffWriter {
+    /// Start a `frames`-page TIFF of `w`×`h` composited frames at `path`.
+    pub fn start(path: &Path, w: usize, h: usize, frames: usize) -> Result<Self, String> {
+        use tiff::encoder::{Compression, TiffEncoder};
+        let err = |e: tiff::TiffError| format!("write TIFF: {e}");
+        let file = BufWriter::new(
+            File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?,
+        );
+        // Raw RGB size: compression only shrinks it, so this never picks the
+        // classic format for a file that could outgrow it.
+        // Sized for 16-bit samples, the larger of the two depths.
+        let big = (w * h * 6) as u64 * frames as u64 > (u32::MAX as u64) / 2;
+        let enc = if big {
+            TiffOut::Big(
+                TiffEncoder::new_big(file)
+                    .map_err(err)?
+                    .with_compression(Compression::Lzw),
+            )
+        } else {
+            TiffOut::Classic(
+                TiffEncoder::new(file)
+                    .map_err(err)?
+                    .with_compression(Compression::Lzw),
+            )
+        };
+        Ok(Self {
+            enc: Some(enc),
+            path: path.to_owned(),
+            w,
+            h,
+            single: frames == 1,
+        })
+    }
+}
+
+/// Write one composited RGBA frame as a TIFF page: **single-channel** (`H×W`,
+/// so a stack reads back as `N×H×W`) when every pixel is grey — a mono media
+/// renders R = G = B, and the background is grey too — else RGB. Decided per
+/// page, so a colour overlay or label on one frame can't turn the whole stack
+/// to RGB; alpha is dropped (the background keeps its colour, as in MP4).
+fn write_tiff_page<K, G, C>(
+    enc: &mut tiff::encoder::TiffEncoder<BufWriter<File>, K>,
+    w: usize,
+    h: usize,
+    rgba: &[G::Inner],
+) -> Result<(), String>
+where
+    K: tiff::encoder::TiffKind,
+    G: tiff::encoder::colortype::ColorType,
+    C: tiff::encoder::colortype::ColorType<Inner = G::Inner>,
+    G::Inner: Copy + PartialEq,
+    [G::Inner]: tiff::encoder::TiffValue,
+{
+    let px = || rgba.chunks_exact(4);
+    let res = if px().all(|p| p[0] == p[1] && p[1] == p[2]) {
+        let grey: Vec<G::Inner> = px().map(|p| p[0]).collect();
+        enc.write_image::<G>(w as u32, h as u32, &grey)
+    } else {
+        let rgb: Vec<G::Inner> = px().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        enc.write_image::<C>(w as u32, h as u32, &rgb)
+    };
+    res.map_err(|e| format!("write TIFF: {e}"))
+}
+
+impl TiffWriter {
+    /// Write one page at the composite's own depth: `G` (grey) / `C` (RGB).
+    fn page<P: Channel, G, C>(&mut self, buf: &[P]) -> Result<(), String>
+    where
+        G: tiff::encoder::colortype::ColorType<Inner = P>,
+        C: tiff::encoder::colortype::ColorType<Inner = P>,
+        [P]: tiff::encoder::TiffValue,
+    {
+        let cropped = self
+            .single
+            .then(|| crop_to_content(buf, self.w, self.h))
+            .flatten();
+        let (w, h, rgba) = match &cropped {
+            Some((cw, ch, v)) => (*cw, *ch, v.as_slice()),
+            None => (self.w, self.h, buf),
+        };
+        match self.enc.as_mut().ok_or("TIFF already closed")? {
+            TiffOut::Classic(e) => write_tiff_page::<_, G, C>(e, w, h, rgba),
+            TiffOut::Big(e) => write_tiff_page::<_, G, C>(e, w, h, rgba),
+        }
+    }
+}
+
+impl FrameSink for TiffWriter {
+    fn write_frame(&mut self, frame: &Composite) -> Result<(), String> {
+        use tiff::encoder::colortype::{Gray16, Gray8, RGB16, RGB8};
+        match frame {
+            Composite::U8(buf) => self.page::<u8, Gray8, RGB8>(buf),
+            Composite::U16(buf) => self.page::<u16, Gray16, RGB16>(buf),
+        }
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        // Each page is complete once written; dropping flushes the buffer.
+        self.enc.take();
+        Ok(())
+    }
+
+    fn kill(&mut self) {
+        self.enc.take();
+        let _ = std::fs::remove_file(&self.path); // a partial stack is no use
     }
 }
 
@@ -1300,11 +1538,15 @@ impl Encoder {
 /// gutters/letterboxing off entirely. Returns `None` when everything is
 /// background. Interior background (e.g. a grid gutter) can't be removed from a
 /// rectangle, so those pixels keep alpha 0.
-pub fn crop_to_content(rgba: &[u8], w: usize, h: usize) -> Option<(usize, usize, Vec<u8>)> {
+pub fn crop_to_content<P: Channel>(
+    rgba: &[P],
+    w: usize,
+    h: usize,
+) -> Option<(usize, usize, Vec<P>)> {
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (usize::MAX, usize::MAX, 0usize, 0usize);
     for y in 0..h {
         for x in 0..w {
-            if rgba[(y * w + x) * 4 + 3] != 0 {
+            if rgba[(y * w + x) * 4 + 3] != P::default() {
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
                 max_x = max_x.max(x);
@@ -1316,7 +1558,7 @@ pub fn crop_to_content(rgba: &[u8], w: usize, h: usize) -> Option<(usize, usize,
         return None; // no content
     }
     let (cw, ch) = (max_x - min_x + 1, max_y - min_y + 1);
-    let mut out = vec![0u8; cw * ch * 4];
+    let mut out = vec![P::default(); cw * ch * 4];
     for y in 0..ch {
         let src = ((min_y + y) * w + min_x) * 4;
         let dst = y * cw * 4;
@@ -1984,6 +2226,55 @@ mod tests {
 
     /// The background (alpha 0) is cropped off, leaving only the content's
     /// bounding box.
+    /// A TIFF export writes one page per frame: a grey frame as a single
+    /// channel (`H×W`, so a stack reads as `N×H×W`), a coloured one as RGB. A
+    /// one-frame export is a single page cropped to its content, like a still.
+    #[test]
+    fn tiff_pages_are_single_channel_when_grey() {
+        use tiff::decoder::{Decoder, DecodingResult};
+        use tiff::ColorType;
+        let (w, h) = (4usize, 2usize);
+        let grey: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8 * 10; 3].into_iter().chain([255]))
+            .collect();
+        let mut colour = grey.clone();
+        colour[0] = 200; // one red-tinted pixel
+
+        let path = std::env::temp_dir().join("cim_tiff_stack_test.tif");
+        let mut out = TiffWriter::start(&path, w, h, 2).expect("start");
+        out.write_frame(&Composite::U8(grey.clone()))
+            .expect("page 0");
+        out.write_frame(&Composite::U8(colour)).expect("page 1");
+        out.finish().expect("finish");
+        let mut dec = Decoder::new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(dec.dimensions().unwrap(), (w as u32, h as u32));
+        assert_eq!(dec.colortype().unwrap(), ColorType::Gray(8));
+        let DecodingResult::U8(px) = dec.read_image().unwrap() else {
+            panic!("8-bit")
+        };
+        assert_eq!(px, (0..w * h).map(|i| i as u8 * 10).collect::<Vec<_>>());
+        assert!(dec.more_images());
+        dec.next_image().unwrap();
+        assert_eq!(dec.colortype().unwrap(), ColorType::RGB(8));
+        let DecodingResult::U8(px) = dec.read_image().unwrap() else {
+            panic!("8-bit")
+        };
+        assert_eq!(&px[..3], &[200, 0, 0]);
+        assert!(!dec.more_images());
+
+        // One frame: a single page, cropped to the content.
+        let mut one = [BG[0], BG[1], BG[2], 0].repeat(w * h);
+        one[4..8].copy_from_slice(&[7, 7, 7, 255]); // pixel (1, 0)
+        let mut out = TiffWriter::start(&path, w, h, 1).expect("start");
+        out.write_frame(&Composite::U8(one)).expect("page");
+        out.finish().expect("finish");
+        let mut dec = Decoder::new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(dec.dimensions().unwrap(), (1, 1));
+        assert_eq!(dec.colortype().unwrap(), ColorType::Gray(8));
+        assert!(!dec.more_images());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn crop_to_content_trims_background() {
         // 4×3 buffer, a single opaque pixel at (2,1) surrounded by background.
@@ -2003,6 +2294,70 @@ mod tests {
     /// including the pane's clip percentile (the export honours the same tone
     /// as the view). This locks the export half of the "all render paths match
     /// pixel-for-pixel" invariant before the paths are unified.
+    /// A wide (16-bit) composite carries the tone at 16-bit precision — the
+    /// same curve the operators' input uses, scaled to `[0, 65535]` — and a
+    /// TIFF written from it is single-channel 16-bit. Two source values one
+    /// 8-bit level apart in the window stay distinct, where the 8-bit
+    /// composite has to merge them.
+    #[test]
+    fn wide_composite_keeps_16_bit_tone() {
+        use tiff::decoder::{Decoder, DecodingResult};
+        let v: Vec<u16> = vec![0, 100, 101, 1000];
+        let frame = Arc::new(FrameData::new([4, 1], 1, Samples::U16(v.clone())));
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(4.0, 1.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(2.0, 0.5),
+            needs_fit: false,
+        };
+        let mut pane = ExportPane::new(
+            view,
+            ContrastMode::Linear,
+            false,
+            None,
+            1,
+            true,
+            0,
+            ExportSource::Still(frame.clone()),
+        );
+        pane.window = Some(Curve::linear(0.0, 1000.0));
+        let mut plan = ExportPlan {
+            panes: vec![pane],
+            layout: ExportLayout::Single(0, cell),
+            control: None,
+            region: cell,
+            out_w: 4,
+            out_h: 1,
+            labels: Vec::new(),
+            label_style: LabelStyle::default(),
+            start: 0,
+            total: 1,
+        };
+        let narrow = plan.compose(0);
+        plan.set_wide(true);
+        let wide = plan.compose16(0);
+        let map = Curve::linear(0.0, 1000.0).map_u16();
+        for (i, &s) in v.iter().enumerate() {
+            assert_eq!(wide[i * 4..i * 4 + 3], [map(s as f32); 3], "pixel {i}");
+            assert_eq!(wide[i * 4 + 3], u16::MAX);
+        }
+        assert_eq!(narrow[4], narrow[8], "8-bit merges 100 and 101");
+        assert_ne!(wide[4], wide[8], "16-bit keeps them apart");
+
+        let path = std::env::temp_dir().join("cim_tiff_wide_test.tif");
+        let mut out = TiffWriter::start(&path, 4, 1, 2).expect("start");
+        out.write_frame(&Composite::U16(wide.clone()))
+            .expect("page");
+        out.finish().expect("finish");
+        let mut dec = Decoder::new(File::open(&path).unwrap()).unwrap();
+        assert_eq!(dec.colortype().unwrap(), tiff::ColorType::Gray(16));
+        let DecodingResult::U16(px) = dec.read_image().unwrap() else {
+            panic!("16-bit")
+        };
+        assert_eq!(px, wide.chunks_exact(4).map(|p| p[0]).collect::<Vec<_>>());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn full_frame_export_matches_lut_render() {
         // u16 ramp with tail outliers so the 0.5% clip actually cuts values.
@@ -2171,7 +2526,7 @@ mod tests {
         for t in 0..plan.total {
             let buf = plan.compose(t);
             assert_eq!(buf.len(), 160 * 120 * 4);
-            enc.write_frame(&buf).expect("write frame");
+            enc.write_frame(&Composite::U8(buf)).expect("write frame");
         }
         enc.finish().expect("ffmpeg finish");
         assert!(out.metadata().map(|m| m.len() > 0).unwrap_or(false));

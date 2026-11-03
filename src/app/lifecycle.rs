@@ -313,7 +313,10 @@ impl CimApp {
         // not a positional list).
         for (i, p) in self.panes.iter().enumerate() {
             if let Some(name) = &p.custom_name {
-                parts.push(format!("--name {}", quote_arg(&format!("{i}={name}"))));
+                // Always quoted: a name is free text, and one that splits
+                // into several arguments breaks the replay.
+                let arg = format!("{i}={name}").replace('"', "\\\"");
+                parts.push(format!("--name \"{arg}\""));
             }
         }
         if n > 0 {
@@ -622,6 +625,8 @@ impl CimApp {
         let removed_id = self.panes[i].id;
         self.forget_pane_work(removed_id);
         self.panes.remove(i);
+        // Its index may now name another media.
+        self.pending_current = None;
         // Drop any overlay (own or shared) that pointed at the removed mask, and
         // clear cached overlay textures that referenced it.
         for v in std::iter::once(&mut self.shared_visual)

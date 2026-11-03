@@ -28,8 +28,14 @@ impl CimApp {
             Action::ViewGrid => self.mode = Mode::Grid,
             Action::ViewSingle => self.mode = Mode::Single,
             Action::ViewAb => self.mode = Mode::Ab,
-            Action::NextMedia if n > 0 => self.current = (self.current + 1) % n,
-            Action::PrevMedia if n > 0 => self.current = (self.current + n - 1) % n,
+            // From a switch still waiting on its render, so repeated presses
+            // keep stepping.
+            Action::NextMedia if n > 0 => {
+                self.focus_media((self.pending_current.unwrap_or(self.current) + 1) % n)
+            }
+            Action::PrevMedia if n > 0 => {
+                self.focus_media((self.pending_current.unwrap_or(self.current) + n - 1) % n)
+            }
             Action::NextFrame => {
                 // Step within the active loop window (the same one playback
                 // obeys), not the whole timeline — and on the timeline the
@@ -120,7 +126,7 @@ impl CimApp {
                 }
             }
             Action::SelectMedia(i) if i < n => {
-                self.current = i;
+                self.focus_media(i);
                 self.mode = Mode::Single;
             }
             _ => {}
