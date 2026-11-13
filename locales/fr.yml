@@ -231,6 +231,7 @@ export.select_hover: >-
   panneaux de la comparaison
 export.full_view: Vue entière
 export.select_hint: Clic droit et glisser sur l'image pour sélectionner la région
+export.region_size_hover: Taille de la région en pixels de l'image — le coin supérieur gauche reste fixe. Glisser les bords sur l'image pour redimensionner.
 export.frames: Images
 export.frames_all: toutes
 export.frames_from: de

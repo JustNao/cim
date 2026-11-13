@@ -516,6 +516,10 @@ struct Export {
     sel_rect: Option<Rect>,
     /// Mode to restore once region selection (forced Single) ends.
     pre_select_mode: Option<Mode>,
+    /// The region while one of its edges is being dragged: drawn instead of
+    /// `region`, and committed to it on release (so the tone bounds that key on
+    /// the crop re-render once, not every frame of the drag).
+    resize: Option<Rect>,
     out_height: u32,
     /// Output file name, saved in the current working directory. The user
     /// edits just the name — no save dialog / folder picker.
@@ -539,6 +543,7 @@ impl Default for Export {
             sel_start: None,
             sel_rect: None,
             pre_select_mode: None,
+            resize: None,
             out_height: 720,
             name: "comparison.mp4".into(),
             run: None,

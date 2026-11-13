@@ -83,6 +83,8 @@ impl CimApp {
     /// applies to every pane of the comparison afterwards.
     pub(super) fn region_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
         if !self.export.show || self.panes.is_empty() {
+            // A resize cut short by the panel closing is dropped, not committed.
+            self.export.resize = None;
             return;
         }
 
@@ -134,23 +136,196 @@ impl CimApp {
             // place, so pane A's view is representative.
             Mode::Ab => vec![(self.slot_a.min(self.panes.len() - 1), area)],
         };
-        for (idx, img_area) in panes_areas {
+        let shown = self.export.resize.unwrap_or(reg);
+        for (k, (idx, img_area)) in panes_areas.into_iter().enumerate() {
             // The region is stored in the pane's *unrotated* view frame (it is
             // aligned to the viewer, not the image — see `select_region_bounds`),
             // so it maps back with the plain view: an axis-aligned screen rect,
             // exactly the rectangle the user dragged. The pane's rotation is
             // applied downstream by the export's `unrotate`, not here.
             let v = self.view_ref(idx);
-            let r = Rect::from_two_pos(
-                v.img_to_screen(reg.min.to_vec2(), img_area),
-                v.img_to_screen(reg.max.to_vec2(), img_area),
-            )
-            .intersect(img_area);
+            let full = Rect::from_two_pos(
+                v.img_to_screen(shown.min.to_vec2(), img_area),
+                v.img_to_screen(shown.max.to_vec2(), img_area),
+            );
+            let r = full.intersect(img_area);
             if r.is_positive() {
                 dim_outside(&ui.painter_at(img_area), img_area, r);
             }
+            self.region_edges(ui, idx, img_area, full);
+            // One size box, on the first pane showing the region.
+            if k == 0 {
+                self.region_size_box(ctx, idx, img_area, full);
+            }
         }
     }
+
+    /// The image bounds a crop on pane `idx` is held inside: the image on an
+    /// unrotated pane, unbounded on a rotated one (where the crop may take in
+    /// background, as `select_region_bounds` allows).
+    fn crop_limits(&self, idx: usize) -> Rect {
+        if self.pane_theta(idx) == 0.0 {
+            let [w, h] = self.disp_size(idx);
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(w as f32, h as f32))
+        } else {
+            Rect::EVERYTHING
+        }
+    }
+
+    /// Drag handles on the export region's edges and corners (screen rect
+    /// `full`, unclipped, over pane `idx`'s `img_area`). A drag moves the grabbed
+    /// edges to the pointer, in whole image pixels, into `export.resize`; the
+    /// release commits it to `export.region`.
+    fn region_edges(&mut self, ui: &mut egui::Ui, idx: usize, img_area: Rect, full: Rect) {
+        const GRIP: f32 = 5.0;
+        use egui::CursorIcon as C;
+        let (x0, y0, x1, y1) = (full.min.x, full.min.y, full.max.x, full.max.y);
+        let span = egui::Rangef::new;
+        let corner = |p: Pos2| Rect::from_center_size(p, Vec2::splat(2.0 * GRIP));
+        // The (left, top, right, bottom) edges each handle moves, its hit rect
+        // and cursor. Corners come last so they win where they overlap a side.
+        let handles: [([bool; 4], Rect, C); 8] = [
+            (
+                [true, false, false, false],
+                Rect::from_x_y_ranges(span(x0 - GRIP, x0 + GRIP), span(y0, y1)),
+                C::ResizeHorizontal,
+            ),
+            (
+                [false, false, true, false],
+                Rect::from_x_y_ranges(span(x1 - GRIP, x1 + GRIP), span(y0, y1)),
+                C::ResizeHorizontal,
+            ),
+            (
+                [false, true, false, false],
+                Rect::from_x_y_ranges(span(x0, x1), span(y0 - GRIP, y0 + GRIP)),
+                C::ResizeVertical,
+            ),
+            (
+                [false, false, false, true],
+                Rect::from_x_y_ranges(span(x0, x1), span(y1 - GRIP, y1 + GRIP)),
+                C::ResizeVertical,
+            ),
+            (
+                [true, true, false, false],
+                corner(full.left_top()),
+                C::ResizeNwSe,
+            ),
+            (
+                [false, false, true, true],
+                corner(full.right_bottom()),
+                C::ResizeNwSe,
+            ),
+            (
+                [false, true, true, false],
+                corner(full.right_top()),
+                C::ResizeNeSw,
+            ),
+            (
+                [true, false, false, true],
+                corner(full.left_bottom()),
+                C::ResizeNeSw,
+            ),
+        ];
+        let limits = self.crop_limits(idx);
+        for (k, (edges, hit, cursor)) in handles.into_iter().enumerate() {
+            let hit = hit.intersect(img_area);
+            if !hit.is_positive() {
+                continue;
+            }
+            let id = egui::Id::new(("export_region_edge", idx, k));
+            let resp = ui
+                .interact(hit, id, egui::Sense::drag())
+                .on_hover_cursor(cursor);
+            let Some(base) = self.export.resize.or(self.export.region) else {
+                return;
+            };
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let q = self.view_ref(idx).screen_to_img(p, img_area);
+                    let (qx, qy) = (q.x.round(), q.y.round());
+                    let mut r = base;
+                    // Each moved edge follows the pointer but stops one pixel
+                    // short of the opposite edge, and inside the image.
+                    if edges[0] {
+                        r.min.x = qx.max(limits.min.x).min(r.max.x - 1.0);
+                    }
+                    if edges[1] {
+                        r.min.y = qy.max(limits.min.y).min(r.max.y - 1.0);
+                    }
+                    if edges[2] {
+                        r.max.x = qx.min(limits.max.x).max(r.min.x + 1.0);
+                    }
+                    if edges[3] {
+                        r.max.y = qy.min(limits.max.y).max(r.min.y + 1.0);
+                    }
+                    self.export.resize = Some(r);
+                }
+            }
+            if resp.drag_stopped() {
+                if let Some(r) = self.export.resize.take() {
+                    self.export.region = Some(r);
+                }
+            }
+        }
+    }
+
+    /// The width x height box at the export region's top-left corner (screen
+    /// rect `full` over pane `idx`): editing a size moves the right / bottom
+    /// edge, keeping the top-left corner where it is.
+    fn region_size_box(&mut self, ctx: &egui::Context, idx: usize, img_area: Rect, full: Rect) {
+        let Some(reg) = self.export.region else {
+            return;
+        };
+        let limits = self.crop_limits(idx);
+        // Above the corner when there is room, else just inside it; kept in the
+        // pane horizontally.
+        const ROOM: f32 = 30.0;
+        let x = full.min.x.max(img_area.min.x);
+        let (pivot, pos) = if full.min.y - ROOM >= img_area.min.y {
+            (egui::Align2::LEFT_BOTTOM, Pos2::new(x, full.min.y - 4.0))
+        } else {
+            (
+                egui::Align2::LEFT_TOP,
+                Pos2::new(x + 4.0, full.min.y.max(img_area.min.y) + 4.0),
+            )
+        };
+        let shown = self.export.resize.unwrap_or(reg);
+        let mut w = shown.width().round().max(1.0) as u32;
+        let mut h = shown.height().round().max(1.0) as u32;
+        // The most the size can grow to with the top-left corner held.
+        let max_w = (limits.max.x - shown.min.x)
+            .floor()
+            .clamp(1.0, u32::MAX as f32) as u32;
+        let max_h = (limits.max.y - shown.min.y)
+            .floor()
+            .clamp(1.0, u32::MAX as f32) as u32;
+        let mut changed = false;
+        egui::Area::new(egui::Id::new("export_region_size"))
+            .order(egui::Order::Foreground)
+            .pivot(pivot)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let hover = t!("export.region_size_hover");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut w).range(1..=max_w))
+                            .on_hover_text(hover.as_ref())
+                            .changed();
+                        ui.label("\u{d7}");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut h).range(1..=max_h))
+                            .on_hover_text(hover.as_ref())
+                            .changed();
+                        ui.label("px");
+                    });
+                });
+            });
+        if changed && self.export.resize.is_none() {
+            self.export.region = Some(Rect::from_min_size(reg.min, Vec2::new(w as f32, h as f32)));
+        }
+    }
+
     pub(super) fn grid_cells(&self, vis: &[usize], area: Rect) -> Vec<(usize, Rect)> {
         let n = vis.len();
         let cols = self.config.max_columns.max(1).min(n).max(1);

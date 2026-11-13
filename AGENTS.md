@@ -2032,6 +2032,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   toggle **or** the window's ✕) runs `cancel_region_select`, which clears
   `selecting_region` and restores the forced-Single mode — otherwise the flag stays
   stuck true and keeps suppressing pane interaction (rotate / reorder / focus).
+  Once chosen, the region can be **edited on the image**: its edges and corners are drag
+  handles (`region_edges` — whole image pixels, held inside the image on an unrotated
+  pane, the live rect in `Export::resize` and committed to `region` on release so the
+  crop-keyed tone bounds re-render once), and a **W × H px** box at its top-left corner
+  (`region_size_box`) sets the size exactly with the top-left corner held.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window but with the **end exclusive** (the loop's `[lo, hi]` plays through
   `hi`, but exporting it yields `lo..hi` — e.g. loop `[20, 40]` → 20 frames, not 21).

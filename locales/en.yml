@@ -220,6 +220,7 @@ export.select_hover: >-
   applies to every pane of the comparison
 export.full_view: Full view
 export.select_hint: Right-click and drag on the image to select the region
+export.region_size_hover: Region size in image pixels — the top-left corner stays put. Drag the edges on the image to resize.
 export.frames: Frames
 export.frames_all: all
 export.frames_from: from
