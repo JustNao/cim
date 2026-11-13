@@ -1152,8 +1152,20 @@ impl CimApp {
             });
         let editable = curve.is_some() && !tone.share_clip;
 
-        // The value axis: the frame's extent, widened to the curve's ends.
-        let (mut a0, mut a1) = (data.min, data.max);
+        // The value axis: the frame's extent, widened to the curve's ends. Under
+        // global statistics (the pane's own, or the Control's it shares) it is
+        // the extent of every frame in memory instead, so the axis — and the
+        // curve's ends pinned to that extent — hold still while the sequence
+        // plays and only the frame's histogram moves under them.
+        let global = curve.and(if tone.share_clip {
+            self.control_global_bounds()
+        } else {
+            self.global_bounds(idx)
+        });
+        let (mut a0, mut a1) = match global {
+            Some((lo, hi)) => (lo.min(data.min), hi.max(data.max)),
+            None => (data.min, data.max),
+        };
         if let Some(c) = &curve {
             a0 = a0.min(c.lo());
             a1 = a1.max(c.hi());

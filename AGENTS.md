@@ -1651,7 +1651,9 @@ into two collapsible groups, each with its own **Sync** toggle:
   `set_sync_geometry`.
 Below the groups the pane's **Histogram** (`ensure_pane_histogram` + `draw_histogram`,
 cached per pane) is **always** shown. For a Linear / Colormap, non-mask pane it carries the
-pane's **tone curve** (§7): value across (the frame's extent, widened to the curve's ends),
+pane's **tone curve** (§7): value across (the frame's extent, widened to the curve's ends —
+or, under **Global statistics** (the pane's own or a shared Control's), the extent of every
+frame in memory, so the axis and the curve's ends stay fixed while a sequence plays),
 level up. Its points are handles — **drag** to move (clamped between neighbours), **left-click**
 empty graph to add a point (and keep dragging it), **right-click** a point to remove it (≥ 2
 stay). The **ends are pinned**: the first point is always level 0 and the last 255 (`Curve`
