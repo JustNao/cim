@@ -1090,6 +1090,12 @@ pub struct CimApp {
     status: StatusLine,
     /// Global error not tied to a sequence — rendered as a modal popup.
     error_popup: Option<String>,
+    /// The startup open (from the command line) is still pending; cleared when
+    /// it lands (`poll_opening`).
+    startup_open: bool,
+    /// Close the app when `error_popup` is dismissed: the command line named
+    /// media but none of them opened.
+    quit_on_dismiss: bool,
     /// Whether the UI bars (toolbar, frame bar, pane headers/footers) are shown.
     /// All of them float **over** the image area (nothing reserves layout space),
     /// so toggling this — `Action::ToggleChrome` — shows an image-only view
@@ -1343,6 +1349,8 @@ impl CimApp {
             export: Export::default(),
             status: StatusLine::default(),
             error_popup: None,
+            startup_open: false,
+            quit_on_dismiss: false,
             show_chrome: true,
             toolbar_h: 0.0,
             framebar_h: 0.0,
@@ -1382,6 +1390,7 @@ impl CimApp {
         };
         // The view applies once the panes exist (`commit_open`).
         app.pending_view = Some(view);
+        app.startup_open = preload.inputs > 0;
         preload.set_waker(&cc.egui_ctx);
         app.opening.push_back(preload);
         app
@@ -2382,6 +2391,9 @@ impl CimApp {
                 });
             if dismiss {
                 self.error_popup = None;
+                if self.quit_on_dismiss && self.panes.is_empty() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
 

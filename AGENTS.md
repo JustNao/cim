@@ -2123,6 +2123,9 @@ its default bounds computed — `media::load_ready`). `CimApp::new` receives the
 the preload; `poll_opening` adds the panes when it finishes, and the view state waits in
 `pending_view` until then. Drops and the file dialog go through the same `Preload`, so
 opening never blocks the UI thread.
+If the command line named media and **none** of them opened (every input failed), the app
+quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, set by
+`poll_opening` for the first open to land); a bare `cim` with no inputs still starts empty.
 
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,

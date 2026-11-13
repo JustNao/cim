@@ -15,6 +15,9 @@ pub struct Preload {
     /// Woken when the load finishes. Filled once the UI exists, which may be
     /// after the thread finished — `CimApp::new` checks for that.
     waker: Arc<OnceLock<egui::Context>>,
+    /// How many inputs this open was given — a startup open of a non-empty
+    /// command line that ends with no pane quits the app (`poll_opening`).
+    pub(super) inputs: usize,
 }
 
 /// Loaded items in input order, and each failed input's error.
@@ -25,6 +28,7 @@ struct Loaded {
 
 impl Preload {
     pub fn start(inputs: Vec<cli::Input>) -> Self {
+        let n_inputs = inputs.len();
         let waker: Arc<OnceLock<egui::Context>> = Arc::default();
         let wake = Arc::clone(&waker);
         let thread = std::thread::spawn(move || {
@@ -34,7 +38,11 @@ impl Preload {
             }
             loaded
         });
-        Self { thread, waker }
+        Self {
+            thread,
+            waker,
+            inputs: n_inputs,
+        }
     }
 
     pub(super) fn set_waker(&self, ctx: &egui::Context) {
@@ -477,10 +485,19 @@ impl CimApp {
     pub(super) fn poll_opening(&mut self) {
         while self.opening.front().is_some_and(|p| p.thread.is_finished()) {
             let loaded = self.opening.pop_front().expect("checked above").join();
+            // The startup open is the first to land (opens are drained oldest
+            // first); it is the only one that can end the app.
+            let startup = std::mem::take(&mut self.startup_open);
             if let Some(e) = loaded.errors.into_iter().last() {
                 self.error_popup = Some(e);
             }
             self.gate_open(loaded.items);
+            // A command line naming media of which none opened leaves nothing
+            // to look at: quit once its error has been read (`draw_modals`).
+            // Every failed input reports an error, so the popup is up.
+            if startup && self.panes.is_empty() && self.pending_open.is_none() {
+                self.quit_on_dismiss = self.error_popup.is_some();
+            }
         }
     }
 
