@@ -83,8 +83,10 @@ impl CimApp {
     /// applies to every pane of the comparison afterwards.
     pub(super) fn region_overlay(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, area: Rect) {
         if !self.export.show || self.panes.is_empty() {
-            // A resize cut short by the panel closing is dropped, not committed.
+            // A resize / move cut short by the panel closing is dropped, not
+            // committed.
             self.export.resize = None;
+            self.export.grab = None;
             return;
         }
 
@@ -227,6 +229,41 @@ impl CimApp {
             ),
         ];
         let limits = self.crop_limits(idx);
+        // A left-drag inside the region moves it whole, in whole image pixels,
+        // held inside the image. Interacted before the edge handles so they win
+        // where the two meet; elsewhere it takes the press from the pane's pan.
+        let inside = full.shrink(GRIP).intersect(img_area);
+        if inside.is_positive() {
+            let id = egui::Id::new(("export_region_move", idx));
+            let resp = ui.interact(inside, id, egui::Sense::drag());
+            let left = egui::PointerButton::Primary;
+            let resp = if resp.dragged_by(left) {
+                resp.on_hover_cursor(C::Grabbing)
+            } else {
+                resp.on_hover_cursor(C::Grab)
+            };
+            let base = self.export.resize.or(self.export.region);
+            if let (Some(base), Some(p)) = (base, resp.interact_pointer_pos()) {
+                let q = self.view_ref(idx).screen_to_img(p, img_area).to_pos2();
+                if resp.drag_started_by(left) {
+                    self.export.grab = Some(q - base.min);
+                }
+                if let Some(off) = self.export.grab.filter(|_| resp.dragged_by(left)) {
+                    let size = base.size();
+                    let mut min = (q - off).round();
+                    // Keep the whole rect inside the limits (no-op when rotated).
+                    min.x = min.x.min(limits.max.x - size.x).max(limits.min.x);
+                    min.y = min.y.min(limits.max.y - size.y).max(limits.min.y);
+                    self.export.resize = Some(Rect::from_min_size(min, size));
+                }
+            }
+            if resp.drag_stopped_by(left) {
+                self.export.grab = None;
+                if let Some(r) = self.export.resize.take() {
+                    self.export.region = Some(r);
+                }
+            }
+        }
         for (k, (edges, hit, cursor)) in handles.into_iter().enumerate() {
             let hit = hit.intersect(img_area);
             if !hit.is_positive() {

@@ -520,6 +520,9 @@ struct Export {
     /// `region`, and committed to it on release (so the tone bounds that key on
     /// the crop re-render once, not every frame of the drag).
     resize: Option<Rect>,
+    /// While the region is being moved (left-drag inside it): the grab point's
+    /// offset from the region's top-left corner, in image pixels.
+    grab: Option<Vec2>,
     out_height: u32,
     /// Output file name, saved in the current working directory. The user
     /// edits just the name — no save dialog / folder picker.
@@ -544,6 +547,7 @@ impl Default for Export {
             sel_rect: None,
             pre_select_mode: None,
             resize: None,
+            grab: None,
             out_height: 720,
             name: "comparison.mp4".into(),
             run: None,

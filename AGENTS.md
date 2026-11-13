@@ -2039,6 +2039,8 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   pane, the live rect in `Export::resize` and committed to `region` on release so the
   crop-keyed tone bounds re-render once), and a **W × H px** box at its top-left corner
   (`region_size_box`) sets the size exactly with the top-left corner held.
+  A **left-drag inside** the region moves it whole (`export_region_move`, the grab offset
+  in `Export::grab`, same commit-on-release); left-drag outside it still pans.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window but with the **end exclusive** (the loop's `[lo, hi]` plays through
   `hi`, but exporting it yields `lo..hi` — e.g. loop `[20, 40]` → 20 frames, not 21).
