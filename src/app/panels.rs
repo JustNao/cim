@@ -1145,7 +1145,7 @@ impl CimApp {
         let frame = self.panes[idx].media.resident(self.frame_disp(idx));
         let integer = frame.as_ref().is_some_and(|f| !f.is_float());
         let mut curve = frame
-            .filter(|f| !contrast.is_operator() && !f.is_mask())
+            .filter(|f| !contrast.full_range() && !f.is_mask())
             .map(|f| match tone.curve.filter(|_| !tone.share_clip) {
                 Some(c) => c,
                 None => self.tone_curve(idx, &f),

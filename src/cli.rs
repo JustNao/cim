@@ -74,6 +74,8 @@ pub enum Tone {
     Linear,
     LutAlpha,
     Boost,
+    /// The raw 8-bit samples, untouched.
+    Raw,
     /// Colormap with the given palette (`colormap:<name>`; bare `colormap` =
     /// the default palette).
     Colormap(crate::palette::Palette),
@@ -309,6 +311,7 @@ fn parse_tones(s: &str) -> Option<Vec<Tone>> {
             "linear" | "linearclip" | "clip" => Some(Tone::Linear),
             "lutalpha" | "lut_alpha" => Some(Tone::LutAlpha),
             "boost" => Some(Tone::Boost),
+            "raw" => Some(Tone::Raw),
             "colormap" => Some(Tone::Colormap(crate::palette::Palette::default())),
             other if other.starts_with("colormap:") => {
                 crate::palette::Palette::from_token(&other["colormap:".len()..]).map(Tone::Colormap)
@@ -902,10 +905,11 @@ mod tests {
     #[test]
     fn parses_colormap_tone() {
         use crate::palette::Palette;
-        let args = "a.tif b.tif c.tif d.tif --tone colormap,colormap:viridis,lutalpha,boost"
-            .split(' ')
-            .map(String::from)
-            .collect();
+        let args =
+            "a.tif b.tif c.tif d.tif e.tif --tone colormap,colormap:viridis,lutalpha,boost,raw"
+                .split(' ')
+                .map(String::from)
+                .collect();
         let Cli::Run { view, .. } = parse(args) else {
             panic!("expected Run");
         };
@@ -917,6 +921,7 @@ mod tests {
                     Tone::Colormap(Palette::Viridis),
                     Tone::LutAlpha,
                     Tone::Boost,
+                    Tone::Raw,
                 ]
                 .as_slice()
             )

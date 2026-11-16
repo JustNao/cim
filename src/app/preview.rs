@@ -109,7 +109,7 @@ impl CimApp {
                 clip: Some(ClipOptions::default().percent),
                 region: None,
             }
-        } else if self.visual(idx).tone.share_clip {
+        } else if !self.visual(idx).contrast.full_range() && self.visual(idx).tone.share_clip {
             // "Share clip" pins this pane to the Control media's bounds, which
             // are computed from the Control's *shown* frame — already memoized,
             // so there is nothing to push to the worker.

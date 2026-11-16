@@ -142,6 +142,8 @@ transform.rc: RC
 transform.rc_hover: Rehaussement / netteté
 transform.op_missing_lib: "Bibliothèque de l'opérateur %{lib} introuvable"
 transform.op_needs_u16: Disponible uniquement pour les images 16 bits monocanal (uint16)
+transform.rc_raw: Désactivé avec la LUT Brut, qui affiche l'image sans modification
+transform.raw_needs_u8: Disponible uniquement pour les images 8 bits (uint8) mono ou RVB
 transform.op_needs_mono: Disponible uniquement pour les images monocanal
 transform.overlay: Superposition
 transform.overlay_none: Aucune
@@ -179,6 +181,7 @@ transform.frame_not_loaded: image non chargée
 # ---- modes de rendu & palettes ---------------------------------------------
 tone.linear: Linéaire
 tone.colormap: Fausses couleurs
+tone.raw: Brut
 palette.diverging: Divergente
 
 # ---- statistiques de région ------------------------------------------------
@@ -187,7 +190,11 @@ stats.std: éca
 stats.min: min
 stats.max: max
 stats.peak: pic
-stats.lut_from_region: LUT depuis la région
+stats.lut_global: Globale
+stats.lut_global_hover: LUT calculée sur toute l'image
+stats.lut_local: Locale
+stats.lut_local_hover: LUT calculée sur la région sélectionnée uniquement
+stats.lut_scope_off: "La LUT actuelle utilise toute la plage : une région ne la modifie pas"
 stats.hide: Masquer les stats
 stats.show: Stats
 stats.show_hover: Afficher les statistiques de la région
@@ -564,7 +571,7 @@ cli.help: |
           --frame <N>              Image de la timeline à afficher
           --pane <N>               Panneau sélectionné
           --ab <A,B,SPLIT>         Opérandes A/B et position 0..1 du séparateur
-          --tone <T,T,...>         Rendu par panneau : linear | lutalpha | boost |
+          --tone <T,T,...>         Rendu par panneau : linear | lutalpha | boost | raw |
                                  colormap[:viridis|turbo|diverging]
           --clip <C,C,...>         Écrêtage linéaire par panneau : off | POURCENT
           --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)

@@ -407,7 +407,7 @@ impl CimApp {
         // frame (matching the live view). The plan attaches the Control source.
         {
             let t = self.visual(idx).tone;
-            if !self.visual(idx).contrast.is_operator() && t.share_clip {
+            if !self.visual(idx).contrast.full_range() && t.share_clip {
                 // A Control on global statistics has one window for the whole
                 // timeline — the live one, over the frames in memory — so pin it
                 // rather than re-derive per-frame bounds the live view never shows.

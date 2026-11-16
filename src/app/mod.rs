@@ -1592,7 +1592,8 @@ impl CimApp {
         crate::imageproc::Ops {
             lut_alpha: self.visual(i).contrast == ContrastMode::LutAlpha,
             boost: self.visual(i).contrast == ContrastMode::Boost,
-            details: self.visual(i).details,
+            // Raw shows the samples untouched, so not even Details runs.
+            details: self.visual(i).details && self.visual(i).contrast != ContrastMode::Raw,
         }
     }
 

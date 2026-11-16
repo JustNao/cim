@@ -141,6 +141,7 @@ impl CimApp {
                     cli::Tone::Linear => ContrastMode::Linear,
                     cli::Tone::LutAlpha => ContrastMode::LutAlpha,
                     cli::Tone::Boost => ContrastMode::Boost,
+                    cli::Tone::Raw => ContrastMode::Raw,
                     cli::Tone::Colormap(pal) => {
                         p.visual.tone.palette = *pal;
                         ContrastMode::Colormap
@@ -336,6 +337,7 @@ impl CimApp {
                     ContrastMode::Linear => "linear".to_string(),
                     ContrastMode::LutAlpha => "lutalpha".to_string(),
                     ContrastMode::Boost => "boost".to_string(),
+                    ContrastMode::Raw => "raw".to_string(),
                     ContrastMode::Colormap => {
                         format!("colormap:{}", self.visual(i).tone.palette.token())
                     }

@@ -133,6 +133,8 @@ transform.rc: RC
 transform.rc_hover: Enhancement / sharpening
 transform.op_missing_lib: "%{lib} operator library not found"
 transform.op_needs_u16: Only available for single-channel 16-bit (uint16) images
+transform.rc_raw: Off under the Raw LUT, which shows the image unmodified
+transform.raw_needs_u8: Only available for 8-bit (uint8) mono or RGB images
 transform.op_needs_mono: Only available for single-channel images
 transform.overlay: Overlay
 transform.overlay_none: None
@@ -169,6 +171,7 @@ transform.frame_not_loaded: frame not loaded
 # ---- tone modes & palettes -------------------------------------------------
 tone.linear: Linear
 tone.colormap: Colormap
+tone.raw: Raw
 palette.diverging: Diverging
 
 # ---- region statistics -----------------------------------------------------
@@ -177,7 +180,11 @@ stats.std: std
 stats.min: min
 stats.max: max
 stats.peak: peak
-stats.lut_from_region: LUT from region
+stats.lut_global: Global
+stats.lut_global_hover: LUT computed over the whole image
+stats.lut_local: Local
+stats.lut_local_hover: LUT computed over the selected region only
+stats.lut_scope_off: "The current LUT maps the full range: a region doesn't change it"
 stats.hide: Hide stats
 stats.show: Stats
 stats.show_hover: Show region stats
@@ -535,7 +542,7 @@ cli.help: |
           --frame <N>              Timeline frame to show
           --pane <N>               Focused pane
           --ab <A,B,SPLIT>         A/B operands and 0..1 divider position
-          --tone <T,T,...>         Per-pane tone: linear | lutalpha | boost |
+          --tone <T,T,...>         Per-pane tone: linear | lutalpha | boost | raw |
                                  colormap[:viridis|turbo|diverging]
           --clip <C,C,...>         Per-pane Linear clip: off | PERCENT (each tail)
           --share-clip <B,B,...>   Per-pane share Control media's bounds (1/0)

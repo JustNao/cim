@@ -45,10 +45,22 @@ impl CimApp {
         // own loaded library and an accepted frame (`imageproc::accepts`); gate their
         // controls independently and explain why when disabled.
         let op_input = self.pane_is_op_input(idx);
-        let details_ok = crate::imageproc::details_available() && op_input;
-        // Why an operator tone `m` can't be picked, or `None` when it can.
+        // Raw shows the samples untouched, so Details (an operator) is off under it.
+        let details_ok =
+            crate::imageproc::details_available() && op_input && contrast != ContrastMode::Raw;
+        // Raw is a 1:1 view of an 8-bit mono / RGB frame (`tone::raw_accepts`).
+        let raw_ok = {
+            let f = self.frame_disp(idx);
+            self.panes[idx]
+                .media
+                .resident(f)
+                .is_some_and(|fr| crate::tone::raw_accepts(&fr))
+        };
+        // Why a tone `m` can't be picked, or `None` when it can.
         let tone_blocked = |m: ContrastMode| {
-            if !m.is_operator() {
+            if m == ContrastMode::Raw {
+                (!raw_ok).then(|| t!("transform.raw_needs_u8"))
+            } else if !m.is_operator() {
                 None
             } else if !m.library_loaded() {
                 Some(t!("transform.op_missing_lib", lib = m.label()))
@@ -60,6 +72,8 @@ impl CimApp {
         };
         let details_hint = if !crate::imageproc::details_available() {
             t!("transform.op_missing_lib", lib = "Details")
+        } else if contrast == ContrastMode::Raw {
+            t!("transform.rc_raw")
         } else {
             op_input_hint()
         };
@@ -168,7 +182,8 @@ impl CimApp {
                                 .show_ui(ui, |ui| {
                                     for m in ContrastMode::ORDER {
                                         // An operator tone needs its library + a
-                                        // 16-bit frame; disable it otherwise (unless
+                                        // 16-bit frame, Raw an 8-bit one; disable
+                                        // it otherwise (unless
                                         // it's already the pane's mode, so it stays
                                         // visible / switchable away).
                                         match tone_blocked(m).filter(|_| contrast != m) {
@@ -491,6 +506,8 @@ fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone:
         // The operator tones have no options. Add a knob here: one row + a field
         // on `ToneOptions`.
         ContrastMode::LutAlpha | ContrastMode::Boost => {}
+        // Raw is the samples as they are: nothing to set.
+        ContrastMode::Raw => {}
     }
 }
 

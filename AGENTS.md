@@ -898,9 +898,9 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   behaviour** (own library `libcim_boost.so`, `Ops.boost`, same ABI, same exemptions),
   an alternative to it rather than a stage after it. Everything that exempts an operator
   tone — clip (`tone::clip_pct`), Share clip, region tone / export crop (`tone_region`,
-  `tone_sig`) — reads **`ContrastMode::is_operator()`**, and the tone picker gates each
-  operator tone on `ContrastMode::library_loaded()`, so a further operator tone joins
-  those rules by adding itself to those two methods.
+  `tone_sig`) — reads **`ContrastMode::full_range()`** (`is_operator()` plus Raw), and the
+  tone picker gates each operator tone on `ContrastMode::library_loaded()`, so a further
+  operator tone joins those rules by adding itself to `is_operator` and `library_loaded`.
 - **Colormap** — false-colour a **mono** frame through a palette (`crate::palette`:
   viridis / turbo / diverging), using the **same window/clip bounds as Linear**; a
   display-only tone (no operators), rendered via `FrameData::render_cmap` (a per-value
@@ -908,6 +908,13 @@ frame, memoized in `FrameData`'s `OnceLock` cells.
   not, like any other tone. Multi-channel frames fall back to the
   plain render; each texel is still one true source sample (only its colour is the
   palette). The diverging ramp suits a signed **Sub** Compute pane (zero → white).
+- **Raw** — the samples **untouched**: an 8-bit frame shown 1:1 (`v` → level `v`). Offered
+  in the picker only for 8-bit mono / RGB, non-mask media (`tone::raw_accepts`). It joins the
+  operators under **`ContrastMode::full_range()`** — the predicate every exemption reads
+  (clip, Share clip, global statistics, manual curve, region tone, export crop) — so its
+  bounds are the plain full-range map with no special path; it also drops Details
+  (`ops_of` / `ExportPane`). A deeper frame reached through a synced tone gets that same
+  full-range map. `--tone raw`.
 
 Plus a per-pane **Share clip** toggle (`ToneOptions.share_clip`) that locks the pane's
 display bounds to the **Control** media's own `[lo,hi]` (`control_clip_bounds` — the
@@ -1726,7 +1733,10 @@ sides) runs the selection (`region_input`, secondary-button edge detection), dra
 rubber band, else the outline plus a **stats panel**: a mini histogram
 (`draw_region_hist`, min/max at its ends) and mean/std/count (`region_stats`, cached
 per pane keyed on `(frame, stats_gen)`). A near-zero drag / plain right-click clears
-it. **"compute LUT from region"** pins every pane's tone to the region (§7); a **–**
+it. A **Global / Local** switch just right of the region outline (`draw_lut_scope`, drawn
+whether or not the stats panel is open; default **Global**) pins every pane's tone to the
+region when Local (`region_tone`, §7) — greyed on a full-range tone (`ContrastMode::full_range`:
+the operators and Raw), which a region never restricts; a **–**
 corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
 are **primary-button-only** so the right-drag isn't stolen.
 
@@ -2139,7 +2149,7 @@ quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, s
 - `-h/--help`, `-V/--version`.
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,
   `--zoom`, `--center X,Y`, `--frame`, `--pane`, `--control`, `--ab A,B,SPLIT`,
-  `--tone` (per-pane `linear|lutalpha|boost|colormap[:viridis|turbo|diverging]`;
+  `--tone` (per-pane `linear|lutalpha|boost|raw|colormap[:viridis|turbo|diverging]`;
   `linearclip`/`clip` are accepted as deprecated aliases for `linear`), `--clip`
   (per-pane Linear clip: `off` or the per-tail percentile, e.g. `0.01,off,0.5`; omitted
   at each pane's depth default), `--share-clip` (per-pane `1`/`0` — lock the pane's bounds

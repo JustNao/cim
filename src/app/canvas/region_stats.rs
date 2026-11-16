@@ -1,7 +1,8 @@
 //! The right-drag statistics region: selection input, the committed outline,
-//! and the per-pane stats panel (mini histogram + mean/std/count + the
-//! "compute LUT from region" tone pin). The region lives in image space, so
-//! it and its stats replicate across every pane.
+//! the Global / Local LUT switch beside it (whether every pane's tone is
+//! computed over the whole image or pinned to the region), and the per-pane
+//! stats panel (mini histogram + mean/std/count). The region lives in image
+//! space, so it, the switch and its stats replicate across every pane.
 
 use crate::app::*;
 
@@ -49,6 +50,8 @@ impl CimApp {
         }
         ui.painter_at(clip_rect)
             .rect_stroke(r, 0.0, Stroke::new(1.5_f32, REGION_COL));
+
+        self.draw_lut_scope(ui, idx, r, clip_rect);
 
         // The stats panel is collapsible: when hidden, a small button under the
         // region brings it back. The region outline above stays visible.
@@ -132,8 +135,7 @@ impl CimApp {
 
     /// Draw the stats panel for pane `idx` just below (or above) the on-screen
     /// region rect `r`: a mini histogram with min/max labelled at its ends, a
-    /// verbose one-per-row stats list (mean / std / n), and the "compute LUT
-    /// from region" toggle that pins every pane's tone to the region.
+    /// verbose one-per-row stats list (mean / std / n).
     fn draw_stats_panel(&mut self, ui: &mut egui::Ui, idx: usize, r: Rect, clip: Rect) {
         let Some(sc) = self.panes[idx].stats.as_ref() else {
             return;
@@ -161,17 +163,7 @@ impl CimApp {
         let hist_h = 40.0;
         let axis_h = 12.0;
         let line_h = 13.0;
-        let btn_h = 20.0;
-        let h = pad
-            + head_h
-            + hist_h
-            + 2.0
-            + axis_h
-            + 4.0
-            + rows.len() as f32 * line_h
-            + 4.0
-            + btn_h
-            + pad;
+        let h = pad + head_h + hist_h + 2.0 + axis_h + 4.0 + rows.len() as f32 * line_h + pad;
         let w = r.width().max(212.0).min((clip.width() - 2.0).max(120.0));
         // Prefer below the region; fall back to above, then pin inside the clip.
         let top = if r.bottom() + h + 4.0 <= clip.bottom() {
@@ -237,20 +229,6 @@ impl CimApp {
             y += line_h;
         }
 
-        // Tone toggle at the bottom of the panel. Applies to every pane.
-        let btn_rect = Rect::from_min_max(
-            Pos2::new(panel.left() + pad, panel.bottom() - btn_h - pad),
-            Pos2::new(panel.right() - pad, panel.bottom() - pad),
-        );
-        let on = self.panes[idx].region_tone;
-        let resp = ui.put(
-            btn_rect,
-            egui::SelectableLabel::new(on, t!("stats.lut_from_region")),
-        );
-        if resp.clicked() {
-            self.apply_region_tone(!on);
-        }
-
         // Collapse button in the top-left corner: hides the panel, leaving the
         // small re-open button under the region (`draw_stats_collapsed`).
         let hide_rect =
@@ -261,6 +239,63 @@ impl CimApp {
             .clicked()
         {
             self.show_stats = false;
+        }
+    }
+
+    /// The **Global / Local** LUT switch, just right of the on-screen region
+    /// rect `r` (left of it, then pinned inside the clip, when the pane edge is
+    /// too close): Global computes the tone over the whole image (the default),
+    /// Local pins it to the region. One state for every pane
+    /// (`apply_region_tone`), drawn whether or not the stats panel is open. Greyed
+    /// on a full-range tone (operators, Raw), which a region never restricts.
+    fn draw_lut_scope(&mut self, ui: &mut egui::Ui, idx: usize, r: Rect, clip: Rect) {
+        let seg = Vec2::new(46.0, 18.0);
+        let size = Vec2::new(seg.x * 2.0, seg.y);
+        let gap = 4.0;
+        let left = if r.right() + gap + size.x <= clip.right() {
+            r.right() + gap
+        } else if r.left() - gap - size.x >= clip.left() {
+            r.left() - gap - size.x
+        } else {
+            (clip.right() - size.x).max(clip.left())
+        };
+        let top = r
+            .top()
+            .clamp(clip.top(), (clip.bottom() - size.y).max(clip.top()));
+        let frame = Rect::from_min_size(Pos2::new(left, top), size);
+        ui.painter_at(clip)
+            .rect_filled(frame, 2.0, Color32::from_black_alpha(205));
+
+        let enabled = !self.visual(idx).contrast.full_range();
+        let local = self.panes[idx].region_tone;
+        let mut pick = None;
+        for (i, (is_local, label, hover)) in [
+            (false, t!("stats.lut_global"), t!("stats.lut_global_hover")),
+            (true, t!("stats.lut_local"), t!("stats.lut_local_hover")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = Rect::from_min_size(frame.min + Vec2::new(i as f32 * seg.x, 0.0), seg);
+            let resp = ui
+                .put(
+                    rect,
+                    egui::Button::new(label)
+                        .selected(local == is_local)
+                        .stroke(Stroke::new(1.0_f32, REGION_COL)),
+                )
+                .on_hover_text(hover);
+            let resp = if enabled {
+                resp
+            } else {
+                resp.on_hover_text(t!("stats.lut_scope_off"))
+            };
+            if enabled && resp.clicked() {
+                pick = Some(is_local);
+            }
+        }
+        if let Some(on) = pick.filter(|&on| on != local) {
+            self.apply_region_tone(on);
         }
     }
 

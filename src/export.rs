@@ -540,7 +540,7 @@ impl ExportPane {
         let ops = crate::imageproc::Ops {
             lut_alpha: self.contrast == ContrastMode::LutAlpha,
             boost: self.contrast == ContrastMode::Boost,
-            details: self.details,
+            details: self.details && self.contrast != ContrastMode::Raw,
         };
         let [fw, fh] = frame.size;
         let [x0, y0, cw, ch] = if crate::imageproc::ops_active(&frame, ops) {

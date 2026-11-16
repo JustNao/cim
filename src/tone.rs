@@ -41,7 +41,14 @@ pub fn pixel_bounds(reg: Rect, size: [usize; 2]) -> Option<(usize, usize, usize,
 /// its own contrast — so the clip toggle doesn't apply to it. Linear and Colormap
 /// share the same bounds.
 pub fn clip_pct(contrast: ContrastMode, tone: &ToneOptions) -> Option<f32> {
-    (!contrast.is_operator() && tone.clip.enabled).then_some(tone.clip.percent)
+    (!contrast.full_range() && tone.clip.enabled).then_some(tone.clip.percent)
+}
+
+/// Whether the **Raw** tone is offered for `frame`: 8-bit samples, mono or
+/// colour (not a boolean mask, whose look isn't a tone). Raw is a 1:1 view of
+/// such a frame; deeper samples need a window to be seen at all.
+pub fn raw_accepts(frame: &FrameData) -> bool {
+    !frame.hi_depth() && !frame.is_mask()
 }
 
 /// Whether a pane renders through the palette rather than the plain LUT.
@@ -164,6 +171,8 @@ mod tests {
         // LUT_ALPHA / Boost compute their own contrast: always the full range.
         assert_eq!(clip_pct(ContrastMode::LutAlpha, &tone), None);
         assert_eq!(clip_pct(ContrastMode::Boost, &tone), None);
+        // Raw shows the samples untouched: never clipped.
+        assert_eq!(clip_pct(ContrastMode::Raw, &tone), None);
         tone.clip.enabled = false;
         assert_eq!(clip_pct(ContrastMode::Linear, &tone), None);
     }

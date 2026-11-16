@@ -87,7 +87,7 @@ impl CimApp {
     fn bounds_hint(&self, idx: usize) -> Option<Option<f32>> {
         let v = self.visual(idx);
         if self.tone_region(idx).is_some()
-            || (!v.contrast.is_operator() && (v.tone.share_clip || v.tone.global))
+            || (!v.contrast.full_range() && (v.tone.share_clip || v.tone.global))
         {
             return None;
         }
@@ -1095,6 +1095,7 @@ impl CimApp {
             ContrastMode::LutAlpha => 1,
             ContrastMode::Colormap => 2,
             ContrastMode::Boost => 3,
+            ContrastMode::Raw => 4,
         };
         let tone = self.visual(idx).tone;
         c.hash(&mut h);
@@ -1145,7 +1146,7 @@ impl CimApp {
         // LUT to that region (`own_tone_bounds`), so fold it in to re-render when
         // the crop changes or clears — and, transitively, for Share-clip panes
         // whose Control adopts it.
-        if self.export.show && !self.visual(idx).contrast.is_operator() {
+        if self.export.show && !self.visual(idx).contrast.full_range() {
             if let Some(reg) = self.export.region {
                 for v in [reg.min.x, reg.min.y, reg.max.x, reg.max.y] {
                     v.to_bits().hash(&mut h);
@@ -1168,7 +1169,7 @@ impl CimApp {
         // "Share clip" locks the tone to the Control media's own (but not for an
         // operator tone, which does its own contrast). Falls through to this
         // pane's own tone when the Control frame isn't resident yet.
-        if !contrast.is_operator() && tone.share_clip {
+        if !contrast.full_range() && tone.share_clip {
             if let Some(c) = self.control_curve() {
                 return c;
             }
@@ -1190,7 +1191,7 @@ impl CimApp {
     /// an operator tone, which does its own contrast).
     pub(super) fn manual_curve(&self, idx: usize) -> Option<Curve> {
         let v = self.visual(idx);
-        v.tone.curve.filter(|_| !v.contrast.is_operator())
+        v.tone.curve.filter(|_| !v.contrast.full_range())
     }
 
     /// A pane's *own* display bounds (its clip / full-range map, or its region
@@ -1216,7 +1217,7 @@ impl CimApp {
     /// enough for `tone_sig` to call every frame.
     pub(super) fn global_bounds(&self, idx: usize) -> Option<(f32, f32)> {
         let v = self.visual(idx);
-        if v.contrast.is_operator() || !v.tone.global || self.tone_region(idx).is_some() {
+        if v.contrast.full_range() || !v.tone.global || self.tone_region(idx).is_some() {
             return None;
         }
         self.panes[idx].media.resident_extent()
@@ -1241,10 +1242,11 @@ impl CimApp {
     /// 2. else the pinned **stats region**, when this pane has region-tone on;
     /// 3. else nothing.
     ///
-    /// The operator tones (LUT_ALPHA / Boost) are excluded throughout: they run
-    /// over the whole image with their own contrast.
+    /// The full-range tones are excluded throughout: the operators (LUT_ALPHA /
+    /// Boost) run over the whole image with their own contrast, and Raw shows
+    /// the samples untouched.
     pub(super) fn tone_region(&self, idx: usize) -> Option<Rect> {
-        if self.visual(idx).contrast.is_operator() {
+        if self.visual(idx).contrast.full_range() {
             return None;
         }
         if self.export.show {

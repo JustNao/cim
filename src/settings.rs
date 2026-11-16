@@ -356,11 +356,19 @@ pub enum ContrastMode {
     /// Uses the same window/clip bounds as Linear; multi-channel frames fall back
     /// to the plain render. A display-only tone (no proprietary operators).
     Colormap,
+    /// The **raw** samples, untouched: an 8-bit image shown 1:1 (value `v` →
+    /// level `v`), with no clip, curve, global statistics, region, Share clip
+    /// or operator. Offered only for 8-bit mono / RGB media
+    /// ([`raw_accepts`](crate::tone::raw_accepts)); a deeper frame that reaches it
+    /// anyway (a synced tone) gets the plain full-range map, the same untouched
+    /// window.
+    Raw,
 }
 
 impl ContrastMode {
     /// The modes in dropdown order.
-    pub const ORDER: [ContrastMode; 4] = [
+    pub const ORDER: [ContrastMode; 5] = [
+        ContrastMode::Raw,
         ContrastMode::Linear,
         ContrastMode::LutAlpha,
         ContrastMode::Boost,
@@ -375,6 +383,7 @@ impl ContrastMode {
             ContrastMode::LutAlpha => "LUT_ALPHA".to_owned(),
             ContrastMode::Boost => "Boost".to_owned(),
             ContrastMode::Colormap => t!("tone.colormap").into_owned(),
+            ContrastMode::Raw => t!("tone.raw").into_owned(),
         }
     }
 
@@ -386,13 +395,22 @@ impl ContrastMode {
         matches!(self, ContrastMode::LutAlpha | ContrastMode::Boost)
     }
 
+    /// A tone that **maps the full native range** and owns its window: the
+    /// operator tones (which then compute their own contrast) and Raw (which
+    /// shows the samples as they are). The clip, Share clip, global statistics,
+    /// manual curve, region tone and export-crop bounds all skip it — the one
+    /// predicate those rules read.
+    pub fn full_range(self) -> bool {
+        self.is_operator() || self == ContrastMode::Raw
+    }
+
     /// Whether this tone's operator library is loaded (always true for the
     /// built-in tones) — what the tone picker gates an operator tone on.
     pub fn library_loaded(self) -> bool {
         match self {
             ContrastMode::LutAlpha => crate::imageproc::lut_alpha_available(),
             ContrastMode::Boost => crate::imageproc::boost_available(),
-            ContrastMode::Linear | ContrastMode::Colormap => true,
+            ContrastMode::Linear | ContrastMode::Colormap | ContrastMode::Raw => true,
         }
     }
 }
