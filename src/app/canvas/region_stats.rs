@@ -1,9 +1,10 @@
-//! The right-drag statistics region: selection input, the committed outline,
-//! the Global / Local LUT switch beside it (whether every pane's tone is
-//! computed over the whole image or pinned to the region), and the per-pane
-//! stats panel (mini histogram + mean/std/count). The region lives in image
-//! space, so it, the switch and its stats replicate across every pane.
+//! The right-drag statistics region: selection input, the committed outline
+//! (edited in place like the export crop — `region_edit.rs`: handles, move,
+//! size box and the Global / Local LUT switch), and the per-pane stats panel
+//! (mini histogram + mean/std/count), hidden by default. The region lives in
+//! image space, so it and its stats replicate across every pane.
 
+use super::EditTarget;
 use crate::app::*;
 
 impl CimApp {
@@ -33,7 +34,9 @@ impl CimApp {
             return;
         }
 
-        let Some(reg) = self.stats_region else { return };
+        let Some(reg) = self.edit_shown(EditTarget::Stats) else {
+            return;
+        };
 
         // The region is stored in the pane's *unrotated* view frame (aligned to
         // the viewer, not the image — see `select_region_bounds`), so it maps
@@ -51,7 +54,12 @@ impl CimApp {
         ui.painter_at(clip_rect)
             .rect_stroke(r, 0.0, Stroke::new(1.5_f32, REGION_COL));
 
-        self.draw_lut_scope(ui, idx, r, clip_rect);
+        // Resize / move handles, and the size box + Global / Local switch.
+        let full = Rect::from_two_pos(
+            v.img_to_screen(reg.min.to_vec2(), coord_area),
+            v.img_to_screen(reg.max.to_vec2(), coord_area),
+        );
+        self.region_edit(ui, ctx, EditTarget::Stats, idx, coord_area, clip_rect, full);
 
         // The stats panel is collapsible: when hidden, a small button under the
         // region brings it back. The region outline above stays visible.
@@ -239,63 +247,6 @@ impl CimApp {
             .clicked()
         {
             self.show_stats = false;
-        }
-    }
-
-    /// The **Global / Local** LUT switch, just right of the on-screen region
-    /// rect `r` (left of it, then pinned inside the clip, when the pane edge is
-    /// too close): Global computes the tone over the whole image (the default),
-    /// Local pins it to the region. One state for every pane
-    /// (`apply_region_tone`), drawn whether or not the stats panel is open. Greyed
-    /// on a full-range tone (operators, Raw), which a region never restricts.
-    fn draw_lut_scope(&mut self, ui: &mut egui::Ui, idx: usize, r: Rect, clip: Rect) {
-        let seg = Vec2::new(46.0, 18.0);
-        let size = Vec2::new(seg.x * 2.0, seg.y);
-        let gap = 4.0;
-        let left = if r.right() + gap + size.x <= clip.right() {
-            r.right() + gap
-        } else if r.left() - gap - size.x >= clip.left() {
-            r.left() - gap - size.x
-        } else {
-            (clip.right() - size.x).max(clip.left())
-        };
-        let top = r
-            .top()
-            .clamp(clip.top(), (clip.bottom() - size.y).max(clip.top()));
-        let frame = Rect::from_min_size(Pos2::new(left, top), size);
-        ui.painter_at(clip)
-            .rect_filled(frame, 2.0, Color32::from_black_alpha(205));
-
-        let enabled = !self.visual(idx).contrast.full_range();
-        let local = self.panes[idx].region_tone;
-        let mut pick = None;
-        for (i, (is_local, label, hover)) in [
-            (false, t!("stats.lut_global"), t!("stats.lut_global_hover")),
-            (true, t!("stats.lut_local"), t!("stats.lut_local_hover")),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let rect = Rect::from_min_size(frame.min + Vec2::new(i as f32 * seg.x, 0.0), seg);
-            let resp = ui
-                .put(
-                    rect,
-                    egui::Button::new(label)
-                        .selected(local == is_local)
-                        .stroke(Stroke::new(1.0_f32, REGION_COL)),
-                )
-                .on_hover_text(hover);
-            let resp = if enabled {
-                resp
-            } else {
-                resp.on_hover_text(t!("stats.lut_scope_off"))
-            };
-            if enabled && resp.clicked() {
-                pick = Some(is_local);
-            }
-        }
-        if let Some(on) = pick.filter(|&on| on != local) {
-            self.apply_region_tone(on);
         }
     }
 

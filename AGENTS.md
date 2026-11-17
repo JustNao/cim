@@ -1092,12 +1092,13 @@ min/max (clip off) or its per-tail-percentile clip (clip on). Pixels outside the
 region that exceed these bounds are clamped (the LUT saturates). LUT_ALPHA / Boost
 still run over the whole image. Recomputed on each texture rebuild; replicates to all
 panes. **An export crop drives the same thing:** while the Export panel is open and a
-crop is set, every non-operator pane's bounds come from `export.region` (taking
+crop is set **and switched to Local** (`Export::local`, default Global — the switch right of
+its size box, §10), every non-full-range pane's bounds come from `export.region` (taking
 precedence over `stats_region`), so the live view previews the region-restricted tone
 the export composites; `tone_sig` folds the crop rect in so panes re-render when it
 changes/clears.
 
-That precedence — **export crop → pinned stats region → whole frame**, never for
+That precedence — **Local export crop → Local stats region → whole frame**, never for
 an operator tone (LUT_ALPHA / Boost) — is `CimApp::tone_region(idx)`, the one place it is stated. It is *policy*;
 the maths it feeds is `tone::frame_bounds` (§2). The export snapshots the method's
 result into `ExportPane.region`, so a region-pinned pane exports with the bounds it
@@ -1733,12 +1734,16 @@ sides) runs the selection (`region_input`, secondary-button edge detection), dra
 rubber band, else the outline plus a **stats panel**: a mini histogram
 (`draw_region_hist`, min/max at its ends) and mean/std/count (`region_stats`, cached
 per pane keyed on `(frame, stats_gen)`). A near-zero drag / plain right-click clears
-it. A **Global / Local** switch just right of the region outline (`draw_lut_scope`, drawn
-whether or not the stats panel is open; default **Global**) pins every pane's tone to the
-region when Local (`region_tone`, §7) — greyed on a full-range tone (`ContrastMode::full_range`:
-the operators and Raw), which a region never restricts; a **–**
-corner button collapses the panel to a small **"σ stats"** re-open button. Pan/reorder
-are **primary-button-only** so the right-drag isn't stolen.
+it. Once drawn it is **edited exactly like the export crop** (§10 — the shared
+`canvas/region_edit.rs`, `EditTarget::Stats`, live edit in `stats_edit`, committed through
+`set_stats_region` on release): edge/corner handles resize, a left-drag inside moves, and
+the **W × H px** box carries the **Global / Local** switch on its right (default
+**Global**), which pins every pane's tone to the region when Local (`region_tone`, §7) —
+greyed on a full-range tone (`ContrastMode::full_range`: the operators and Raw), which a
+region never restricts. The size box is drawn once per pass (`RegionEdit::box_drawn`, reset
+in `draw_central`). The stats panel is **hidden by default** (`show_stats`); the small
+**"Stats"** button under the region opens it and its **–** corner button collapses it
+again. Pan/reorder are **primary-button-only** so the right-drag isn't stolen.
 
 **Pane rotation (Alt + drag / Transformations panel Geometry slider).** Each pane
 carries a `rotation` (degrees, -180..180) that **rides the Geometry sync**
@@ -2035,22 +2040,29 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   `sample` / `sample_base` / `blend_overlay`, and `pane_boxes` maps corners through it too,
   so there is a single sampling implementation. `par_composite_matches_serial_composite`
   pins the split against the LUT render at several thread counts.
-- **Region crop** is chosen in image space ("Select…" forces Single, and a hint row under
-  it says to right-drag until the selection ends): a **right-drag**
+- **Region crop** is chosen in image space ("Select…" forces Single and **hides the Export
+  window** until the selection ends — `draw_export` returns early while `selecting`, so the
+  whole image is reachable; a hint banner at the top of the view, drawn by `region_overlay`,
+  says to right-drag, and **Escape** abandons it via `cancel_region_select`): a **right-drag**
   draws the crop (secondary-button edge detection in `region_overlay`, like the stats
   region) while **left-drag pans and the wheel zooms** so the user can move around first;
   `screen_rect_to_image` on release maps it to image space, applied to every pane as a
   cell of exactly the crop's pixel size. Closing the panel mid-selection (the toolbar
-  toggle **or** the window's ✕) runs `cancel_region_select`, which clears
+  toggle, the window's ✕ — or Escape while it is hidden) runs `cancel_region_select`, which clears
   `selecting_region` and restores the forced-Single mode — otherwise the flag stays
   stuck true and keeps suppressing pane interaction (rotate / reorder / focus).
-  Once chosen, the region can be **edited on the image**: its edges and corners are drag
-  handles (`region_edges` — whole image pixels, held inside the image on an unrotated
-  pane, the live rect in `Export::resize` and committed to `region` on release so the
-  crop-keyed tone bounds re-render once), and a **W × H px** box at its top-left corner
-  (`region_size_box`) sets the size exactly with the top-left corner held.
-  A **left-drag inside** the region moves it whole (`export_region_move`, the grab offset
-  in `Export::grab`, same commit-on-release); left-drag outside it still pans.
+  Once chosen, the region can be **edited on the image** — by `canvas/region_edit.rs`
+  (`region_edit`, `EditTarget::Export`), which the stats region shares (§9): its edges and
+  corners are drag handles (`region_handles` — whole image pixels, held inside the image on
+  an unrotated pane, the live rect in `RegionEdit::resize` (`Export::edit`) and committed to
+  `region` on release so the crop-keyed tone bounds re-render once), a **left-drag inside**
+  moves it whole (grab offset in `RegionEdit::grab`, same commit-on-release; left-drag
+  outside still pans), and a **W × H px** box at its top-left corner (`region_size_box`)
+  sets the size exactly with the top-left corner held. Right of the size is the crop's
+  **Global / Local** LUT switch (`Export::local`, default **Global**): Local computes every
+  non-full-range pane's tone over the crop (`tone_region`, §7), live and in the export;
+  Global keeps the whole-image tone, so the crop exports with the contrast the full view
+  shows.
 - **Frame range:** "all", else inclusive `from/to`; **"Use loop range"** adopts the
   playback window but with the **end exclusive** (the loop's `[lo, hi]` plays through
   `hi`, but exporting it yields `lo..hi` — e.g. loop `[20, 40]` → 20 frames, not 21).

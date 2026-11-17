@@ -495,6 +495,22 @@ impl Default for LineSel {
     }
 }
 
+/// The live edit of an image-space region (the export crop or the stats
+/// region) on the canvas — see `canvas/region_edit.rs`.
+#[derive(Default)]
+struct RegionEdit {
+    /// The region while it is being resized or moved: drawn instead of the
+    /// committed one, and committed on release (so the tone bounds that key on
+    /// it re-render once, not every frame of the drag).
+    resize: Option<Rect>,
+    /// While the region is being moved (left-drag inside it): the grab point's
+    /// offset from the region's top-left corner, in image pixels.
+    grab: Option<Vec2>,
+    /// The size box is drawn once per pass, on the first pane showing the
+    /// region; reset at the start of `draw_central`.
+    box_drawn: bool,
+}
+
 /// The export panel's state: output settings (those kept across runs —
 /// compression, fps, the label toggle and style — live in `Config::export`), the
 /// in-image region selection
@@ -516,13 +532,12 @@ struct Export {
     sel_rect: Option<Rect>,
     /// Mode to restore once region selection (forced Single) ends.
     pre_select_mode: Option<Mode>,
-    /// The region while one of its edges is being dragged: drawn instead of
-    /// `region`, and committed to it on release (so the tone bounds that key on
-    /// the crop re-render once, not every frame of the drag).
-    resize: Option<Rect>,
-    /// While the region is being moved (left-drag inside it): the grab point's
-    /// offset from the region's top-left corner, in image pixels.
-    grab: Option<Vec2>,
+    /// In-progress move / resize of `region` (see [`RegionEdit`]).
+    edit: RegionEdit,
+    /// The Global / Local LUT switch beside the crop's size box: when on, every
+    /// non-full-range pane's tone is computed over the crop while the Export
+    /// panel is open (`tone_region`); off (the default), over the whole image.
+    local: bool,
     out_height: u32,
     /// Output file name, saved in the current working directory. The user
     /// edits just the name — no save dialog / folder picker.
@@ -546,8 +561,8 @@ impl Default for Export {
             sel_start: None,
             sel_rect: None,
             pre_select_mode: None,
-            resize: None,
-            grab: None,
+            edit: RegionEdit::default(),
+            local: false,
             out_height: 720,
             name: "comparison.mp4".into(),
             run: None,
@@ -1059,9 +1074,9 @@ pub struct CimApp {
     /// no black flash.
     pending_recompute: Option<usize>,
 
-    /// Draw the per-region stats panels (histogram + numbers + LUT button).
-    /// Toggled by the button in the panel's top-left corner; when off, a small
-    /// button under the region brings it back. The outline stays visible.
+    /// Draw the per-region stats panels (histogram + numbers). Off by default;
+    /// toggled by the button in the panel's top-left corner, and when off a
+    /// small button under the region brings it back. The outline stays visible.
     show_stats: bool,
     /// Right-drag statistics region, in IMAGE space (like `export_region`), so
     /// the same crop and its per-pane stats replicate across every pane. `None`
@@ -1072,6 +1087,8 @@ pub struct CimApp {
     stats_gen: u64,
     /// In-progress stats-region right-drag. See [`RegionSel`].
     region_sel: RegionSel,
+    /// In-progress move / resize of `stats_region` (see [`RegionEdit`]).
+    stats_edit: RegionEdit,
 
     // ---- intensity-profile line (shift + right-drag) --------------------
     /// The editable profile line in IMAGE space, replicated across every pane;
@@ -1344,8 +1361,9 @@ impl CimApp {
             help_doc: None,
             rebinding: None,
             pending_recompute: None,
-            show_stats: true,
+            show_stats: false,
             stats_region: None,
+            stats_edit: RegionEdit::default(),
             stats_gen: 0,
             region_sel: RegionSel::default(),
 
@@ -2199,6 +2217,11 @@ impl CimApp {
     pub(super) fn set_stats_region(&mut self, reg: Option<Rect>) {
         self.stats_region = reg;
         self.stats_gen = self.stats_gen.wrapping_add(1);
+        if reg.is_none() {
+            // A move / resize in flight has nothing left to commit to.
+            self.stats_edit.resize = None;
+            self.stats_edit.grab = None;
+        }
         for p in &mut self.panes {
             p.stats = None;
             if reg.is_none() && p.region_tone {

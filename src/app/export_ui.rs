@@ -1344,6 +1344,15 @@ impl CimApp {
     }
 
     pub(super) fn draw_export(&mut self, ctx: &egui::Context) {
+        // While a crop is being chosen the panel steps aside so the whole image
+        // is reachable; it comes back once the drag lands, or on Escape, which
+        // abandons the selection (the canvas shows how, `region_overlay`).
+        if self.export.selecting {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.cancel_region_select();
+            }
+            return;
+        }
         let mut open = self.export.show;
         let running = self.export.run.is_some();
         let region = self.export_canvas();
@@ -1422,16 +1431,6 @@ impl CimApp {
                                 };
                             });
                             ui.end_row();
-                            // While a crop is being chosen, say how — under the
-                            // button, gone once the drag lands (or is cancelled).
-                            if self.export.selecting {
-                                ui.label("");
-                                ui.label(
-                                    egui::RichText::new(t!("export.select_hint"))
-                                        .color(ui.visuals().warn_fg_color),
-                                );
-                                ui.end_row();
-                            }
 
                             ui.label(t!("export.frames"));
                             ui.horizontal(|ui| {

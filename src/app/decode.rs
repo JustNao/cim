@@ -1146,7 +1146,7 @@ impl CimApp {
         // LUT to that region (`own_tone_bounds`), so fold it in to re-render when
         // the crop changes or clears — and, transitively, for Share-clip panes
         // whose Control adopts it.
-        if self.export.show && !self.visual(idx).contrast.full_range() {
+        if self.export.show && self.export.local && !self.visual(idx).contrast.full_range() {
             if let Some(reg) = self.export.region {
                 for v in [reg.min.x, reg.min.y, reg.max.x, reg.max.y] {
                     v.to_bits().hash(&mut h);
@@ -1237,8 +1237,9 @@ impl CimApp {
     /// — and the export snapshots the result of this same method
     /// (`export_ui::export_pane`) rather than restating the precedence:
     ///
-    /// 1. an **export crop**, while the Export panel is open, so the live view
-    ///    previews the region-restricted tone the export composites;
+    /// 1. an **export crop** switched to Local, while the Export panel is open,
+    ///    so the live view previews the region-restricted tone the export
+    ///    composites;
     /// 2. else the pinned **stats region**, when this pane has region-tone on;
     /// 3. else nothing.
     ///
@@ -1249,7 +1250,7 @@ impl CimApp {
         if self.visual(idx).contrast.full_range() {
             return None;
         }
-        if self.export.show {
+        if self.export.show && self.export.local {
             if let Some(reg) = self.export.region {
                 return Some(reg);
             }
