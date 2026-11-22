@@ -23,7 +23,8 @@ impl CimApp {
             Pos2::new(area.max.x, area.max.y - bot_in),
         );
 
-        let inner = self.unobscured(img);
+        // No per-pane header in A/B (its labels sit in the corners).
+        let inner = self.unobscured(img, false);
         for &idx in &[a, b] {
             let size = self.panes[idx].media.size();
             let v = self.view_mut(idx);

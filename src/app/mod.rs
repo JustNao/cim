@@ -2028,9 +2028,13 @@ impl CimApp {
     }
 
     /// `cell` less the strips the full-width global bars cover
-    /// (`chrome_insets`): where a fitted image can show every pixel.
-    pub(super) fn unobscured(&self, cell: Rect) -> Rect {
-        let (top, bot) = self.chrome_insets(cell);
+    /// (`chrome_insets`) and, with `header`, the pane's own header bar below
+    /// them: where a fitted image can show every pixel.
+    pub(super) fn unobscured(&self, cell: Rect, header: bool) -> Rect {
+        let (mut top, bot) = self.chrome_insets(cell);
+        if header && self.show_chrome {
+            top += HEADER_H;
+        }
         Rect::from_min_max(
             Pos2::new(cell.min.x, cell.min.y + top),
             Pos2::new(cell.max.x, cell.max.y - bot),
