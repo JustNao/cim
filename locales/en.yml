@@ -578,6 +578,9 @@ cli.help: |
       opening a window; the other flags only pre-fill the Export panel.
 
           --export <FILE>          Export to FILE (.mp4, .tif, .png, .jpg) and exit
+          --open                   With --export: open cim instead, the Export
+                                 panel showing these settings, to adjust them
+                                 before exporting
           --export-layout <grid|single|ab>
                                    Exported layout
           --export-region <X,Y,W,H|full>

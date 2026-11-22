@@ -155,6 +155,9 @@ pub struct ViewState {
 pub struct ExportArgs {
     /// `--export PATH`: export to this file, without a window.
     pub output: Option<String>,
+    /// `--open`: open the window with the Export panel showing these settings
+    /// instead of exporting — to adjust them before exporting by hand.
+    pub open: bool,
     /// `--export-layout grid|single|ab`.
     pub mode: Option<ViewMode>,
     /// `--export-region X,Y,W,H` (image space) or `full`: `Some(None)` = none.
@@ -346,6 +349,7 @@ fn parse_flag(args: &[String], i: &mut usize, view: &mut ViewState) -> bool {
             view.export.output = next(*i).map(str::to_owned);
             *i += 1;
         }
+        "--open" => view.export.open = true,
         "--export-layout" => {
             view.export.mode = next(*i).and_then(parse_mode);
             *i += 1;
@@ -1398,6 +1402,27 @@ mod tests {
         };
         assert_eq!(view.export.region, Some(None));
         assert_eq!(view.export.range, Some(None));
+        assert!(!view.export.open);
+    }
+
+    #[test]
+    fn open_takes_no_value_and_keeps_the_export_settings() {
+        let Cli::Run { inputs, view } = parse(
+            ["a.png", "--open", "--export", "out.mp4", "--fps", "12"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ) else {
+            panic!("expected Run");
+        };
+        // `--open` consumed nothing: `a.png` is still the one input.
+        assert_eq!(inputs.len(), 1);
+        assert!(view.export.open);
+        assert_eq!(view.export.output.as_deref(), Some("out.mp4"));
+        assert_eq!(view.export.fps, Some(12.0));
+        // And it is recognised as a flag by an import too.
+        let (view, n) = parse_command("cim a.png --open").expect("a command");
+        assert!(view.export.open && n == 1);
     }
 
     #[test]

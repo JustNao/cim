@@ -1149,6 +1149,12 @@ impl CimApp {
         if let Some(n) = a.parents {
             self.config.header_parents = n;
         }
+        // `--open`: show the panel now, already holding the command's layout
+        // and file (so nothing for `toggle_export` to default).
+        if a.open {
+            self.export.show = true;
+            self.export.primed = false;
+        }
     }
 
     /// The `cim … --export OUT` command that writes this export without opening

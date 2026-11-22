@@ -2110,6 +2110,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   need the pass's fonts). `headless` also stops config autosave and auto-confirms
   the many-sequences gate. Exit code 0/1/2 (written / failed / bad command); a
   release build `AttachConsole`s so progress prints in the launching terminal.
+  Adding **`--open`** to such a command launches the window instead: everything
+  applies as usual (`commit_open` → `apply_view_state` → `apply_export_args`) and
+  the Export panel opens on those settings (`Export.show`), to adjust them before
+  exporting by hand. `--canvas` is not applied in a window, so an *uncropped* export
+  follows the window's own size from there.
   **Import settings** reads the clipboard (`arboard` — egui only gets text on a
   paste keystroke), parses it with `cli::parse_command` (the same `parse_flag` a
   launch uses; positional inputs are only counted, to warn on a mismatch) and
@@ -2192,7 +2197,8 @@ quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, s
 
 - `-h/--help`, `-V/--version`.
 - **Export flags** (`ExportArgs`, in `ViewState.export`; §10): `--export OUT` runs the
-  export windowless and exits; the rest (`--export-*`, `--fps`, `--crf`, `--label-*`,
+  export windowless and exits (`--open` launches the window instead, Export panel
+  open on those settings); the rest (`--export-*`, `--fps`, `--crf`, `--label-*`,
   `--parents`, `--canvas`) fill the export settings. Every view/export flag goes
   through one `parse_flag`, shared with `parse_command` (Import settings), which
   splits text with `split_command` (double/single quotes, `\"`, other backslashes

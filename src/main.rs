@@ -53,7 +53,9 @@ fn main() -> eframe::Result<()> {
 
     // `--export OUT`: write the export the command describes and exit, without
     // ever opening a window (`app::headless`).
-    if view.export.output.is_some() {
+    // `--open` turns it back into a normal launch, with the Export panel open on
+    // those settings.
+    if view.export.output.is_some() && !view.export.open {
         attach_console();
         std::process::exit(app::headless::run(config, inputs, view));
     }

@@ -612,6 +612,9 @@ cli.help: |
 
           --export <FICHIER>       Exporter vers FICHIER (.mp4, .tif, .png, .jpg)
                                  puis quitter
+          --open                   Avec --export : ouvrir cim à la place, le
+                                 panneau Export affichant ces réglages, pour les
+                                 ajuster avant d'exporter
           --export-layout <grid|single|ab>
                                    Disposition exportée
           --export-region <X,Y,L,H|full>
