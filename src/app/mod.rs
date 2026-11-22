@@ -2027,6 +2027,16 @@ impl CimApp {
         (top, bot)
     }
 
+    /// `cell` less the strips the full-width global bars cover
+    /// (`chrome_insets`): where a fitted image can show every pixel.
+    pub(super) fn unobscured(&self, cell: Rect) -> Rect {
+        let (top, bot) = self.chrome_insets(cell);
+        Rect::from_min_max(
+            Pos2::new(cell.min.x, cell.min.y + top),
+            Pos2::new(cell.max.x, cell.max.y - bot),
+        )
+    }
+
     /// Pixel size of the frame actually on screen for pane `i`. Pages in a
     /// sequence may differ in resolution, so this follows the **committed
     /// texture's** frame, not the target: while navigating to a not-yet-decoded

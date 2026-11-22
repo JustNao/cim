@@ -25,16 +25,26 @@ impl Default for ViewTransform {
 
 impl ViewTransform {
     /// Fit an image of `img` pixels inside `pane`, centred.
+    #[cfg(test)]
     pub fn fit(&mut self, img: [usize; 2], pane: Rect) {
+        self.fit_within(img, pane, pane);
+    }
+
+    /// Fit an image of `img` pixels inside `inner`, a sub-rect of the view
+    /// reference `pane` — the part of it no full-width bar (toolbar / frame bar)
+    /// covers — centred in `inner`. The view still maps through `pane`, so the
+    /// centre is offset by however far `inner`'s centre sits from `pane`'s.
+    pub fn fit_within(&mut self, img: [usize; 2], pane: Rect, inner: Rect) {
+        let inner = if inner.is_positive() { inner } else { pane };
         let iw = img[0].max(1) as f32;
         let ih = img[1].max(1) as f32;
-        let sx = pane.width() / iw;
-        let sy = pane.height() / ih;
+        let sx = inner.width() / iw;
+        let sy = inner.height() / ih;
         // Fill the limiting dimension exactly (no shrink margin): the floating
-        // header/footer bars overlay the image's edges, so a gap here would leave
-        // a sliver of pane background showing between a bar and the image.
+        // pane header/footer bars overlay the image's edges, so a gap here would
+        // leave a sliver of pane background showing between a bar and the image.
         self.zoom = sx.min(sy).max(1e-4);
-        self.center = Vec2::new(iw / 2.0, ih / 2.0);
+        self.center = Vec2::new(iw / 2.0, ih / 2.0) + (pane.center() - inner.center()) / self.zoom;
         self.needs_fit = false;
     }
 
@@ -73,5 +83,32 @@ impl ViewTransform {
     /// Pan by a screen-space delta.
     pub fn pan(&mut self, screen_delta: Vec2) {
         self.center -= screen_delta / self.zoom;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fit inside a bar-trimmed sub-rect shows the whole image within it, even
+    /// though the view still maps through the full pane.
+    #[test]
+    fn fit_within_keeps_the_image_clear_of_the_bars() {
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let inner = Rect::from_min_max(Pos2::new(0.0, 40.0), Pos2::new(800.0, 600.0));
+        let mut v = ViewTransform::default();
+        v.fit_within([400, 400], pane, inner);
+        let r = v.image_rect([400, 400], pane);
+        assert!((r.height() - inner.height()).abs() < 1e-3);
+        assert!((r.min.y - inner.min.y).abs() < 1e-3, "{r:?}");
+        assert!((r.max.y - inner.max.y).abs() < 1e-3, "{r:?}");
+        assert!((r.center().x - pane.center().x).abs() < 1e-3);
+        assert!(!v.needs_fit);
+        // An unobscured fit is the plain one.
+        let mut plain = ViewTransform::default();
+        plain.fit([400, 400], pane);
+        let mut same = ViewTransform::default();
+        same.fit_within([400, 400], pane, pane);
+        assert_eq!((plain.zoom, plain.center), (same.zoom, same.center));
     }
 }

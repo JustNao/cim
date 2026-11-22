@@ -237,11 +237,14 @@ impl CimApp {
         // frame later (see `Pane::cell`) to size its region against the viewport.
         self.panes[idx].cell = img_area;
 
-        // Fit this pane's effective view on first draw / after a reset.
+        // Fit this pane's effective view on first draw / after a reset — into
+        // the part of the cell the toolbar / frame bar leave uncovered, so no
+        // image pixel starts out hidden behind a bar.
         {
+            let inner = self.unobscured(img_area);
             let v = self.view_mut(idx);
             if v.needs_fit {
-                v.fit(size, img_area);
+                v.fit_within(size, img_area, inner);
             }
         }
 

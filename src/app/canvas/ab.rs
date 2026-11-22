@@ -23,11 +23,12 @@ impl CimApp {
             Pos2::new(area.max.x, area.max.y - bot_in),
         );
 
+        let inner = self.unobscured(img);
         for &idx in &[a, b] {
             let size = self.panes[idx].media.size();
             let v = self.view_mut(idx);
             if v.needs_fit {
-                v.fit(size, img);
+                v.fit_within(size, img, inner);
             }
         }
 
