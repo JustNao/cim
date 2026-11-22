@@ -281,6 +281,18 @@ export.err_no_visible: No visible media (enable some in ☰ Media)
 export.err_no_name: Enter an output file name first
 export.err_all_background: Nothing to export (all background)
 export.err_panicked: Export thread panicked
+export.command: Command
+export.command_hover: Copy a cim command that writes this exact export (view, settings, region) without opening cim
+export.command_copied: Export command copied to the clipboard
+export.import: Import settings
+export.import_hover: Apply an export command copied with Command (view, region, settings) to the open media
+export.import_no_clipboard: "Couldn't read the clipboard: %{err}"
+export.import_not_command: The clipboard doesn't hold a cim command
+export.imported: Settings imported
+export.import_mismatch: "Settings imported — but the command names %{cmd} media and %{open} are open"
+headless.no_inputs: --export needs media to export
+headless.discovering: discovering sequence lengths…
+headless.settle_timeout: the view did not settle in time; exporting anyway
 
 # ---- view command / debug / help windows -----------------------------------
 viewcmd.title: View command
@@ -557,6 +569,39 @@ cli.help: |
           --control <N>            Control media: shared clip source (+ timeline if a sequence)
           --loop <LO,HI>           Inclusive playback loop range (0-based)
           --name <N=TEXT>          Name pane N (0-based) TEXT; repeat per renamed pane
+          --stats-region <X,Y,W,H> Statistics region, in image pixels
+          --region-tone <1|0>      Tone computed over the statistics region
+
+  EXPORT:
+      Normally generated for you by the Export panel's "Command" button, which
+      writes every setting. --export makes cim write the file and exit without
+      opening a window; the other flags only pre-fill the Export panel.
+
+          --export <FILE>          Export to FILE (.mp4, .tif, .png, .jpg) and exit
+          --export-layout <grid|single|ab>
+                                   Exported layout
+          --export-region <X,Y,W,H|full>
+                                   Export crop, in image pixels
+          --export-lut <global|local>
+                                   Tone of a cropped export: whole image or crop
+          --export-frames <FROM,TO|all>
+                                   Inclusive frame range (0-based)
+          --export-height <N>      Output height in pixels
+          --fps <F>                Video frame rate
+          --crf <N>                x264 quality, 0 (lossless) – 51
+          --labels <1|0>           Burn the media names in
+          --label-size <PX>        Label text size, in output pixels
+          --label-color <RRGGBBAA> Label text colour (premultiplied)
+          --label-bg <1|0>         Box behind the label text
+          --label-bg-color <RRGGBBAA>
+                                   Label box colour (premultiplied)
+          --label-anchor <POS>     top-left | top | top-right | left | center |
+                                 right | bottom-left | bottom | bottom-right
+          --label-margin <PX>      Gap between a label and its cell edge
+          --parents <N>            Parent folders shown in media names
+          --canvas <W,H,PPP>       Image area the view was captured in (points,
+                                 pixels per point) — what --zoom/--center are
+                                 relative to
 
   SHELL COMPLETION:
       bash         eval "$(cim --completions bash)"

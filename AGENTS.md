@@ -161,7 +161,11 @@ src/
     panels.rs    Toolbar, media manager (drag the ⠿ handle to reorder rows via
                  `drop_target` + `remap_move`), settings, view-command, frame bar.
     profile.rs   The Line-profile plot window.
-    export_ui.rs Export panel UI + building ExportPlan from live app state.
+    export_ui.rs Export panel UI + building ExportPlan from live app state;
+                 the Command / Import settings round trip (export_command,
+                 apply_export_args).
+    headless.rs  Windowless export (`cim … --export OUT`): the app on a bare
+                 egui::Context, driven through the same `CimApp::frame`.
     help.rs      The Help window: loads the **external** `help.md` and renders a
                  small Markdown subset (§12).
 ```
@@ -1239,7 +1243,11 @@ across a spread of percentiles.
 
 `ViewTransform` (`view.rs`): `{ zoom, center (image-space), needs_fit }` with `fit`,
 `actual_size`, `img_to_screen`/`screen_to_img`, `image_rect`, `zoom_at`, `pan`; zoom
-clamps to `[1e-4, 512]`.
+clamps to `[1e-4, 512]`. A fit (first draw, **Fit** / ResetView) is `fit_within(img,
+cell, unobscured(cell, header))`: sized to the part of the cell the toolbar, the pane
+header (not in A/B) and the frame bar leave uncovered, with the centre offset so the
+image sits in that sub-rect while the view still maps through the whole cell. The
+pane footer still overlays the bottom strip.
 
 Each `Pane` has its own `transform`/`frame` plus `sync_spatial`/`sync_temporal`
 flags; `CimApp` holds `shared_view`/`shared_frame`. `view_ref/view_mut(i)` and
@@ -2085,6 +2093,30 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   encode of `t` and the export runs at the slower stage's pace, not their sum. On any
   early exit the receiver is dropped before the join so a composer blocked in `send`
   can't deadlock. A still skips all that and saves synchronously.
+- **Command / Import settings — the export as a command line.** The panel's
+  **Command** button copies `export_command`: the view command at full precision
+  (`view_command_parts(exact = true)` — unrounded zoom/centre/rotation/split, and
+  `--cols`, whose default is a *setting* the replaying machine may have changed),
+  plus **every** export setting (`--export-layout/-region/-lut/-frames/-height`,
+  `--fps`, `--crf`, the label flags, `--parents`), the stats region, the image
+  area the view is relative to (`--canvas W,H,PPP` = `last_area` + `ppp`) and
+  `--export OUT` (resolved like `start_export`, via `export_path`). `main` sees
+  `--export` and runs `app::headless::run` **instead of a window**: `CimApp` is
+  built on a bare `egui::Context` (`with_context` — `new` only adds the GPU state
+  and the startup cloak), chrome hidden so `last_area` is the canvas, and driven
+  through the same `CimApp::frame` the window's `update` calls — open, discover the
+  range (`load_offsets`), settle (`headless_settled`: no seek, pools idle, every
+  exported pane's shown frame resident), then `start_export` inside a pass (labels
+  need the pass's fonts). `headless` also stops config autosave and auto-confirms
+  the many-sequences gate. Exit code 0/1/2 (written / failed / bad command); a
+  release build `AttachConsole`s so progress prints in the launching terminal.
+  **Import settings** reads the clipboard (`arboard` — egui only gets text on a
+  paste keystroke), parses it with `cli::parse_command` (the same `parse_flag` a
+  launch uses; positional inputs are only counted, to warn on a mismatch) and
+  `apply_view_state`s it onto the open media; export flags given at launch
+  without `--export` pre-fill the panel the same way (`Export.primed` keeps the
+  layout/name when the panel opens). `export_command_replays_to_the_same_pixels`
+  (§16) pins the round trip.
 - **Media names burnt into the output ("Add names").** The panel's toggle
   (`Export.labels_on`) draws one text label per media in every layout and both formats.
   The text **is the pane's name**: each field edits `Pane.custom_name` exactly as a
@@ -2159,6 +2191,12 @@ quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, s
 `poll_opening` for the first open to land); a bare `cim` with no inputs still starts empty.
 
 - `-h/--help`, `-V/--version`.
+- **Export flags** (`ExportArgs`, in `ViewState.export`; §10): `--export OUT` runs the
+  export windowless and exits; the rest (`--export-*`, `--fps`, `--crf`, `--label-*`,
+  `--parents`, `--canvas`) fill the export settings. Every view/export flag goes
+  through one `parse_flag`, shared with `parse_command` (Import settings), which
+  splits text with `split_command` (double/single quotes, `\"`, other backslashes
+  literal, a PowerShell `&` dropped).
 - **View-state flags** (`ViewState`, 0-based, optional): `--mode`, `--cols`,
   `--zoom`, `--center X,Y`, `--frame`, `--pane`, `--control`, `--ab A,B,SPLIT`,
   `--tone` (per-pane `linear|lutalpha|boost|raw|colormap[:viridis|turbo|diverging]`;
@@ -2171,7 +2209,8 @@ quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, s
   `--show` (per-pane visibility), `--scale` (per-pane Scale to the Control's size), `--tsync` (per-pane Visualization-sync),
   `--gsync` (per-pane Geometry-sync — rotation), `--rotate` (per-pane display rotation
   in degrees, `-180..180`), `--loop LO,HI`, `--name N=TEXT` (repeatable: pane `N`'s
-  user-given name — keyed by index, not a positional list, since a name may hold commas). Generated by the in-app "View cmd" window (`view_command`), applied
+  user-given name — keyed by index, not a positional list, since a name may hold commas),
+  `--stats-region X,Y,W,H` + `--region-tone 1|0`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
   button and a global **Ctrl+Shift+C** shortcut both route through `copy_view_command`
   (egui's `ctx.copy_text`, so it goes via eframe's clipboard backend on every platform).
@@ -2569,7 +2608,12 @@ spread of budgets and sizes, an image already under it is never reduced, `0` mea
 a tiny budget stops at the thumbnail floor rather than reducing forever, a reduced image
 says so in its name, and a re-level decodes **from the kept codestream** — changing the
 frame's size and no-oping when the level is unchanged);
-`export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
+**`export_command_replays_to_the_same_pixels`** (a chrome-shown session's export
+command, replayed windowless under a different saved config, composes the same bytes —
+both an uncropped grid with rotation/labels and a Local-LUT crop; mutation-checked
+against a rounded zoom and a flipped LUT switch); `cli` export-flag parsing, label-anchor
+tokens, `split_command` and `parse_command`; `view` `fit_within` (a fit clear of the
+bars); `export` full compose→ffmpeg encode, **two-pane parallel (scoped-thread) compose**,
 **pixel-exact region crop** (incl. rotated), **multi-row grid labels anchored inside
 their own cell** (the output-fraction the panel's label preview scales by), **a Computed source recomputed per
 exported frame** (the composed pixels equal the same `combine_frames` done by hand on

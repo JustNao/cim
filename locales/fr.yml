@@ -298,6 +298,18 @@ export.err_no_visible: Aucun média visible (réactivez-en dans ☰ Médias)
 export.err_no_name: Saisissez d'abord un nom de fichier de sortie
 export.err_all_background: Rien à exporter (tout est en arrière-plan)
 export.err_panicked: Le fil d'export a échoué
+export.command: Commande
+export.command_hover: Copier une commande cim qui écrit exactement cet export (vue, réglages, région) sans ouvrir cim
+export.command_copied: Commande d'export copiée dans le presse-papiers
+export.import: Importer les réglages
+export.import_hover: Appliquer aux médias ouverts une commande d'export copiée avec Commande (vue, région, réglages)
+export.import_no_clipboard: "Impossible de lire le presse-papiers : %{err}"
+export.import_not_command: Le presse-papiers ne contient pas de commande cim
+export.imported: Réglages importés
+export.import_mismatch: "Réglages importés — mais la commande nomme %{cmd} médias et %{open} sont ouverts"
+headless.no_inputs: --export demande des médias à exporter
+headless.discovering: découverte de la longueur des séquences…
+headless.settle_timeout: la vue ne s'est pas stabilisée à temps ; export malgré tout
 
 # ---- fenêtres Commande de vue / Débogage / Aide ----------------------------
 viewcmd.title: Commande de vue
@@ -589,6 +601,41 @@ cli.help: |
           --loop <LO,HI>           Plage de boucle inclusive (à partir de 0)
           --name <N=TEXTE>         Nomme le panneau N (à partir de 0) TEXTE ;
                                  à répéter par panneau renommé
+          --stats-region <X,Y,L,H> Région de statistiques, en pixels image
+          --region-tone <1|0>      Rendu calculé sur la région de statistiques
+
+  EXPORT :
+      Normalement générées par le bouton « Commande » du panneau Export, qui
+      écrit tous les réglages. --export fait écrire le fichier par cim puis
+      quitter, sans ouvrir de fenêtre ; les autres options pré-remplissent
+      seulement le panneau Export.
+
+          --export <FICHIER>       Exporter vers FICHIER (.mp4, .tif, .png, .jpg)
+                                 puis quitter
+          --export-layout <grid|single|ab>
+                                   Disposition exportée
+          --export-region <X,Y,L,H|full>
+                                   Recadrage de l'export, en pixels image
+          --export-lut <global|local>
+                                   Rendu d'un export recadré : image entière ou
+                                 recadrage
+          --export-frames <DE,À|all>
+                                   Plage d'images inclusive (à partir de 0)
+          --export-height <N>      Hauteur de sortie en pixels
+          --fps <F>                Cadence de la vidéo
+          --crf <N>                Qualité x264, 0 (sans perte) – 51
+          --labels <1|0>           Incruster le nom des médias
+          --label-size <PX>        Taille du texte, en pixels de sortie
+          --label-color <RRGGBBAA> Couleur du texte (prémultipliée)
+          --label-bg <1|0>         Fond derrière le texte
+          --label-bg-color <RRGGBBAA>
+                                   Couleur du fond (prémultipliée)
+          --label-anchor <POS>     top-left | top | top-right | left | center |
+                                 right | bottom-left | bottom | bottom-right
+          --label-margin <PX>      Écart entre un nom et le bord de sa cellule
+          --parents <N>            Dossiers parents affichés dans le nom des médias
+          --canvas <L,H,PPP>       Zone d'image où la vue a été capturée (points,
+                                 pixels par point) — référence de --zoom/--center
 
   COMPLÉTION SHELL :
       bash         eval "$(cim --completions bash)"

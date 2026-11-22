@@ -22,6 +22,7 @@ mod watch;
 use util::*;
 mod decode;
 mod export_ui;
+pub mod headless;
 mod help;
 mod input;
 mod panels;
@@ -548,6 +549,11 @@ struct Export {
     /// Which media the panel's label preview shows (pane id); falls back to the
     /// first exported pane when it's gone.
     label_preview: Option<u64>,
+    /// Whether the last export wrote its file (the windowless run's exit code).
+    ok: bool,
+    /// Layout and name were set by a command line (`apply_export_args`), so
+    /// opening the panel keeps them instead of defaulting them to the view.
+    primed: bool,
 }
 
 impl Default for Export {
@@ -569,6 +575,8 @@ impl Default for Export {
             cancel: false,
             status: String::new(),
             label_preview: None,
+            ok: false,
+            primed: false,
         }
     }
 }
@@ -1228,6 +1236,9 @@ pub struct CimApp {
     /// first maximized frame has been presented (see `set_window_cloak`).
     #[cfg(windows)]
     cloaked_hwnd: Option<isize>,
+    /// A windowless export run (`headless`): no config autosave, and the
+    /// many-sequences confirmation answers itself.
+    headless: bool,
 }
 
 impl CimApp {
@@ -1237,7 +1248,49 @@ impl CimApp {
         preload: lifecycle::Preload,
         view: cli::ViewState,
     ) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
+        // eframe shows the window right after the first frame is *painted* but
+        // just before it is *presented* (`set_visible` runs before
+        // `swap_buffers` in its glow backend), so on Windows the DWM can
+        // composite the still-blank window first — an intermittent white flash
+        // at startup. Cloak the window now: a cloaked window is fully managed
+        // (shown, resized, maximized) but never composited to the screen, so
+        // no show/present race can flash anything. `tick` uncloaks it once the
+        // first maximized frame has actually been swapped.
+        #[cfg(windows)]
+        let cloaked_hwnd = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match cc.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => {
+                    let hwnd = h.hwnd.get();
+                    set_window_cloak(hwnd, true);
+                    Some(hwnd)
+                }
+                // No handle (unexpected): skip cloaking — worst case a white
+                // flash, never a stuck-invisible window.
+                _ => None,
+            }
+        };
+        let mut app = Self::with_context(&cc.egui_ctx, config, preload, view);
+        // Present exactly when `main` resolved this run to GPU mode and
+        // eframe actually gave us the wgpu renderer.
+        app.gpu = GpuState::new(cc);
+        #[cfg(windows)]
+        {
+            app.cloaked_hwnd = cloaked_hwnd;
+        }
+        app
+    }
+
+    /// Build the app on `ctx` alone — no window, no GPU. [`Self::new`] adds
+    /// what the window brings; the windowless export (`headless`) uses this
+    /// directly, so both run the very same state and code.
+    pub(super) fn with_context(
+        ctx: &egui::Context,
+        config: Config,
+        preload: lifecycle::Preload,
+        view: cli::ViewState,
+    ) -> Self {
+        let mut style = (*ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         // The chrome bars (toolbar / frame bar) fill with `panel_fill`, and every
         // selectable button/tab (mode tabs, Media/Transformations/Export/… toggles)
@@ -1273,7 +1326,7 @@ impl CimApp {
         // No drop shadows under windows / popups (e.g. the Compute pane form).
         style.visuals.window_shadow = egui::epaint::Shadow::NONE;
         style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
-        cc.egui_ctx.set_style(style);
+        ctx.set_style(style);
 
         // Embed a small font (a subset of DejaVu Sans covering the Braille block)
         // so glyphs the bundled fonts lack — notably the ⠿ drag-handle grip —
@@ -1291,7 +1344,7 @@ impl CimApp {
                 .or_default()
                 .push("cimicons".to_owned());
         }
-        cc.egui_ctx.set_fonts(fonts);
+        ctx.set_fonts(fonts);
 
         // `main` already applied the CPU and JPEG 2000 budgets, before the
         // startup files began loading.
@@ -1307,29 +1360,6 @@ impl CimApp {
         crate::imageproc::set_force_non_u16(config.force_ops_non_u16);
         let cpp_dir_active = config.cpp_lib_dir.clone();
         let accel_active = config.hardware_accel;
-
-        // eframe shows the window right after the first frame is *painted* but
-        // just before it is *presented* (`set_visible` runs before
-        // `swap_buffers` in its glow backend), so on Windows the DWM can
-        // composite the still-blank window first — an intermittent white flash
-        // at startup. Cloak the window now: a cloaked window is fully managed
-        // (shown, resized, maximized) but never composited to the screen, so
-        // no show/present race can flash anything. `tick` uncloaks it once the
-        // first maximized frame has actually been swapped.
-        #[cfg(windows)]
-        let cloaked_hwnd = {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            match cc.window_handle().map(|h| h.as_raw()) {
-                Ok(RawWindowHandle::Win32(h)) => {
-                    let hwnd = h.hwnd.get();
-                    set_window_cloak(hwnd, true);
-                    Some(hwnd)
-                }
-                // No handle (unexpected): skip cloaking — worst case a white
-                // flash, never a stuck-invisible window.
-                _ => None,
-            }
-        };
 
         let mut app = Self {
             saved_config: config.clone(),
@@ -1393,7 +1423,7 @@ impl CimApp {
             pending_open: None,
             pending_view: None,
             opening: VecDeque::new(),
-            work: workers::Workers::new(threads, &cc.egui_ctx),
+            work: workers::Workers::new(threads, ctx),
             cpu_budget_active: cpu_budget,
             jp2_max_mp_active: jp2_max_mp,
             cpp_dir_active,
@@ -1407,18 +1437,17 @@ impl CimApp {
             warn_popup: None,
             clock: 0,
             render_scratch: Vec::new(),
-            // Present exactly when `main` resolved this run to GPU mode and
-            // eframe actually gave us the wgpu renderer.
-            gpu: GpuState::new(cc),
+            gpu: None,
             gpu_accel_active: accel_active,
             gpu_probe: None,
             #[cfg(windows)]
-            cloaked_hwnd,
+            cloaked_hwnd: None,
+            headless: false,
         };
         // The view applies once the panes exist (`commit_open`).
         app.pending_view = Some(view);
         app.startup_open = preload.inputs > 0;
-        preload.set_waker(&cc.egui_ctx);
+        preload.set_waker(ctx);
         app.opening.push_back(preload);
         app
     }
@@ -2204,6 +2233,11 @@ impl CimApp {
     /// differs from what's on disk) is the JSON written. That debounce is the
     /// point: dragging a slider would otherwise write the file on every frame.
     fn autosave_config(&mut self, ctx: &egui::Context, now: f64) {
+        // A windowless export applies its command's settings to `config`; they
+        // belong to that one run, not to the user's saved settings.
+        if self.headless {
+            return;
+        }
         if self.config != self.seen_config {
             self.seen_config = self.config.clone();
             self.autosave_at = Some(now + CONFIG_AUTOSAVE_DEBOUNCE);
@@ -2468,6 +2502,11 @@ impl CimApp {
         // Resource warning before opening more than `SEQ_WARN_LIMIT` sequences.
         // The media are already loaded (cheaply) and held in `pending_open`;
         // confirming adds them, declining quits the app.
+        if self.headless {
+            if let Some(batch) = self.pending_open.take() {
+                self.commit_open(batch);
+            }
+        }
         if self.pending_open.is_some() {
             let existing = self.panes.iter().filter(|p| p.media.is_sequence()).count();
             let opening = self
@@ -2529,6 +2568,15 @@ impl eframe::App for CimApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl CimApp {
+    /// One update of the whole app: tick, draw, deferred actions, export
+    /// polling, repaint pacing. Shared by the window (`update`) and the
+    /// windowless export (`headless`), which drives it on a bare context.
+    pub(super) fn frame(&mut self, ctx: &egui::Context) {
         // Whole-update CPU cost (CIM_DEBUG profiler); recorded at the end.
         let frame_start = crate::debug::enabled().then(std::time::Instant::now);
 

@@ -261,6 +261,13 @@ impl CimApp {
             }
             self.shared_view.needs_fit = false;
         }
+        if let Some([x, y, w, h]) = vs.stats_region {
+            self.set_stats_region(Some(Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))));
+        }
+        if let Some(on) = vs.region_tone {
+            self.apply_region_tone(on && self.stats_region.is_some());
+        }
+        self.apply_export_args(&vs.export);
     }
 
     /// Build a `cim …` command line that reopens the current files at the
@@ -272,6 +279,13 @@ impl CimApp {
     /// Only the *shared* view is captured — panes with their own view (sync off)
     /// fall back to it.
     pub(super) fn view_command(&self) -> String {
+        self.view_command_parts(false).join(" ")
+    }
+
+    /// The arguments of [`Self::view_command`]. `exact` (the export command)
+    /// writes the view at full precision and keeps the flags whose default is
+    /// a *setting* (`--cols`), which the replaying machine may have changed.
+    pub(super) fn view_command_parts(&self, exact: bool) -> Vec<String> {
         let mut parts: Vec<String> = vec!["cim".into()];
         for p in &self.panes {
             // A numbered sequence goes back out as its compact token, so a replay
@@ -306,14 +320,19 @@ impl CimApp {
             };
             parts.push(format!("--mode {mode}"));
         }
-        if self.config.max_columns != Config::default().max_columns {
+        if exact || self.config.max_columns != Config::default().max_columns {
             parts.push(format!("--cols {}", self.config.max_columns));
         }
         // Zoom / centre are the point of the command (they capture where you are
         // in the image), so they're always emitted.
         let v = self.shared_view;
-        parts.push(format!("--zoom {:.4}", v.zoom));
-        parts.push(format!("--center {:.2},{:.2}", v.center.x, v.center.y));
+        if exact {
+            parts.push(format!("--zoom {}", v.zoom));
+            parts.push(format!("--center {},{}", v.center.x, v.center.y));
+        } else {
+            parts.push(format!("--zoom {:.4}", v.zoom));
+            parts.push(format!("--center {:.2},{:.2}", v.center.x, v.center.y));
+        }
         if self.timeline_len() > 1 && self.shared_frame != 0 {
             parts.push(format!("--frame {}", self.shared_frame));
         }
@@ -411,7 +430,10 @@ impl CimApp {
             let per_pane_geometry = (0..n).any(|i| self.rotation_of(i) != 0.0);
             if per_pane_geometry {
                 let rots: Vec<String> = (0..n)
-                    .map(|i| format!("{}", (self.rotation_of(i) * 100.0).round() / 100.0))
+                    .map(|i| match exact {
+                        true => format!("{}", self.rotation_of(i)),
+                        false => format!("{}", (self.rotation_of(i) * 100.0).round() / 100.0),
+                    })
                     .collect();
                 parts.push(format!("--rotate {}", rots.join(",")));
             }
@@ -436,6 +458,19 @@ impl CimApp {
         if let Some((lo, hi)) = self.playback.loop_range {
             parts.push(format!("--loop {lo},{hi}"));
         }
+        // The stats region, and whether the tone follows it.
+        if let Some(r) = self.stats_region {
+            parts.push(format!(
+                "--stats-region {},{},{},{}",
+                r.min.x,
+                r.min.y,
+                r.width(),
+                r.height()
+            ));
+            if self.panes.iter().any(|p| p.region_tone) {
+                parts.push("--region-tone 1".into());
+            }
+        }
         if n > 0 {
             if self.current != 0 {
                 parts.push(format!("--pane {}", self.current.min(n - 1)));
@@ -443,14 +478,14 @@ impl CimApp {
             if self.control != 0 {
                 parts.push(format!("--control {}", self.control.min(n - 1)));
             }
-            if self.mode == Mode::Ab {
-                parts.push(format!(
-                    "--ab {},{},{:.3}",
-                    self.slot_a, self.slot_b, self.ab_split
-                ));
+            if self.mode == Mode::Ab || exact {
+                parts.push(match exact {
+                    true => format!("--ab {},{},{}", self.slot_a, self.slot_b, self.ab_split),
+                    false => format!("--ab {},{},{:.3}", self.slot_a, self.slot_b, self.ab_split),
+                });
             }
         }
-        parts.join(" ")
+        parts
     }
 
     pub(super) fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -847,7 +882,7 @@ fn quote_path(p: &Path) -> String {
 }
 
 /// Double-quote a command-line argument when it contains whitespace.
-fn quote_arg(s: &str) -> String {
+pub(super) fn quote_arg(s: &str) -> String {
     if s.chars().any(char::is_whitespace) {
         format!("\"{s}\"")
     } else {

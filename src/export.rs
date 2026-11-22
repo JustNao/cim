@@ -758,6 +758,27 @@ impl LabelAnchor {
         Self::BottomRight,
     ];
 
+    /// The command-line name (`--label-anchor`), one per [`Self::ALL`] entry.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopCenter => "top",
+            Self::TopRight => "top-right",
+            Self::MidLeft => "left",
+            Self::Center => "center",
+            Self::MidRight => "right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomCenter => "bottom",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    /// Inverse of [`Self::token`] (case-insensitive).
+    pub fn from_token(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|a| a.token() == s)
+    }
+
     /// Horizontal / vertical placement fractions (0 = min edge, 1 = max edge),
     /// applied to the free space left over after the label and its margin.
     pub fn fractions(self) -> (f32, f32) {

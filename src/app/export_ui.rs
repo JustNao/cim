@@ -237,7 +237,9 @@ fn anchor_name(a: LabelAnchor) -> String {
 impl CimApp {
     pub(super) fn toggle_export(&mut self) {
         self.export.show = !self.export.show;
-        if self.export.show {
+        if self.export.show && std::mem::take(&mut self.export.primed) {
+            // A command line already chose the layout and the file.
+        } else if self.export.show {
             self.export.mode = self.mode; // default to what's on screen
                                           // Default the format to what's being exported: MP4 when anything in
                                           // the output moves, a PNG still when it's all images.
@@ -669,7 +671,7 @@ impl CimApp {
 
     /// The panes an export actually composites, by current mode — so a warning /
     /// check only considers media that end up in the output.
-    fn export_participants(&self) -> Vec<usize> {
+    pub(super) fn export_participants(&self) -> Vec<usize> {
         if self.panes.is_empty() {
             return Vec::new();
         }
@@ -700,7 +702,7 @@ impl CimApp {
     /// meaningful. `false` once the chosen range is fully discovered: an explicit
     /// sub-range whose frames every participating sequence has already found needs
     /// no more loading, even if some tail is still undiscovered.
-    fn export_range_incomplete(&self) -> bool {
+    pub(super) fn export_range_incomplete(&self) -> bool {
         // "All" over a still-discovering timeline is inherently open-ended: the
         // end grows with discovery, so it's never complete until the true end.
         if self.export.range.is_none() && !self.current_at_end() {
@@ -922,11 +924,12 @@ impl CimApp {
         }
     }
 
-    pub(super) fn start_export(&mut self, ctx: &egui::Context) {
+    /// The file the export writes: the typed name with its format resolved and
+    /// made absolute, or the reason it can't be used.
+    fn export_path(&self) -> Result<PathBuf, String> {
         let name = self.export.name.trim();
         if name.is_empty() {
-            self.export.status = t!("export.err_no_name").into_owned();
-            return;
+            return Err(t!("export.err_no_name").into_owned());
         }
         // Resolve the output format from the extension. A bare name defaults to
         // MP4; a recognised extension is kept; anything else (e.g. a stray "." in
@@ -947,11 +950,10 @@ impl CimApp {
                 name.to_string()
             }
             Some(ext) => {
-                self.export.status = format!(
+                return Err(format!(
                     "Unsupported extension '.{ext}' — use .mp4, .tif, .png or .jpg \
                      (or no extension for MP4)"
-                );
-                return;
+                ));
             }
         };
         // Resolve to an absolute path against the current working directory so
@@ -965,6 +967,18 @@ impl CimApp {
                 path = cwd.join(&path);
             }
         }
+        Ok(path)
+    }
+
+    pub(super) fn start_export(&mut self, ctx: &egui::Context) {
+        self.export.ok = false;
+        let path = match self.export_path() {
+            Ok(path) => path,
+            Err(e) => {
+                self.export.status = e;
+                return;
+            }
+        };
         if self.export_format() == ExportFormat::Image {
             self.export_still_image(ctx, path);
             return;
@@ -1029,7 +1043,10 @@ impl CimApp {
             return;
         };
         self.export.status = match export::save_image(&path, cw, ch, &cropped) {
-            Ok(()) => t!("export.done_image", w = cw, h = ch, path = path.display()).into_owned(),
+            Ok(()) => {
+                self.export.ok = true;
+                t!("export.done_image", w = cw, h = ch, path = path.display()).into_owned()
+            }
             Err(e) => t!("export.failed", err = e).into_owned(),
         };
     }
@@ -1058,10 +1075,185 @@ impl CimApp {
             .unwrap_or_else(|_| ExportOutcome::Failed(t!("export.err_panicked").into_owned()));
         let path = std::mem::take(&mut run.path);
         self.export.run = None;
+        self.export.ok = matches!(outcome, ExportOutcome::Done(_));
         self.export.status = match outcome {
             ExportOutcome::Done(n) => t!("export.done_video", n = n, path = path).into_owned(),
             ExportOutcome::Cancelled => t!("export.cancelled").into_owned(),
             ExportOutcome::Failed(e) => e,
+        };
+    }
+
+    /// `(frames written, total)` of the running export, if one is.
+    pub(super) fn export_progress(&self) -> Option<(usize, usize)> {
+        self.export
+            .run
+            .as_ref()
+            .map(|r| (r.progress.load(Ordering::Relaxed), r.total))
+    }
+
+    /// Apply a command line's export settings (`--export-*`, the label flags),
+    /// at launch or from **Import settings**. Only the flags present change
+    /// anything, like the view flags in `apply_view_state`.
+    pub(super) fn apply_export_args(&mut self, a: &cli::ExportArgs) {
+        if let Some(m) = a.mode {
+            self.export.mode = mode_of(m);
+            self.export.primed = true;
+        }
+        if let Some(r) = a.region {
+            self.export.region =
+                r.map(|[x, y, w, h]| Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)));
+            self.export.edit = RegionEdit::default();
+        }
+        if let Some(local) = a.local {
+            self.export.local = local;
+        }
+        if let Some(range) = a.range {
+            self.export.range = range.map(|(s, e)| (s, e.max(s)));
+        }
+        if let Some(h) = a.height {
+            self.export.out_height = h.clamp(2, 16384);
+        }
+        if let Some(out) = &a.output {
+            self.export.name = out.clone();
+            self.export.primed = true;
+        }
+        let e = &mut self.config.export;
+        if let Some(fps) = a.fps {
+            e.fps = fps.clamp(1.0, 240.0);
+        }
+        if let Some(crf) = a.crf {
+            e.crf = crf.min(51);
+        }
+        if let Some(on) = a.labels {
+            e.labels_on = on;
+        }
+        let st = &mut e.label_style;
+        if let Some(size) = a.label_size {
+            st.size_px = size.clamp(LabelStyle::MIN_SIZE, LabelStyle::MAX_SIZE);
+        }
+        if let Some([r, g, b, al]) = a.label_color {
+            st.color = Color32::from_rgba_premultiplied(r, g, b, al);
+        }
+        if let Some(bg) = a.label_bg {
+            st.background = bg;
+        }
+        if let Some([r, g, b, al]) = a.label_bg_color {
+            st.bg_color = Color32::from_rgba_premultiplied(r, g, b, al);
+        }
+        if let Some(anchor) = a.label_anchor {
+            st.anchor = anchor;
+        }
+        if let Some(m) = a.label_margin {
+            st.margin = m.max(0.0);
+        }
+        if let Some(n) = a.parents {
+            self.config.header_parents = n;
+        }
+    }
+
+    /// The `cim … --export OUT` command that writes this export without opening
+    /// cim (`headless`): the view command at full precision, plus every export
+    /// setting and the image area the view is relative to (`--canvas`). Every
+    /// setting is spelled out — not just the non-default ones — since the
+    /// machine replaying it may have a different saved configuration.
+    pub(super) fn export_command(&self) -> Result<String, String> {
+        let path = self.export_path()?;
+        let mut parts = self.view_command_parts(true);
+        let mode = |m: Mode| match m {
+            Mode::Grid => "grid",
+            Mode::Single => "single",
+            Mode::Ab => "ab",
+        };
+        parts.push(format!("--parents {}", self.config.header_parents));
+        parts.push(format!("--export-layout {}", mode(self.export.mode)));
+        parts.push(match self.export.region {
+            Some(r) => format!(
+                "--export-region {},{},{},{}",
+                r.min.x,
+                r.min.y,
+                r.width(),
+                r.height()
+            ),
+            None => "--export-region full".into(),
+        });
+        parts.push(format!(
+            "--export-lut {}",
+            if self.export.local { "local" } else { "global" }
+        ));
+        parts.push(match self.export.range {
+            Some((s, e)) => format!("--export-frames {s},{e}"),
+            None => "--export-frames all".into(),
+        });
+        parts.push(format!("--export-height {}", self.export.out_height));
+        let e = &self.config.export;
+        parts.push(format!("--fps {}", e.fps));
+        parts.push(format!("--crf {}", e.crf));
+        parts.push(format!("--labels {}", u8::from(e.labels_on)));
+        let st = &e.label_style;
+        parts.push(format!("--label-size {}", st.size_px));
+        parts.push(format!(
+            "--label-color {}",
+            cli::rgba_arg(st.color.to_array())
+        ));
+        parts.push(format!("--label-bg {}", u8::from(st.background)));
+        parts.push(format!(
+            "--label-bg-color {}",
+            cli::rgba_arg(st.bg_color.to_array())
+        ));
+        parts.push(format!("--label-anchor {}", st.anchor.token()));
+        parts.push(format!("--label-margin {}", st.margin));
+        let a = self.last_area;
+        parts.push(format!(
+            "--canvas {},{},{}",
+            a.width(),
+            a.height(),
+            self.ppp
+        ));
+        parts.push(format!(
+            "--export {}",
+            lifecycle::quote_arg(&path.display().to_string())
+        ));
+        Ok(parts.join(" "))
+    }
+
+    /// Copy [`Self::export_command`] to the clipboard (the **Command** button).
+    fn copy_export_command(&mut self, ctx: &egui::Context) {
+        self.export.status = match self.export_command() {
+            Ok(cmd) => {
+                ctx.copy_text(cmd);
+                t!("export.command_copied").into_owned()
+            }
+            Err(e) => e,
+        };
+    }
+
+    /// **Import settings**: read a command copied from **Command** off the
+    /// clipboard and apply its view and export settings to the open media.
+    fn import_export_command(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) => text,
+            Err(e) => {
+                self.export.status = t!("export.import_no_clipboard", err = e).into_owned();
+                return;
+            }
+        };
+        let Some((view, inputs)) = cli::parse_command(&text) else {
+            self.export.status = t!("export.import_not_command").into_owned();
+            return;
+        };
+        // Importing only fills the panel (the file name is the command's): the
+        // export still runs from its button.
+        self.apply_view_state(view);
+        self.export.primed = false;
+        self.export.status = if inputs != self.panes.len() {
+            t!(
+                "export.import_mismatch",
+                cmd = inputs,
+                open = self.panes.len()
+            )
+            .into_owned()
+        } else {
+            t!("export.imported").into_owned()
         };
     }
 
@@ -1368,6 +1560,14 @@ impl CimApp {
             .resizable(true)
             .default_width(240.0)
             .show(ctx, |ui| {
+                if ui
+                    .add_enabled(!running, egui::Button::new(t!("export.import")))
+                    .on_hover_text(t!("export.import_hover"))
+                    .clicked()
+                {
+                    self.import_export_command();
+                }
+                ui.separator();
                 ui.add_enabled_ui(!running, |ui| {
                     egui::Grid::new("export_grid")
                         .num_columns(2)
@@ -1581,9 +1781,18 @@ impl CimApp {
                         ExportFormat::Tiff => t!("export.run_tiff"),
                         ExportFormat::Video => t!("export.run_video"),
                     };
-                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                        self.start_export(ctx);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
+                            self.start_export(ctx);
+                        }
+                        if ui
+                            .add_enabled(ready, egui::Button::new(t!("export.command")))
+                            .on_hover_text(t!("export.command_hover"))
+                            .clicked()
+                        {
+                            self.copy_export_command(ctx);
+                        }
+                    });
                 }
 
                 if !self.export.status.is_empty() {
@@ -1596,6 +1805,15 @@ impl CimApp {
             self.cancel_region_select();
         }
         self.export.show = open;
+    }
+}
+
+/// The app's layout for a command line's.
+fn mode_of(m: cli::ViewMode) -> Mode {
+    match m {
+        cli::ViewMode::Grid => Mode::Grid,
+        cli::ViewMode::Single => Mode::Single,
+        cli::ViewMode::Ab => Mode::Ab,
     }
 }
 

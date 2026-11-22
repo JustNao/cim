@@ -136,6 +136,60 @@ pub struct ViewState {
     /// name. Keyed by index rather than a positional list, since a name may hold
     /// any character — commas included.
     pub names: Vec<(usize, String)>,
+    /// The shared image-space statistics region `X,Y,W,H` (`--stats-region`).
+    pub stats_region: Option<[f32; 4]>,
+    /// Whether the panes' tone follows that region (`--region-tone 1|0`).
+    pub region_tone: Option<bool>,
+    /// The export panel's settings (`--export-*`, label flags, `--canvas`), and
+    /// the output that makes this a windowless export run (`--export`).
+    pub export: ExportArgs,
+}
+
+/// The export side of a command line, produced by the export panel's
+/// **Command** button. Every field is optional, like [`ViewState`]'s: a flag
+/// that is absent leaves the app's setting as it is.
+///
+/// With `output` set, cim does not open a window: it replays the view
+/// headlessly, writes the export and exits (`app::headless`).
+#[derive(Default, Clone)]
+pub struct ExportArgs {
+    /// `--export PATH`: export to this file, without a window.
+    pub output: Option<String>,
+    /// `--export-layout grid|single|ab`.
+    pub mode: Option<ViewMode>,
+    /// `--export-region X,Y,W,H` (image space) or `full`: `Some(None)` = none.
+    pub region: Option<Option<[f32; 4]>>,
+    /// `--export-lut global|local`: the crop's Local LUT switch.
+    pub local: Option<bool>,
+    /// `--export-frames FROM,TO` (inclusive, 0-based) or `all`.
+    pub range: Option<Option<(usize, usize)>>,
+    /// `--export-height N`: output height in pixels.
+    pub height: Option<u32>,
+    /// `--fps F`.
+    pub fps: Option<f32>,
+    /// `--crf N`.
+    pub crf: Option<u32>,
+    /// `--labels 1|0`: burn the media names in.
+    pub labels: Option<bool>,
+    /// `--label-size PX`.
+    pub label_size: Option<f32>,
+    /// `--label-color RRGGBBAA` (premultiplied, as the config stores it).
+    pub label_color: Option<[u8; 4]>,
+    /// `--label-bg 1|0`: draw the box behind the text.
+    pub label_bg: Option<bool>,
+    /// `--label-bg-color RRGGBBAA`.
+    pub label_bg_color: Option<[u8; 4]>,
+    /// `--label-anchor top-left|top|…|bottom-right`.
+    pub label_anchor: Option<crate::export::LabelAnchor>,
+    /// `--label-margin PX`.
+    pub label_margin: Option<f32>,
+    /// `--canvas W,H,PPP`: the image area the view was captured in (points)
+    /// and its pixels per point. The view's zoom/centre — and so the exported
+    /// region — are relative to it; only a windowless run applies it.
+    pub canvas: Option<(f32, f32, f32)>,
+    /// `--parents N`: parent folders shown in a pane's name, so the burnt-in
+    /// labels match.
+    pub parents: Option<usize>,
 }
 
 /// Parse the arguments after argv[0].
@@ -144,8 +198,6 @@ pub fn parse(args: Vec<String>) -> Cli {
     let mut view = ViewState::default();
     let mut i = 0;
     while i < args.len() {
-        // Flags that take a value read the following argument and skip it.
-        let next = |i: usize| args.get(i + 1).map(String::as_str);
         match args[i].as_str() {
             "-h" | "--help" => {
                 print!("{}", help_text());
@@ -175,99 +227,321 @@ pub fn parse(args: Vec<String>) -> Cli {
                     }
                 }
             }
-            "--mode" => {
-                view.mode = next(i).and_then(parse_mode);
-                i += 1;
-            }
-            "--cols" => {
-                view.cols = next(i).and_then(|s| s.parse().ok());
-                i += 1;
-            }
-            "--zoom" => {
-                view.zoom = next(i).and_then(|s| s.parse().ok());
-                i += 1;
-            }
-            "--center" => {
-                view.center = next(i).and_then(parse_pair);
-                i += 1;
-            }
-            "--frame" => {
-                view.frame = next(i).and_then(|s| s.parse().ok());
-                i += 1;
-            }
-            "--pane" => {
-                view.pane = next(i).and_then(|s| s.parse().ok());
-                i += 1;
-            }
-            "--ab" => {
-                view.ab = next(i).and_then(parse_ab);
-                i += 1;
-            }
-            "--tone" => {
-                view.tones = next(i).and_then(parse_tones);
-                i += 1;
-            }
-            "--clip" => {
-                view.clips = next(i).and_then(parse_clips);
-                i += 1;
-            }
-            "--share-clip" => {
-                view.share_clip = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--global-stats" => {
-                view.global_stats = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--curve" => {
-                view.curves = next(i).and_then(parse_curves);
-                i += 1;
-            }
-            "--detail" => {
-                view.details = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--show" => {
-                view.visible = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--scale" => {
-                view.scale = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--tsync" => {
-                view.tsync = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--gsync" => {
-                view.gsync = next(i).and_then(parse_details);
-                i += 1;
-            }
-            "--rotate" => {
-                view.rotations = next(i).and_then(parse_floats);
-                i += 1;
-            }
-            "--control" => {
-                view.control = next(i).and_then(|s| s.parse().ok());
-                i += 1;
-            }
-            "--loop" => {
-                view.loop_range = next(i).and_then(parse_uint_pair);
-                i += 1;
-            }
-            "--name" => {
-                if let Some((n, name)) = next(i).and_then(|s| s.split_once('=')) {
-                    if let Ok(n) = n.trim().parse() {
-                        view.names.push((n, name.to_string()));
-                    }
+            _ => {
+                if !parse_flag(&args, &mut i, &mut view) {
+                    expand_arg(&args[i], &mut inputs);
                 }
-                i += 1;
             }
-            other => expand_arg(other, &mut inputs),
         }
         i += 1;
     }
     Cli::Run { inputs, view }
+}
+
+/// Apply the view / export flag at `args[*i]` to `view`, advancing `*i` onto
+/// its value (the caller steps past it). `false` when `args[*i]` is not such a
+/// flag — a positional input. Shared by [`parse`] and [`parse_command`], so a
+/// command pasted into a running cim reads exactly as it does on a launch.
+fn parse_flag(args: &[String], i: &mut usize, view: &mut ViewState) -> bool {
+    // Flags that take a value read the following argument and skip it.
+    let next = |i: usize| args.get(i + 1).map(String::as_str);
+    match args[*i].as_str() {
+        "--mode" => {
+            view.mode = next(*i).and_then(parse_mode);
+            *i += 1;
+        }
+        "--cols" => {
+            view.cols = next(*i).and_then(|s| s.parse().ok());
+            *i += 1;
+        }
+        "--zoom" => {
+            view.zoom = next(*i).and_then(|s| s.parse().ok());
+            *i += 1;
+        }
+        "--center" => {
+            view.center = next(*i).and_then(parse_pair);
+            *i += 1;
+        }
+        "--frame" => {
+            view.frame = next(*i).and_then(|s| s.parse().ok());
+            *i += 1;
+        }
+        "--pane" => {
+            view.pane = next(*i).and_then(|s| s.parse().ok());
+            *i += 1;
+        }
+        "--ab" => {
+            view.ab = next(*i).and_then(parse_ab);
+            *i += 1;
+        }
+        "--tone" => {
+            view.tones = next(*i).and_then(parse_tones);
+            *i += 1;
+        }
+        "--clip" => {
+            view.clips = next(*i).and_then(parse_clips);
+            *i += 1;
+        }
+        "--share-clip" => {
+            view.share_clip = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--global-stats" => {
+            view.global_stats = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--curve" => {
+            view.curves = next(*i).and_then(parse_curves);
+            *i += 1;
+        }
+        "--detail" => {
+            view.details = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--show" => {
+            view.visible = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--scale" => {
+            view.scale = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--tsync" => {
+            view.tsync = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--gsync" => {
+            view.gsync = next(*i).and_then(parse_details);
+            *i += 1;
+        }
+        "--rotate" => {
+            view.rotations = next(*i).and_then(parse_floats);
+            *i += 1;
+        }
+        "--control" => {
+            view.control = next(*i).and_then(|s| s.parse().ok());
+            *i += 1;
+        }
+        "--loop" => {
+            view.loop_range = next(*i).and_then(parse_uint_pair);
+            *i += 1;
+        }
+        "--name" => {
+            if let Some((n, name)) = next(*i).and_then(|s| s.split_once('=')) {
+                if let Ok(n) = n.trim().parse() {
+                    view.names.push((n, name.to_string()));
+                }
+            }
+            *i += 1;
+        }
+        "--stats-region" => {
+            view.stats_region = next(*i).and_then(parse_rect);
+            *i += 1;
+        }
+        "--region-tone" => {
+            view.region_tone = next(*i).map(parse_bool);
+            *i += 1;
+        }
+        "--export" => {
+            view.export.output = next(*i).map(str::to_owned);
+            *i += 1;
+        }
+        "--export-layout" => {
+            view.export.mode = next(*i).and_then(parse_mode);
+            *i += 1;
+        }
+        "--export-region" => {
+            view.export.region = next(*i).and_then(|s| match s.trim() {
+                "full" | "none" => Some(None),
+                s => parse_rect(s).map(Some),
+            });
+            *i += 1;
+        }
+        "--export-lut" => {
+            view.export.local = next(*i).and_then(|s| match s.trim() {
+                "local" => Some(true),
+                "global" => Some(false),
+                _ => None,
+            });
+            *i += 1;
+        }
+        "--export-frames" => {
+            view.export.range = next(*i).and_then(|s| match s.trim() {
+                "all" => Some(None),
+                s => parse_uint_pair(s).map(Some),
+            });
+            *i += 1;
+        }
+        "--export-height" => {
+            view.export.height = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        "--fps" => {
+            view.export.fps = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        "--crf" => {
+            view.export.crf = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        "--labels" => {
+            view.export.labels = next(*i).map(parse_bool);
+            *i += 1;
+        }
+        "--label-size" => {
+            view.export.label_size = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        "--label-color" => {
+            view.export.label_color = next(*i).and_then(parse_rgba);
+            *i += 1;
+        }
+        "--label-bg" => {
+            view.export.label_bg = next(*i).map(parse_bool);
+            *i += 1;
+        }
+        "--label-bg-color" => {
+            view.export.label_bg_color = next(*i).and_then(parse_rgba);
+            *i += 1;
+        }
+        "--label-anchor" => {
+            view.export.label_anchor = next(*i).and_then(crate::export::LabelAnchor::from_token);
+            *i += 1;
+        }
+        "--label-margin" => {
+            view.export.label_margin = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        "--canvas" => {
+            view.export.canvas = next(*i).and_then(parse_canvas);
+            *i += 1;
+        }
+        "--parents" => {
+            view.export.parents = next(*i).and_then(|s| s.trim().parse().ok());
+            *i += 1;
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Parse a command line copied from the export panel (**Import settings**):
+/// the same flags as a launch, read with the same [`parse_flag`]. Positional
+/// inputs are skipped — an import applies the view and export settings to the
+/// media already open; the count of them is returned so a mismatch can be
+/// reported. `None` when the text holds no flag at all.
+pub fn parse_command(line: &str) -> Option<(ViewState, usize)> {
+    let mut args = split_command(line);
+    // The program itself (`cim`, or a path to it), when present.
+    if args.first().is_some_and(|a| {
+        Path::new(a)
+            .file_stem()
+            .is_some_and(|s| s.eq_ignore_ascii_case("cim"))
+    }) {
+        args.remove(0);
+    }
+    let mut view = ViewState::default();
+    let (mut inputs, mut flags) = (0, 0);
+    let mut i = 0;
+    while i < args.len() {
+        if parse_flag(&args, &mut i, &mut view) {
+            flags += 1;
+        } else if !args[i].starts_with('-') {
+            inputs += 1;
+        }
+        i += 1;
+    }
+    (flags > 0).then_some((view, inputs))
+}
+
+/// Split a command line into arguments the way a shell would for the commands
+/// cim writes: whitespace separates, double (or single) quotes group, and `\"`
+/// inside double quotes is a literal quote. Any other backslash is literal, so
+/// Windows paths survive. A PowerShell call operator (`& "…\cim.exe" …`) is
+/// dropped.
+pub fn split_command(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                started = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' if chars.peek() == Some(&'"') => cur.push(chars.next().unwrap()),
+                        '"' => break,
+                        c => cur.push(c),
+                    }
+                }
+            }
+            '\'' => {
+                started = true;
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    cur.push(c);
+                }
+            }
+            c if c.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                started = true;
+                cur.push(c);
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    if out.first().is_some_and(|a| a == "&") {
+        out.remove(0);
+    }
+    out
+}
+
+/// Parse `x,y,w,h` (an image-space rect) for `--export-region` / `--stats-region`.
+fn parse_rect(s: &str) -> Option<[f32; 4]> {
+    let v = parse_floats(s)?;
+    let r: [f32; 4] = v.try_into().ok()?;
+    (r[2] > 0.0 && r[3] > 0.0).then_some(r)
+}
+
+/// Parse `w,h[,ppp]` for `--canvas` (pixels per point default to 1).
+fn parse_canvas(s: &str) -> Option<(f32, f32, f32)> {
+    let v = parse_floats(s)?;
+    let (w, h, ppp) = match v[..] {
+        [w, h] => (w, h, 1.0),
+        [w, h, ppp] => (w, h, ppp),
+        _ => return None,
+    };
+    (w >= 1.0 && h >= 1.0 && ppp > 0.0).then_some((w, h, ppp))
+}
+
+/// Parse `RRGGBBAA` (optionally `#`-prefixed) into bytes.
+fn parse_rgba(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 8 || !s.is_ascii() {
+        return None;
+    }
+    let byte = |k: usize| u8::from_str_radix(&s[k..k + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?, byte(6)?])
+}
+
+/// The `RRGGBBAA` token [`parse_rgba`] reads.
+pub fn rgba_arg(c: [u8; 4]) -> String {
+    format!("{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3])
+}
+
+/// One on/off flag value (`1`/`true`/`on`).
+fn parse_bool(s: &str) -> bool {
+    matches!(s.trim(), "1" | "true" | "on")
 }
 
 /// Parse a `--mode` value (case-insensitive).
@@ -1042,6 +1316,133 @@ mod tests {
             view.names,
             vec![(1, "left, cam = 2".to_string()), (0, "ref".to_string())]
         );
+    }
+
+    #[test]
+    fn parses_export_flags() {
+        let args: Vec<String> = [
+            "--export-layout",
+            "ab",
+            "--export-region",
+            "10,20,300,200",
+            "--export-lut",
+            "local",
+            "--export-frames",
+            "3,9",
+            "--export-height",
+            "480",
+            "--fps",
+            "12.5",
+            "--crf",
+            "18",
+            "--labels",
+            "0",
+            "--label-size",
+            "30",
+            "--label-color",
+            "ff8000ff",
+            "--label-bg",
+            "1",
+            "--label-bg-color",
+            "#00000080",
+            "--label-anchor",
+            "top-right",
+            "--label-margin",
+            "4",
+            "--canvas",
+            "1600,900,1.25",
+            "--parents",
+            "2",
+            "--stats-region",
+            "1,2,3,4",
+            "--region-tone",
+            "1",
+            "--export",
+            r"C:\out dir\clip.mp4",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let Cli::Run { inputs, view } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert!(inputs.is_empty());
+        let e = &view.export;
+        assert!(e.mode == Some(ViewMode::Ab));
+        assert_eq!(e.region, Some(Some([10.0, 20.0, 300.0, 200.0])));
+        assert_eq!(e.local, Some(true));
+        assert_eq!(e.range, Some(Some((3, 9))));
+        assert_eq!(e.height, Some(480));
+        assert_eq!(e.fps, Some(12.5));
+        assert_eq!(e.crf, Some(18));
+        assert_eq!(e.labels, Some(false));
+        assert_eq!(e.label_size, Some(30.0));
+        assert_eq!(e.label_color, Some([255, 128, 0, 255]));
+        assert_eq!(e.label_bg, Some(true));
+        assert_eq!(e.label_bg_color, Some([0, 0, 0, 128]));
+        assert!(e.label_anchor == Some(crate::export::LabelAnchor::TopRight));
+        assert_eq!(e.label_margin, Some(4.0));
+        assert_eq!(e.canvas, Some((1600.0, 900.0, 1.25)));
+        assert_eq!(e.parents, Some(2));
+        assert_eq!(e.output.as_deref(), Some(r"C:\out dir\clip.mp4"));
+        assert_eq!(view.stats_region, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(view.region_tone, Some(true));
+        // The "whole" spellings.
+        let Cli::Run { view, .. } = parse(
+            ["--export-region", "full", "--export-frames", "all"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ) else {
+            panic!("expected Run");
+        };
+        assert_eq!(view.export.region, Some(None));
+        assert_eq!(view.export.range, Some(None));
+    }
+
+    #[test]
+    fn every_label_anchor_round_trips_its_token() {
+        for a in crate::export::LabelAnchor::ALL {
+            assert!(crate::export::LabelAnchor::from_token(a.token()) == Some(a));
+        }
+        assert!(crate::export::LabelAnchor::from_token("nowhere").is_none());
+    }
+
+    #[test]
+    fn splits_commands_like_a_shell() {
+        assert_eq!(
+            split_command(r#"cim "C:\my dir\a.tif" b.png --name "0=say \"hi\"" --zoom 2"#),
+            [
+                "cim",
+                r"C:\my dir\a.tif",
+                "b.png",
+                "--name",
+                r#"0=say "hi""#,
+                "--zoom",
+                "2"
+            ]
+        );
+        // PowerShell's call operator and single quotes.
+        assert_eq!(
+            split_command(r"& 'C:\bin\cim.exe' x.png"),
+            [r"C:\bin\cim.exe", "x.png"]
+        );
+        assert!(split_command("   ").is_empty());
+    }
+
+    #[test]
+    fn parse_command_reads_flags_and_counts_inputs() {
+        let (view, inputs) = parse_command(
+            r#"cim "C:\a b\x.tif" y.png --zoom 1.5 --center 10,20 --export-height 600 --export "D:\o u t.mp4""#,
+        )
+        .expect("a command");
+        assert_eq!(inputs, 2);
+        assert_eq!(view.zoom, Some(1.5));
+        assert_eq!(view.center, Some((10.0, 20.0)));
+        assert_eq!(view.export.height, Some(600));
+        assert_eq!(view.export.output.as_deref(), Some(r"D:\o u t.mp4"));
+        // Text that isn't a command.
+        assert!(parse_command("hello world").is_none());
     }
 
     #[test]

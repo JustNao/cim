@@ -50,6 +50,13 @@ fn main() -> eframe::Result<()> {
     // the loads run on the instance's share of the CPU.
     cpu::set_budget(config.cpu_budget);
     media::jp2::set_budget_px(config.jp2_max_mp.saturating_mul(1_000_000));
+
+    // `--export OUT`: write the export the command describes and exit, without
+    // ever opening a window (`app::headless`).
+    if view.export.output.is_some() {
+        attach_console();
+        std::process::exit(app::headless::run(config, inputs, view));
+    }
     let preload = std::sync::Mutex::new(Some(app::Preload::start(inputs.clone())));
 
     // The renderer is chosen once, here (hence "takes effect after restart" in
@@ -129,6 +136,26 @@ fn run(
             Ok(Box::new(app::CimApp::new(cc, config, preload, view)))
         }),
     )
+}
+
+/// A release build is a Windows GUI-subsystem program (no console of its own),
+/// so a windowless export run from a terminal would print nowhere: attach to the
+/// launching console, if any, so its progress and outcome show there. (A shell
+/// does not wait for a GUI-subsystem program; piping its output — `| Write-Output`
+/// in PowerShell — makes it.) A no-op elsewhere.
+fn attach_console() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        extern "system" {
+            fn AttachConsole(pid: u32) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        // Fails harmlessly when there is no parent console (or output is
+        // already redirected to a pipe or file, which then just works).
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 /// The window icon, decoded at startup from the PNG baked into the binary.

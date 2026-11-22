@@ -29,6 +29,10 @@ hayro-jpeg2000 = { version = "0.4", default-features = false, features = ["std"]
 # Row-parallel tone mapping and analytic scans (see media::render, crate::cpu).
 rayon = "1"
 rfd = "0.14"
+# Reading the clipboard (the export panel's Import settings — egui only hands
+# text over on a paste keystroke). Already in the tree via egui-winit, so no new
+# package.
+arboard = { version = "3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "5"
