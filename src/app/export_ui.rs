@@ -437,6 +437,7 @@ impl CimApp {
         // region → none), so a region-pinned tone survives the export.
         pane.region = self.tone_region(idx);
         pane.rotation = self.rotation_of(idx).to_radians();
+        pane.dai_rotation = self.dai_rotation_track(idx);
         // Use the effective overlay (shared when the pane is tone-synced), and
         // skip what prepare_overlay skips: mask panes (they don't take an overlay),
         // a hidden overlay, and the overlay's own source pane.

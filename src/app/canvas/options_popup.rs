@@ -376,6 +376,27 @@ impl CimApp {
                             self.rotation_edit_pane = None;
                         }
                     });
+                    // The camera rotation recorded in the media's DAI, added to
+                    // the angle above (which is then relative to it). Shown only
+                    // when the DAI carries one.
+                    if self.has_dai_rotation(idx) {
+                        let mut on = self.panes[idx].dai_rotate;
+                        let angle = {
+                            let p = &self.panes[idx];
+                            let f = p
+                                .tex
+                                .front
+                                .as_ref()
+                                .map_or_else(|| self.frame_disp(idx), |t| t.shown);
+                            self.dai_rotation_at(idx, f)
+                        };
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut on, t!("transform.with_dai"))
+                                .on_hover_text(t!("transform.with_dai_hover"));
+                            ui.weak(format!("({})", fmt_angle(angle)));
+                        });
+                        self.panes[idx].dai_rotate = on;
+                    }
                 });
 
                 // ---- Histogram (always visible, at the bottom) ---------------
