@@ -86,6 +86,41 @@ impl ViewTransform {
     }
 }
 
+/// The zoom as a magnification factor, as the toolbar shows it: `x2`, `x1.5`,
+/// `x1` when magnified (or 1:1), and `x1/4`, `x1/2.5` when minified — so the
+/// number reads as "how many times" either way, rather than a percentage.
+pub fn fmt_zoom(zoom: f32) -> String {
+    fn short(v: f32) -> String {
+        let r = (v * 100.0).round() / 100.0;
+        if r.fract() == 0.0 {
+            format!("{}", r as i64)
+        } else {
+            format!("{r}")
+        }
+    }
+    if zoom >= 0.995 {
+        format!("x{}", short(zoom))
+    } else {
+        format!("x1/{}", short(1.0 / zoom))
+    }
+}
+
+/// Parse a typed zoom: `x2`, `2`, `x1/4`, `1/4`, `0.25` or `25%`. `None` for
+/// anything else or a non-positive value; the result is clamped to the view's
+/// zoom range.
+pub fn parse_zoom(s: &str) -> Option<f32> {
+    let s = s.trim();
+    let s = s.strip_prefix(['x', 'X', '×']).unwrap_or(s).trim();
+    let z = if let Some(p) = s.strip_suffix('%') {
+        p.trim().parse::<f32>().ok()? / 100.0
+    } else if let Some((n, d)) = s.split_once('/') {
+        n.trim().parse::<f32>().ok()? / d.trim().parse::<f32>().ok()?
+    } else {
+        s.parse::<f32>().ok()?
+    };
+    (z.is_finite() && z > 0.0).then(|| z.clamp(1e-4, 512.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +145,26 @@ mod tests {
         let mut same = ViewTransform::default();
         same.fit_within([400, 400], pane, pane);
         assert_eq!((plain.zoom, plain.center), (same.zoom, same.center));
+    }
+
+    #[test]
+    fn zoom_reads_as_a_factor_and_parses_back() {
+        assert_eq!(fmt_zoom(1.0), "x1");
+        assert_eq!(fmt_zoom(2.0), "x2");
+        assert_eq!(fmt_zoom(1.5), "x1.5");
+        assert_eq!(fmt_zoom(0.25), "x1/4");
+        assert_eq!(fmt_zoom(0.4), "x1/2.5");
+        for z in [1.0, 2.0, 1.5, 0.25, 0.4, 8.0] {
+            assert_eq!(parse_zoom(&fmt_zoom(z)), Some(z));
+        }
+        assert_eq!(parse_zoom("4"), Some(4.0));
+        assert_eq!(parse_zoom(" X 3 "), Some(3.0));
+        assert_eq!(parse_zoom("1/8"), Some(0.125));
+        assert_eq!(parse_zoom("50%"), Some(0.5));
+        assert_eq!(parse_zoom("0"), None);
+        assert_eq!(parse_zoom("-2"), None);
+        assert_eq!(parse_zoom("1/0"), None);
+        assert_eq!(parse_zoom("abc"), None);
+        assert_eq!(parse_zoom("1e9"), Some(512.0));
     }
 }

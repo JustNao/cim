@@ -36,7 +36,7 @@ impl CimApp {
                 self.apply_action_local(Action::ResetView);
             }
             if ui
-                .button("100%")
+                .button("x1")
                 .on_hover_text(self.hover_for(Action::ActualSize, ""))
                 .clicked()
                 && !self.panes.is_empty()
@@ -44,7 +44,38 @@ impl CimApp {
                 let size = self.panes[self.current].media.size();
                 self.view_mut(self.current).actual_size(size);
             }
-            ui.label(format!("{:.0}%", self.view_zoom_label() * 100.0));
+            // The zoom as a factor (`x4`, `x1/2`), typeable: a click selects it
+            // all so a level can be typed straight over, committed on Enter /
+            // focus loss about the view centre. Mirrors the live zoom otherwise.
+            let field = egui::TextEdit::singleline(&mut self.zoom_edit)
+                .id(egui::Id::new("toolbar_zoom"))
+                .desired_width(48.0)
+                .horizontal_align(egui::Align::Center);
+            let mut out = field.show(ui);
+            let resp = out.response.on_hover_text(t!("toolbar.zoom_hover"));
+            if resp.gained_focus() {
+                let end = self.zoom_edit.chars().count();
+                out.state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(end),
+                    )));
+                out.state.store(ui.ctx(), resp.id);
+            }
+            let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if resp.lost_focus() && !escaped {
+                if let Some(z) = crate::view::parse_zoom(&self.zoom_edit) {
+                    if !self.panes.is_empty() {
+                        let v = self.view_mut(self.current.min(self.panes.len() - 1));
+                        v.zoom = z;
+                        v.needs_fit = false;
+                    }
+                }
+            }
+            if !resp.has_focus() {
+                self.zoom_edit = crate::view::fmt_zoom(self.view_zoom_label());
+            }
             // Playback (Play/speed/Load all) and the scrubber live in the
             // full-width bottom frame bar, shown when the media is a sequence.
 
