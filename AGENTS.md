@@ -1963,8 +1963,13 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
   yaml per image); `Dai::value(media, frame, col)` reads one. The yaml parser is a small
   hand-written subset (no YAML dependency).
 - **The DAI window** (`app/dai_panel.rs`, toolbar **DAI**, shown while any pane has DAI)
-  follows `current` and keeps the selected column **by name**, so switching to a media
-  with the same layout keeps it. The column list is filtered and ranked by
+  follows `current` and keeps the selected columns **by name**, so switching to a media
+  with the same layout keeps them. Ctrl+click selects several: the table shows them side
+  by side (sticky header, horizontal scroll for many, truncated cells with the full value
+  on hover), the graph plots the last one picked. **Follow** keeps the view on the current
+  frame — the table scrolls to it whenever it moves (`followed`), a zoomed graph keeps its
+  width centred on it (wheel zoom and a selection then centre on the playhead too); a
+  drag-pan of the graph or a wheel over the table turns it off. The column list is filtered and ranked by
   `dai::fuzzy_score` (best *alignment*, word starts and runs score up). A numeric column
   graphs over `Dai::span` frames (the known length, or a lone file's csv row count when
   longer — those rows are still its pages): wheel zooms x about the cursor, drag pans,
