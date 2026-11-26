@@ -623,6 +623,10 @@ fn components(stem: &str) -> Vec<String> {
 /// component prefix of the media's (longer prefix better), which beats a media
 /// name that is a prefix of the DAI's (shorter DAI name better). Anything else
 /// — `seqA_1` against `seqA_2` — doesn't match.
+///
+/// One more pairing ranks just below the same name: a processed version of an
+/// acquisition reads the DAI of its **raw** one — `seq.versionA.tif` →
+/// `seq.raw.csv`, the last dotted part of the media's name replaced by `raw`.
 fn affinity(media: &str, dai: &str) -> Option<(u8, isize)> {
     let (a, b) = (components(media), components(dai));
     if a.is_empty() || b.is_empty() {
@@ -630,6 +634,15 @@ fn affinity(media: &str, dai: &str) -> Option<(u8, isize)> {
     }
     if a == b {
         return Some((3, 0));
+    }
+    if let (Some((base, _)), Some((dai_base, tag))) = (media.rsplit_once('.'), dai.rsplit_once('.'))
+    {
+        if tag.eq_ignore_ascii_case("raw")
+            && !base.is_empty()
+            && base.eq_ignore_ascii_case(dai_base)
+        {
+            return Some((3, -1));
+        }
     }
     let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     if common == b.len() {
@@ -884,6 +897,20 @@ mod tests {
         assert!(affinity("seqA00012", "seqA").is_some());
         assert_eq!(affinity("seqA_1", "seqA_2"), None);
         assert_eq!(affinity("seqA", "seqB"), None);
+        // A processed version reads its raw acquisition's DAI.
+        assert_eq!(affinity("seq.versionA", "seq.raw"), Some((3, -1)));
+        assert_eq!(affinity("seq_1.VersionB", "seq_1.RAW"), Some((3, -1)));
+        assert_eq!(affinity("seq.versionA", "other.raw"), None);
+        assert!(affinity("seq.versionA", "seq.raw") < affinity("seq.versionA", "seq.versionA"));
+        assert!(affinity("seq.versionA", "seq.raw") > affinity("seq.versionA", "seq"));
+        let raw: Vec<PathBuf> = ["d/seq.csv", "d/seq.raw.csv", "d/seq.versionB.csv"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(
+            best_match(Path::new("d/seq.versionA.tif"), &raw, true).unwrap(),
+            Path::new("d/seq.raw.csv")
+        );
         let c: Vec<PathBuf> = [
             "d/seqA.csv",
             "d/seqA.yaml",
