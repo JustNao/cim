@@ -26,6 +26,7 @@ toolbar.settings: Settings
 toolbar.settings_hover: Open the settings
 toolbar.help: Help
 toolbar.help_hover: Mouse and modifier commands (reads help.md)
+toolbar.zoom_hover: "Zoom factor (x2 = 2 screen pixels per image pixel, x1/4 = a quarter). Click to type one: x4, 1/2, 300%"
 toolbar.debug: Debug
 toolbar.debug_hover: Per-stage timing (read → display)
 

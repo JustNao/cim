@@ -1048,6 +1048,9 @@ pub struct CimApp {
     /// target), so a jump can be committed on Enter without stepping through the
     /// intervening frames.
     frame_edit: String,
+    /// Edit buffer for the toolbar's typeable zoom factor (`x2`, `x1/4`): the
+    /// live zoom unless the field has focus.
+    zoom_edit: String,
 
     mode: Mode,
     current: usize, // focused pane (single view / keyboard target)
@@ -1387,6 +1390,7 @@ impl CimApp {
             shared_rotation: 0.0,
             pending_seek: None,
             frame_edit: String::new(),
+            zoom_edit: String::new(),
             mode: Mode::Grid,
             current: 0,
             pending_current: None,

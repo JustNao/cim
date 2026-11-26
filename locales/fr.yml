@@ -25,6 +25,7 @@ toolbar.settings: Réglages
 toolbar.settings_hover: Ouvrir les réglages
 toolbar.help: Aide
 toolbar.help_hover: Commandes souris et modificateurs
+toolbar.zoom_hover: "Facteur de zoom (x2 = 2 pixels écran par pixel image, x1/4 = un quart). Cliquer pour en saisir un : x4, 1/2, 300%"
 toolbar.debug: Debug
 toolbar.debug_hover: Temps par étape (lecture → affichage)
 
