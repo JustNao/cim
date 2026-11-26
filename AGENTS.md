@@ -1945,7 +1945,9 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
 - **Matching** (`best_match`/`affinity`) is per media file, over the csv/yaml in its
   directory (listed once per directory): same stem best, then a DAI name whose
   **components** are a prefix of the media's (`seqA_variation.tif` → `seqA.csv`; longer
-  prefix better), then the reverse. Components split on `_ - . space` and at letter↔digit
+  prefix better), then the reverse. Just below the same name ranks a processed version's
+  **raw** acquisition: `seq.versionA.tif` → `seq.raw.csv` (the last dotted part replaced
+  by `raw`). Components split on `_ - . space` and at letter↔digit
   changes, case-insensitively; `seqA_1` vs `seqA_2` never match. On equal affinity a
   multi-frame media prefers the csv, a still the yaml.
 - **Binding** (`Binding`): a yaml is a `Record` for every page of its file; a csv is `Rows`
