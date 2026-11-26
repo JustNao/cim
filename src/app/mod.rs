@@ -15,6 +15,7 @@
 mod canvas;
 mod compute;
 mod dai;
+mod dai_panel;
 mod lifecycle;
 pub use lifecycle::Preload;
 mod util;
@@ -1084,6 +1085,8 @@ pub struct CimApp {
     show_viewcmd: bool,
     /// The Help window, rendering the external `help.md` (see [`help`]).
     show_help: bool,
+    /// The DAI window (toolbar **DAI**, shown while some media has DAI).
+    dai_panel: dai_panel::DaiPanel,
     /// The loaded help document (`Ok` text, or the error explaining where it was
     /// looked for), read on first open and re-read by the window's Reload button
     /// — so editing `help.md` doesn't need a restart.
@@ -1405,6 +1408,7 @@ impl CimApp {
             show_transform: false,
             show_viewcmd: false,
             show_help: false,
+            dai_panel: Default::default(),
             help_doc: None,
             rebinding: None,
             pending_recompute: None,
@@ -2703,6 +2707,9 @@ impl CimApp {
         }
         if self.show_help {
             self.draw_help(ctx);
+        }
+        if self.dai_panel.show {
+            self.draw_dai_panel(ctx);
         }
         if self.show_debug {
             self.draw_debug(ctx);

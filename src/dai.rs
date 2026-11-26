@@ -36,12 +36,14 @@ pub const CSV_ROTATION: &str = "consigneDerotation";
 /// The yaml key holding the camera roll, in radians.
 pub const YAML_ROTATION: &str = "los_absolute_orient_roll";
 
-/// One DAI cell. Columns are not typed as a whole: a numeric column may hold an
-/// empty cell or a `NaN`, and a text column a number.
+/// One DAI cell. Cells are typed one by one (a numeric column may hold an
+/// empty cell or a `NaN`, a text column a number); a column's [`ColType`] is
+/// derived from its cells. **No booleans:** some columns flag with 0/1 and
+/// others are ordinary integers that happen to hold only 0 and 1, which can't be
+/// told apart — so `0`/`1` are ints and `true`/`false` text.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Empty,
-    Bool(bool),
     Int(i64),
     Float(f64),
     Text(String),
@@ -56,8 +58,6 @@ impl Value {
             return Value::Empty;
         }
         match s.to_ascii_lowercase().as_str() {
-            "true" => return Value::Bool(true),
-            "false" => return Value::Bool(false),
             "nan" | ".nan" => return Value::Float(f64::NAN),
             "inf" | ".inf" | "+inf" | "+.inf" | "infinity" => return Value::Float(f64::INFINITY),
             "-inf" | "-.inf" | "-infinity" => return Value::Float(f64::NEG_INFINITY),
@@ -78,14 +78,70 @@ impl Value {
     }
 
     /// The cell as a number, for plotting / numeric use: ints and floats (NaN
-    /// included), booleans as 0/1; `None` for empty and text cells.
+    /// included); `None` for empty and text cells.
     pub fn as_f64(&self) -> Option<f64> {
         match *self {
             Value::Int(i) => Some(i as f64),
             Value::Float(f) => Some(f),
-            Value::Bool(b) => Some(b as u8 as f64),
             Value::Empty | Value::Text(_) => None,
         }
+    }
+
+    /// The cell as the DAI panel shows it (`—` for empty).
+    pub fn display(&self) -> String {
+        match self {
+            Value::Empty => "—".into(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => fmt_float(*f),
+            Value::Text(t) => t.clone(),
+        }
+    }
+
+    fn col_type(&self) -> ColType {
+        match self {
+            Value::Empty => ColType::Empty,
+            Value::Int(_) => ColType::Int,
+            Value::Float(_) => ColType::Float,
+            Value::Text(_) => ColType::Text,
+        }
+    }
+}
+
+/// A float for display: plain with up to 6 decimals in the everyday range,
+/// scientific outside it.
+pub fn fmt_float(f: f64) -> String {
+    if !f.is_finite() {
+        return format!("{f}");
+    }
+    let a = f.abs();
+    if a != 0.0 && !(1e-4..1e7).contains(&a) {
+        format!("{f:.4e}")
+    } else {
+        let s = format!("{f:.6}");
+        let s = s.trim_end_matches('0');
+        s.strip_suffix('.').unwrap_or(s).to_string()
+    }
+}
+
+/// What a whole column holds: the widest of its cells' types — ints only →
+/// `Int`, any float among them → `Float`, any text → `Text`; empty cells don't
+/// count, so an all-empty column is `Empty`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ColType {
+    Empty,
+    Int,
+    Float,
+    Text,
+}
+
+impl ColType {
+    fn widen(self, other: ColType) -> ColType {
+        self.max(other)
+    }
+
+    /// Plotable: an int or a float column.
+    pub fn numeric(self) -> bool {
+        matches!(self, ColType::Int | ColType::Float)
     }
 }
 
@@ -112,12 +168,8 @@ impl Kind {
 /// nested keys flattened as `parent.child`). Every row has `columns.len()` cells.
 #[derive(Clone, Debug)]
 pub struct Table {
-    // Not read by the rotation alone; kept for the DAI explorer to come, which
-    // lists every column of every file.
-    #[allow(dead_code)]
     pub path: PathBuf,
     pub kind: Kind,
-    #[allow(dead_code)]
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     /// Index of the rotation column, resolved once (it is read every paint).
@@ -138,12 +190,6 @@ impl Table {
             rows,
             rotation_col,
         }
-    }
-
-    /// Index of the column named `name`.
-    #[allow(dead_code)] // for the DAI explorer to come; the tests use it already
-    pub fn column(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c == name)
     }
 
     /// Cell `(row, col)`, if the table has it.
@@ -246,11 +292,7 @@ impl Table {
             } else if matches!(value, "~" | "null" | "Null" | "NULL") {
                 Value::Empty
             } else {
-                match value.to_ascii_lowercase().as_str() {
-                    "yes" | "on" => Value::Bool(true),
-                    "no" | "off" => Value::Bool(false),
-                    _ => Value::parse(value, false),
-                }
+                Value::parse(value, false)
             };
             columns.push(full);
             row.push(v);
@@ -350,6 +392,16 @@ pub enum Binding {
     Rows { table: usize, first_file: usize },
 }
 
+/// One column of a media's DAI, merged across its tables by name (a numbered
+/// run may have one csv per file, or a yaml per image).
+#[derive(Clone, Debug)]
+pub struct Column {
+    pub name: String,
+    pub ty: ColType,
+    /// The column's index in each table (`None` where that table lacks it).
+    in_table: Vec<Option<usize>>,
+}
+
 /// A media's DAI: its parsed tables and how each of its files maps onto them.
 #[derive(Clone, Debug)]
 pub struct Dai {
@@ -357,9 +409,65 @@ pub struct Dai {
     pub paths: Vec<PathBuf>,
     pub files: Vec<Binding>,
     pub tables: Vec<Table>,
+    /// Every column of every table, in first-seen order.
+    pub columns: Vec<Column>,
 }
 
 impl Dai {
+    fn new(paths: Vec<PathBuf>, files: Vec<Binding>, tables: Vec<Table>) -> Dai {
+        let mut columns: Vec<Column> = Vec::new();
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        for (t, table) in tables.iter().enumerate() {
+            for (c, name) in table.columns.iter().enumerate() {
+                if name.is_empty() {
+                    continue; // a trailing `;` makes an unnamed, empty column
+                }
+                let k = *by_name.entry(name.clone()).or_insert_with(|| {
+                    columns.push(Column {
+                        name: name.clone(),
+                        ty: ColType::Empty,
+                        in_table: vec![None; tables.len()],
+                    });
+                    columns.len() - 1
+                });
+                let col = &mut columns[k];
+                col.in_table[t] = Some(c);
+                col.ty = table
+                    .rows
+                    .iter()
+                    .filter_map(|r| r.get(c))
+                    .fold(col.ty, |ty, v| ty.widen(v.col_type()));
+            }
+        }
+        Dai {
+            paths,
+            files,
+            tables,
+            columns,
+        }
+    }
+
+    /// Cell of merged column `col` for global frame `frame` of `media`.
+    pub fn value(&self, media: &Media, frame: usize, col: usize) -> Option<&Value> {
+        let (table, row) = self.row_of(media, frame)?;
+        let t = self.tables.iter().position(|t| std::ptr::eq(t, table))?;
+        table.get(row, self.columns.get(col)?.in_table[t]?)
+    }
+
+    /// How many frames the DAI panel spans: the media's known length — or, for a
+    /// single file with a csv, the csv's row count when that is longer, since a
+    /// lazily discovered sequence knows its first pages only (each row is still
+    /// its page, so a row past the frontier is a frame to seek to).
+    pub fn span(&self, media: &Media) -> usize {
+        let known = media.frame_count();
+        match (self.paths.len(), self.files.first()) {
+            (1, Some(&Binding::Rows { table, .. })) if media.local_file(0).is_none() => {
+                known.max(self.tables[table].rows.len())
+            }
+            _ => known,
+        }
+    }
+
     /// The table and row describing global frame `frame` of `media` (the media
     /// these DAI were loaded for), or `None` when that frame has none.
     pub fn row_of(&self, media: &Media, frame: usize) -> Option<(&Table, usize)> {
@@ -456,11 +564,7 @@ pub fn load(paths: &[PathBuf], sequence: bool) -> Loaded {
             },
         });
     }
-    let dai = (!tables.is_empty()).then(|| Dai {
-        paths: paths.to_vec(),
-        files,
-        tables,
-    });
+    let dai = (!tables.is_empty()).then(|| Dai::new(paths.to_vec(), files, tables));
     Loaded { dai, errors }
 }
 
@@ -555,6 +659,66 @@ fn best_match(path: &Path, candidates: &[PathBuf], sequence: bool) -> Option<Pat
         .map(|(_, c)| c.clone())
 }
 
+/// Fuzzy match of a typed `query` against a column `name`, case-insensitive:
+/// every query character must appear in order. Higher is better — consecutive
+/// runs, word starts (after `_ . - space` or a lower→upper change) and an early
+/// first hit score up, gaps score down (the best alignment counts, not the
+/// leftmost). `None` = no match; an empty query
+/// matches everything equally.
+pub fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
+    let q: Vec<char> = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let n: Vec<char> = name.chars().collect();
+    let lower: Vec<char> = n
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let bonus = |i: usize| {
+        let word_start = i == 0
+            || matches!(n[i - 1], '_' | '.' | '-' | ' ')
+            || (n[i - 1].is_lowercase() && n[i].is_uppercase());
+        1 + if word_start { 8 } else { 0 }
+    };
+    // best[i]: the best score of the query so far with its last character
+    // matched at name position `i` — the best *alignment*, not the leftmost,
+    // so `roll` finds the trailing `_roll` rather than scattered letters.
+    const NO: i32 = i32::MIN / 2;
+    let mut best: Vec<i32> = (0..n.len())
+        .map(|i| {
+            if lower[i] == q[0] {
+                bonus(i) - i.min(3) as i32
+            } else {
+                NO
+            }
+        })
+        .collect();
+    for &qc in &q[1..] {
+        let mut next = vec![NO; n.len()];
+        for i in 1..n.len() {
+            if lower[i] != qc {
+                continue;
+            }
+            let run = best[i - 1].saturating_add(8);
+            let gap = (0..i - 1)
+                .map(|j| best[j].saturating_sub((i - j - 1).min(5) as i32))
+                .max()
+                .unwrap_or(NO);
+            let prev = run.max(gap);
+            if prev > NO {
+                next[i] = prev + bonus(i);
+            }
+        }
+        best = next;
+    }
+    best.into_iter().max().filter(|&b| b > NO)
+}
+
 struct LoadJob {
     id: u64,
     gen: u64,
@@ -631,7 +795,7 @@ mod tests {
         assert_eq!(t.rows.len(), 3);
         assert_eq!(t.rows[0][1], Value::Float(0.5)); // decimal comma
         assert_eq!(t.rows[0][2], Value::Text("a;b".into())); // quoted separator
-        assert_eq!(t.rows[0][3], Value::Bool(true));
+        assert_eq!(t.rows[0][3], Value::Text("true".into())); // no booleans
         assert!(t.rows[1][1].as_f64().unwrap().is_nan());
         assert_eq!(t.rows[1][2], Value::Empty);
         assert_eq!(t.rows[2][1], Value::Float(1.25));
@@ -649,7 +813,7 @@ mod tests {
                     tags:\n  - a\n  - b\n\
                     missing: ~\n";
         let t = Table::parse_yaml("x.yaml".into(), text).unwrap();
-        let get = |k: &str| &t.rows[0][t.column(k).unwrap()];
+        let get = |k: &str| &t.rows[0][t.columns.iter().position(|c| c == k).unwrap()];
         assert_eq!(get("los_absolute_orient_roll"), &Value::Float(-0.25));
         assert_eq!(get("name"), &Value::Text("img #1".into()));
         assert_eq!(get("camera.model"), &Value::Text("X1".into()));
@@ -657,6 +821,59 @@ mod tests {
         assert_eq!(get("tags"), &Value::Text("[a, b]".into()));
         assert_eq!(get("missing"), &Value::Empty);
         assert!(Table::parse_yaml("x.yaml".into(), "just text").is_err());
+    }
+
+    #[test]
+    fn columns_are_typed_and_merged_across_files() {
+        let t = Table::parse_csv(
+            "a.csv".into(),
+            "i;f;s;flag;none\n1;1;x;0;\n2;2,5;3;1;\n;NaN;;1;\n",
+        )
+        .unwrap();
+        let u = Table::parse_csv("b.csv".into(), "i;extra\n3;7\n").unwrap();
+        let dai = Dai::new(vec![], vec![], vec![t, u]);
+        let ty: Vec<(&str, ColType)> = dai
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.ty))
+            .collect();
+        assert_eq!(
+            ty,
+            [
+                ("i", ColType::Int),
+                ("f", ColType::Float), // an int and a float (and NaN) → float
+                ("s", ColType::Text),
+                ("flag", ColType::Int), // 0/1 stays an int, never a boolean
+                ("none", ColType::Empty),
+                ("extra", ColType::Int),
+            ]
+        );
+        assert_eq!(dai.columns[0].in_table, [Some(0), Some(0)]);
+        assert_eq!(dai.columns[5].in_table, [None, Some(1)]);
+    }
+
+    #[test]
+    fn fuzzy_search_ranks_word_starts_and_runs() {
+        assert!(fuzzy_score("cdr", "consigneDerotation").is_some());
+        assert!(fuzzy_score("xyz", "consigneDerotation").is_none());
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+        // Contiguous / word-start hits beat scattered ones.
+        let a = fuzzy_score("roll", "los_absolute_orient_roll").unwrap();
+        let b = fuzzy_score("roll", "rate_of_lateral_lift").unwrap();
+        assert!(a > b, "{a} vs {b}");
+        let c = fuzzy_score("dero", "consigneDerotation").unwrap();
+        let d = fuzzy_score("dero", "dummy_error_offset").unwrap();
+        assert!(c > d, "{c} vs {d}");
+        assert!(fuzzy_score("ROLL", "los_absolute_orient_roll").is_some());
+    }
+
+    #[test]
+    fn floats_display_compactly() {
+        assert_eq!(fmt_float(0.5), "0.5");
+        assert_eq!(fmt_float(2.0), "2");
+        assert_eq!(fmt_float(1.0 / 3.0), "0.333333");
+        assert_eq!(fmt_float(1.5e-7), "1.5000e-7");
+        assert_eq!(fmt_float(f64::NAN), "NaN");
     }
 
     #[test]

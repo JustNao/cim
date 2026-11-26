@@ -26,6 +26,8 @@ toolbar.settings_hover: Ouvrir les réglages
 toolbar.help: Aide
 toolbar.help_hover: Commandes souris et modificateurs
 toolbar.zoom_hover: "Facteur de zoom (x2 = 2 pixels écran par pixel image, x1/4 = un quart). Cliquer pour en saisir un : x4, 1/2, 300%"
+toolbar.dai: DAI
+toolbar.dai_hover: Explorer les informations auxiliaires (DAI) du média sélectionné
 toolbar.debug: Debug
 toolbar.debug_hover: Temps par étape (lecture → affichage)
 
@@ -179,6 +181,23 @@ transform.with_dai: avec DAI
 transform.with_dai_hover: >-
   Ajouter la rotation caméra enregistrée dans le fichier DAI de ce média (par
   image), indiquée entre parenthèses. L'angle ci-dessus lui est alors relatif
+dai.title: "DAI — %{name}"
+dai.none: Aucune DAI pour ce média.
+dai.search_hint: Rechercher une colonne…
+dai.columns: "%{shown} / %{total} colonnes"
+dai.no_column: Choisir une colonne à gauche.
+dai.graph: Graphe
+dai.graph_needs_numbers: Une colonne de texte n'a pas de graphe
+dai.table: Tableau
+dai.whole: Séquence entière
+dai.whole_hover: Afficher à nouveau toutes les images sur l'axe x
+dai.to_current: Image courante
+dai.plot_hint: "Molette : zoom · glisser : déplacer · clic droit glissé (ou Maj+glisser) : zoomer sur une partie · clic : aller à cette image"
+dai.jump_hover: Aller à cette image
+dai.type_int: entier
+dai.type_float: réel
+dai.type_text: texte
+dai.type_empty: vide
 transform.reset: Réinit.
 transform.histogram: Histogramme
 transform.frame_not_loaded: image non chargée
