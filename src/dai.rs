@@ -14,9 +14,10 @@
 //!
 //! The data is kept whole and typed ([`Table`] of [`Value`]s, every column, every
 //! row) rather than reduced to the one field cim uses today — the camera
-//! **rotation** (`consigneDerotation` in a csv, `los_absolute_orient_roll` in a
-//! yaml, radians), which the pane's display rotation adds by default — so a
-//! later DAI explorer can graph any column over the sequence.
+//! **rotation** (`consigneDerotation` — `consigneDerotationPIR` in older files —
+//! in a csv, `los_absolute_orient_roll` in a yaml, radians), which the pane's
+//! display rotation adds by default — and the DAI window graphs any column over
+//! the sequence.
 //!
 //! Loading lists directories and parses files, which is real I/O on a shared
 //! mount, so it runs on a dedicated thread ([`DaiLoader`]) mirroring
@@ -31,10 +32,11 @@ use std::thread;
 
 use crate::media::Media;
 
-/// The csv column holding the camera derotation, in radians.
-pub const CSV_ROTATION: &str = "consigneDerotation";
-/// The yaml key holding the camera roll, in radians.
-pub const YAML_ROTATION: &str = "los_absolute_orient_roll";
+/// Names the csv column holding the camera derotation (radians) goes by, in
+/// order of preference: the current one, then the older files' name.
+pub const CSV_ROTATION: &[&str] = &["consigneDerotation", "consigneDerotationPIR"];
+/// The yaml key(s) holding the camera roll, in radians.
+pub const YAML_ROTATION: &[&str] = &["los_absolute_orient_roll"];
 
 /// One DAI cell. Cells are typed one by one (a numeric column may hold an
 /// empty cell or a `NaN`, a text column a number); a column's [`ColType`] is
@@ -178,11 +180,13 @@ pub struct Table {
 
 impl Table {
     fn new(path: PathBuf, kind: Kind, columns: Vec<String>, rows: Vec<Vec<Value>>) -> Table {
-        let key = match kind {
+        let keys = match kind {
             Kind::Csv => CSV_ROTATION,
             Kind::Yaml => YAML_ROTATION,
         };
-        let rotation_col = columns.iter().position(|c| c == key);
+        let rotation_col = keys
+            .iter()
+            .find_map(|key| columns.iter().position(|c| c == key));
         Table {
             path,
             kind,
@@ -815,6 +819,16 @@ mod tests {
         assert_eq!(t.rows[2][3], Value::Empty); // short row padded
         assert_eq!(t.rotation_col, Some(1));
         assert!(Table::parse_csv("x.csv".into(), "no separators\nhere").is_err());
+        // Older files name the column `consigneDerotationPIR`; the current
+        // name wins when a file has both.
+        let old = Table::parse_csv("x.csv".into(), "a;consigneDerotationPIR\n1;2\n").unwrap();
+        assert_eq!(old.rotation_col, Some(1));
+        let both = Table::parse_csv(
+            "x.csv".into(),
+            "consigneDerotationPIR;consigneDerotation\n1;2\n",
+        )
+        .unwrap();
+        assert_eq!(both.rotation_col, Some(1));
     }
 
     #[test]
