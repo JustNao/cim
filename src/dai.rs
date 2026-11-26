@@ -3,8 +3,9 @@
 //! Some acquisitions ship metadata beside the pixels: a **`.csv`** for a
 //! sequence (one row per image, after a free-form header of variable length —
 //! the column names are the first line holding `;` separators), or a
-//! **`.yaml`/`.yml`** for a single image (one flat-or-nested dictionary). The
-//! file is matched by name: the same stem (`seqA.tif` → `seqA.csv`), or one
+//! **`.yaml`/`.yml`** — or **`.dai`/`.dai2`**, yaml under another extension —
+//! for a single image (one flat-or-nested dictionary). The file is matched by
+//! name: the same stem (`seqA.tif` → `seqA.csv`, or `seqA_dai.csv`), or one
 //! whose name components are a prefix of the other's (`seqA_variation.tif` →
 //! `seqA.csv`).
 //!
@@ -160,7 +161,8 @@ impl Kind {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         match ext.as_str() {
             "csv" => Some(Kind::Csv),
-            "yaml" | "yml" => Some(Kind::Yaml),
+            // `.dai` / `.dai2` are yaml inside, under their own extension.
+            "yaml" | "yml" | "dai" | "dai2" => Some(Kind::Yaml),
             _ => None,
         }
     }
@@ -628,24 +630,36 @@ fn components(stem: &str) -> Vec<String> {
 /// name that is a prefix of the DAI's (shorter DAI name better). Anything else
 /// — `seqA_1` against `seqA_2` — doesn't match.
 ///
-/// One more pairing ranks just below the same name: a processed version of an
-/// acquisition reads the DAI of its **raw** one — `seq.versionA.tif` →
-/// `seq.raw.csv`, the last dotted part of the media's name replaced by `raw`.
+/// A DAI name may carry a `_dai` tag (`seqA.tif` → `seqA_dai.csv`), which is
+/// set aside before comparing: such a file counts as the same name, ranked just
+/// under an untagged one. Below those ranks a processed version of an
+/// acquisition reading the DAI of its **raw** one — `seq.versionA.tif` →
+/// `seq.raw.csv` (or `seq.raw_dai.csv`), the last dotted part of the media's
+/// name replaced by `raw`.
 fn affinity(media: &str, dai: &str) -> Option<(u8, isize)> {
-    let (a, b) = (components(media), components(dai));
+    let (core, tagged) = match dai
+        .len()
+        .checked_sub(4)
+        .filter(|&at| dai.is_char_boundary(at))
+    {
+        Some(at) if at > 0 && dai[at..].eq_ignore_ascii_case("_dai") => (&dai[..at], true),
+        _ => (dai, false),
+    };
+    let (a, b) = (components(media), components(core));
     if a.is_empty() || b.is_empty() {
         return None;
     }
     if a == b {
-        return Some((3, 0));
+        return Some((3, if tagged { -1 } else { 0 }));
     }
-    if let (Some((base, _)), Some((dai_base, tag))) = (media.rsplit_once('.'), dai.rsplit_once('.'))
+    if let (Some((base, _)), Some((dai_base, tag))) =
+        (media.rsplit_once('.'), core.rsplit_once('.'))
     {
         if tag.eq_ignore_ascii_case("raw")
             && !base.is_empty()
             && base.eq_ignore_ascii_case(dai_base)
         {
-            return Some((3, -1));
+            return Some((3, -2));
         }
     }
     let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
@@ -912,8 +926,33 @@ mod tests {
         assert_eq!(affinity("seqA_1", "seqA_2"), None);
         assert_eq!(affinity("seqA", "seqB"), None);
         // A processed version reads its raw acquisition's DAI.
-        assert_eq!(affinity("seq.versionA", "seq.raw"), Some((3, -1)));
-        assert_eq!(affinity("seq_1.VersionB", "seq_1.RAW"), Some((3, -1)));
+        assert_eq!(affinity("seq.versionA", "seq.raw"), Some((3, -2)));
+        assert_eq!(affinity("seq_1.VersionB", "seq_1.RAW"), Some((3, -2)));
+        assert_eq!(affinity("seq.versionA", "seq.raw_dai"), Some((3, -2)));
+        // A `_dai` tag counts as the same name, just under an untagged one.
+        assert_eq!(affinity("seqA", "seqA_dai"), Some((3, -1)));
+        assert_eq!(affinity("seqA", "seqA_DAI"), Some((3, -1)));
+        assert!(affinity("seqA", "seqA_dai") < affinity("seqA", "seqA"));
+        assert!(affinity("seqA", "seqA_dai") > affinity("seqA", "seqA_other"));
+        assert!(affinity("seqA_variation", "seqA_dai").is_some());
+        assert_eq!(affinity("seqB", "seqA_dai"), None);
+        assert_eq!(affinity("x", "_dai"), None);
+        let tagged: Vec<PathBuf> = ["d/seqA_dai.csv", "d/seqA_x.csv", "d/img.dai", "d/pic.dai2"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(
+            best_match(Path::new("d/seqA.tif"), &tagged, true).unwrap(),
+            Path::new("d/seqA_dai.csv")
+        );
+        assert_eq!(
+            best_match(Path::new("d/img.png"), &tagged, false).unwrap(),
+            Path::new("d/img.dai")
+        );
+        assert_eq!(
+            best_match(Path::new("d/pic.png"), &tagged, false).unwrap(),
+            Path::new("d/pic.dai2")
+        );
         assert_eq!(affinity("seq.versionA", "other.raw"), None);
         assert!(affinity("seq.versionA", "seq.raw") < affinity("seq.versionA", "seq.versionA"));
         assert!(affinity("seq.versionA", "seq.raw") > affinity("seq.versionA", "seq"));
@@ -1009,6 +1048,16 @@ mod tests {
         let loaded = load(std::slice::from_ref(&tif), true);
         assert!(loaded.dai.is_none());
         assert_eq!(loaded.errors.len(), 1);
+        // A `.dai2` file is yaml inside.
+        let still = dir.join("pic.tif");
+        write_multipage_tiff_u16(&still, &[[4, 4]]);
+        std::fs::write(dir.join("pic.dai2"), "los_absolute_orient_roll: 0.5\n").unwrap();
+        let media = crate::media::load(&still).unwrap();
+        let dai = load(std::slice::from_ref(&still), false).dai.unwrap();
+        assert_eq!(
+            dai.rotation_deg(&media, 0),
+            Some(0.5f64.to_degrees() as f32)
+        );
         // No DAI file at all: nothing, and nothing to report.
         let other = dir.join("lonely.tif");
         write_multipage_tiff_u16(&other, &[[4, 4]]);
