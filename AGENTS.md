@@ -1938,12 +1938,15 @@ flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced sess
 
 Some media carry metadata beside the pixels: a **`.csv`** for a sequence (a free-form header
 of any length, then the first line holding `;` names the columns, then one row per image),
-or a **`.yaml`/`.yml`** dictionary for a single image. **It is an opportunity, never an
+or a **`.yaml`/`.yml`** dictionary for a single image (also **`.dai`/`.dai2`**: the same
+yaml under its own extension). **It is an opportunity, never an
 error:** a media without one says nothing; a file that *matched* but couldn't be read sets
 the transient `status` note (`status.dai_read_failed`), nothing more.
 
 - **Matching** (`best_match`/`affinity`) is per media file, over the csv/yaml in its
-  directory (listed once per directory): same stem best, then a DAI name whose
+  directory (listed once per directory): same stem best — a DAI name tagged `_dai`
+  (`seqA.tif` → `seqA_dai.csv`) counts as the same name, just under an untagged one;
+  the tag is set aside for every rule below too — then a DAI name whose
   **components** are a prefix of the media's (`seqA_variation.tif` → `seqA.csv`; longer
   prefix better), then the reverse. Just below the same name ranks a processed version's
   **raw** acquisition: `seq.versionA.tif` → `seq.raw.csv` (the last dotted part replaced
