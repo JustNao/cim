@@ -181,9 +181,13 @@ dai.graph_needs_numbers: A text column has no graph
 dai.table: Table
 dai.whole: Whole sequence
 dai.whole_hover: Show every frame on the x axis again
-dai.to_current: Current frame
 dai.plot_hint: "Wheel: zoom · drag: pan · right-drag (or Shift+drag): zoom to a part · click: go to that frame"
 dai.jump_hover: Go to this frame
+dai.multi_hint: "Ctrl+click: several columns (table)"
+dai.n_columns: "%{n} columns"
+dai.frame: Frame
+dai.follow: Follow
+dai.follow_hover: Keep the view on the current frame — the table scrolls to it, a zoomed graph stays centred on it. Panning or scrolling turns it off
 dai.type_int: int
 dai.type_float: float
 dai.type_text: text

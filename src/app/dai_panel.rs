@@ -3,9 +3,13 @@
 //! sequence — as a zoomable graph or a table — where clicking a frame index
 //! jumps the timeline there.
 //!
-//! It tracks `current` like the Transformations panel. The column is kept by
+//! It tracks `current` like the Transformations panel. The columns are kept by
 //! **name**, so switching to another media with the same DAI layout keeps the
-//! same column on screen, which is the usual way to compare two acquisitions.
+//! same columns on screen, which is the usual way to compare two acquisitions.
+//! Several columns can be selected (Ctrl + click) and read side by side in the
+//! table; the graph plots the last one picked. **Follow** keeps the view on the
+//! current frame: the table scrolls to it, and a zoomed graph stays centred on
+//! it (the whole-sequence graph needs nothing — the playhead is always in it).
 
 use super::profile::{fmt_tick, label_box, nice_ticks};
 use super::*;
@@ -23,8 +27,14 @@ pub(super) struct DaiPanel {
     pub show: bool,
     /// The column-name search field.
     query: String,
-    /// The selected column, by name (see the module docs).
-    column: Option<String>,
+    /// The selected columns, by name (see the module docs), in the order they
+    /// were picked: the table shows them all, the graph the last.
+    columns: Vec<String>,
+    /// The **Follow** toggle: keep the view on the current frame.
+    follow: bool,
+    /// The frame the table last scrolled to while following, so it scrolls
+    /// only when the frame moves and leaves the scrollbar to the user otherwise.
+    followed: Option<usize>,
     /// Table instead of graph.
     table: bool,
     /// The graph's visible frame range; `None` = the whole sequence.
@@ -111,6 +121,7 @@ impl CimApp {
             .collect();
         // Best match first; ties keep the file's column order.
         hits.sort_by_key(|&(score, k)| (std::cmp::Reverse(score), k));
+        ui.weak(t!("dai.multi_hint"));
         // The count's hover names the DAI file(s) the columns come from.
         let files: Vec<String> = dai
             .tables
@@ -129,29 +140,42 @@ impl CimApp {
             .show(ui, |ui| {
                 for (_, k) in hits {
                     let col = &dai.columns[k];
-                    let selected = self.dai_panel.column.as_deref() == Some(&col.name);
+                    let selected = self.dai_panel.columns.contains(&col.name);
                     ui.horizontal(|ui| {
                         let r = ui.selectable_label(selected, &col.name);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.weak(type_label(col.ty));
                         });
                         if r.clicked() {
-                            self.dai_panel.column = Some(col.name.clone());
-                            self.dai_panel.scroll_to = None;
+                            let cols = &mut self.dai_panel.columns;
+                            if ui.input(|i| i.modifiers.command) {
+                                // Ctrl + click adds or removes a column.
+                                match cols.iter().position(|c| *c == col.name) {
+                                    Some(at) => {
+                                        cols.remove(at);
+                                    }
+                                    None => cols.push(col.name.clone()),
+                                }
+                            } else {
+                                *cols = vec![col.name.clone()];
+                            }
+                            self.dai_panel.followed = None; // re-centre on the new table
                         }
                     });
                 }
             });
     }
 
-    /// The selected column: the view switch and the graph or table.
+    /// The selected columns: the view switch and the graph or table.
     fn draw_dai_column(&mut self, ui: &mut egui::Ui, i: usize, dai: &Arc<Dai>) {
-        let Some(k) = self
+        let sel: Vec<usize> = self
             .dai_panel
-            .column
-            .as_deref()
-            .and_then(|name| dai.columns.iter().position(|c| c.name == name))
-        else {
+            .columns
+            .iter()
+            .filter_map(|name| dai.columns.iter().position(|c| c.name == *name))
+            .collect();
+        // The graph plots the column picked last.
+        let Some(&k) = sel.last() else {
             ui.weak(t!("dai.no_column"));
             return;
         };
@@ -159,24 +183,27 @@ impl CimApp {
         let span = dai.span(&self.panes[i].media).max(1);
         let numeric = col.ty.numeric();
         let current = self.frame_disp(i);
+        let graph = numeric && !self.dai_panel.table;
         ui.horizontal(|ui| {
-            ui.strong(&col.name);
-            ui.weak(type_label(col.ty));
+            if graph || sel.len() == 1 {
+                ui.strong(&col.name);
+                ui.weak(type_label(col.ty));
+            } else {
+                ui.strong(t!("dai.n_columns", n = sel.len()));
+            }
             ui.separator();
             ui.add_enabled_ui(numeric, |ui| {
                 if ui
-                    .selectable_label(numeric && !self.dai_panel.table, t!("dai.graph"))
+                    .selectable_label(graph, t!("dai.graph"))
                     .on_disabled_hover_text(t!("dai.graph_needs_numbers"))
                     .clicked()
                 {
                     self.dai_panel.table = false;
                 }
             });
-            if ui
-                .selectable_label(!numeric || self.dai_panel.table, t!("dai.table"))
-                .clicked()
-            {
+            if ui.selectable_label(!graph, t!("dai.table")).clicked() {
                 self.dai_panel.table = true;
+                self.dai_panel.followed = None;
             }
             ui.separator();
             if ui
@@ -189,18 +216,26 @@ impl CimApp {
             {
                 self.dai_panel.x_range = None;
             }
-            if ui.button(t!("dai.to_current")).clicked() {
-                self.dai_panel.scroll_to = Some(current);
-                // The graph: bring the playhead into view, keeping the zoom.
-                if let Some((lo, hi)) = self.dai_panel.x_range {
-                    let c = current as f64;
-                    if c < lo || c > hi {
-                        let half = (hi - lo) / 2.0;
-                        self.dai_panel.x_range = Some(clamp_range(c - half, c + half, span));
-                    }
-                }
+            if ui
+                .selectable_label(self.dai_panel.follow, t!("dai.follow"))
+                .on_hover_text(t!("dai.follow_hover"))
+                .clicked()
+            {
+                self.dai_panel.follow = !self.dai_panel.follow;
+                self.dai_panel.followed = None;
             }
         });
+        if self.dai_panel.follow {
+            // A zoomed graph keeps its width and centres on the playhead.
+            if let Some((lo, hi)) = self.dai_panel.x_range {
+                let (c, half) = (current as f64, (hi - lo) / 2.0);
+                self.dai_panel.x_range = Some(clamp_range(c - half, c + half, span));
+            }
+            if self.dai_panel.followed != Some(current) {
+                self.dai_panel.followed = Some(current);
+                self.dai_panel.scroll_to = Some(current);
+            }
+        }
         if numeric && !self.dai_panel.table {
             let key = SeriesKey {
                 pane: self.panes[i].id,
@@ -228,7 +263,7 @@ impl CimApp {
             if let Some(target) = self.draw_dai_graph(ui, span, current) {
                 self.dai_jump(i, target);
             }
-        } else if let Some(target) = self.draw_dai_table(ui, i, dai, k, span, current) {
+        } else if let Some(target) = self.draw_dai_table(ui, i, dai, &sel, span, current) {
             self.dai_jump(i, target);
         }
     }
@@ -257,7 +292,12 @@ impl CimApp {
         if let Some(p) = hover {
             let d = ui.input(|i| i.raw_scroll_delta.y + i.raw_scroll_delta.x);
             if d != 0.0 {
-                let anchor = x_at(p.x, lo, hi);
+                // Following, the zoom is about the playhead it stays centred on.
+                let anchor = if self.dai_panel.follow {
+                    current as f64
+                } else {
+                    x_at(p.x, lo, hi)
+                };
                 let f = (-d as f64 * 0.0025).exp();
                 let (a, b) =
                     clamp_range(anchor - (anchor - lo) * f, anchor + (hi - anchor) * f, span);
@@ -276,6 +316,7 @@ impl CimApp {
         } else if resp.dragged_by(PointerButton::Primary) && self.dai_panel.select_from.is_none() {
             let dx = resp.drag_delta().x as f64 / px_per(lo, hi);
             if dx != 0.0 {
+                self.dai_panel.follow = false; // panning away from the playhead
                 (lo, hi) = clamp_range(lo - dx, hi - dx, span);
                 self.dai_panel.x_range = Some((lo, hi));
             }
@@ -284,7 +325,16 @@ impl CimApp {
         if resp.drag_stopped() {
             if let (Some(a), Some(b)) = (self.dai_panel.select_from.take(), pointer_x) {
                 if ((b - a) * px_per(lo, hi)).abs() as f32 >= MIN_SELECT_PX {
-                    (lo, hi) = clamp_range(a.min(b), a.max(b), span);
+                    // Following, the selection sets the width; the playhead
+                    // stays the centre.
+                    let (a, b) = match self.dai_panel.follow {
+                        true => {
+                            let (c, half) = (current as f64, (a - b).abs() / 2.0);
+                            (c - half, c + half)
+                        }
+                        false => (a.min(b), a.max(b)),
+                    };
+                    (lo, hi) = clamp_range(a, b, span);
                     self.dai_panel.x_range = Some((lo, hi));
                 }
             }
@@ -476,48 +526,114 @@ impl CimApp {
         jump
     }
 
-    /// The column as a table of `frame | value`, virtualised (only the visible
-    /// rows are laid out), the current frame highlighted. Returns a clicked frame.
+    /// The selected columns as a table — `frame | value | value …` —
+    /// virtualised (only the visible rows are laid out), with the column names
+    /// in a header that stays put while the rows scroll and the current frame
+    /// highlighted. Many columns scroll sideways. Returns a clicked frame.
     fn draw_dai_table(
         &mut self,
         ui: &mut egui::Ui,
         i: usize,
         dai: &Dai,
-        col: usize,
+        cols: &[usize],
         span: usize,
         current: usize,
     ) -> Option<usize> {
         let row_h = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
-        let mut area = egui::ScrollArea::vertical()
-            .id_salt("dai_table")
-            .auto_shrink([false, false]);
-        if let Some(r) = self.dai_panel.scroll_to.take() {
-            let step = row_h + ui.spacing().item_spacing.y;
-            let offset = (r as f32 * step - ui.available_height() / 2.0).max(0.0);
-            area = area.vertical_scroll_offset(offset);
-        }
-        let mut jump = None;
-        let media = &self.panes[i].media;
-        area.show_rows(ui, row_h, span, |ui, rows| {
-            for f in rows {
-                ui.horizontal(|ui| {
-                    ui.set_height(row_h);
-                    let label = egui::RichText::new(format!("{f:>7}")).monospace();
-                    if ui
-                        .selectable_label(f == current, label)
-                        .on_hover_text(t!("dai.jump_hover"))
-                        .clicked()
-                    {
-                        jump = Some(f);
-                    }
-                    ui.separator();
-                    let text = dai
-                        .value(media, f, col)
-                        .map_or_else(|| "—".into(), |v| v.display());
-                    ui.label(egui::RichText::new(text).monospace());
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let frame_w = ui.fonts(|f| {
+            f.layout_no_wrap("0000000".into(), mono.clone(), Color32::WHITE)
+                .size()
+                .x
+        }) + 16.0;
+        // Each column as wide as its name (within reason); a longer value is
+        // truncated, with the whole of it on hover.
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let widths: Vec<f32> = cols
+            .iter()
+            .map(|&c| {
+                let name = &dai.columns[c].name;
+                let w = ui.fonts(|f| {
+                    f.layout_no_wrap(name.clone(), body.clone(), Color32::WHITE)
+                        .size()
+                        .x
                 });
-            }
-        });
+                (w + 16.0).clamp(90.0, 260.0)
+            })
+            .collect();
+        let mut jump = None;
+        let mut user_scrolled = false;
+        let scroll_to = self.dai_panel.scroll_to.take();
+        let media = &self.panes[i].media;
+        egui::ScrollArea::horizontal()
+            .id_salt("dai_table_h")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [frame_w, row_h],
+                        egui::Label::new(egui::RichText::new(t!("dai.frame")).strong()),
+                    );
+                    for (&c, &w) in cols.iter().zip(&widths) {
+                        let col = &dai.columns[c];
+                        ui.separator();
+                        ui.add_sized(
+                            [w, row_h],
+                            egui::Label::new(egui::RichText::new(&col.name).strong()).truncate(),
+                        )
+                        .on_hover_text(format!(
+                            "{} ({})",
+                            col.name,
+                            type_label(col.ty)
+                        ));
+                    }
+                });
+                ui.separator();
+                let mut area = egui::ScrollArea::vertical()
+                    .id_salt("dai_table")
+                    .auto_shrink([true, false]);
+                if let Some(r) = scroll_to {
+                    let step = row_h + ui.spacing().item_spacing.y;
+                    let offset = (r as f32 * step - ui.available_height() / 2.0).max(0.0);
+                    area = area.vertical_scroll_offset(offset);
+                }
+                let out = area.show_rows(ui, row_h, span, |ui, rows| {
+                    for f in rows {
+                        ui.horizontal(|ui| {
+                            ui.set_height(row_h);
+                            let label = egui::RichText::new(format!("{f:>7}")).monospace();
+                            if ui
+                                .add_sized(
+                                    [frame_w, row_h],
+                                    egui::SelectableLabel::new(f == current, label),
+                                )
+                                .on_hover_text(t!("dai.jump_hover"))
+                                .clicked()
+                            {
+                                jump = Some(f);
+                            }
+                            for (&c, &w) in cols.iter().zip(&widths) {
+                                ui.separator();
+                                let text = dai
+                                    .value(media, f, c)
+                                    .map_or_else(|| "—".into(), |v| v.display());
+                                ui.add_sized(
+                                    [w, row_h],
+                                    egui::Label::new(egui::RichText::new(&text).monospace())
+                                        .truncate(),
+                                )
+                                .on_hover_text(text);
+                            }
+                        });
+                    }
+                });
+                // The wheel over the rows hands the scrollbar back to the user.
+                user_scrolled = ui.rect_contains_pointer(out.inner_rect)
+                    && ui.input(|i| i.raw_scroll_delta.y != 0.0);
+            });
+        if user_scrolled {
+            self.dai_panel.follow = false;
+        }
         jump
     }
 

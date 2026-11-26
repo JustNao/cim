@@ -191,9 +191,13 @@ dai.graph_needs_numbers: Une colonne de texte n'a pas de graphe
 dai.table: Tableau
 dai.whole: Séquence entière
 dai.whole_hover: Afficher à nouveau toutes les images sur l'axe x
-dai.to_current: Image courante
 dai.plot_hint: "Molette : zoom · glisser : déplacer · clic droit glissé (ou Maj+glisser) : zoomer sur une partie · clic : aller à cette image"
 dai.jump_hover: Aller à cette image
+dai.multi_hint: "Ctrl+clic : plusieurs colonnes (tableau)"
+dai.n_columns: "%{n} colonnes"
+dai.frame: Image
+dai.follow: Suivre
+dai.follow_hover: Garder la vue sur l'image courante — le tableau y défile, un graphe zoomé reste centré dessus. Déplacer ou faire défiler la vue le désactive
 dai.type_int: entier
 dai.type_float: réel
 dai.type_text: texte
