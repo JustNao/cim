@@ -61,9 +61,11 @@ impl CimApp {
         (p.x >= 0.0 && p.y >= 0.0 && (p.x as usize) < w && (p.y as usize) < h).then_some(p)
     }
 
-    /// Pane `idx`'s effective display rotation in radians (0 when unrotated).
+    /// Pane `idx`'s effective display rotation in radians (0 when unrotated):
+    /// the user's angle plus, with **with DAI** on, the camera rotation its DAI
+    /// records for the shown frame — so a manual rotation is relative to it.
     pub(in crate::app) fn pane_theta(&self, idx: usize) -> f32 {
-        self.rotation_of(idx).to_radians()
+        (self.rotation_of(idx) + self.dai_rotation(idx)).to_radians()
     }
 
     /// Screen position of image point `p` for pane `idx`, including the pane's

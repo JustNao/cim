@@ -14,6 +14,7 @@
 
 mod canvas;
 mod compute;
+mod dai;
 mod lifecycle;
 pub use lifecycle::Preload;
 mod util;
@@ -883,6 +884,18 @@ struct Pane {
     /// Applied at draw time (the texture stays unrotated) and to the export;
     /// rides the Geometry sync (`sync_geometry`).
     rotation: f32,
+    /// This media's auxiliary per-image information (DAI, [`crate::dai`]), found
+    /// beside its files in the background on open and reload. `None` = none
+    /// found (or not yet).
+    dai: Option<std::sync::Arc<crate::dai::Dai>>,
+    /// Generation of the DAI lookup in flight (`None` = none pending).
+    dai_req: Option<u64>,
+    /// The Transformations panel's **with DAI** toggle: add the DAI's camera
+    /// rotation (per frame) to the display rotation. On by default; only shown
+    /// — and only effective — when the DAI carries one. Per pane, not part of
+    /// the Geometry sync: the DAI belongs to the media, so a synced edit turns
+    /// each pane *relative to its own* camera angle.
+    dai_rotate: bool,
     /// Cached tinted overlay texture for this pane (rebuilt when the effective
     /// overlay config or the mask's shown frame changes).
     overlay_tex: Option<CachedTex>,
@@ -2383,6 +2396,7 @@ impl CimApp {
         self.pump_decoder();
         self.pump_render(ctx);
         self.pump_offset_scans(); // apply finished background offset scans
+        self.pump_dai(); // attach DAI found beside newly opened / reloaded media
         self.handle_input(ctx);
         self.advance_playback(ctx);
         self.drive_seek();

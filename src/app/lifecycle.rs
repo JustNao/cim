@@ -201,6 +201,12 @@ impl CimApp {
                 p.sync_geometry = false;
             }
         }
+        // Not part of the Geometry sync (the DAI is the media's own), so no unsync.
+        if let Some(on) = &vs.dai_rotate {
+            for (p, &d) in self.panes.iter_mut().zip(on) {
+                p.dai_rotate = d;
+            }
+        }
         // Visualization sync flags (`--tsync`), applied *after* the per-pane
         // tone/detail flags (which unsync the panes they set). Re-seed the shared
         // set from the first synced pane so panes that follow it show the look.
@@ -440,6 +446,14 @@ impl CimApp {
             if self.panes.iter().any(|p| !p.visible) {
                 parts.push(format!("--show {}", flags(&|i| self.panes[i].visible)));
             }
+            // Only a pane that turned it off: on is the default, and DAI is
+            // found afresh by the replay.
+            if self.panes.iter().any(|p| !p.dai_rotate) {
+                parts.push(format!(
+                    "--dai-rotate {}",
+                    flags(&|i| self.panes[i].dai_rotate)
+                ));
+            }
             if self.panes.iter().any(|p| p.scale) {
                 parts.push(format!("--scale {}", flags(&|i| self.panes[i].scale)));
             }
@@ -647,6 +661,9 @@ impl CimApp {
             visual,
             scale: false,
             rotation: 0.0,
+            dai: None,
+            dai_req: None,
+            dai_rotate: true,
             overlay_tex: None,
             region_tone: false,
             stats: None,
@@ -670,6 +687,7 @@ impl CimApp {
         // instantly seekable without the user pressing "Load offsets".
         let i = self.panes.len() - 1;
         self.request_offset_scan(i);
+        self.request_dai(i);
     }
 
     pub(super) fn remove_media(&mut self, i: usize) {
@@ -863,6 +881,9 @@ impl CimApp {
                 // background under a new generation — this also supersedes any
                 // scan still in flight against the old contents.
                 self.request_offset_scan(i);
+                // The DAI may have changed with the files (or the folder's
+                // listing); look again.
+                self.request_dai(i);
             }
             Err(e) => self.panes[i].error = Some(t!("error.reload_failed", err = e).into_owned()),
         }

@@ -205,6 +205,10 @@ pub struct ExportPane {
     /// Display rotation in **radians**, about the image centre (0 = none). Applied
     /// when sampling so an exported pane matches the rotated live view.
     pub rotation: f32,
+    /// Per-source-frame rotation added to `rotation`, in radians — the DAI
+    /// camera rotation (`CimApp::dai_rotation_track`), which varies along a
+    /// sequence. Empty = none; a frame past its end adds nothing.
+    pub dai_rotation: Vec<f32>,
     pub count: usize,
     pub sync_temporal: bool,
     pub own_frame: usize,
@@ -398,6 +402,7 @@ impl ExportPane {
             share_clip: false,
             palette: None,
             rotation: 0.0,
+            dai_rotation: Vec::new(),
             count,
             sync_temporal,
             own_frame,
@@ -605,7 +610,12 @@ impl ExportPane {
     fn sampler(&self) -> PaneSampler<'_> {
         PaneSampler {
             view: self.view,
-            rotation: self.rotation,
+            rotation: self.rotation
+                + self
+                    .raw_idx
+                    .and_then(|i| self.dai_rotation.get(i))
+                    .copied()
+                    .unwrap_or(0.0),
             cur_display: self.cur_display.as_deref(),
             cur_wide: self.cur_wide.as_deref(),
             cur_origin: self.cur_origin,
@@ -2198,6 +2208,62 @@ mod tests {
                 assert_eq!(got, expect, "pixel ({ox},{oy})");
             }
         }
+    }
+
+    /// The DAI rotation is per source frame and adds to the pane's own: a
+    /// sequence whose second page records 180° exports that page flipped and the
+    /// first one untouched, and a pane rotation of 180° on top cancels it.
+    #[test]
+    fn dai_rotation_follows_the_exported_frame() {
+        let dir = crate::testutil::fixture_dir("export_dai_rot");
+        let paths = crate::testutil::write_png_run(&dir, 2, 8, 8);
+        let src = |k: usize, x: usize, y: usize| {
+            ((y * 8 + x) as u8)
+                .wrapping_mul(31)
+                .wrapping_add(k as u8 * 10) as usize
+        };
+        let cell = Rect::from_min_size(Pos2::ZERO, Vec2::new(8.0, 8.0));
+        let view = ViewTransform {
+            zoom: 1.0,
+            center: Vec2::new(4.0, 4.0),
+            needs_fit: false,
+        };
+        let compose = |base: f32| {
+            let mut pane = ExportPane::new(
+                view,
+                ContrastMode::Linear,
+                false,
+                None,
+                2,
+                true,
+                0,
+                ExportSource::Files {
+                    paths: paths.clone(),
+                },
+            );
+            pane.rotation = base;
+            pane.dai_rotation = vec![0.0, std::f32::consts::PI];
+            let mut plan = ExportPlan {
+                panes: vec![pane],
+                layout: ExportLayout::Single(0, cell),
+                control: None,
+                region: cell,
+                out_w: 8,
+                out_h: 8,
+                labels: Vec::new(),
+                label_style: LabelStyle::default(),
+                start: 0,
+                total: 2,
+            };
+            (plan.compose(0), plan.compose(1))
+        };
+        let at = |buf: &[u8], x: usize, y: usize| buf[(y * 8 + x) * 4] as usize;
+        let (f0, f1) = compose(0.0);
+        assert_eq!(at(&f0, 1, 2), src(0, 1, 2));
+        assert_eq!(at(&f1, 1, 2), src(1, 6, 5));
+        let (f0, f1) = compose(std::f32::consts::PI);
+        assert_eq!(at(&f0, 1, 2), src(0, 6, 5));
+        assert_eq!(at(&f1, 1, 2), src(1, 1, 2));
     }
 
     /// With the image panned so it only partly covers the view, exporting the

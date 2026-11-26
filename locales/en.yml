@@ -164,6 +164,10 @@ transform.share_clip_hover: >-
 transform.rotate: Rotate
 transform.rotate_hover: Rotate the image (Alt + drag on the pane)
 transform.rotate_reset_hover: Reset to 0°
+transform.with_dai: with DAI
+transform.with_dai_hover: >-
+  Add the camera rotation recorded in this media's DAI file (per frame), shown
+  in brackets. The angle above is then relative to it
 transform.reset: Reset
 transform.histogram: Histogram
 transform.frame_not_loaded: frame not loaded
@@ -452,6 +456,7 @@ status.load_stopped: Stopped loading
 status.libs_loaded: "Operators loaded: %{libs}"
 status.cache_full: Frame cache full — continuing with offsets only (headers) for the rest
 status.view_command_copied: View command copied to clipboard
+status.dai_read_failed: "Could not read DAI file %{err}"
 status.settings_reset: Keyboard shortcuts reset to defaults
 modal.error: Error
 modal.warning: Warning
@@ -566,6 +571,7 @@ cli.help: |
           --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)
           --gsync <B,B,...>        Per-pane Geometry-sync toggles (rotation) (1/0)
           --rotate <D,D,...>       Per-pane display rotation in degrees (-180..180)
+          --dai-rotate <B,B,...>   Per-pane add the DAI camera rotation (1/0, default 1)
           --control <N>            Control media: shared clip source (+ timeline if a sequence)
           --loop <LO,HI>           Inclusive playback loop range (0-based)
           --name <N=TEXT>          Name pane N (0-based) TEXT; repeat per renamed pane

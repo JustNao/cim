@@ -202,6 +202,8 @@ impl CimApp {
         self.pending_seek.is_none()
             && !self.work.busy()
             && self.pending_recompute.is_none()
+            // The DAI rotation is part of the view being exported.
+            && self.panes.iter().all(|p| p.dai_req.is_none())
             && (0..self.panes.len()).all(|i| !self.catching_up(i))
             && self
                 .export_participants()

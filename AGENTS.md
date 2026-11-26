@@ -109,6 +109,9 @@ src/
     tone.wgsl      The u8 / u16 / f32 tone-map kernels.
   thumbs.rs      Off-UI-thread thumbnail renderer for the timeline hover preview
                  (§8.1): one shared worker + the capacity-LRU ThumbCache.
+  dai.rs         Auxiliary per-image information (DAI, §9.1): the csv / yaml found
+                 beside a media's files — name matching, the typed Table/Value model,
+                 file→row Binding, and the DaiLoader worker thread.
   watcher.rs     Off-UI-thread source-file signer for the auto-reload watch
                  (sign_paths / FileWatcher, §9) — file I/O off the paint path.
   debug.rs       Opt-in pipeline profiler (CIM_DEBUG=1): per-stage timing rings.
@@ -137,6 +140,8 @@ src/
     compute.rs   Compute panes: reduce/add/sub (add/sub as a generated,
                  cache-pooled sequence), source graph (chaining +
                  cycle guard), recompute/auto-refresh/save.
+    dai.rs       A pane's DAI: request on open/reload, apply on landing, and the
+                 camera rotation it adds (dai_rotation / dai_rotation_track).
     watch.rs     Auto-reload file watching (poll_watches / rebaseline_watch):
                  rate-limited requests + the debounce, signing done off-thread.
     decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
@@ -1773,6 +1778,18 @@ that track a specific source *pixel*) stay pixel-aligned with the drawn mesh. Ex
 `ExportPane.rotation` (radians) un-rotates each sampled point (`unrotate`) so a rendered/encoded
 pane matches the rotated live view (`--rotate` round-trips it through the view command).
 
+**DAI camera rotation (§9.1).** The angle a pane is *drawn* at is `pane_theta` =
+`rotation_of` (the user's, Geometry-synced) **plus** `dai_rotation` — the camera rotation the
+media's DAI records for the frame the committed texture shows, while the per-pane
+**with DAI** toggle (`Pane.dai_rotate`, on by default, shown under Rotate only when the DAI
+has a rotation column) is on. Everything that tracks a source pixel goes through
+`pane_theta`, so the user's angle — slider, typed, Alt-drag — is **relative** to the
+camera's. `dai_rotate` is deliberately outside the Geometry sync: the DAI is the media's
+own, so a synced edit turns each pane relative to *its* camera. Export carries it per
+source frame (`ExportPane::dai_rotation`, radians, added in `sampler`), since it varies
+along a sequence; `--dai-rotate` (per pane 1/0) round-trips the toggle, emitted only when
+one is off.
+
 **Region selection is viewer-aligned, not image-aligned.** The **export crop** and the
 **stats region** are both stored in the pane's *unrotated* view frame and converted with the
 **plain view** (no rotation), via one shared helper `select_region_bounds` (used by
@@ -1912,6 +1929,39 @@ silently drop the argument before it reached cim.
 `--share-clip`/`--detail`/`--rotate`), not only when a pane is unsynced. Each of those
 flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced session (where
 `--tsync` is otherwise omitted as the default) would replay unsynced without it.
+
+### 9.1 DAI — auxiliary per-image information (`dai.rs`, `app/dai.rs`)
+
+Some media carry metadata beside the pixels: a **`.csv`** for a sequence (a free-form header
+of any length, then the first line holding `;` names the columns, then one row per image),
+or a **`.yaml`/`.yml`** dictionary for a single image. **It is an opportunity, never an
+error:** a media without one says nothing; a file that *matched* but couldn't be read sets
+the transient `status` note (`status.dai_read_failed`), nothing more.
+
+- **Matching** (`best_match`/`affinity`) is per media file, over the csv/yaml in its
+  directory (listed once per directory): same stem best, then a DAI name whose
+  **components** are a prefix of the media's (`seqA_variation.tif` → `seqA.csv`; longer
+  prefix better), then the reverse. Components split on `_ - . space` and at letter↔digit
+  changes, case-insensitively; `seqA_1` vs `seqA_2` never match. On equal affinity a
+  multi-frame media prefers the csv, a still the yaml.
+- **Binding** (`Binding`): a yaml is a `Record` for every page of its file; a csv is `Rows`
+  counted from page 0 of the **first of the media's files its name fits** — so one csv
+  beside a numbered run or a folder covers the whole run (row = global frame − that
+  file's start, via `Media::locate_file`), and a csv per file covers its own pages.
+  `Dai::row_of(media, frame)` is the one lookup.
+- **The model is the whole file**, typed (`Table { columns, rows: Vec<Vec<Value>> }`,
+  `Value = Empty | Bool | Int | Float | Text`, decimal comma accepted in a csv, NaN/inf
+  kept; nested yaml keys flattened `a.b`, sequences kept as text) — not just the one field
+  used today — because a DAI explorer graphing every numeric column is planned. The yaml
+  parser is a small hand-written subset (no YAML dependency).
+- **Off the UI thread:** `DaiLoader` (one worker, the `OffsetScanner` pattern) is given the
+  pane's **paths** only; results are keyed by pane id + generation (`Pane.dai_req`,
+  `work.dai_gen`), requested by `add_pane` and `reload` (a re-listed folder may bring new
+  files). A reload keeps the old DAI until the new one lands, so the rotation doesn't flick.
+  Headless export waits for every lookup (`headless_settled`).
+- **Used for:** the camera rotation — `consigneDerotation` (csv) / `los_absolute_orient_roll`
+  (yaml), **radians**, applied as given (§9, *DAI camera rotation*). A missing, empty or
+  non-finite cell adds 0 for that frame.
 
 ---
 
@@ -2214,7 +2264,8 @@ quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, s
   `--detail` (per-pane `1`/`0`),
   `--show` (per-pane visibility), `--scale` (per-pane Scale to the Control's size), `--tsync` (per-pane Visualization-sync),
   `--gsync` (per-pane Geometry-sync — rotation), `--rotate` (per-pane display rotation
-  in degrees, `-180..180`), `--loop LO,HI`, `--name N=TEXT` (repeatable: pane `N`'s
+  in degrees, `-180..180`), `--dai-rotate` (per-pane 1/0, add the DAI camera rotation —
+  §9.1), `--loop LO,HI`, `--name N=TEXT` (repeatable: pane `N`'s
   user-given name — keyed by index, not a positional list, since a name may hold commas),
   `--stats-region X,Y,W,H` + `--region-tone 1|0`. Generated by the in-app "View cmd" window (`view_command`), applied
   after startup files load (`apply_view_state`). The window's **Copy to clipboard**
@@ -2614,7 +2665,11 @@ spread of budgets and sizes, an image already under it is never reduced, `0` mea
 a tiny budget stops at the thumbnail floor rather than reducing forever, a reduced image
 says so in its name, and a re-level decodes **from the kept codestream** — changing the
 frame's size and no-oping when the level is unchanged);
-**`export_command_replays_to_the_same_pixels`** (a chrome-shown session's export
+**DAI** (`dai` — csv header skipping / decimal comma / quoted `;` / padding, the yaml
+subset, name affinity and csv-vs-yaml preference, a TIFF's rows per page, a still run binding
+per-file yamls or one run-wide csv, an unreadable match reported but not fatal; and
+`dai_rotation_follows_the_exported_frame` — the export's per-frame rotation adds to the
+pane's); **`export_command_replays_to_the_same_pixels`** (a chrome-shown session's export
 command, replayed windowless under a different saved config, composes the same bytes —
 both an uncropped grid with rotation/labels and a Local-LUT crop; mutation-checked
 against a rounded zoom and a flipped LUT switch); `cli` export-flag parsing, label-anchor

@@ -127,6 +127,9 @@ pub struct ViewState {
     pub gsync: Option<Vec<bool>>,
     /// Per-pane display rotation in degrees (`--rotate`), in pane order.
     pub rotations: Option<Vec<f32>>,
+    /// Per-pane "add the DAI camera rotation" toggles (`--dai-rotate`), in pane
+    /// order. Default on, so only emitted when a pane turned it off.
+    pub dai_rotate: Option<Vec<bool>>,
     /// The Control media: the shared clip-bounds source, and — when it's a
     /// sequence — the timeline / playback driver (`--control`).
     pub control: Option<usize>,
@@ -319,6 +322,10 @@ fn parse_flag(args: &[String], i: &mut usize, view: &mut ViewState) -> bool {
         }
         "--rotate" => {
             view.rotations = next(*i).and_then(parse_floats);
+            *i += 1;
+        }
+        "--dai-rotate" => {
+            view.dai_rotate = next(*i).and_then(parse_details);
             *i += 1;
         }
         "--control" => {
@@ -1229,7 +1236,7 @@ mod tests {
 
     #[test]
     fn parses_show_tsync_control() {
-        let args = "a.tif b.tif --show 1,0 --scale 0,1 --tsync 0,1 --gsync 1,0 --control 1"
+        let args = "a.tif b.tif --show 1,0 --scale 0,1 --tsync 0,1 --gsync 1,0 --control 1 --dai-rotate 0,1"
             .split(' ')
             .map(String::from)
             .collect();
@@ -1238,6 +1245,7 @@ mod tests {
         };
         assert_eq!(view.visible, Some(vec![true, false]));
         assert_eq!(view.scale, Some(vec![false, true]));
+        assert_eq!(view.dai_rotate, Some(vec![false, true]));
         assert_eq!(view.tsync, Some(vec![false, true]));
         assert_eq!(view.gsync, Some(vec![true, false]));
         assert_eq!(view.control, Some(1));

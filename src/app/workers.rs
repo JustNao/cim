@@ -38,6 +38,10 @@ pub(super) struct Workers {
     pub watch_gen: u64,
     /// Rate limit on signing requests, independent of the repaint rate.
     pub watch_polled_at: f64,
+    /// DAI files found and parsed beside opened media, and the generation that
+    /// tells a lookup of the old contents from one after a reload.
+    pub dai: crate::dai::DaiLoader,
+    pub dai_gen: u64,
     /// Timeline hover-preview thumbnails. A pool of its own because the
     /// per-pane renderer's results gate the lock-step commit.
     pub thumbs: crate::thumbs::ThumbPool,
@@ -58,6 +62,8 @@ impl Workers {
             watcher: crate::watcher::FileWatcher::new(ctx.clone()),
             watch_gen: 0,
             watch_polled_at: f64::NEG_INFINITY,
+            dai: crate::dai::DaiLoader::new(ctx.clone()),
+            dai_gen: 0,
             thumbs: crate::thumbs::ThumbPool::new(ctx.clone()),
             thumb_cache: crate::thumbs::ThumbCache::default(),
         }

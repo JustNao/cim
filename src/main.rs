@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod cpu;
 mod curve;
+mod dai;
 mod debug;
 mod decoder;
 mod export;
