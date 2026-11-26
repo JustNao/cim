@@ -1986,7 +1986,8 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
   `work.dai_gen`), requested by `add_pane` and `reload` (a re-listed folder may bring new
   files). A reload keeps the old DAI until the new one lands, so the rotation doesn't flick.
   Headless export waits for every lookup (`headless_settled`).
-- **Used for:** the camera rotation — `cameraRotation` (csv) / `camera_roll`
+- **Used for:** the camera rotation — `cameraRotation` (csv; `cameraRotationOld` in
+  older files, the current name winning when both exist, `CSV_ROTATION`) / `camera_roll`
   (yaml), **radians**, applied as given (§9, *DAI camera rotation*). A missing, empty or
   non-finite cell adds 0 for that frame.
 
