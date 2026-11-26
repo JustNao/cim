@@ -96,6 +96,15 @@ impl CimApp {
             {
                 self.show_transform = !self.show_transform;
             }
+            // Only offered once some media has DAI beside it.
+            if self.any_dai()
+                && ui
+                    .selectable_label(self.dai_panel.show, t!("toolbar.dai"))
+                    .on_hover_text(t!("toolbar.dai_hover"))
+                    .clicked()
+            {
+                self.dai_panel.show = !self.dai_panel.show;
+            }
             if ui
                 .selectable_label(false, t!("toolbar.compute"))
                 .on_hover_text(self.hover_for(Action::OpenCompute, &t!("toolbar.compute_hover")))

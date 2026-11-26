@@ -27,6 +27,8 @@ toolbar.settings_hover: Open the settings
 toolbar.help: Help
 toolbar.help_hover: Mouse and modifier commands (reads help.md)
 toolbar.zoom_hover: "Zoom factor (x2 = 2 screen pixels per image pixel, x1/4 = a quarter). Click to type one: x4, 1/2, 300%"
+toolbar.dai: DAI
+toolbar.dai_hover: Browse the auxiliary information (DAI) of the selected media
 toolbar.debug: Debug
 toolbar.debug_hover: Per-stage timing (read → display)
 
@@ -169,6 +171,23 @@ transform.with_dai: with DAI
 transform.with_dai_hover: >-
   Add the camera rotation recorded in this media's DAI file (per frame), shown
   in brackets. The angle above is then relative to it
+dai.title: "DAI — %{name}"
+dai.none: No DAI for this media.
+dai.search_hint: Search columns…
+dai.columns: "%{shown} / %{total} columns"
+dai.no_column: Pick a column on the left.
+dai.graph: Graph
+dai.graph_needs_numbers: A text column has no graph
+dai.table: Table
+dai.whole: Whole sequence
+dai.whole_hover: Show every frame on the x axis again
+dai.to_current: Current frame
+dai.plot_hint: "Wheel: zoom · drag: pan · right-drag (or Shift+drag): zoom to a part · click: go to that frame"
+dai.jump_hover: Go to this frame
+dai.type_int: int
+dai.type_float: float
+dai.type_text: text
+dai.type_empty: empty
 transform.reset: Reset
 transform.histogram: Histogram
 transform.frame_not_loaded: frame not loaded

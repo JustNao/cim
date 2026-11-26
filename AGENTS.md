@@ -142,6 +142,8 @@ src/
                  cycle guard), recompute/auto-refresh/save.
     dai.rs       A pane's DAI: request on open/reload, apply on landing, and the
                  camera rotation it adds (dai_rotation / dai_rotation_track).
+    dai_panel.rs The DAI window: fuzzy column search, graph / table of a column,
+                 click a frame to jump there (dai_jump).
     watch.rs     Auto-reload file watching (poll_watches / rebaseline_watch):
                  rate-limited requests + the debounce, signing done off-thread.
     decode.rs    Decode plumbing, cache-budget eviction, lock-step texture
@@ -1952,10 +1954,26 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
   file's start, via `Media::locate_file`), and a csv per file covers its own pages.
   `Dai::row_of(media, frame)` is the one lookup.
 - **The model is the whole file**, typed (`Table { columns, rows: Vec<Vec<Value>> }`,
-  `Value = Empty | Bool | Int | Float | Text`, decimal comma accepted in a csv, NaN/inf
-  kept; nested yaml keys flattened `a.b`, sequences kept as text) — not just the one field
-  used today — because a DAI explorer graphing every numeric column is planned. The yaml
-  parser is a small hand-written subset (no YAML dependency).
+  `Value = Empty | Int | Float | Text`, decimal comma accepted in a csv, NaN/inf kept;
+  nested yaml keys flattened `a.b`, sequences kept as text). **No booleans, on purpose:**
+  some columns flag with 0/1 and others are ints that only ever hold 0 and 1, which can't
+  be told apart — so `0`/`1` are ints and `true`/`false` text. A column's `ColType` is the
+  widest of its cells (Empty < Int < Float < Text; empty cells don't count), and
+  `Dai::columns` merges same-named columns across the media's tables (a csv per file, a
+  yaml per image); `Dai::value(media, frame, col)` reads one. The yaml parser is a small
+  hand-written subset (no YAML dependency).
+- **The DAI window** (`app/dai_panel.rs`, toolbar **DAI**, shown while any pane has DAI)
+  follows `current` and keeps the selected column **by name**, so switching to a media
+  with the same layout keeps it. The column list is filtered and ranked by
+  `dai::fuzzy_score` (best *alignment*, word starts and runs score up). A numeric column
+  graphs over `Dai::span` frames (the known length, or a lone file's csv row count when
+  longer — those rows are still its pages): wheel zooms x about the cursor, drag pans,
+  right-drag / Shift+drag zooms to a part, **Whole sequence** resets (`x_range = None`,
+  also reached by zooming fully out), more frames than pixels draw a per-column min/max
+  envelope. The series is cached per (pane, `Arc<Dai>`, column, span). The table is
+  virtualised (`show_rows`). Clicking a frame in either jumps there through `dai_jump`:
+  a `fast_jump` past the frontier, then the transport / pane-own / shared seek — offsets,
+  never a decode sweep.
 - **Off the UI thread:** `DaiLoader` (one worker, the `OffsetScanner` pattern) is given the
   pane's **paths** only; results are keyed by pane id + generation (`Pane.dai_req`,
   `work.dai_gen`), requested by `add_pane` and `reload` (a re-listed folder may bring new
@@ -2668,7 +2686,8 @@ a tiny budget stops at the thumbnail floor rather than reducing forever, a reduc
 says so in its name, and a re-level decodes **from the kept codestream** — changing the
 frame's size and no-oping when the level is unchanged);
 **DAI** (`dai` — csv header skipping / decimal comma / quoted `;` / padding, the yaml
-subset, name affinity and csv-vs-yaml preference, a TIFF's rows per page, a still run binding
+subset, column typing (0/1 stays int) and merging across files, fuzzy ranking, float
+display, name affinity and csv-vs-yaml preference, the graph's range clamp, a TIFF's rows per page, a still run binding
 per-file yamls or one run-wide csv, an unreadable match reported but not fatal; and
 `dai_rotation_follows_the_exported_frame` — the export's per-frame rotation adds to the
 pane's); **`export_command_replays_to_the_same_pixels`** (a chrome-shown session's export

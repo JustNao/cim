@@ -338,7 +338,7 @@ impl CimApp {
 
 /// Draw `text` anchored at `pos` over a dark box, so a crosshair readout stays
 /// legible on top of the axis tick label it covers.
-fn label_box(
+pub(super) fn label_box(
     painter: &egui::Painter,
     pos: Pos2,
     align: Align2,
@@ -365,7 +365,7 @@ fn draw_profile_legend(ui: &mut egui::Ui, series: &[(String, Color32, Vec<f32>)]
 }
 
 /// Format an axis tick value: whole numbers plainly, else a few decimals.
-fn fmt_tick(v: f32) -> String {
+pub(super) fn fmt_tick(v: f32) -> String {
     if v.fract().abs() < 1e-4 {
         format!("{}", v.round() as i64)
     } else {
@@ -375,7 +375,7 @@ fn fmt_tick(v: f32) -> String {
 
 /// "Nice" evenly spaced tick values spanning `[min, max]` (roughly `target`
 /// of them), rounded to 1/2/5 × 10ⁿ so the labels read cleanly.
-fn nice_ticks(min: f32, max: f32, target: usize) -> Vec<f32> {
+pub(super) fn nice_ticks(min: f32, max: f32, target: usize) -> Vec<f32> {
     // Both ends are finite by construction (the plot's own axis ranges), so an
     // empty or inverted span is the only degenerate case to guard.
     if max <= min {
