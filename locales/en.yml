@@ -500,6 +500,9 @@ daicheck.parse_error: "  Could not parse it: %{err}"
 daicheck.table: "  %{cols} columns, %{rows} rows:"
 daicheck.rotation: "  Rotation column: %{name} — first values: %{values}"
 daicheck.no_rotation: "  No rotation column. Nearest names to each one looked for:"
+daicheck.app_none: "⇒ In cim: no DAI for this media (no DAI button, no rotation)."
+daicheck.app_rotation: "⇒ In cim: DAI loaded (%{cols} columns), rotation on — frame 0 turns by %{deg}."
+daicheck.app_no_rotation: "⇒ In cim: DAI loaded (%{cols} columns) but no rotation column."
 status.settings_reset: Keyboard shortcuts reset to defaults
 modal.error: Error
 modal.warning: Warning
