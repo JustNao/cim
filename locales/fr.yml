@@ -502,27 +502,7 @@ status.cache_full: >-
 status.view_command_copied: Commande de vue copiée dans le presse-papiers
 status.dai_read_failed: "Impossible de lire le fichier DAI %{err}"
 status.proprietary_failed: "Impossible de lire %{err} — noms génériques utilisés"
-daicheck.media: "Média : %{path}"
-daicheck.names_from: "Noms de rotation lus dans %{path} :"
-daicheck.names_none: "Aucun %{file} trouvé (à côté de l'exécutable, dans le dossier courant, ni intégré à la compilation) — aucune colonne n'est lue comme rotation :"
-daicheck.embedded: le proprietary.yaml intégré à la compilation
-daicheck.names_error: "  Lecture impossible : %{err}"
-daicheck.kind: "Type de DAI préféré à égalité : %{kind}"
-daicheck.candidates: "%{n} fichier(s) DAI (csv / yaml / yml / dai / dai2) dans %{dir} :"
-daicheck.no_match: (le nom ne correspond pas)
-daicheck.none_chosen: "→ Aucun fichier DAI ne correspond au nom de ce média."
-daicheck.chosen: "→ Retenu : %{path}"
-daicheck.read_error: "  Lecture impossible : %{err}"
-daicheck.encoding: "  %{bytes} octets, lus en %{enc}"
-daicheck.header: "  En-tête (ligne %{line}) : %{text}"
-daicheck.no_header: "  Aucune ligne séparée par des ';' : pas un csv DAI"
-daicheck.parse_error: "  Analyse impossible : %{err}"
-daicheck.table: "  %{cols} colonnes, %{rows} lignes :"
-daicheck.rotation: "  Colonne de rotation : %{name} — premières valeurs : %{values}"
-daicheck.no_rotation: "  Pas de colonne de rotation. Noms les plus proches de chacun de ceux cherchés :"
-daicheck.app_none: "⇒ Dans cim : pas de DAI pour ce média (ni bouton DAI, ni rotation)."
-daicheck.app_rotation: "⇒ Dans cim : DAI chargée (%{cols} colonnes), rotation active — l'image 0 tourne de %{deg}."
-daicheck.app_no_rotation: "⇒ Dans cim : DAI chargée (%{cols} colonnes) mais sans colonne de rotation."
+status.proprietary_embedded: le proprietary.yaml intégré à la compilation
 status.settings_reset: Raccourcis clavier rétablis par défaut
 modal.error: Erreur
 modal.warning: Avertissement
@@ -620,9 +600,6 @@ cli.help: |
                                  sous la forme PRÉFIXE%0Xu SUFFIXE,DÉBUT,FIN)
           --completions <SHELL>  Afficher un script de complétion pour SHELL
                                  (bash | powershell)
-          --dai-check <FICHIER>... Expliquer comment la DAI de chaque FICHIER est
-                                 trouvée et lue (candidats, en-tête, colonne de
-                                 rotation) et quitter
 
   ÉTAT DE LA VUE :
       Ces options reproduisent une vue enregistrée et sont normalement générées
