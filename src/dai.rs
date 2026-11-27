@@ -623,7 +623,7 @@ pub fn load(paths: &[PathBuf], sequence: bool) -> Loaded {
     let mut files = Vec::with_capacity(paths.len());
     let mut first_of: HashMap<usize, usize> = HashMap::new();
     for (k, path) in paths.iter().enumerate() {
-        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let dir = dai_dir(path);
         let candidates = listings
             .entry(dir.clone())
             .or_insert_with(|| list_dai(&dir));
@@ -667,6 +667,16 @@ pub fn load(paths: &[PathBuf], sequence: bool) -> Loaded {
     }
     let dai = (!tables.is_empty()).then(|| Dai::new(paths.to_vec(), files, tables));
     Loaded { dai, errors }
+}
+
+/// The directory a media file's DAI is looked for in: its own. A bare file
+/// name (`cim seq.tif`, run from the file's folder) has the **empty** path as
+/// parent, which can't be listed — that is the working directory.
+fn dai_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
 }
 
 /// The DAI files (csv / yaml) in `dir`; an unreadable directory has none.
@@ -852,6 +862,31 @@ pub fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
 /// affinity, the encoding and header line chosen, the columns, and whether a
 /// rotation column was found (with the nearest names when not).
 pub fn diagnose(path: &Path) -> String {
+    let mut report = diagnose_steps(path);
+    // Last, the lookup exactly as a pane runs it (`DaiLoader` → `load`), so the
+    // report's verdict is the app's, not a re-derivation of it.
+    let media = crate::media::load(path).ok();
+    let sequence = media.as_ref().is_none_or(|m| m.is_sequence());
+    let loaded = load(&[path.to_path_buf()], sequence);
+    let verdict = match (&loaded.dai, &media) {
+        (None, _) => t!("daicheck.app_none").into_owned(),
+        (Some(d), Some(m)) if d.has_rotation() => {
+            let r = d
+                .rotation_deg(m, 0)
+                .map_or_else(|| "—".into(), |v| format!("{v}°"));
+            t!("daicheck.app_rotation", cols = d.columns.len(), deg = r).into_owned()
+        }
+        (Some(d), _) => t!("daicheck.app_no_rotation", cols = d.columns.len()).into_owned(),
+    };
+    report.push_str(&verdict);
+    report.push('\n');
+    for e in loaded.errors {
+        report.push_str(&format!("  {e}\n"));
+    }
+    report
+}
+
+fn diagnose_steps(path: &Path) -> String {
     let mut out = Vec::new();
     let mut say = |s: String| out.push(s);
     let names = crate::proprietary::get();
@@ -873,11 +908,10 @@ pub fn diagnose(path: &Path) -> String {
         kind = if sequence { "csv" } else { "yaml" }
     )
     .into_owned());
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let candidates = list_dai(dir);
+    // The very function `load` uses: this report once diverged from it here,
+    // hiding the bug it is meant to find.
+    let dir = dai_dir(path);
+    let candidates = list_dai(&dir);
     say(t!(
         "daicheck.candidates",
         n = candidates.len(),
@@ -1194,6 +1228,17 @@ mod tests {
         assert_eq!(fmt_float(1.0 / 3.0), "0.333333");
         assert_eq!(fmt_float(1.5e-7), "1.5000e-7");
         assert_eq!(fmt_float(f64::NAN), "NaN");
+    }
+
+    /// A file opened by its bare name looks in the working directory: its
+    /// parent is the empty path, which `read_dir` refuses — so DAI was silently
+    /// never found for `cim seq.tif` run from the file's own folder.
+    #[test]
+    fn a_bare_file_name_looks_in_the_working_directory() {
+        assert_eq!(dai_dir(Path::new("seq.tif")), Path::new("."));
+        assert_eq!(dai_dir(Path::new("d/seq.tif")), Path::new("d"));
+        assert_eq!(dai_dir(Path::new("/seq.tif")), Path::new("/"));
+        assert!(std::fs::read_dir(dai_dir(Path::new("seq.tif"))).is_ok());
     }
 
     #[test]

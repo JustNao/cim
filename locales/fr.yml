@@ -520,6 +520,9 @@ daicheck.parse_error: "  Analyse impossible : %{err}"
 daicheck.table: "  %{cols} colonnes, %{rows} lignes :"
 daicheck.rotation: "  Colonne de rotation : %{name} — premières valeurs : %{values}"
 daicheck.no_rotation: "  Pas de colonne de rotation. Noms les plus proches de chacun de ceux cherchés :"
+daicheck.app_none: "⇒ Dans cim : pas de DAI pour ce média (ni bouton DAI, ni rotation)."
+daicheck.app_rotation: "⇒ Dans cim : DAI chargée (%{cols} colonnes), rotation active — l'image 0 tourne de %{deg}."
+daicheck.app_no_rotation: "⇒ Dans cim : DAI chargée (%{cols} colonnes) mais sans colonne de rotation."
 status.settings_reset: Raccourcis clavier rétablis par défaut
 modal.error: Erreur
 modal.warning: Avertissement

@@ -2009,7 +2009,10 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
 - **Debugging:** DAI is silent by design, so `cim --dai-check FILE...` (`dai::diagnose`)
   prints every step — the names in effect and where from, each candidate file and its
   affinity, the one chosen, encoding, header line, columns, and the rotation column or the
-  nearest names to each one looked for.
+  nearest names to each one looked for — then runs the very `load` a pane runs and states
+  the app's verdict, so the report can't disagree with the app (it once did: it listed
+  `.` for a bare file name while `load` listed the empty path, which can't be read — so
+  `cim seq.tif` from the file's own folder never found its DAI. Both use `dai_dir` now).
 
 ---
 
