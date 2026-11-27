@@ -1525,8 +1525,15 @@ impl CimApp {
                 ui.heading(t!("settings.operators"));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(t!("settings.library_folder"))
-                        .on_hover_text(t!("settings.library_folder_hover"));
+                    ui.label(t!("settings.library_folder")).on_hover_text(t!(
+                        "settings.library_folder_hover",
+                        ops = crate::imageproc::Libs {
+                            lut_alpha: true,
+                            boost: true,
+                            details: true,
+                        }
+                        .names()
+                    ));
                     if ui.button(t!("settings.browse")).clicked() {
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             self.config.cpp_lib_dir = dir.to_string_lossy().into_owned();

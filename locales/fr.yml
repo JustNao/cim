@@ -438,8 +438,7 @@ settings.adaptive_render_hover: >-
 settings.operators: Opérateurs d'image
 settings.library_folder: Dossier des bibliothèques
 settings.library_folder_hover: >-
-  Dossier contenant les bibliothèques d'opérateurs propriétaires (LUT_ALPHA /
-  Boost / Details). Laissez vide pour utiliser le dossier LIBS situé à côté de
+  Dossier contenant les bibliothèques d'opérateurs propriétaires (%{ops}). Laissez vide pour utiliser le dossier LIBS situé à côté de
   l'exécutable cim. Les bibliothèques se chargent automatiquement quand ce
   dossier change.
 settings.library_folder_hint: (utilise <cim>/LIBS)
@@ -502,6 +501,25 @@ status.cache_full: >-
   Cache d'images plein — la suite se poursuit en offsets (en-têtes) seulement
 status.view_command_copied: Commande de vue copiée dans le presse-papiers
 status.dai_read_failed: "Impossible de lire le fichier DAI %{err}"
+status.proprietary_failed: "Impossible de lire %{err} — noms génériques utilisés"
+daicheck.media: "Média : %{path}"
+daicheck.names_from: "Noms de rotation lus dans %{path} :"
+daicheck.names_none: "Aucun %{file} trouvé (à côté de l'exécutable, dans le dossier courant, ni intégré à la compilation) — aucune colonne n'est lue comme rotation :"
+daicheck.embedded: le proprietary.yaml intégré à la compilation
+daicheck.names_error: "  Lecture impossible : %{err}"
+daicheck.kind: "Type de DAI préféré à égalité : %{kind}"
+daicheck.candidates: "%{n} fichier(s) DAI (csv / yaml / yml / dai / dai2) dans %{dir} :"
+daicheck.no_match: (le nom ne correspond pas)
+daicheck.none_chosen: "→ Aucun fichier DAI ne correspond au nom de ce média."
+daicheck.chosen: "→ Retenu : %{path}"
+daicheck.read_error: "  Lecture impossible : %{err}"
+daicheck.encoding: "  %{bytes} octets, lus en %{enc}"
+daicheck.header: "  En-tête (ligne %{line}) : %{text}"
+daicheck.no_header: "  Aucune ligne séparée par des ';' : pas un csv DAI"
+daicheck.parse_error: "  Analyse impossible : %{err}"
+daicheck.table: "  %{cols} colonnes, %{rows} lignes :"
+daicheck.rotation: "  Colonne de rotation : %{name} — premières valeurs : %{values}"
+daicheck.no_rotation: "  Pas de colonne de rotation. Noms les plus proches de chacun de ceux cherchés :"
 status.settings_reset: Raccourcis clavier rétablis par défaut
 modal.error: Erreur
 modal.warning: Avertissement
@@ -599,6 +617,9 @@ cli.help: |
                                  sous la forme PRÉFIXE%0Xu SUFFIXE,DÉBUT,FIN)
           --completions <SHELL>  Afficher un script de complétion pour SHELL
                                  (bash | powershell)
+          --dai-check <FICHIER>... Expliquer comment la DAI de chaque FICHIER est
+                                 trouvée et lue (candidats, en-tête, colonne de
+                                 rotation) et quitter
 
   ÉTAT DE LA VUE :
       Ces options reproduisent une vue enregistrée et sont normalement générées
@@ -618,7 +639,7 @@ cli.help: |
           --share-clip <B,B,...>   Bornes du média Contrôle par panneau (1/0)
           --global-stats <B,B,...> Min/max de toutes les images en mémoire par panneau (1/0)
           --curve <K,K,...>        Courbe de tons par panneau : auto | VALEUR:NIVEAU/VALEUR:NIVEAU/...
-          --detail <B,B,...>       Bascules DETAILS_ENHANCED par panneau (1/0)
+          --detail <B,B,...>       Bascules de l'opérateur de détails par panneau (1/0)
           --show <B,B,...>         Visibilité par panneau (1/0)
           --scale <B,B,...>        Mise à la taille du média Contrôle par panneau (1/0)
           --tsync <B,B,...>        Sync Visualisation par panneau (1/0)

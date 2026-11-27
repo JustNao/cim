@@ -213,6 +213,14 @@ pub fn parse(args: Vec<String>) -> Cli {
                 println!("cim {}", env!("CARGO_PKG_VERSION"));
                 return Cli::Exit(0);
             }
+            "--dai-check" => {
+                // Every following argument is a media file to explain.
+                for p in &args[i + 1..] {
+                    print!("{}", crate::dai::diagnose(Path::new(p)));
+                    println!();
+                }
+                return Cli::Exit(0);
+            }
             "--complete" => {
                 let word = args.get(i + 1).map(String::as_str).unwrap_or("");
                 for c in complete(word) {

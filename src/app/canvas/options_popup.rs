@@ -204,7 +204,14 @@ impl CimApp {
 
                             draw_tone_options(ui, pane_id, contrast, &mut tone);
 
-                            ui.label(t!("transform.rc"));
+                            // The operator's real name when `proprietary.yaml` gives
+                            // it, else the toggle's short label.
+                            let op = crate::imageproc::Op::Details;
+                            if op.named() {
+                                ui.label(op.name());
+                            } else {
+                                ui.label(t!("transform.rc"));
+                            }
                             ui.add_enabled(details_ok, egui::Checkbox::without_text(&mut details))
                                 .on_hover_text(t!("transform.rc_hover"))
                                 .on_disabled_hover_text(details_hint.clone());
