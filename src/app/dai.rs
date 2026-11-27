@@ -5,7 +5,8 @@
 use super::*;
 
 impl CimApp {
-    /// Look for pane `i`'s DAI files in the background (`crate::dai::DaiLoader`).
+    /// Look for pane `i`'s DAI files in the background (`crate::dai::DaiLoader`)
+    /// — or read the one the user named for it (`Pane.dai_file`, `--dai`).
     /// A Compute pane has no files and so none. The pane keeps whatever DAI it
     /// already had until the new lookup lands, so a reload doesn't flick the
     /// rotation off for a frame.
@@ -23,7 +24,7 @@ impl CimApp {
         p.dai_req = Some(gen);
         self.work
             .dai
-            .request(p.id, gen, paths, p.media.is_sequence());
+            .request(p.id, gen, paths, p.media.is_sequence(), p.dai_file.clone());
     }
 
     /// Apply finished DAI lookups to their still-matching pane. A file that was

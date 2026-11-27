@@ -49,6 +49,8 @@ pub enum Action {
     ToggleSettings,
     ToggleManager,
     ToggleVis,
+    /// Show / hide the DAI window.
+    ToggleDai,
     ToggleExport,
     OpenCompute,
     PlayPause,
@@ -81,6 +83,7 @@ impl Action {
             Action::ToggleSettings => "toggle_settings".into(),
             Action::ToggleManager => "toggle_manager".into(),
             Action::ToggleVis => "toggle_vis".into(),
+            Action::ToggleDai => "toggle_dai".into(),
             Action::ToggleExport => "toggle_export".into(),
             Action::OpenCompute => "open_compute".into(),
             Action::PlayPause => "play_pause".into(),
@@ -123,6 +126,7 @@ impl Action {
             Action::ToggleSettings,
             Action::ToggleManager,
             Action::ToggleVis,
+            Action::ToggleDai,
             Action::ToggleExport,
             Action::OpenCompute,
             Action::PlayPause,
@@ -246,7 +250,9 @@ impl Default for Keybindings {
         set(Action::PrevMedia, Key::ArrowLeft);
         set(Action::NextFrame, Key::F);
         set(Action::PrevFrame, Key::D);
-        set(Action::ResetView, Key::Z);
+        // Z went to the DAI window; a saved config that has Fit on Z keeps it
+        // there (and the DAI window unbound — `migrate` never takes a used key).
+        set(Action::ResetView, Key::X);
         set(Action::ActualSize, Key::S);
         set(Action::ZoomIn, Key::Plus);
         set(Action::ZoomOut, Key::Minus);
@@ -255,6 +261,7 @@ impl Default for Keybindings {
         set(Action::ToggleSettings, Key::S);
         set(Action::ToggleManager, Key::Q);
         set(Action::ToggleVis, Key::V);
+        set(Action::ToggleDai, Key::Z);
         set(Action::ToggleExport, Key::E);
         set(Action::OpenCompute, Key::C);
         set(Action::PlayPause, Key::Space);

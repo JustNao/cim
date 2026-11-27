@@ -126,6 +126,24 @@ impl CimApp {
                 p.custom_name = (!name.is_empty()).then(|| name.to_owned());
             }
         }
+        // DAI files named on the command line: read now in place of the lookup
+        // by name that opening the pane started (a newer request supersedes it).
+        // `--dai PATH` (no pane) names one file for every media; a per-pane
+        // `--dai N=PATH` then overrides it for that pane.
+        let mut named: Vec<(usize, PathBuf)> = match &vs.dai_all {
+            Some(path) => (0..self.panes.len())
+                .filter(|&i| !matches!(self.panes[i].source, Source::Computed))
+                .map(|i| (i, path.clone()))
+                .collect(),
+            None => Vec::new(),
+        };
+        named.extend(vs.dai_files.iter().cloned());
+        for (i, path) in named {
+            if i < self.panes.len() {
+                self.panes[i].dai_file = Some(path);
+                self.request_dai(i);
+            }
+        }
         if let Some(f) = vs.frame {
             // The sequence length isn't discovered yet, so we can't land on `f`
             // now — record it and let `drive_seek` walk discovery up to it.
@@ -351,6 +369,29 @@ impl CimApp {
                 // into several arguments breaks the replay.
                 let arg = format!("{i}={name}").replace('"', "\\\"");
                 parts.push(format!("--name \"{arg}\""));
+            }
+        }
+        // DAI files given by hand: one `--dai PATH` when every media has the
+        // same, else one `--dai N=PATH` per pane that has one.
+        let files: Vec<(usize, &PathBuf)> = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !matches!(p.source, Source::Computed))
+            .map(|(i, p)| p.dai_file.as_ref().map(|f| (i, f)))
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        match files.first() {
+            Some((_, first)) if files.iter().all(|(_, f)| f == first) => {
+                parts.push(format!("--dai {}", quote_path(first)));
+            }
+            _ => {
+                for (i, p) in self.panes.iter().enumerate() {
+                    if let Some(path) = &p.dai_file {
+                        let arg = format!("{i}={}", path.display());
+                        parts.push(format!("--dai {}", quote_arg(&arg)));
+                    }
+                }
             }
         }
         if n > 0 {
@@ -663,6 +704,7 @@ impl CimApp {
             rotation: 0.0,
             dai: None,
             dai_req: None,
+            dai_file: None,
             dai_rotate: true,
             overlay_tex: None,
             region_tone: false,

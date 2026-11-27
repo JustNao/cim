@@ -139,6 +139,11 @@ pub struct ViewState {
     /// name. Keyed by index rather than a positional list, since a name may hold
     /// any character — commas included.
     pub names: Vec<(usize, String)>,
+    /// DAI files named for panes (`--dai N=PATH`, repeatable), read in place
+    /// of the lookup by name.
+    pub dai_files: Vec<(usize, PathBuf)>,
+    /// One DAI file for every media (`--dai PATH`, no `N=`).
+    pub dai_all: Option<PathBuf>,
     /// The shared image-space statistics region `X,Y,W,H` (`--stats-region`).
     pub stats_region: Option<[f32; 4]>,
     /// Whether the panes' tone follows that region (`--region-tone 1|0`).
@@ -340,6 +345,20 @@ fn parse_flag(args: &[String], i: &mut usize, view: &mut ViewState) -> bool {
             if let Some((n, name)) = next(*i).and_then(|s| s.split_once('=')) {
                 if let Ok(n) = n.trim().parse() {
                     view.names.push((n, name.to_string()));
+                }
+            }
+            *i += 1;
+        }
+        "--dai" => {
+            // `N=PATH` for pane N, else the whole argument is a path for every
+            // media — so a path holding an `=` is still a path.
+            if let Some(arg) = next(*i) {
+                match arg
+                    .split_once('=')
+                    .and_then(|(n, p)| Some((n.trim().parse().ok()?, p)))
+                {
+                    Some((n, path)) => view.dai_files.push((n, PathBuf::from(path))),
+                    None => view.dai_all = Some(PathBuf::from(arg)),
                 }
             }
             *i += 1;
@@ -1249,6 +1268,37 @@ mod tests {
         assert_eq!(view.tsync, Some(vec![false, true]));
         assert_eq!(view.gsync, Some(vec![true, false]));
         assert_eq!(view.control, Some(1));
+        let Cli::Run { view, .. } = parse(
+            [
+                "a.tif",
+                "b.tif",
+                "--dai",
+                "1=raw/a.csv",
+                "--dai",
+                "0=c:\\x=y.dai2",
+            ]
+            .map(String::from)
+            .to_vec(),
+        ) else {
+            panic!("expected Run");
+        };
+        assert_eq!(
+            view.dai_files,
+            [
+                (1, PathBuf::from("raw/a.csv")),
+                (0, PathBuf::from("c:\\x=y.dai2"))
+            ]
+        );
+        assert_eq!(view.dai_all, None);
+        let Cli::Run { view, .. } = parse(
+            ["a.tif", "--dai", "shared/run=2.csv"]
+                .map(String::from)
+                .to_vec(),
+        ) else {
+            panic!("expected Run");
+        };
+        assert_eq!(view.dai_all, Some(PathBuf::from("shared/run=2.csv")));
+        assert!(view.dai_files.is_empty());
     }
 
     #[test]

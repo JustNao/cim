@@ -891,6 +891,9 @@ struct Pane {
     dai: Option<std::sync::Arc<crate::dai::Dai>>,
     /// Generation of the DAI lookup in flight (`None` = none pending).
     dai_req: Option<u64>,
+    /// A DAI file the user named for this media (`--dai N=PATH`), read instead
+    /// of looking for one by name. Kept across reloads.
+    dai_file: Option<PathBuf>,
     /// The Transformations panel's **with DAI** toggle: add the DAI's camera
     /// rotation (per frame) to the display rotation. On by default; only shown
     /// — and only effective — when the DAI carries one. Per pane, not part of

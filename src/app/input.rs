@@ -106,6 +106,7 @@ impl CimApp {
                 // selected pane).
                 self.show_transform = !self.show_transform;
             }
+            Action::ToggleDai => self.dai_panel.show = !self.dai_panel.show,
             Action::ToggleExport => self.toggle_export(),
             Action::OpenCompute => self.deferred.push(Deferred::CreateCompute),
             Action::PlayPause => self.playback.playing = !self.playback.playing,

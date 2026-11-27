@@ -100,7 +100,7 @@ impl CimApp {
             if self.any_dai()
                 && ui
                     .selectable_label(self.dai_panel.show, t!("toolbar.dai"))
-                    .on_hover_text(t!("toolbar.dai_hover"))
+                    .on_hover_text(self.hover_for(Action::ToggleDai, &t!("toolbar.dai_hover")))
                     .clicked()
             {
                 self.dai_panel.show = !self.dai_panel.show;

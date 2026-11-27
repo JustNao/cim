@@ -482,6 +482,7 @@ action.open_files: Ouvrir des fichiers…
 action.toggle_settings: Afficher / masquer les réglages
 action.toggle_manager: Afficher / masquer le gestionnaire de médias
 action.toggle_vis: Afficher / masquer le panneau Transformations
+action.toggle_dai: Afficher / masquer la fenêtre DAI
 action.toggle_export: Afficher / masquer le panneau d'export
 action.open_compute: Ajouter un panneau de calcul
 action.play_pause: Lecture / pause des séquences
@@ -628,6 +629,9 @@ cli.help: |
                                  (-180..180)
           --dai-rotate <B,B,...>   Ajout de la rotation caméra DAI par panneau
                                  (1/0, défaut 1)
+          --dai <[N=]CHEMIN>       Lire la DAI du panneau N dans CHEMIN (csv / yaml /
+                                 dai / dai2) au lieu de la chercher (répétable) ;
+                                 sans N=, celle de tous les médias
           --control <N>            Média Contrôle : source des bornes partagées
                                  (+ timeline si c'est une séquence)
           --loop <LO,HI>           Plage de boucle inclusive (à partir de 0)

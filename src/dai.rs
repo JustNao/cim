@@ -277,6 +277,8 @@ pub fn yaml_entries(text: &str) -> Result<Vec<(String, YamlEntry)>, String> {
     let mut stack: Vec<(usize, String)> = Vec::new();
     // The entry a block sequence may follow: (index in `out`, items, indent).
     let mut list: Option<(usize, Vec<String>, usize)> = None;
+    // The first line that isn't `key: value`, for the error when nothing is.
+    let mut skipped: Option<usize> = None;
     let flush = |list: &mut Option<(usize, Vec<String>, usize)>,
                  out: &mut Vec<(String, YamlEntry)>| {
         // An item-less "list" was a nested mapping's parent: it stays empty.
@@ -296,18 +298,22 @@ pub fn yaml_entries(text: &str) -> Result<Vec<(String, YamlEntry)>, String> {
             .strip_prefix('-')
             .filter(|r| r.is_empty() || r.starts_with(' '))
         {
-            match &mut list {
-                Some((_, items, li)) if indent >= *li => {
+            if let Some((_, items, li)) = &mut list {
+                if indent >= *li {
                     items.push(unquote(item.trim()).to_string());
-                    continue;
                 }
-                _ => return Err(format!("line {}: unexpected list item", n + 1)),
             }
+            // A list item anywhere else (an item of a list of mappings, after
+            // its first key) is past this subset: skipped, not fatal — one
+            // unusual record must not cost a whole file its other keys.
+            continue;
         }
-        flush(&mut list, &mut out);
         let Some((key, value)) = split_yaml_key(trimmed) else {
-            return Err(format!("line {}: expected 'key: value'", n + 1));
+            // A continuation line, a multi-line scalar, …: skipped likewise.
+            skipped.get_or_insert(n + 1);
+            continue;
         };
+        flush(&mut list, &mut out);
         while stack.last().is_some_and(|(i, _)| *i >= indent) {
             stack.pop();
         }
@@ -342,7 +348,10 @@ pub fn yaml_entries(text: &str) -> Result<Vec<(String, YamlEntry)>, String> {
         out.push((full, entry));
     }
     flush(&mut list, &mut out);
-    Ok(out)
+    match (out.is_empty(), skipped) {
+        (true, Some(n)) => Err(format!("line {n}: expected 'key: value'")),
+        _ => Ok(out),
+    }
 }
 
 /// The csv's header line and its index (see [`Table::parse_csv`]).
@@ -572,7 +581,11 @@ impl Dai {
     pub fn row_of(&self, media: &Media, frame: usize) -> Option<(&Table, usize)> {
         let (file, page) = match media.local_file(frame) {
             Some((path, page)) => (self.paths.iter().position(|p| p == path)?, page),
-            None => (0, frame), // a single file: the frame is its page
+            // A single file: the frame is its page. A media of several files
+            // that can't place the frame (a concatenation not yet discovered
+            // that far) has no DAI for it — not the first file's.
+            None if self.paths.len() <= 1 => (0, frame),
+            None => return None,
         };
         match *self.files.get(file)? {
             Binding::None => None,
@@ -853,11 +866,44 @@ pub fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
     best.into_iter().max().filter(|&b| b > NO)
 }
 
+/// Bind one DAI file the user named (`--dai N=PATH`) to the whole media made
+/// of `paths`, instead of looking for one by name: a csv's rows are the
+/// media's frames from the first (row `k` = frame `k`, across all its files),
+/// a yaml describes every frame. Unlike the automatic lookup, a file that
+/// can't be read is always reported — it was asked for.
+pub fn load_file(dai: &Path, paths: &[PathBuf]) -> Loaded {
+    match read_table(dai) {
+        Ok(t) => {
+            let binding = match t.kind {
+                Kind::Yaml => Binding::Record(0),
+                Kind::Csv => Binding::Rows {
+                    table: 0,
+                    first_file: 0,
+                },
+            };
+            Loaded {
+                dai: Some(Dai::new(
+                    paths.to_vec(),
+                    vec![binding; paths.len().max(1)],
+                    vec![t],
+                )),
+                errors: Vec::new(),
+            }
+        }
+        Err(e) => Loaded {
+            dai: None,
+            errors: vec![format!("{}: {e}", dai.display())],
+        },
+    }
+}
+
 struct LoadJob {
     id: u64,
     gen: u64,
     paths: Vec<PathBuf>,
     sequence: bool,
+    /// A DAI file named by the user, used instead of the lookup by name.
+    file: Option<PathBuf>,
 }
 
 /// A finished DAI lookup for pane `id`, generation `gen`.
@@ -881,7 +927,10 @@ impl DaiLoader {
         let (done_tx, done_rx) = channel::<DaiDone>();
         thread::spawn(move || {
             while let Ok(job) = job_rx.recv() {
-                let Loaded { dai, errors } = load(&job.paths, job.sequence);
+                let Loaded { dai, errors } = match &job.file {
+                    Some(f) => load_file(f, &job.paths),
+                    None => load(&job.paths, job.sequence),
+                };
                 let done = DaiDone {
                     id: job.id,
                     gen: job.gen,
@@ -897,12 +946,20 @@ impl DaiLoader {
         Self { job_tx, done_rx }
     }
 
-    pub fn request(&self, id: u64, gen: u64, paths: Vec<PathBuf>, sequence: bool) {
+    pub fn request(
+        &self,
+        id: u64,
+        gen: u64,
+        paths: Vec<PathBuf>,
+        sequence: bool,
+        file: Option<PathBuf>,
+    ) {
         let _ = self.job_tx.send(LoadJob {
             id,
             gen,
             paths,
             sequence,
+            file,
         });
     }
 
@@ -975,6 +1032,33 @@ mod tests {
         assert_eq!(decode_text(&be), s);
         assert_eq!(decode_text(b"\xEF\xBB\xBFa;b"), "a;b");
         assert_eq!(decode_text(b"a;\xE9"), "a;é"); // Latin-1
+    }
+
+    /// Structure past the subset (a list of mappings, a block scalar) skips
+    /// those lines instead of failing the file, so its other keys still load.
+    #[test]
+    fn yaml_beyond_the_subset_keeps_the_rest() {
+        let text = "\
+cam:
+  roll: 0.25
+points:
+  - x: 1
+    y: 2
+  - x: 3
+    y: 4
+note: |
+  free text
+  over lines
+after: 7
+";
+        let t = Table::parse_yaml("x.dai2".into(), text).unwrap();
+        let get = |k: &str| t.columns.iter().position(|c| c == k).map(|c| &t.rows[0][c]);
+        assert_eq!(get("cam.roll"), Some(&Value::Float(0.25)));
+        assert_eq!(get("after"), Some(&Value::Int(7)));
+        assert_eq!(
+            t.rotation_col,
+            t.columns.iter().position(|c| c == "cam.roll")
+        );
     }
 
     #[test]
@@ -1182,6 +1266,80 @@ mod tests {
             dai.rotation_deg(&media, 1),
             Some(0.1f64.to_degrees() as f32)
         );
+    }
+
+    /// A folder where a few images have no DAI file of their own: the others
+    /// keep theirs — as a still run, and as a run of one-page TIFFs (a
+    /// concatenation, whose frames are discovered lazily).
+    #[test]
+    fn images_without_dai_leave_the_others_theirs() {
+        let dir = fixture_dir("dai_gaps_png");
+        let files = write_png_run(&dir, 4, 4, 4);
+        for k in [0usize, 1, 3] {
+            let stem = files[k].file_stem().unwrap().to_str().unwrap();
+            std::fs::write(
+                dir.join(format!("{stem}.dai2")),
+                format!("cam:\n  roll: {k}\n"),
+            )
+            .unwrap();
+        }
+        let media = crate::media::load_sequence(&files, "run".into()).unwrap();
+        let dai = load(&files, true).dai.unwrap();
+        let deg = |k: f64| Some(k.to_degrees() as f32);
+        assert_eq!(dai.rotation_deg(&media, 0), deg(0.0));
+        assert_eq!(dai.rotation_deg(&media, 1), deg(1.0));
+        assert_eq!(dai.rotation_deg(&media, 2), None);
+        assert_eq!(dai.rotation_deg(&media, 3), deg(3.0));
+
+        let dir = fixture_dir("dai_gaps_tif");
+        let tifs: Vec<PathBuf> = (0..4)
+            .map(|k| dir.join(format!("img_{k:03}.tif")))
+            .collect();
+        for (k, t) in tifs.iter().enumerate() {
+            write_multipage_tiff_u16(t, &[[4, 4]]);
+            if k != 2 {
+                std::fs::write(
+                    dir.join(format!("img_{k:03}.dai2")),
+                    format!("cam:\n  roll: {k}\n"),
+                )
+                .unwrap();
+            }
+        }
+        let mut media = crate::media::load_sequence(&tifs, "run".into()).unwrap();
+        let dai = load(&tifs, true).dai.unwrap();
+        // An undiscovered frame has no file yet, so no DAI — not file 0's.
+        assert_eq!(dai.rotation_deg(&media, 0), deg(0.0));
+        assert_eq!(dai.rotation_deg(&media, 1), None);
+        // Discover the run as the frontier probes do: each one-page file ends,
+        // rolling on to the next file's page 0.
+        while media.frame_count() < 4 {
+            let n = media.frame_count();
+            media.frontier_ended(n);
+            media.note_frontier(n);
+        }
+        assert_eq!(dai.rotation_deg(&media, 0), deg(0.0));
+        assert_eq!(dai.rotation_deg(&media, 1), deg(1.0));
+        assert_eq!(dai.rotation_deg(&media, 2), None); // no file of its own
+        assert_eq!(dai.rotation_deg(&media, 3), deg(3.0));
+    }
+
+    /// A DAI file named by hand covers the whole media: csv rows are frames.
+    #[test]
+    fn a_named_dai_file_binds_to_every_frame() {
+        let dir = fixture_dir("dai_named");
+        let files = write_png_run(&dir, 3, 4, 4);
+        let csv = dir.join("elsewhere.csv");
+        std::fs::write(&csv, "camRotation;\n0;\n1;\n2;\n").unwrap();
+        let media = crate::media::load_sequence(&files, "run".into()).unwrap();
+        let dai = load_file(&csv, &files).dai.unwrap();
+        for k in 0..3 {
+            assert_eq!(
+                dai.rotation_deg(&media, k),
+                Some((k as f64).to_degrees() as f32)
+            );
+        }
+        let missing = load_file(&dir.join("nope.csv"), &files);
+        assert!(missing.dai.is_none() && missing.errors.len() == 1);
     }
 
     #[test]
