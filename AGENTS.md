@@ -1251,7 +1251,7 @@ across a spread of percentiles.
 `ViewTransform` (`view.rs`): `{ zoom, center (image-space), needs_fit }` with `fit`,
 `actual_size`, `img_to_screen`/`screen_to_img`, `image_rect`, `zoom_at`, `pan`; zoom
 clamps to `[1e-4, 512]`. The toolbar shows the zoom as a **factor** (`fmt_zoom`: `x2`, `x1.5`,
-`x1/4`) in a typeable field (`zoom_edit`; `parse_zoom` takes `x4`, `1/2`, `0.25`, `300%`),
+`x0.8`, `x0.33` — two significant digits below 1) in a typeable field (`zoom_edit`; `parse_zoom` takes `x4`, `1/2`, `0.25`, `300%`),
 applied about the view centre on Enter / focus loss; the button beside it is `x1` (actual size). A fit (first draw, **Fit** / ResetView) is `fit_within(img,
 cell, unobscured(cell, header))`: sized to the part of the cell the toolbar, the pane
 header (not in A/B) and the frame bar leave uncovered, with the centre offset so the

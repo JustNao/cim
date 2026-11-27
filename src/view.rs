@@ -87,8 +87,8 @@ impl ViewTransform {
 }
 
 /// The zoom as a magnification factor, as the toolbar shows it: `x2`, `x1.5`,
-/// `x1` when magnified (or 1:1), and `x1/4`, `x1/2.5` when minified — so the
-/// number reads as "how many times" either way, rather than a percentage.
+/// `x1`, and below 1 a decimal to two significant digits — `x0.8`, `x0.33`,
+/// `x0.04` — rather than a percentage.
 pub fn fmt_zoom(zoom: f32) -> String {
     fn short(v: f32) -> String {
         let r = (v * 100.0).round() / 100.0;
@@ -101,7 +101,12 @@ pub fn fmt_zoom(zoom: f32) -> String {
     if zoom >= 0.995 {
         format!("x{}", short(zoom))
     } else {
-        format!("x1/{}", short(1.0 / zoom))
+        // Two significant digits however small: 0.8 → 1 decimal place's worth
+        // of leading zeros + 1, 0.04 → 3 decimals.
+        let decimals = (1 - zoom.log10().floor() as i32).max(1) as usize;
+        let s = format!("{zoom:.decimals$}");
+        let s = s.trim_end_matches('0');
+        format!("x{}", s.strip_suffix('.').unwrap_or(s))
     }
 }
 
@@ -152,8 +157,12 @@ mod tests {
         assert_eq!(fmt_zoom(1.0), "x1");
         assert_eq!(fmt_zoom(2.0), "x2");
         assert_eq!(fmt_zoom(1.5), "x1.5");
-        assert_eq!(fmt_zoom(0.25), "x1/4");
-        assert_eq!(fmt_zoom(0.4), "x1/2.5");
+        assert_eq!(fmt_zoom(0.25), "x0.25");
+        assert_eq!(fmt_zoom(0.4), "x0.4");
+        assert_eq!(fmt_zoom(0.8), "x0.8");
+        assert_eq!(fmt_zoom(1.0 / 3.0), "x0.33");
+        assert_eq!(fmt_zoom(0.04), "x0.04");
+        assert_eq!(fmt_zoom(0.00417), "x0.0042");
         for z in [1.0, 2.0, 1.5, 0.25, 0.4, 8.0] {
             assert_eq!(parse_zoom(&fmt_zoom(z)), Some(z));
         }
