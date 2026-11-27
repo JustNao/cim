@@ -275,7 +275,7 @@ export.label_size_hover: Text height in output pixels (independent of zoom)
 export.label_background: Background
 export.label_position: Position
 export.label_margin: Margin
-export.label_preview: Preview
+export.preview: Preview
 export.anchor_top_left: Top left
 export.anchor_top_center: Top centre
 export.anchor_top_right: Top right

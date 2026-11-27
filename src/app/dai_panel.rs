@@ -75,7 +75,13 @@ impl CimApp {
             .id(egui::Id::new("dai_panel"))
             .open(&mut open)
             .resizable(true)
-            .default_size(Vec2::new(900.0, 480.0))
+            // Opened from the top like the other tool windows, and no taller
+            // than the screen leaves room for: centred, it overflowed the bottom.
+            .default_pos(window_pos(ctx, 900.0))
+            .default_size(Vec2::new(
+                900.0,
+                (ctx.screen_rect().height() * 0.6).min(480.0),
+            ))
             .show(ctx, |ui| {
                 let Some(i) = idx else {
                     ui.label(t!("dai.none"));

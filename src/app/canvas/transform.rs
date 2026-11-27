@@ -157,7 +157,7 @@ pub(super) fn paint_rotated(painter: &egui::Painter, id: TextureId, rect: Rect, 
 /// the image (the adaptive viewport region) needs — rotating it about its own
 /// centre would tear it away from the base underneath, so it rotates about the
 /// whole image's screen pivot (the base rect's centre) and stays contiguous.
-pub(super) fn paint_rotated_about(
+pub(in crate::app) fn paint_rotated_about(
     painter: &egui::Painter,
     id: TextureId,
     rect: Rect,

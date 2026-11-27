@@ -286,7 +286,7 @@ export.label_size_hover: Hauteur du texte en pixels de sortie (indépendante du 
 export.label_background: Fond
 export.label_position: Position
 export.label_margin: Marge
-export.label_preview: Aperçu
+export.preview: Aperçu
 export.anchor_top_left: En haut à gauche
 export.anchor_top_center: En haut au centre
 export.anchor_top_right: En haut à droite

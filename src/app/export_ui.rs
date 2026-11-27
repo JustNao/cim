@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use super::canvas::paint_rotated_about;
 use super::*;
 
 /// An in-progress export: a worker thread that owns the encoder + snapshotted
@@ -1380,75 +1381,52 @@ impl CimApp {
                     .suffix(" px"),
             );
         });
-
-        ui.add_space(4.0);
-        self.draw_label_preview(ui, &rows);
     }
 
-    /// Overlay pane `idx`'s adaptive viewport region on the label preview.
-    ///
-    /// `dest` is where the pane's image is drawn in the preview box and `shown`
-    /// the image-space rect it represents, so the region's own image rect maps
-    /// into `dest` by the same linear fit. Clipped to the intersection, so a
-    /// region that only partly covers the previewed rect (a crop reaching past
-    /// the viewport) leaves the base showing through the rest rather than
-    /// stretching over it. Axis-aligned: the preview shows the exported
-    /// composition, which is never drawn rotated.
-    fn paint_preview_region(&self, painter: &egui::Painter, idx: usize, dest: Rect, shown: Rect) {
-        let Some((tex, img)) = self.region_of(idx) else {
-            return;
-        };
-        let vis = img.intersect(shown);
-        if !vis.is_positive() || !shown.is_positive() {
-            return;
-        }
-        // Image space -> preview space, and image space -> the region's own UVs.
-        let map = |p: Pos2, from: Rect, to: Rect| {
-            Pos2::new(
-                to.min.x + (p.x - from.min.x) / from.width() * to.width(),
-                to.min.y + (p.y - from.min.y) / from.height() * to.height(),
-            )
-        };
-        let unit = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        painter.add(egui::Shape::image(
-            tex,
-            Rect::from_min_max(map(vis.min, shown, dest), map(vis.max, shown, dest)),
-            Rect::from_min_max(map(vis.min, img, unit), map(vis.max, img, unit)),
-            Color32::WHITE,
-        ));
-    }
-    /// A small mock of one exported cell: the media's own image with the label
-    /// drawn over it, using the same anchor / margin / padding maths as
-    /// `ExportPlan::draw_labels`, scaled to the preview. Not a re-run of the
-    /// compositor — just enough to see where the text lands and how it reads.
-    fn draw_label_preview(&mut self, ui: &mut egui::Ui, rows: &[(usize, u64)]) {
-        if rows.is_empty() {
-            return;
-        }
+    /// The panel's right column: a **Preview** header with the media picker,
+    /// then a small mock of that media's exported cell — its own image, turned
+    /// by the pane's rotation as the export turns it, with the label (when
+    /// **Add names** is on) drawn using the same anchor / margin / padding maths
+    /// as `ExportPlan::draw_labels`, scaled to the preview. Not a re-run of the
+    /// compositor — just enough to see what lands where and how it reads.
+    fn draw_export_preview(&mut self, ui: &mut egui::Ui) {
+        const PREVIEW_W: f32 = 300.0;
+        ui.set_width(PREVIEW_W);
+        // Only the media that actually end up in the output, in output order.
+        let rows: Vec<(usize, u64)> = self
+            .export_participants()
+            .into_iter()
+            .map(|i| (i, self.panes[i].id))
+            .collect();
         // Which media to preview (defaults to the first exported one).
         let mut idx = rows
             .iter()
             .find(|(_, id)| Some(*id) == self.export.label_preview)
-            .map_or(rows[0].0, |(i, _)| *i);
-        if rows.len() > 1 {
-            ui.horizontal(|ui| {
-                ui.label(t!("export.label_preview"));
+            .map(|(i, _)| *i)
+            .or(rows.first().map(|r| r.0));
+        ui.horizontal(|ui| {
+            ui.strong(t!("export.preview"));
+            if let (Some(cur), true) = (idx, rows.len() > 1) {
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("exp_label_preview")
-                    .selected_text(ellipsize(&self.pane_name(idx), 24))
+                    .selected_text(ellipsize(&self.pane_name(cur), 24))
                     .show_ui(ui, |ui| {
-                        for &(i, _) in rows {
+                        for &(i, _) in &rows {
                             if ui
-                                .selectable_label(i == idx, ellipsize(&self.label_text(i), 30))
+                                .selectable_label(i == cur, ellipsize(&self.label_text(i), 30))
                                 .clicked()
                             {
-                                idx = i;
+                                idx = Some(i);
                             }
                         }
                     });
-            });
-            self.export.label_preview = Some(self.panes[idx].id);
-        }
+            }
+        });
+        let Some(idx) = idx else {
+            ui.label(egui::RichText::new(t!("export.labels_no_media")).weak());
+            return;
+        };
+        self.export.label_preview = Some(self.panes[idx].id);
 
         // Preview box, in the exported cell's aspect so the placement is honest.
         // With a crop selected it mirrors the region: the box takes the crop's
@@ -1463,7 +1441,7 @@ impl CimApp {
         // The box *is* the pane's label rect, so the anchor maths below is the
         // compositor's, unscaled.
         let aspect = (g.label.width() / g.label.height().max(1e-6)).clamp(0.1, 10.0);
-        let w = ui.available_width().clamp(80.0, 300.0);
+        let w = PREVIEW_W;
         let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / aspect), Sense::hover());
         let painter = ui.painter_at(rect);
         // Composition space → the preview box.
@@ -1474,23 +1452,24 @@ impl CimApp {
         let to_prev = |p: Pos2| rect.min + (p - g.label.min) * k;
         let dest = Rect::from_min_max(to_prev(g.image.min), to_prev(g.image.max));
         let dsz = self.disp_size(idx);
-        let (iw, ih) = (dsz[0].max(1) as f32, dsz[1].max(1) as f32);
-        let uv = Rect::from_min_max(
-            Pos2::new(
-                (g.uv.min.x / iw).clamp(0.0, 1.0),
-                (g.uv.min.y / ih).clamp(0.0, 1.0),
-            ),
-            Pos2::new(
-                (g.uv.max.x / iw).clamp(0.0, 1.0),
-                (g.uv.max.y / ih).clamp(0.0, 1.0),
-            ),
+        // Image space → the preview: `g.uv` (the image rect shown) fills `dest`.
+        let img_to_prev = img_to_preview(g.uv, dest);
+        let whole = Rect::from_min_max(
+            img_to_prev(Pos2::ZERO),
+            img_to_prev(Pos2::new(dsz[0] as f32, dsz[1] as f32)),
         );
+        // The export turns each pane about its image centre (`ExportPane`'s
+        // `unrotate`, user angle + DAI), so the preview does too — the whole image
+        // drawn turned about that centre and clipped to the cell, which is what
+        // sampling the turned image through the cell gives.
+        let theta = self.pane_theta(idx);
+        let pivot = whole.center();
         // Any part of the cell the image doesn't reach is background in the
-        // output too (the A/B case), so show it as such rather than stretching.
+        // output too (the A/B case, a turned image's corners), so show it as such.
         painter.rect_filled(rect, 0.0, Color32::from_gray(24));
         match self.pane_texture(idx) {
             Some(tex) => {
-                painter.add(egui::Shape::image(tex, dest, uv, Color32::WHITE));
+                paint_rotated_about(&painter, tex, whole, theta, pivot);
                 // Under adaptive rendering the pane texture above is the
                 // `BASE_MAX`-capped base, so on its own the preview turned
                 // pixelated the moment the mode engaged — at a perfectly
@@ -1499,7 +1478,10 @@ impl CimApp {
                 // sharp viewport region over it exactly as the canvas does. The
                 // previewed rect is the pane's visible content, which is what the
                 // region is sized to cover, so this is normally the whole box.
-                self.paint_preview_region(&painter, idx, dest, g.uv);
+                if let Some((tex, img)) = self.region_of(idx) {
+                    let r = Rect::from_min_max(img_to_prev(img.min), img_to_prev(img.max));
+                    paint_rotated_about(&painter, tex, r, theta, pivot);
+                }
             }
             // No committed texture yet (still decoding): a flat plate still shows
             // where the label lands.
@@ -1508,6 +1490,9 @@ impl CimApp {
             }
         };
 
+        if !self.config.export.labels_on {
+            return;
+        }
         // Same geometry as the export, scaled by the preview's share of the
         // output height, so the label keeps its true relative size.
         let st = self.config.export.label_style;
@@ -1562,249 +1547,266 @@ impl CimApp {
 
         egui::Window::new(t!("export.title"))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 560.0))
             .resizable(true)
             .default_width(240.0)
             .show(ctx, |ui| {
-                if ui
-                    .add_enabled(!running, egui::Button::new(t!("export.import")))
-                    .on_hover_text(t!("export.import_hover"))
-                    .clicked()
-                {
-                    self.import_export_command();
-                }
-                ui.separator();
-                ui.add_enabled_ui(!running, |ui| {
-                    egui::Grid::new("export_grid")
-                        .num_columns(2)
-                        .spacing([12.0, 8.0])
-                        .show(ui, |ui| {
-                            ui.label(t!("export.layout"));
-                            egui::ComboBox::from_id_salt("exp_layout")
-                                .selected_text(match self.export.mode {
-                                    Mode::Grid => t!("export.layout_grid"),
-                                    Mode::Single => t!("toolbar.single"),
-                                    Mode::Ab => t!("export.layout_ab"),
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.export.mode,
-                                        Mode::Grid,
-                                        t!("export.layout_grid"),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.export.mode,
-                                        Mode::Single,
-                                        t!("toolbar.single"),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.export.mode,
-                                        Mode::Ab,
-                                        t!("export.layout_ab"),
-                                    );
-                                });
-                            ui.end_row();
-
-                            ui.label(t!("export.region"));
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .button(t!("export.select"))
-                                    .on_hover_text(t!("export.select_hover"))
-                                    .clicked()
-                                {
-                                    // Pick the crop on one image: force Single
-                                    // view for the drag, restore after.
-                                    if self.mode != Mode::Single {
-                                        self.export.pre_select_mode = Some(self.mode);
-                                        self.mode = Mode::Single;
-                                    }
-                                    self.export.selecting = true;
-                                }
-                                let has = self.export.region.is_some();
-                                if ui
-                                    .add_enabled(has, egui::Button::new(t!("export.full_view")))
-                                    .clicked()
-                                {
-                                    self.export.region = None;
-                                }
-                                match self.export.region {
-                                    Some(r) => ui.label(format!(
-                                        "{}×{} px",
-                                        r.width().round() as u32,
-                                        r.height().round() as u32
-                                    )),
-                                    None => ui.label(t!("export.region_full")),
-                                };
-                            });
-                            ui.end_row();
-
-                            ui.label(t!("export.frames"));
-                            ui.horizontal(|ui| {
-                                let mut all = self.export.range.is_none();
-                                if ui.checkbox(&mut all, t!("export.frames_all")).changed() {
-                                    self.export.range = if all { None } else { Some((0, tl - 1)) };
-                                }
-                                if let Some((s, e)) = self.export.range {
-                                    // 0-based inclusive (matches the transport bar).
-                                    let (mut s0, mut e0) = (s, e);
-                                    ui.add(
-                                        egui::DragValue::new(&mut s0)
-                                            .range(0..=e0)
-                                            .prefix(format!("{} ", t!("export.frames_from"))),
-                                    );
-                                    ui.add(
-                                        egui::DragValue::new(&mut e0)
-                                            .range(s0..=(tl - 1))
-                                            .prefix(format!("{} ", t!("export.frames_to"))),
-                                    );
-                                    self.export.range = Some((s0, e0));
-                                }
-                                // Adopt the current playback loop window, but with
-                                // the end **exclusive** — a loop [20, 40] exports
-                                // frames 20..40 (20 frames), not through 40.
-                                let (llo, lhi) = self.loop_bounds(tl);
-                                if ui
-                                    .add_enabled(
-                                        self.playback.loop_range.is_some(),
-                                        egui::Button::new(t!("export.use_loop")),
-                                    )
-                                    .on_hover_text(t!("export.use_loop_hover"))
-                                    .clicked()
-                                {
-                                    self.export.range = Some((llo, lhi.saturating_sub(1).max(llo)));
-                                }
-                            });
-                            ui.end_row();
-
-                            ui.label(t!("export.out_height"));
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::DragValue::new(&mut self.export.out_height)
-                                        .range(120..=2160),
-                                );
-                                if ui.button(t!("export.out_height_view")).clicked() {
-                                    self.export.out_height = region.height().round() as u32;
-                                }
-                                ui.monospace(format!("→ {out_w}×{out_h}"));
-                            });
-                            ui.end_row();
-
-                            ui.label(t!("export.compression"));
-                            ui.add(
-                                egui::Slider::new(&mut self.config.export.crf, 0..=51)
-                                    .text("CRF")
-                                    .custom_formatter(|n, _| format!("{n:.0}")),
-                            );
-                            ui.end_row();
-
-                            ui.label("FPS");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config.export.fps).range(1.0..=60.0),
-                            );
-                            ui.end_row();
-
-                            ui.label(t!("export.add_labels"));
-                            ui.checkbox(&mut self.config.export.labels_on, "")
-                                .on_hover_text(t!("export.add_labels_hover"));
-                            ui.end_row();
-                        });
-                    if self.config.export.labels_on {
-                        self.draw_label_options(ui);
-                    }
-                });
-
-                // Sequence lengths are discovered lazily, so warn when the chosen
-                // range isn't fully discovered yet — but not when it already is
-                // (e.g. a loop sub-range whose frames are all known).
-                if self.export_range_incomplete() {
-                    ui.scope(|ui| {
-                        // Keep the warning (text + button) from stretching the
-                        // window wider than the preview: cap it and let the label
-                        // wrap onto as many lines as it needs.
-                        ui.set_max_width(300.0);
-                        ui.colored_label(
-                            Color32::from_rgb(240, 200, 120),
-                            t!("export.warn_incomplete"),
-                        );
-                        if self.decoding_all {
-                            if ui.button(t!("frame_bar.stop")).clicked() {
-                                self.stop_load();
-                            }
-                        } else if ui
-                            .button(t!("export.load_frames"))
-                            .on_hover_text(t!("export.load_frames_hover"))
-                            .clicked()
-                        {
-                            self.load_offsets();
-                        }
-                    });
-                }
-
-                let is_image = self.export_format() == ExportFormat::Image;
-                if is_image {
-                    ui.label(t!("export.summary_image"));
-                } else {
-                    ui.label(t!(
-                        "export.summary_video",
-                        n = total,
-                        secs = format!("{:.1}", total as f32 / self.config.export.fps.max(1.0))
-                    ));
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label(t!("export.save_as"));
-                    ui.add_enabled(
-                        !running,
-                        egui::TextEdit::singleline(&mut self.export.name).desired_width(180.0),
-                    )
-                    .on_hover_text(t!("export.save_as_hover"));
-                });
-                ui.label(
-                    egui::RichText::new(
-                        std::env::current_dir()
-                            .unwrap_or_default()
-                            .display()
-                            .to_string(),
-                    )
-                    .weak()
-                    .small(),
-                );
-
-                ui.separator();
-                if let Some(run) = &self.export.run {
-                    let done = run.progress.load(Ordering::Relaxed);
-                    ui.add(
-                        egui::ProgressBar::new(done as f32 / run.total.max(1) as f32)
-                            .text(format!("{}/{}", done, run.total)),
-                    );
-                    if ui.button(t!("compute.cancel")).clicked() {
-                        self.export.cancel = true;
-                    }
-                } else {
-                    let ready = !self.export.name.trim().is_empty();
-                    let label = match self.export_format() {
-                        ExportFormat::Image => t!("export.run_image"),
-                        ExportFormat::Tiff => t!("export.run_tiff"),
-                        ExportFormat::Video => t!("export.run_video"),
-                    };
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                            self.start_export(ctx);
-                        }
+                // Settings on the left, the preview beside them, both from the top.
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
                         if ui
-                            .add_enabled(ready, egui::Button::new(t!("export.command")))
-                            .on_hover_text(t!("export.command_hover"))
+                            .add_enabled(!running, egui::Button::new(t!("export.import")))
+                            .on_hover_text(t!("export.import_hover"))
                             .clicked()
                         {
-                            self.copy_export_command(ctx);
+                            self.import_export_command();
+                        }
+                        ui.separator();
+                        ui.add_enabled_ui(!running, |ui| {
+                            egui::Grid::new("export_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| {
+                                    ui.label(t!("export.layout"));
+                                    egui::ComboBox::from_id_salt("exp_layout")
+                                        .selected_text(match self.export.mode {
+                                            Mode::Grid => t!("export.layout_grid"),
+                                            Mode::Single => t!("toolbar.single"),
+                                            Mode::Ab => t!("export.layout_ab"),
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.export.mode,
+                                                Mode::Grid,
+                                                t!("export.layout_grid"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.export.mode,
+                                                Mode::Single,
+                                                t!("toolbar.single"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.export.mode,
+                                                Mode::Ab,
+                                                t!("export.layout_ab"),
+                                            );
+                                        });
+                                    ui.end_row();
+
+                                    ui.label(t!("export.region"));
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button(t!("export.select"))
+                                            .on_hover_text(t!("export.select_hover"))
+                                            .clicked()
+                                        {
+                                            // Pick the crop on one image: force Single
+                                            // view for the drag, restore after.
+                                            if self.mode != Mode::Single {
+                                                self.export.pre_select_mode = Some(self.mode);
+                                                self.mode = Mode::Single;
+                                            }
+                                            self.export.selecting = true;
+                                        }
+                                        let has = self.export.region.is_some();
+                                        if ui
+                                            .add_enabled(
+                                                has,
+                                                egui::Button::new(t!("export.full_view")),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.export.region = None;
+                                        }
+                                        match self.export.region {
+                                            Some(r) => ui.label(format!(
+                                                "{}×{} px",
+                                                r.width().round() as u32,
+                                                r.height().round() as u32
+                                            )),
+                                            None => ui.label(t!("export.region_full")),
+                                        };
+                                    });
+                                    ui.end_row();
+
+                                    ui.label(t!("export.frames"));
+                                    ui.horizontal(|ui| {
+                                        let mut all = self.export.range.is_none();
+                                        if ui.checkbox(&mut all, t!("export.frames_all")).changed()
+                                        {
+                                            self.export.range =
+                                                if all { None } else { Some((0, tl - 1)) };
+                                        }
+                                        if let Some((s, e)) = self.export.range {
+                                            // 0-based inclusive (matches the transport bar).
+                                            let (mut s0, mut e0) = (s, e);
+                                            ui.add(
+                                                egui::DragValue::new(&mut s0).range(0..=e0).prefix(
+                                                    format!("{} ", t!("export.frames_from")),
+                                                ),
+                                            );
+                                            ui.add(
+                                                egui::DragValue::new(&mut e0)
+                                                    .range(s0..=(tl - 1))
+                                                    .prefix(format!("{} ", t!("export.frames_to"))),
+                                            );
+                                            self.export.range = Some((s0, e0));
+                                        }
+                                        // Adopt the current playback loop window, but with
+                                        // the end **exclusive** — a loop [20, 40] exports
+                                        // frames 20..40 (20 frames), not through 40.
+                                        let (llo, lhi) = self.loop_bounds(tl);
+                                        if ui
+                                            .add_enabled(
+                                                self.playback.loop_range.is_some(),
+                                                egui::Button::new(t!("export.use_loop")),
+                                            )
+                                            .on_hover_text(t!("export.use_loop_hover"))
+                                            .clicked()
+                                        {
+                                            self.export.range =
+                                                Some((llo, lhi.saturating_sub(1).max(llo)));
+                                        }
+                                    });
+                                    ui.end_row();
+
+                                    ui.label(t!("export.out_height"));
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.export.out_height)
+                                                .range(120..=2160),
+                                        );
+                                        if ui.button(t!("export.out_height_view")).clicked() {
+                                            self.export.out_height = region.height().round() as u32;
+                                        }
+                                        ui.monospace(format!("→ {out_w}×{out_h}"));
+                                    });
+                                    ui.end_row();
+
+                                    ui.label(t!("export.compression"));
+                                    ui.add(
+                                        egui::Slider::new(&mut self.config.export.crf, 0..=51)
+                                            .text("CRF")
+                                            .custom_formatter(|n, _| format!("{n:.0}")),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("FPS");
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.config.export.fps)
+                                            .range(1.0..=60.0),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label(t!("export.add_labels"));
+                                    ui.checkbox(&mut self.config.export.labels_on, "")
+                                        .on_hover_text(t!("export.add_labels_hover"));
+                                    ui.end_row();
+                                });
+                            if self.config.export.labels_on {
+                                self.draw_label_options(ui);
+                            }
+                        });
+
+                        // Sequence lengths are discovered lazily, so warn when the chosen
+                        // range isn't fully discovered yet — but not when it already is
+                        // (e.g. a loop sub-range whose frames are all known).
+                        if self.export_range_incomplete() {
+                            ui.scope(|ui| {
+                                // Keep the warning (text + button) from stretching the
+                                // window wider than the preview: cap it and let the label
+                                // wrap onto as many lines as it needs.
+                                ui.set_max_width(300.0);
+                                ui.colored_label(
+                                    Color32::from_rgb(240, 200, 120),
+                                    t!("export.warn_incomplete"),
+                                );
+                                if self.decoding_all {
+                                    if ui.button(t!("frame_bar.stop")).clicked() {
+                                        self.stop_load();
+                                    }
+                                } else if ui
+                                    .button(t!("export.load_frames"))
+                                    .on_hover_text(t!("export.load_frames_hover"))
+                                    .clicked()
+                                {
+                                    self.load_offsets();
+                                }
+                            });
+                        }
+
+                        let is_image = self.export_format() == ExportFormat::Image;
+                        if is_image {
+                            ui.label(t!("export.summary_image"));
+                        } else {
+                            ui.label(t!(
+                                "export.summary_video",
+                                n = total,
+                                secs = format!(
+                                    "{:.1}",
+                                    total as f32 / self.config.export.fps.max(1.0)
+                                )
+                            ));
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label(t!("export.save_as"));
+                            ui.add_enabled(
+                                !running,
+                                egui::TextEdit::singleline(&mut self.export.name)
+                                    .desired_width(180.0),
+                            )
+                            .on_hover_text(t!("export.save_as_hover"));
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                std::env::current_dir()
+                                    .unwrap_or_default()
+                                    .display()
+                                    .to_string(),
+                            )
+                            .weak()
+                            .small(),
+                        );
+
+                        ui.separator();
+                        if let Some(run) = &self.export.run {
+                            let done = run.progress.load(Ordering::Relaxed);
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / run.total.max(1) as f32)
+                                    .text(format!("{}/{}", done, run.total)),
+                            );
+                            if ui.button(t!("compute.cancel")).clicked() {
+                                self.export.cancel = true;
+                            }
+                        } else {
+                            let ready = !self.export.name.trim().is_empty();
+                            let label = match self.export_format() {
+                                ExportFormat::Image => t!("export.run_image"),
+                                ExportFormat::Tiff => t!("export.run_tiff"),
+                                ExportFormat::Video => t!("export.run_video"),
+                            };
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
+                                    self.start_export(ctx);
+                                }
+                                if ui
+                                    .add_enabled(ready, egui::Button::new(t!("export.command")))
+                                    .on_hover_text(t!("export.command_hover"))
+                                    .clicked()
+                                {
+                                    self.copy_export_command(ctx);
+                                }
+                            });
+                        }
+
+                        if !self.export.status.is_empty() {
+                            ui.label(&self.export.status);
                         }
                     });
-                }
-
-                if !self.export.status.is_empty() {
-                    ui.label(&self.export.status);
-                }
+                    ui.separator();
+                    ui.vertical(|ui| self.draw_export_preview(ui));
+                });
             });
         // Closing via the window's ✕ (rather than the toolbar toggle) must still
         // tear down an in-progress region selection, or it stays stuck on.
@@ -1852,6 +1854,17 @@ fn name_for_format(name: &str, video: bool) -> String {
     };
     let stem = if stem.is_empty() { "comparison" } else { stem };
     format!("{stem}.{}", if video { "mp4" } else { "png" })
+}
+
+/// The linear map from image space to the preview that puts the image rect
+/// `shown` exactly on `dest`.
+fn img_to_preview(shown: Rect, dest: Rect) -> impl Fn(Pos2) -> Pos2 {
+    move |p| {
+        Pos2::new(
+            dest.min.x + (p.x - shown.min.x) / shown.width().max(1e-6) * dest.width(),
+            dest.min.y + (p.y - shown.min.y) / shown.height().max(1e-6) * dest.height(),
+        )
+    }
 }
 
 #[cfg(test)]

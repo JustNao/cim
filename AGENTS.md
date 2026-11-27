@@ -884,9 +884,8 @@ matching crop of a full render (`region_render_matches_full_subrect`).
 preview drew `pane_texture(idx)` alone, so the moment adaptive engaged it showed the
 `BASE_MAX`-capped base — a preview that turned pixelated at an ordinary zoom for an export that
 is not pixelated at all (export renders whole-image at full resolution). It now overlays
-`region_of` through the same image-space fit (`paint_preview_region`), clipped to the
-intersection so a region that only partly covers the previewed rect leaves the base showing
-through the rest instead of stretching over it.
+`region_of` through the same image-space fit (`img_to_preview`), each drawn at its true place
+and clipped to the cell — so the region sits on the base exactly as on the canvas.
 
 `render_into` (`media/render.rs`): **U8/U16** build a value-keyed **LUT** (≤ 64 Ki)
 then table-look-up per pixel; **F32** maps arithmetically. Mono replicates grey
@@ -2251,7 +2250,11 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   coloured background fainter in the output. Labelled pixels are forced **opaque**
   so a still's `crop_to_content` never trims a label off. Because this lives in `compose`,
   MP4, still, and all three layouts get it with no per-path code.
-  The panel also shows a **preview**: the chosen media's live texture with the label drawn by
+  The panel's **right column** is a **preview** (`draw_export_preview`, top-aligned beside
+  the settings, under a *Preview* header holding the media picker): the chosen media's live
+  texture, **turned by `pane_theta`** about the image centre exactly as `ExportPane`'s
+  `unrotate` turns the export (the whole image drawn rotated and clipped to the cell; its
+  corners are background, as in the output), with — when Add names is on — the label drawn by
   the ordinary egui painter using the same anchor/margin/padding maths scaled by the
   preview's share of the output height — a faithful mock, not a re-run of the compositor.
   Its geometry comes from **`preview_geom(idx)` → `PreviewGeom`**, the live mirror of
@@ -2444,6 +2447,11 @@ per locale, `_version: 1` then `area.key: text`), baked into the binary by
   restart. The choice is `config.language`, persisted by the ordinary autosave.
 - **Not translated on purpose:** proper names (LUT_ALPHA, Boost, Details, Turbo, Viridis, MP4,
   fps), the A/B slot letters, and anything that is an identifier rather than prose.
+- **Tool windows open from the top** (`util::window_pos`): placed by their top-left
+  corner, horizontally centred, a little below the toolbar. A centre pivot kept the window's
+  *centre* fixed, so any change in content height moved its top edge (the Transformations
+  panel jumped whenever a group opened or a tone's options changed). Modals stay
+  centre-anchored.
 - **Text-sized chrome:** the pane header buttons are hand-painted at a measured width, so
   `draw_header` measures each *translated* label (`text_w`) instead of assuming the
   English one — a longer French word would otherwise clip.

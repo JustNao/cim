@@ -102,6 +102,20 @@ pub(super) fn ellipsize(s: &str, max: usize) -> String {
     }
 }
 
+/// Where a free-floating tool window first opens: horizontally centred for a
+/// window about `width` wide, its **top** a little below the toolbar. Placed by
+/// its top-left corner (egui's default pivot) on purpose: a centre pivot keeps
+/// the window's *centre* fixed, so every change in its content's height moved
+/// its top edge — the Transformations panel jumped whenever a group opened or a
+/// tone's options changed.
+pub(super) fn window_pos(ctx: &egui::Context, width: f32) -> Pos2 {
+    let screen = ctx.screen_rect();
+    Pos2::new(
+        (screen.center().x - width / 2.0).max(screen.left()),
+        screen.top() + (screen.height() * 0.12).min(120.0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -610,8 +610,7 @@ impl CimApp {
         let cmd = self.view_command();
         egui::Window::new(t!("viewcmd.title"))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 560.0))
             .resizable(true)
             .default_width(560.0)
             .show(ctx, |ui| {
@@ -644,8 +643,7 @@ impl CimApp {
         let mut open = self.show_debug;
         egui::Window::new(t!("debug.title"))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 440.0))
             .resizable(true)
             .default_width(440.0)
             .show(ctx, |ui| {
@@ -731,8 +729,7 @@ impl CimApp {
 
         egui::Window::new(format!("☰ {}", t!("manager.title")))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 560.0))
             // Width stays user-resizable, but let the height auto-size so the
             // window grows to include every media row (the inner ScrollArea only
             // kicks in once the list is taller than the screen).
@@ -1365,8 +1362,7 @@ impl CimApp {
         let mut open = self.show_settings;
         egui::Window::new(format!("⚙ {}", t!("settings.title")))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 240.0))
             .resizable(true)
             // Start narrow and let the content widen it, like the Export panel:
             // a resizable window only ever *grows* to its content (egui's

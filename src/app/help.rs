@@ -55,8 +55,7 @@ impl CimApp {
         let mut open = self.show_help;
         egui::Window::new(format!("❓ {}", t!("help.title")))
             .open(&mut open)
-            .default_pos(ctx.screen_rect().center())
-            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(window_pos(ctx, 620.0))
             .resizable(true)
             .default_width(620.0)
             .default_height(560.0)
