@@ -2265,11 +2265,13 @@ reads the right pixels. Any still is additionally `crop_to_content`-trimmed, and
   coloured background fainter in the output. Labelled pixels are forced **opaque**
   so a still's `crop_to_content` never trims a label off. Because this lives in `compose`,
   MP4, still, and all three layouts get it with no per-path code.
-  The panel's **right column** is a **preview** (`draw_export_preview`, top-aligned beside
-  the settings, under a *Preview* header holding the media picker): the chosen media's live
-  texture, **turned by `pane_theta`** about the image centre exactly as `ExportPane`'s
+  Beside the panel is a **preview** — a window of its own (`draw_export_preview_window`, an
+  `Area` docked to the panel's right edge, or its left when there's no room, top-aligned,
+  margin-free so the image runs to its edges, hidden while the panel is collapsed), under a
+  *Preview* header holding the media picker. (As a column inside the resizable panel it left
+  a wide gap between settings and preview.) It shows the chosen media's live texture, **turned by `pane_theta`** about the image centre exactly as `ExportPane`'s
   `unrotate` turns the export (the whole image drawn rotated and clipped to the cell; its
-  corners are background, as in the output), with — when Add names is on — the label drawn by
+  corners are **black** background, as in the output — unturned, the image fills the box), with — when Add names is on — the label drawn by
   the ordinary egui painter using the same anchor/margin/padding maths scaled by the
   preview's share of the output height — a faithful mock, not a re-run of the compositor.
   Its geometry comes from **`preview_geom(idx)` → `PreviewGeom`**, the live mirror of
