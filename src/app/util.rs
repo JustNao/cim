@@ -116,6 +116,20 @@ pub(super) fn window_pos(ctx: &egui::Context, width: f32) -> Pos2 {
     )
 }
 
+/// Where a `width`-wide window docked to `panel` goes: against its right edge,
+/// or its left when there is no room on the right; top-aligned with it. Shared
+/// by the export preview and the operator-parameters panel.
+pub(super) fn dock_beside(ctx: &egui::Context, panel: Rect, width: f32) -> Pos2 {
+    const GAP: f32 = 4.0;
+    let screen = ctx.screen_rect();
+    let x = if panel.right() + GAP + width <= screen.right() {
+        panel.right() + GAP
+    } else {
+        (panel.left() - GAP - width).max(screen.left())
+    };
+    Pos2::new(x, panel.top())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

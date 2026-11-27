@@ -108,7 +108,7 @@ impl CimApp {
         let mut vis_sync_changed = false;
         let mut geo_sync_changed = false;
 
-        egui::Window::new(t!("transform.title"))
+        let shown = egui::Window::new(t!("transform.title"))
             .open(&mut open)
             // Centered on first appearance each run (position then sticks for the
             // session; not persisted across runs — see `persist_egui_memory`).
@@ -174,30 +174,59 @@ impl CimApp {
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
                             ui.label(t!("transform.lut"));
-                            egui::ComboBox::from_id_salt(("opt_tone", pane_id))
-                                .selected_text(contrast.label())
-                                .width(130.0)
-                                .show_ui(ui, |ui| {
-                                    for m in ContrastMode::ORDER {
-                                        // An operator tone needs its library + a
-                                        // 16-bit frame, Raw an 8-bit one; disable
-                                        // it otherwise (unless
-                                        // it's already the pane's mode, so it stays
-                                        // visible / switchable away).
-                                        match tone_blocked(m).filter(|_| contrast != m) {
-                                            Some(why) => {
-                                                ui.add_enabled(
-                                                    false,
-                                                    egui::SelectableLabel::new(false, m.label()),
-                                                )
-                                                .on_disabled_hover_text(why);
-                                            }
-                                            None => {
-                                                ui.selectable_value(&mut contrast, m, m.label());
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt(("opt_tone", pane_id))
+                                    .selected_text(contrast.label())
+                                    .width(130.0)
+                                    .show_ui(ui, |ui| {
+                                        for m in ContrastMode::ORDER {
+                                            // An operator tone needs its library + a
+                                            // 16-bit frame, Raw an 8-bit one; disable
+                                            // it otherwise (unless
+                                            // it's already the pane's mode, so it stays
+                                            // visible / switchable away).
+                                            match tone_blocked(m).filter(|_| contrast != m) {
+                                                Some(why) => {
+                                                    ui.add_enabled(
+                                                        false,
+                                                        egui::SelectableLabel::new(
+                                                            false,
+                                                            m.label(),
+                                                        ),
+                                                    )
+                                                    .on_disabled_hover_text(why);
+                                                }
+                                                None => {
+                                                    ui.selectable_value(
+                                                        &mut contrast,
+                                                        m,
+                                                        m.label(),
+                                                    );
+                                                }
                                             }
                                         }
+                                    });
+                                // The ⚙ beside an operator tone opens its parameters
+                                // panel, docked to this one — offered when the
+                                // library exports its parameters.
+                                if let Some(op) = super::op_params_panel::tunable_op(contrast) {
+                                    let tunable = crate::imageproc::schema(op).is_some();
+                                    if ui
+                                        .add_enabled(
+                                            tunable,
+                                            egui::Button::new("⚙").selected(self.op_panel.show),
+                                        )
+                                        .on_hover_text(t!("op_params.open_hover", op = op.name()))
+                                        .on_disabled_hover_text(t!(
+                                            "op_params.unavailable",
+                                            op = op.name()
+                                        ))
+                                        .clicked()
+                                    {
+                                        self.op_panel.show = !self.op_panel.show;
                                     }
-                                });
+                                }
+                            });
                             ui.end_row();
 
                             draw_tone_options(ui, pane_id, contrast, &mut tone);
@@ -493,6 +522,15 @@ impl CimApp {
                 self.set_rotation(idx, rotation);
             }
         }
+
+        // The operator-parameters panel docks beside this one — drawn after the
+        // writeback above, so its own edits aren't overwritten by it. Not while
+        // the panel is collapsed or closed.
+        if self.op_panel.show && self.show_transform {
+            if let Some(r) = shown.filter(|r| r.inner.is_some()) {
+                self.draw_op_params_window(ctx, r.response.rect, idx);
+            }
+        }
     }
 }
 
@@ -529,8 +567,8 @@ fn draw_tone_options(ui: &mut egui::Ui, _pane_id: u64, mode: ContrastMode, tone:
             ui.end_row();
             draw_clip_and_share(ui, tone);
         }
-        // The operator tones have no options. Add a knob here: one row + a field
-        // on `ToneOptions`.
+        // The operator tones' parameters have their own panel (the ⚙ beside the
+        // tone). Add a knob here: one row + a field on `ToneOptions`.
         ContrastMode::LutAlpha | ContrastMode::Boost => {}
         // Raw is the samples as they are: nothing to set.
         ContrastMode::Raw => {}

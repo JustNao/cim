@@ -139,6 +139,11 @@ pub struct ViewState {
     /// name. Keyed by index rather than a positional list, since a name may hold
     /// any character — commas included.
     pub names: Vec<(usize, String)>,
+    /// Operator construction parameters (`--op-params N=OP:KEY=v/v,KEY=v`,
+    /// repeatable): pane index, operator id (`lut_alpha` / `boost`) and the
+    /// values by key — resolved against the library's parameters on apply,
+    /// since the CLI parses before any library loads.
+    pub op_params: Vec<(usize, String, std::collections::BTreeMap<String, Vec<f64>>)>,
     /// DAI files named for panes (`--dai N=PATH`, repeatable), read in place
     /// of the lookup by name.
     pub dai_files: Vec<(usize, PathBuf)>,
@@ -345,6 +350,16 @@ fn parse_flag(args: &[String], i: &mut usize, view: &mut ViewState) -> bool {
             if let Some((n, name)) = next(*i).and_then(|s| s.split_once('=')) {
                 if let Ok(n) = n.trim().parse() {
                     view.names.push((n, name.to_string()));
+                }
+            }
+            *i += 1;
+        }
+        "--op-params" => {
+            if let Some((n, rest)) = next(*i).and_then(|s| s.split_once('=')) {
+                if let (Ok(n), Some((op, vals))) = (n.trim().parse(), rest.split_once(':')) {
+                    if let Ok(vals) = crate::op_params::parse_token(vals) {
+                        view.op_params.push((n, op.trim().to_string(), vals));
+                    }
                 }
             }
             *i += 1;
@@ -1357,6 +1372,25 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(view.rotations, Some(vec![-90.0, 45.5]));
+    }
+
+    #[test]
+    fn parses_op_params() {
+        let args = vec![
+            "a.tif".into(),
+            "--op-params".into(),
+            "0=lut_alpha:gamma=0.6,output=12/65535".into(),
+            "--op-params".into(),
+            "bogus".into(),
+        ];
+        let Cli::Run { view, .. } = parse(args) else {
+            panic!("expected Run");
+        };
+        assert_eq!(view.op_params.len(), 1);
+        let (n, op, vals) = &view.op_params[0];
+        assert_eq!((*n, op.as_str()), (0, "lut_alpha"));
+        assert_eq!(vals["gamma"], vec![0.6]);
+        assert_eq!(vals["output"], vec![12.0, 65535.0]);
     }
 
     #[test]

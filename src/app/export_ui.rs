@@ -433,6 +433,8 @@ impl CimApp {
             if self.visual(idx).contrast == ContrastMode::Colormap {
                 pane.palette = Some(t.palette);
             }
+            // The operators' construction parameters, as the view builds them.
+            pane.op_params = t.op_params;
         }
         // Same region the live bounds are computed over (export crop → stats
         // region → none), so a region-pinned tone survives the export.
@@ -1393,15 +1395,8 @@ impl CimApp {
     /// when there's no room on the right), top-aligned with it, and framed with
     /// no margin so the image runs to its edges.
     fn draw_export_preview_window(&mut self, ctx: &egui::Context, panel: Rect) {
-        const GAP: f32 = 4.0;
-        let screen = ctx.screen_rect();
-        let x = if panel.right() + GAP + PREVIEW_W <= screen.right() {
-            panel.right() + GAP
-        } else {
-            (panel.left() - GAP - PREVIEW_W).max(screen.left())
-        };
         egui::Area::new(Id::new("export_preview"))
-            .fixed_pos(Pos2::new(x, panel.top()))
+            .fixed_pos(dock_beside(ctx, panel, PREVIEW_W))
             .show(ctx, |ui| {
                 egui::Frame::window(ui.style())
                     .inner_margin(0.0)

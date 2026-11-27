@@ -5,6 +5,8 @@ mod ab;
 mod chrome;
 mod compute_ui;
 mod line_profile;
+mod op_params_panel;
+pub(crate) use op_params_panel::{tunable_op, OpPanel};
 mod options_popup;
 mod region_edit;
 mod region_stats;

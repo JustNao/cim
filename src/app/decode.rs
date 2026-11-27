@@ -1136,6 +1136,10 @@ impl CimApp {
         // The Colormap palette changes the rendered colour.
         tone.palette.id().hash(&mut h);
         self.visual(idx).details.hash(&mut h);
+        // An operator tone's construction parameters (only the active tone's —
+        // the mapping `ops_of` hands the render).
+        let ops = self.ops_of(idx);
+        (ops.lut_alpha_params, ops.boost_params).hash(&mut h);
         let region = self.panes[idx].region_tone;
         region.hash(&mut h);
         if region {

@@ -202,6 +202,28 @@ dai.type_int: entier
 dai.type_float: réel
 dai.type_text: texte
 dai.type_empty: vide
+op_params.title: "Paramètres %{op}"
+op_params.close: Fermer
+op_params.open_hover: "Paramètres %{op} : choisir un préréglage et modifier chaque paramètre"
+op_params.unavailable: "La bibliothèque %{op} n'expose aucun paramètre"
+op_params.preset: Préréglage
+op_params.default_preset: "%{name} (par défaut)"
+op_params.user_presets: Mes préréglages
+op_params.custom: Personnalisé
+op_params.modified: "%{name} (modifié)"
+op_params.reset: Réinit.
+op_params.reset_hover: Revenir au préréglage par défaut de la bibliothèque
+op_params.rename: Nom
+op_params.rename_hover: Renommer ce préréglage
+op_params.delete_hover: Supprimer ce préréglage
+op_params.save_as: Enregistrer sous…
+op_params.save_as_hover: Enregistrer ces valeurs comme un de vos préréglages
+op_params.name_hint: Nom du préréglage
+op_params.save: Enregistrer
+op_params.save_failed: "Impossible d'enregistrer les préréglages : %{err}"
+op_params.range: "%{min} – %{max}"
+op_params.range_min: "≥ %{min}"
+op_params.range_max: "≤ %{max}"
 transform.reset: Réinit.
 transform.histogram: Histogramme
 transform.frame_not_loaded: image non chargée
@@ -621,6 +643,8 @@ cli.help: |
           --global-stats <B,B,...> Min/max de toutes les images en mémoire par panneau (1/0)
           --curve <K,K,...>        Courbe de tons par panneau : auto | VALEUR:NIVEAU/VALEUR:NIVEAU/...
           --detail <B,B,...>       Bascules de l'opérateur de détails par panneau (1/0)
+          --op-params <N=OP:K=V>   Paramètres d'opérateur du panneau N, ex. 0=lut_alpha:gamma=0.6,out=0/255 ;
+                                   à répéter par panneau
           --show <B,B,...>         Visibilité par panneau (1/0)
           --scale <B,B,...>        Mise à la taille du média Contrôle par panneau (1/0)
           --tsync <B,B,...>        Sync Visualisation par panneau (1/0)

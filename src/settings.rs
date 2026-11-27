@@ -448,7 +448,7 @@ impl Default for ClipOptions {
 
 /// Per-pane tone options. Extend by growing this struct and reading it in
 /// `stage`/`tone_bounds`/`tone_sig`/`view_command`/`export_pane`. (LUT_ALPHA and
-/// Boost have no options; they run the operator at full strength.)
+/// Boost take only their construction parameters, `op_params`.)
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct ToneOptions {
     pub clip: ClipOptions,
@@ -474,6 +474,10 @@ pub struct ToneOptions {
     /// points instead and overrides all of them — but not "Share clip", which
     /// still locks the pane to the Control's tone. Ignored by LUT_ALPHA / Boost.
     pub curve: Option<crate::curve::Curve>,
+    /// The operator tones' construction parameters, edited in the ⚙ panel
+    /// beside the tone (`op_params`): `None` per operator = the library's own
+    /// default preset. Only read by LUT_ALPHA / Boost.
+    pub op_params: crate::op_params::OpParamSel,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -645,9 +649,19 @@ impl Default for Config {
     }
 }
 
+/// The directory cim keeps its settings in (the config JSON, and the user's
+/// operator presets beside it — `op_params::UserPresets`).
+pub fn config_dir() -> Option<PathBuf> {
+    Some(
+        directories::ProjectDirs::from("dev", "cim", "cim")?
+            .config_dir()
+            .to_path_buf(),
+    )
+}
+
 impl Config {
     fn path() -> Option<PathBuf> {
-        let dirs = directories::ProjectDirs::from("dev", "cim", "cim")?;
+        let dir = config_dir()?;
         // On Linux the XDG config dir is `~/.config/cim`, so the file lands at
         // `~/.config/cim/cim.json`. Other platforms keep `config.json`.
         let name = if cfg!(target_os = "linux") {
@@ -655,7 +669,7 @@ impl Config {
         } else {
             "config.json"
         };
-        Some(dirs.config_dir().join(name))
+        Some(dir.join(name))
     }
 
     pub fn load() -> Self {

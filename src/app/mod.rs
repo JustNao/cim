@@ -1137,6 +1137,12 @@ pub struct CimApp {
     rotation_edit: String,
     rotation_edit_pane: Option<u64>,
 
+    /// The operator-parameters panel docked beside the Transformations panel
+    /// (the ⚙ next to an operator tone) and its edit state.
+    op_panel: canvas::OpPanel,
+    /// The user's own operator presets (`op_presets.json` beside the config).
+    op_presets: crate::op_params::UserPresets,
+
     /// Export-panel state (settings, region selection, running job). See [`Export`].
     export: Export,
     /// Transient notification shown top-right in the toolbar (e.g. "Settings
@@ -1426,6 +1432,8 @@ impl CimApp {
             line_hover: None,
             rotation_edit: String::new(),
             rotation_edit_pane: None,
+            op_panel: Default::default(),
+            op_presets: crate::op_params::UserPresets::load(),
 
             export: Export::default(),
             status: StatusLine::default(),
@@ -1663,12 +1671,8 @@ impl CimApp {
     /// Whether they actually *run* additionally depends on the frame and the
     /// loaded libraries: `imageproc::ops_active`.
     pub(super) fn ops_of(&self, i: usize) -> crate::imageproc::Ops {
-        crate::imageproc::Ops {
-            lut_alpha: self.visual(i).contrast == ContrastMode::LutAlpha,
-            boost: self.visual(i).contrast == ContrastMode::Boost,
-            // Raw shows the samples untouched, so not even Details runs.
-            details: self.visual(i).details && self.visual(i).contrast != ContrastMode::Raw,
-        }
+        let v = self.visual(i);
+        crate::imageproc::Ops::for_tone(v.contrast, v.details, v.tone.op_params)
     }
 
     /// Load any not-yet-loaded proprietary operator library from the configured

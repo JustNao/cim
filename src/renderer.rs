@@ -413,6 +413,7 @@ mod tests {
                 lut_alpha: true,
                 boost: true,
                 details: true,
+                ..Default::default()
             },
         };
         let mut worker = Worker::default();

@@ -192,6 +192,28 @@ dai.type_int: int
 dai.type_float: float
 dai.type_text: text
 dai.type_empty: empty
+op_params.title: "%{op} parameters"
+op_params.close: Close
+op_params.open_hover: "%{op} parameters: pick a preset and edit every parameter"
+op_params.unavailable: "The %{op} library exports no parameters"
+op_params.preset: Preset
+op_params.default_preset: "%{name} (default)"
+op_params.user_presets: My presets
+op_params.custom: Custom
+op_params.modified: "%{name} (modified)"
+op_params.reset: Reset
+op_params.reset_hover: Back to the library's default preset
+op_params.rename: Name
+op_params.rename_hover: Rename this preset
+op_params.delete_hover: Delete this preset
+op_params.save_as: Save as…
+op_params.save_as_hover: Save these values as one of your presets
+op_params.name_hint: Preset name
+op_params.save: Save
+op_params.save_failed: "Could not save the presets: %{err}"
+op_params.range: "%{min} – %{max}"
+op_params.range_min: "≥ %{min}"
+op_params.range_max: "≤ %{max}"
 transform.reset: Reset
 transform.histogram: Histogram
 transform.frame_not_loaded: frame not loaded
@@ -593,6 +615,8 @@ cli.help: |
           --global-stats <B,B,...> Per-pane min/max over all frames in memory (1/0)
           --curve <K,K,...>        Per-pane tone curve: auto | VALUE:LEVEL/VALUE:LEVEL/...
           --detail <B,B,...>       Per-pane details-operator toggles (1/0)
+          --op-params <N=OP:K=V>   Pane N's operator parameters, e.g. 0=lut_alpha:gamma=0.6,out=0/255;
+                                   repeat per pane
           --show <B,B,...>         Per-pane visibility / show-hide (1/0)
           --scale <B,B,...>        Per-pane scale to the Control media's size (1/0)
           --tsync <B,B,...>        Per-pane Visualization-sync toggles (1/0)

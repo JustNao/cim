@@ -62,7 +62,7 @@
 use std::os::raw::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 /// The C symbols each operator library exports (see the module docs):
 /// `create(width, height) -> handle`, `apply(...)`, `destroy(handle)`.
@@ -73,6 +73,23 @@ type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
 /// after-LUT 8-bit companion (read-only), both `len` samples.
 type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usize);
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
+
+/// The optional parameter ABI (`cpp/imageproc.h`, "tunable construction
+/// parameters"): mirrors `cim_param_info`.
+#[repr(C)]
+struct CParamInfo {
+    key: *const std::os::raw::c_char,
+    kind: std::os::raw::c_int,
+    len: usize,
+    min: f64,
+    max: f64,
+}
+const CIM_PARAM_INT: std::os::raw::c_int = 1;
+type CountFn = unsafe extern "C" fn() -> usize;
+type ParamInfoFn = unsafe extern "C" fn(usize, *mut CParamInfo) -> std::os::raw::c_int;
+type PresetNameFn = unsafe extern "C" fn(usize) -> *const std::os::raw::c_char;
+type PresetValuesFn = unsafe extern "C" fn(usize, *mut f64, usize) -> std::os::raw::c_int;
+type CreateWithFn = unsafe extern "C" fn(usize, usize, *const f64, usize) -> *mut c_void;
 
 /// Which operator — an index into [`OPS`] and `proprietary.yaml`'s `operators`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,6 +161,44 @@ impl Op {
         let (real, ph) = self.names();
         real.symbol.as_deref().unwrap_or(ph.symbol)
     }
+
+    /// A stable, non-proprietary id — what user presets are filed under and
+    /// the view command names the operator by.
+    pub fn id(self) -> &'static str {
+        match self {
+            Op::LutAlpha => "lut_alpha",
+            Op::Boost => "boost",
+            Op::Details => "details",
+        }
+    }
+
+    /// The operator a stable [`id`](Self::id) names.
+    pub fn from_id(id: &str) -> Option<Op> {
+        [Op::LutAlpha, Op::Boost, Op::Details]
+            .into_iter()
+            .find(|o| o.id() == id)
+    }
+
+    fn slot(self) -> &'static RwLock<Option<Operator>> {
+        match self {
+            Op::LutAlpha => &LUT_ALPHA,
+            Op::Boost => &BOOST,
+            Op::Details => &DETAILS,
+        }
+    }
+}
+
+/// The tunable parameters and presets of `op`, when its library is loaded and
+/// exports the optional parameter ABI (`None` otherwise — the ⚙ panel is then
+/// not offered).
+pub fn schema(op: Op) -> Option<Arc<crate::op_params::Schema>> {
+    op.slot()
+        .read()
+        .unwrap()
+        .as_ref()?
+        .params
+        .as_ref()
+        .map(|p| p.schema.clone())
 }
 
 /// Resolve a library file name against the optional configured directory. With a
@@ -160,7 +215,8 @@ fn resolve(dir: Option<&Path>, name: &str) -> PathBuf {
 /// The `Library` is kept alive here because the function pointers borrow from it;
 /// it unloads when this slot is cleared.
 struct Operator {
-    _lib: libloading::Library,
+    /// `None` only for the tests' in-process stand-in operator.
+    _lib: Option<libloading::Library>,
     create: CreateFn,
     /// The `<stem>_apply` symbol. LUT_ALPHA / Boost and DETAILS_ENHANCED export different
     /// `apply` signatures ([`ApplyFn`] vs [`DetailsApplyFn`]); it is stored as the
@@ -169,6 +225,14 @@ struct Operator {
     /// sound — the resolved symbol address is the same either way).
     apply: ApplyFn,
     destroy: DestroyFn,
+    /// The optional parameter ABI, when the library exports all of it.
+    params: Option<OperatorParams>,
+}
+
+/// An operator's parameter schema (copied out at load) and its `create_with`.
+struct OperatorParams {
+    schema: Arc<crate::op_params::Schema>,
+    create_with: CreateWithFn,
 }
 
 // The handles are only ever called through `&Operator` behind the `RwLock`, and
@@ -245,13 +309,75 @@ fn load_one(lib_path: &Path, stem: &str) -> anyhow::Result<Operator> {
         let apply: libloading::Symbol<ApplyFn> = lib.get(format!("{stem}_apply\0").as_bytes())?;
         let destroy: libloading::Symbol<DestroyFn> =
             lib.get(format!("{stem}_destroy\0").as_bytes())?;
+        let params = load_params(&lib, stem);
         Ok(Operator {
             create: *create,
             apply: *apply,
             destroy: *destroy,
-            _lib: lib,
+            params,
+            _lib: Some(lib),
         })
     }
+}
+
+/// Resolve the optional parameter ABI of `lib` and copy its schema out. `None`
+/// when any of the seven symbols is missing or what they report is inconsistent
+/// (see `op_params::Schema::new`) — the operator then loads without parameters,
+/// exactly as before.
+///
+/// # Safety
+/// Calls into the library per the documented ABI.
+unsafe fn load_params(lib: &libloading::Library, stem: &str) -> Option<OperatorParams> {
+    use std::ffi::CStr;
+    let sym = |name: &str| format!("{stem}_{name}\0").into_bytes();
+    let param_count: CountFn = *lib.get(&sym("param_count")).ok()?;
+    let param_info: ParamInfoFn = *lib.get(&sym("param_info")).ok()?;
+    let preset_count: CountFn = *lib.get(&sym("preset_count")).ok()?;
+    let preset_name: PresetNameFn = *lib.get(&sym("preset_name")).ok()?;
+    let preset_default: CountFn = *lib.get(&sym("preset_default")).ok()?;
+    let preset_values: PresetValuesFn = *lib.get(&sym("preset_values")).ok()?;
+    let create_with: CreateWithFn = *lib.get(&sym("create_with")).ok()?;
+    let mut params = Vec::new();
+    for i in 0..param_count() {
+        let mut info = CParamInfo {
+            key: std::ptr::null(),
+            kind: 0,
+            len: 0,
+            min: f64::NAN,
+            max: f64::NAN,
+        };
+        if param_info(i, &mut info) != 0 || info.key.is_null() {
+            return None;
+        }
+        let key = CStr::from_ptr(info.key).to_string_lossy().into_owned();
+        params.push((
+            key,
+            info.kind == CIM_PARAM_INT,
+            info.len,
+            info.min,
+            info.max,
+        ));
+    }
+    let n: usize = params.iter().map(|p| p.2).sum();
+    let mut presets = Vec::new();
+    for p in 0..preset_count() {
+        let name = preset_name(p);
+        let name = if name.is_null() {
+            format!("{}", p + 1)
+        } else {
+            CStr::from_ptr(name).to_string_lossy().into_owned()
+        };
+        let mut values = vec![0.0; n];
+        if preset_values(p, values.as_mut_ptr(), n) != 0 {
+            return None;
+        }
+        presets.push(crate::op_params::Preset { name, values });
+    }
+    let schema = crate::op_params::Schema::new(params, presets, preset_default())?;
+    Some(OperatorParams {
+        schema: Arc::new(schema),
+        create_with,
+    })
 }
 
 /// Attempt to load every operator library from `dir` (the configured library
@@ -415,6 +541,34 @@ pub struct Ops {
     pub boost: bool,
     /// Run the detail enhancement.
     pub details: bool,
+    /// LUT_ALPHA's / Boost's construction parameters (`None` = the library's
+    /// default preset, plain `create`). Part of the instance key: other values
+    /// build another instance through `create_with`.
+    pub lut_alpha_params: Option<crate::op_params::ParamsRef>,
+    pub boost_params: Option<crate::op_params::ParamsRef>,
+}
+
+impl Ops {
+    /// The operators a pane's tone asks for: its contrast mode, Details toggle
+    /// and parameter selections. The one mapping the live view (`ops_of`) and
+    /// the export (`ExportPane`) share, so they cannot ask for different ones.
+    pub fn for_tone(
+        contrast: crate::settings::ContrastMode,
+        details: bool,
+        params: crate::op_params::OpParamSel,
+    ) -> Ops {
+        use crate::settings::ContrastMode;
+        let lut_alpha = contrast == ContrastMode::LutAlpha;
+        let boost = contrast == ContrastMode::Boost;
+        Ops {
+            lut_alpha,
+            boost,
+            // Raw shows the samples untouched, so not even Details runs.
+            details: details && contrast != ContrastMode::Raw,
+            lut_alpha_params: params.lut_alpha.filter(|_| lut_alpha).map(|s| s.values),
+            boost_params: params.boost.filter(|_| boost).map(|s| s.values),
+        }
+    }
 }
 
 /// One live proprietary operator instance: the opaque C++ handle from `create`,
@@ -422,6 +576,8 @@ pub struct Ops {
 /// Owned by a single pane's worker thread; `Drop` frees the handle on that thread.
 struct Instance {
     dims: (usize, usize),
+    /// The construction parameters it was built with (`None` = plain `create`).
+    params: Option<crate::op_params::ParamsRef>,
     handle: *mut c_void,
     apply: ApplyFn,
     destroy: DestroyFn,
@@ -487,17 +643,25 @@ impl PaneOps {
     /// pixel-for-pixel.
     pub fn apply(&mut self, gray: &mut [u16], width: usize, height: usize, ops: Ops) {
         if ops.lut_alpha {
-            if let Some(inst) = Self::ensure(&mut self.lut_alpha, &LUT_ALPHA, width, height) {
+            if let Some(inst) = Self::ensure(
+                &mut self.lut_alpha,
+                &LUT_ALPHA,
+                width,
+                height,
+                ops.lut_alpha_params,
+            ) {
                 run(inst, gray);
             }
         }
         if ops.boost {
-            if let Some(inst) = Self::ensure(&mut self.boost, &BOOST, width, height) {
+            if let Some(inst) =
+                Self::ensure(&mut self.boost, &BOOST, width, height, ops.boost_params)
+            {
                 run(inst, gray);
             }
         }
         if ops.details {
-            if let Some(inst) = Self::ensure(&mut self.details, &DETAILS, width, height) {
+            if let Some(inst) = Self::ensure(&mut self.details, &DETAILS, width, height, None) {
                 // The 8-bit companion is the current view LUT output: `gray`
                 // (post LUT_ALPHA / Boost if used, else the linear/clip map) downscaled
                 // to 8 bits.
@@ -603,18 +767,24 @@ impl PaneOps {
         out.extend(gray.iter().flat_map(|&g| [g, g, g]));
     }
 
-    /// The instance of `op` built for `(w, h)`, reusing a cached one (moved to
-    /// the front, most recently used) or creating it — evicting the
+    /// The instance of `op` built for `(w, h)` and `params`, reusing a cached
+    /// one (moved to the front, most recently used) or creating it — evicting the
     /// least-recently-used instance beyond [`INSTANCES_PER_OP`] *before* the
-    /// build, so a heavy rebuild never holds an extra instance. `None` if the
-    /// library is absent or `create` returned null.
+    /// build, so a heavy rebuild never holds an extra instance. `params` builds
+    /// through `create_with` (every parameter is a construction parameter),
+    /// `None` through plain `create`. `None` if the library is absent, the
+    /// values can't be resolved, or the constructor returned null.
     fn ensure<'a>(
         slot: &'a mut Vec<Instance>,
         op: &RwLock<Option<Operator>>,
         w: usize,
         h: usize,
+        params: Option<crate::op_params::ParamsRef>,
     ) -> Option<&'a Instance> {
-        if let Some(pos) = slot.iter().position(|i| i.dims == (w, h)) {
+        if let Some(pos) = slot
+            .iter()
+            .position(|i| i.dims == (w, h) && i.params == params)
+        {
             // Cache hit: move to the front (most recently used).
             let inst = slot.remove(pos);
             slot.insert(0, inst);
@@ -629,14 +799,25 @@ impl PaneOps {
             // the one-time, size-dependent build, not the per-frame `apply`, so
             // parallel steady-state rendering is unaffected.
             let _guard = CONSTRUCT.lock().unwrap_or_else(PoisonError::into_inner);
-            // SAFETY: `create` per the documented ABI; the returned handle is
-            // freed exactly once in `Instance::drop`.
-            let handle = unsafe { (operator.create)(w, h) };
+            let handle = match params {
+                // SAFETY: `create` per the documented ABI; the returned handle
+                // is freed exactly once in `Instance::drop`.
+                None => unsafe { (operator.create)(w, h) },
+                Some(r) => match (&operator.params, crate::op_params::get(r)) {
+                    // SAFETY: `create_with` per the ABI, with exactly the value
+                    // count its own schema reported.
+                    (Some(p), Some(v)) if v.len() == p.schema.n => unsafe {
+                        (p.create_with)(w, h, v.as_ptr(), v.len())
+                    },
+                    _ => std::ptr::null_mut(),
+                },
+            };
             if !handle.is_null() {
                 slot.insert(
                     0,
                     Instance {
                         dims: (w, h),
+                        params,
                         handle,
                         apply: operator.apply,
                         destroy: operator.destroy,
@@ -739,5 +920,74 @@ mod tests {
         };
         assert!(all.all());
         assert_eq!(all.names(), "LUT_ALPHA, Boost, Details");
+    }
+
+    /// A stand-in operator built from Rust `extern "C"` fns, counting how its
+    /// instances are built: plain `create`, or `create_with` and with what.
+    mod mock {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        pub static PLAIN: AtomicUsize = AtomicUsize::new(0);
+        pub static WITH: AtomicUsize = AtomicUsize::new(0);
+        pub static LAST_GAMMA: Mutex<f64> = Mutex::new(0.0);
+        unsafe extern "C" fn create(_: usize, _: usize) -> *mut c_void {
+            PLAIN.fetch_add(1, Ordering::SeqCst);
+            Box::into_raw(Box::new(0u8)) as *mut c_void
+        }
+        unsafe extern "C" fn create_with(
+            _: usize,
+            _: usize,
+            v: *const f64,
+            n: usize,
+        ) -> *mut c_void {
+            WITH.fetch_add(1, Ordering::SeqCst);
+            *LAST_GAMMA.lock().unwrap() = std::slice::from_raw_parts(v, n)[0];
+            Box::into_raw(Box::new(0u8)) as *mut c_void
+        }
+        unsafe extern "C" fn apply(_: *mut c_void, _: *mut u16, _: usize) {}
+        unsafe extern "C" fn destroy(h: *mut c_void) {
+            drop(Box::from_raw(h as *mut u8));
+        }
+        pub fn operator() -> Operator {
+            Operator {
+                _lib: None,
+                create,
+                apply,
+                destroy,
+                params: Some(OperatorParams {
+                    schema: Arc::new(crate::op_params::test_schema()),
+                    create_with,
+                }),
+            }
+        }
+    }
+
+    /// Instances are keyed on their parameters as well as their size: the same
+    /// values reuse one, other values build another through `create_with`, and
+    /// no parameters at all builds through plain `create`.
+    #[test]
+    fn instances_are_keyed_on_their_parameters() {
+        use mock::*;
+        let op = RwLock::new(Some(operator()));
+        let mut slot = Vec::new();
+        let a = crate::op_params::intern(&[0.5, 0.0, 65535.0]);
+        let b = crate::op_params::intern(&[2.0, 0.0, 65535.0]);
+        let built = || (PLAIN.load(Ordering::SeqCst), WITH.load(Ordering::SeqCst));
+        assert!(PaneOps::ensure(&mut slot, &op, 4, 4, None).is_some());
+        assert_eq!(built(), (1, 0));
+        assert!(PaneOps::ensure(&mut slot, &op, 4, 4, Some(a)).is_some());
+        assert_eq!(built(), (1, 1));
+        assert_eq!(*LAST_GAMMA.lock().unwrap(), 0.5);
+        assert!(PaneOps::ensure(&mut slot, &op, 4, 4, Some(b)).is_some());
+        assert_eq!(built(), (1, 2));
+        assert_eq!(*LAST_GAMMA.lock().unwrap(), 2.0);
+        // All three are cached: going back builds nothing.
+        PaneOps::ensure(&mut slot, &op, 4, 4, Some(a));
+        PaneOps::ensure(&mut slot, &op, 4, 4, None);
+        assert_eq!(built(), (1, 2));
+        // Values that don't match the schema's count build nothing.
+        let bad = crate::op_params::intern(&[1.0]);
+        assert!(PaneOps::ensure(&mut slot, &op, 4, 4, Some(bad)).is_none());
+        assert_eq!(built(), (1, 2));
     }
 }

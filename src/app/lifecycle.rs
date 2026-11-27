@@ -210,6 +210,41 @@ impl CimApp {
                 p.sync_tone = false;
             }
         }
+        // Operator construction parameters (`--op-params`), per pane like
+        // --tone. The origin shown is a preset holding exactly these values when
+        // there is one, else the library default (marked modified).
+        for (i, op, keyed) in &vs.op_params {
+            let Some(op) = crate::imageproc::Op::from_id(op) else {
+                continue;
+            };
+            let Some(schema) = crate::imageproc::schema(op) else {
+                continue;
+            };
+            if *i >= self.panes.len() {
+                continue;
+            }
+            let values = crate::op_params::from_keys(&schema, keyed);
+            let origin = schema
+                .presets
+                .iter()
+                .position(|p| p.values == values)
+                .map(crate::op_params::Origin::Library)
+                .or_else(|| {
+                    self.op_presets
+                        .of(op.id())
+                        .iter()
+                        .find(|p| crate::op_params::from_keys(&schema, &p.params) == values)
+                        .map(|p| crate::op_params::Origin::User(p.id))
+                })
+                .unwrap_or(crate::op_params::Origin::Library(schema.default));
+            let sel = crate::op_params::Sel {
+                values: crate::op_params::intern(&values),
+                origin,
+            };
+            let p = &mut self.panes[*i];
+            p.visual.tone.op_params.set(op, Some(sel));
+            p.sync_tone = false;
+        }
         // Per-pane rotation. Rotation rides the *Geometry* sync, so unsync the
         // panes it sets (otherwise a synced pane would ignore its own angle and
         // follow the shared one); the following --gsync re-syncs and re-seeds.
@@ -471,6 +506,30 @@ impl CimApp {
             if (0..n).any(|i| self.visual(i).details) {
                 parts.push(format!("--detail {}", flags(&|i| self.visual(i).details)));
                 per_pane_transform = true;
+            }
+            // Operator construction parameters: the active operator tone's
+            // values that differ from the library default, per pane.
+            for i in 0..n {
+                let Some(op) = crate::app::canvas::tunable_op(self.visual(i).contrast) else {
+                    continue;
+                };
+                let (Some(schema), Some(sel)) = (
+                    crate::imageproc::schema(op),
+                    self.visual(i).tone.op_params.get(op),
+                ) else {
+                    continue;
+                };
+                let Some(values) = crate::op_params::get(sel.values) else {
+                    continue;
+                };
+                if values.len() != schema.n {
+                    continue;
+                }
+                let tok = crate::op_params::to_token(&schema, &values);
+                if !tok.is_empty() {
+                    parts.push(format!("--op-params {i}={}:{tok}", op.id()));
+                    per_pane_transform = true;
+                }
             }
             // Rotation rides the *Geometry* sync, so it forces `--gsync`, not
             // `--tsync`.

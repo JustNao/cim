@@ -12,6 +12,7 @@ mod gpu;
 mod imageproc;
 mod media;
 mod offsets;
+mod op_params;
 mod palette;
 mod proprietary;
 mod renderer;

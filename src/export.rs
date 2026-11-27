@@ -180,6 +180,9 @@ pub struct ExportPane {
     pub view: ViewTransform,
     pub contrast: ContrastMode,
     pub details: bool,
+    /// The operator tones' construction parameters (the pane's
+    /// `ToneOptions::op_params`), so the export builds the same instances.
+    pub op_params: crate::op_params::OpParamSel,
     /// Linear-clip state: `Some(percent)` clips that percentile off each tail,
     /// `None` maps the full range. Snapshotted from the pane's tone (LUT_ALPHA
     /// always `None` — it takes the full range and does its own contrast).
@@ -396,6 +399,7 @@ impl ExportPane {
             view,
             contrast,
             details,
+            op_params: Default::default(),
             clip,
             window: None,
             region: None,
@@ -542,11 +546,7 @@ impl ExportPane {
         // auto-contrast over it), so it renders the whole frame — exactly the
         // classic (non-adaptive) view; adaptive regions are view-dependent by
         // design and are not reproduced.
-        let ops = crate::imageproc::Ops {
-            lut_alpha: self.contrast == ContrastMode::LutAlpha,
-            boost: self.contrast == ContrastMode::Boost,
-            details: self.details && self.contrast != ContrastMode::Raw,
-        };
+        let ops = crate::imageproc::Ops::for_tone(self.contrast, self.details, self.op_params);
         let [fw, fh] = frame.size;
         let [x0, y0, cw, ch] = if crate::imageproc::ops_active(&frame, ops) {
             [0, 0, fw, fh]
