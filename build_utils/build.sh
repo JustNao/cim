@@ -65,7 +65,7 @@ build_linux() {
   require_image "$IMAGE_LINUX" linux
   echo ">> Linux (x86_64, glibc 2.28)"
   run "$IMAGE_LINUX" /work/target/docker/linux '
-    cargo build --release --locked --offline
+    cargo build --release --locked
     bin="$CARGO_TARGET_DIR/release/cim"
     echo "=== built $bin ==="
     file "$bin"
@@ -79,7 +79,7 @@ build_windows() {
   require_image "$IMAGE_WINDOWS" windows
   echo ">> Windows (x86_64, mingw-w64 / GNU ABI)"
   run "$IMAGE_WINDOWS" /work/target/docker/windows '
-    cargo build --release --locked --offline --target x86_64-pc-windows-gnu
+    cargo build --release --locked --target x86_64-pc-windows-gnu
     bin="$CARGO_TARGET_DIR/x86_64-pc-windows-gnu/release/cim.exe"
     echo "=== built $bin ==="
     file "$bin"

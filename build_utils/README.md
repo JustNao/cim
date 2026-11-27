@@ -44,9 +44,11 @@ it pulls and bakes in everything a compile needs:
 - **every crate from `Cargo.lock`** (`cargo fetch` for all target platforms, into
   `CARGO_HOME` inside the image).
 
-You then transfer the image to the air-gapped machine and build there with
-`--offline`. No crates, toolchains, or packages are downloaded at build time —
-only your source tree is mounted in.
+You then transfer the image to the air-gapped machine and build there. With
+every locked crate already in the image, nothing is downloaded at build time —
+only your source tree is mounted in. (The build doesn't pass `--offline`, so on a
+machine that does have network a crate missing from the image is fetched
+instead of failing the build.)
 
 ## 1. Build the images (online machine)
 
@@ -92,7 +94,7 @@ never clobber a local dev build):
 | Linux   | `target/docker/linux/release/cim`                           |
 | Windows | `target/docker/windows/x86_64-pc-windows-gnu/release/cim.exe` |
 
-Editing code and re-running `build.sh` recompiles offline; only changed crates
+Editing code and re-running `build.sh` recompiles without network; only changed crates
 are rebuilt (the `target/docker/…` dirs persist between runs).
 
 The image names can be overridden with `CIM_BUILD_IMAGE_LINUX` /
@@ -102,8 +104,8 @@ The image names can be overridden with `CIM_BUILD_IMAGE_LINUX` /
 
 An image snapshots the dependency set, so rebuild it (online) only when:
 
-- **`Cargo.lock` changes** (added/updated/removed crates) — otherwise the
-  offline `--locked --offline` build fails on a missing crate, or
+- **`Cargo.lock` changes** (added/updated/removed crates) — otherwise an
+  air-gapped build fails on a crate missing from the image, or
 - you **bump the Rust toolchain** (change `1.96.0` in the Dockerfiles).
 
 Plain source edits do **not** need an image rebuild.
