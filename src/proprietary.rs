@@ -125,7 +125,6 @@ fn scalar(v: &Value) -> String {
 
 static NAMES: OnceLock<Proprietary> = OnceLock::new();
 static ERROR: OnceLock<String> = OnceLock::new();
-static SOURCE: OnceLock<String> = OnceLock::new();
 
 /// The `proprietary.yaml` embedded at build time (empty when there was none).
 const EMBEDDED: &str = include_str!(concat!(env!("OUT_DIR"), "/proprietary.yaml"));
@@ -157,7 +156,7 @@ pub fn init() {
                 .and_then(|b| Proprietary::parse(&crate::dai::decode_text(&b))),
         ),
         None if !EMBEDDED.trim().is_empty() => (
-            rust_i18n::t!("daicheck.embedded").into_owned(),
+            rust_i18n::t!("status.proprietary_embedded").into_owned(),
             Proprietary::parse(EMBEDDED),
         ),
         None => {
@@ -172,7 +171,6 @@ pub fn init() {
             Proprietary::default()
         }
     };
-    let _ = SOURCE.set(label);
     let _ = NAMES.set(names);
 }
 
@@ -188,12 +186,6 @@ pub fn get() -> &'static Proprietary {
             Proprietary::default()
         }
     })
-}
-
-/// Where the names came from — a file's path, or "embedded at build" — when
-/// any were found.
-pub fn source() -> Option<&'static str> {
-    SOURCE.get().map(String::as_str)
 }
 
 /// Why `proprietary.yaml` couldn't be used, when it exists but failed to read.

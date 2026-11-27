@@ -482,27 +482,7 @@ status.cache_full: Frame cache full — continuing with offsets only (headers) f
 status.view_command_copied: View command copied to clipboard
 status.dai_read_failed: "Could not read DAI file %{err}"
 status.proprietary_failed: "Could not read %{err} — using placeholder names"
-daicheck.media: "Media: %{path}"
-daicheck.names_from: "Rotation names from %{path}:"
-daicheck.names_none: "No %{file} found (beside the executable, in the working directory, or embedded at build) — no column is read as a rotation:"
-daicheck.embedded: the proprietary.yaml embedded at build
-daicheck.names_error: "  Could not read it: %{err}"
-daicheck.kind: "Preferred DAI kind on a tie: %{kind}"
-daicheck.candidates: "%{n} DAI file(s) (csv / yaml / yml / dai / dai2) in %{dir}:"
-daicheck.no_match: (name doesn't match)
-daicheck.none_chosen: "→ No DAI file matches this media's name."
-daicheck.chosen: "→ Chosen: %{path}"
-daicheck.read_error: "  Could not read it: %{err}"
-daicheck.encoding: "  %{bytes} bytes, read as %{enc}"
-daicheck.header: "  Header (line %{line}): %{text}"
-daicheck.no_header: "  No ';'-separated line: not a DAI csv"
-daicheck.parse_error: "  Could not parse it: %{err}"
-daicheck.table: "  %{cols} columns, %{rows} rows:"
-daicheck.rotation: "  Rotation column: %{name} — first values: %{values}"
-daicheck.no_rotation: "  No rotation column. Nearest names to each one looked for:"
-daicheck.app_none: "⇒ In cim: no DAI for this media (no DAI button, no rotation)."
-daicheck.app_rotation: "⇒ In cim: DAI loaded (%{cols} columns), rotation on — frame 0 turns by %{deg}."
-daicheck.app_no_rotation: "⇒ In cim: DAI loaded (%{cols} columns) but no rotation column."
+status.proprietary_embedded: the proprietary.yaml embedded at build
 status.settings_reset: Keyboard shortcuts reset to defaults
 modal.error: Error
 modal.warning: Warning
@@ -593,8 +573,6 @@ cli.help: |
                                  PREFIX%0Xu SUFFIX,START,END form)
           --completions <SHELL>  Print a completion script for SHELL to stdout
                                  (bash | powershell)
-          --dai-check <FILE>...  Explain how each FILE's DAI is found and read
-                                 (candidates, header, rotation column) and exit
 
   VIEW STATE:
       These reproduce a saved viewpoint and are normally generated for you by the

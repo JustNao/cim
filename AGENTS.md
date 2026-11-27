@@ -2006,13 +2006,9 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
   rotation*). The column's *name* is not in the source: `proprietary.yaml` lists the csv
   columns / yaml keys to try, in order, matched trimmed and case-insensitively; without it
   no column is a rotation. A missing, empty or non-finite cell adds 0 for that frame.
-- **Debugging:** DAI is silent by design, so `cim --dai-check FILE...` (`dai::diagnose`)
-  prints every step — the names in effect and where from, each candidate file and its
-  affinity, the one chosen, encoding, header line, columns, and the rotation column or the
-  nearest names to each one looked for — then runs the very `load` a pane runs and states
-  the app's verdict, so the report can't disagree with the app (it once did: it listed
-  `.` for a bare file name while `load` listed the empty path, which can't be read — so
-  `cim seq.tif` from the file's own folder never found its DAI. Both use `dai_dir` now).
+- **Directory:** `dai_dir` — the file's own folder, or `.` for a bare file name, whose
+  parent is the *empty* path, which `read_dir` refuses (`cim seq.tif` from the file's own
+  folder never found its DAI before this).
 
 ---
 
@@ -2296,8 +2292,7 @@ If the command line named media and **none** of them opened (every input failed)
 quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, set by
 `poll_opening` for the first open to land); a bare `cim` with no inputs still starts empty.
 
-- `-h/--help`, `-V/--version`, `--dai-check FILE...` (explain each file's DAI lookup and
-  exit, §9.1).
+- `-h/--help`, `-V/--version`.
 - **Export flags** (`ExportArgs`, in `ViewState.export`; §10): `--export OUT` runs the
   export windowless and exits (`--open` launches the window instead, Export panel
   open on those settings); the rest (`--export-*`, `--fps`, `--crf`, `--label-*`,

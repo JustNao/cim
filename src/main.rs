@@ -36,8 +36,7 @@ fn main() -> eframe::Result<()> {
     // completion output are localised too, and they never reach the window.
     settings::apply_locale(&config.language);
     // The names kept out of the source (DAI rotation columns, operators) —
-    // before anything reads them: the CLI's DAI check, the operator libraries,
-    // the first DAI lookup.
+    // before anything reads them: the operator libraries, the first DAI lookup.
     proprietary::init();
 
     // Handle CLI-only requests (--help, completion) and expand sequence tokens
@@ -46,9 +45,6 @@ fn main() -> eframe::Result<()> {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    if args.iter().any(|a| a == "--dai-check") {
-        attach_console(); // its report goes to the launching terminal
-    }
     let (inputs, view) = match cli::parse(args) {
         cli::Cli::Run { inputs, view } => (inputs, view),
         cli::Cli::Exit(code) => std::process::exit(code),
