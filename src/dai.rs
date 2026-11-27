@@ -2,7 +2,8 @@
 //!
 //! Some acquisitions ship metadata beside the pixels: a **`.csv`** for a
 //! sequence (one row per image, after a free-form header of variable length —
-//! the column names are the first line holding `;` separators), or a
+//! the column names are the first `;`-separated line as wide as the data rows,
+//! see [`Table::parse_csv`]), or a
 //! **`.yaml`/`.yml`** — or **`.dai`/`.dai2`**, yaml under another extension —
 //! for a single image (one flat-or-nested dictionary). The file is matched by
 //! name: the same stem (`seqA.tif` → `seqA.csv`, or `seqA_dai.csv`), or one
@@ -15,10 +16,10 @@
 //!
 //! The data is kept whole and typed ([`Table`] of [`Value`]s, every column, every
 //! row) rather than reduced to the one field cim uses today — the camera
-//! **rotation** (`cameraRotation` — `cameraRotationOld` in older files —
-//! in a csv, `camera_roll` in a yaml, radians), which the pane's
-//! display rotation adds by default — and the DAI window graphs any column over
-//! the sequence.
+//! **rotation** (radians), which the pane's display rotation adds by default —
+//! and the DAI window graphs any column over the sequence. The rotation
+//! column's *name* is not in this source: it comes from `proprietary.yaml`
+//! ([`crate::proprietary`]), as a list of csv columns and yaml keys to try.
 //!
 //! Loading lists directories and parses files, which is real I/O on a shared
 //! mount, so it runs on a dedicated thread ([`DaiLoader`]) mirroring
@@ -31,13 +32,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-use crate::media::Media;
+use rust_i18n::t;
 
-/// Names the csv column holding the camera derotation (radians) goes by, in
-/// order of preference: the current one, then the older files' name.
-pub const CSV_ROTATION: &[&str] = &["cameraRotation", "cameraRotationOld"];
-/// The yaml key(s) holding the camera roll, in radians.
-pub const YAML_ROTATION: &[&str] = &["camera_roll"];
+use crate::media::Media;
 
 /// One DAI cell. Cells are typed one by one (a numeric column may hold an
 /// empty cell or a `NaN`, a text column a number); a column's [`ColType`] is
@@ -182,13 +179,18 @@ pub struct Table {
 
 impl Table {
     fn new(path: PathBuf, kind: Kind, columns: Vec<String>, rows: Vec<Vec<Value>>) -> Table {
+        // The first of `proprietary.yaml`'s names the file has, compared
+        // trimmed and case-insensitively (exports differ in both).
+        let names = crate::proprietary::get();
         let keys = match kind {
-            Kind::Csv => CSV_ROTATION,
-            Kind::Yaml => YAML_ROTATION,
+            Kind::Csv => &names.csv_rotation,
+            Kind::Yaml => &names.yaml_rotation,
         };
-        let rotation_col = keys
-            .iter()
-            .find_map(|key| columns.iter().position(|c| c == key));
+        let rotation_col = keys.iter().find_map(|key| {
+            columns
+                .iter()
+                .position(|c| c.trim().eq_ignore_ascii_case(key.trim()))
+        });
         Table {
             path,
             kind,
@@ -205,12 +207,16 @@ impl Table {
 
     /// Parse a csv: skip the free-form header up to the first line holding a
     /// `;`, which names the columns; every later non-blank line is a row.
+    ///
+    /// The header is the first `;` line **as wide as the data**: a free-form
+    /// preamble may hold `;` too (`Date;2024-05-01`), so "the first line with a
+    /// `;`" would take that for the column names. Width is the field count
+    /// without trailing empty fields, and the data's is the most common width
+    /// among the `;` lines (the rows far outnumber the preamble).
     pub fn parse_csv(path: PathBuf, text: &str) -> Result<Table, String> {
-        let mut lines = text.lines();
-        let header = lines
-            .by_ref()
-            .find(|l| l.contains(';'))
-            .ok_or_else(|| "no ';'-separated header line".to_string())?;
+        let (at, header) =
+            csv_header(text).ok_or_else(|| "no ';'-separated header line".to_string())?;
+        let lines = text.lines().skip(at + 1);
         let columns: Vec<String> = split_csv_line(header)
             .into_iter()
             .map(|c| c.trim().to_string())
@@ -235,81 +241,170 @@ impl Table {
     /// kept as their raw text — which is all a per-image record needs, without
     /// a YAML dependency.
     pub fn parse_yaml(path: PathBuf, text: &str) -> Result<Table, String> {
-        let mut columns = Vec::new();
-        let mut row = Vec::new();
-        // (indent, key) of the open parent mappings.
-        let mut stack: Vec<(usize, String)> = Vec::new();
-        // A key whose value is a block sequence: (column index, items, indent).
-        let mut list: Option<(usize, Vec<String>, usize)> = None;
-        let flush = |list: &mut Option<(usize, Vec<String>, usize)>, row: &mut Vec<Value>| {
-            // An item-less "list" was a nested mapping's parent: it stays `Empty`.
-            if let Some((c, items, _)) = list.take().filter(|(_, items, _)| !items.is_empty()) {
-                row[c] = Value::Text(format!("[{}]", items.join(", ")));
-            }
-        };
-        for (n, raw) in text.lines().enumerate() {
-            let line = strip_yaml_comment(raw);
-            let body = line.trim_start();
-            let trimmed = body.trim_end();
-            if trimmed.is_empty()
-                || trimmed == "---"
-                || trimmed == "..."
-                || trimmed.starts_with('%')
-            {
-                continue;
-            }
-            let indent = line.len() - body.len();
-            if let Some(item) = trimmed
-                .strip_prefix('-')
-                .filter(|r| r.is_empty() || r.starts_with(' '))
-            {
-                match &mut list {
-                    Some((_, items, li)) if indent >= *li => {
-                        items.push(unquote(item.trim()).to_string());
-                        continue;
-                    }
-                    _ => return Err(format!("line {}: unexpected list item", n + 1)),
-                }
-            }
-            flush(&mut list, &mut row);
-            let Some((key, value)) = split_yaml_key(trimmed) else {
-                return Err(format!("line {}: expected 'key: value'", n + 1));
-            };
-            while stack.last().is_some_and(|(i, _)| *i >= indent) {
-                stack.pop();
-            }
-            let full = stack
-                .iter()
-                .map(|(_, k)| k.as_str())
-                .chain(std::iter::once(key.as_str()))
-                .collect::<Vec<_>>()
-                .join(".");
-            if value.is_empty() {
-                // A nested mapping or a block sequence follows; the column exists
-                // either way (empty if neither does).
-                columns.push(full);
-                row.push(Value::Empty);
-                list = Some((columns.len() - 1, Vec::new(), indent));
-                stack.push((indent, key));
-                continue;
-            }
-            let v = if is_quoted(value) {
-                Value::Text(unquote(value).to_string())
-            } else if matches!(value, "~" | "null" | "Null" | "NULL") {
-                Value::Empty
-            } else {
-                Value::parse(value, false)
-            };
-            columns.push(full);
-            row.push(v);
-        }
-        flush(&mut list, &mut row);
+        let (columns, row): (Vec<String>, Vec<Value>) = yaml_entries(text)?
+            .into_iter()
+            .map(|(k, e)| {
+                let v = match e {
+                    YamlEntry::Value(v) => v,
+                    YamlEntry::List(items) => Value::Text(format!("[{}]", items.join(", "))),
+                };
+                (k, v)
+            })
+            .unzip();
         let rows = if columns.is_empty() {
             Vec::new()
         } else {
             vec![row]
         };
         Ok(Table::new(path, Kind::Yaml, columns, rows))
+    }
+}
+
+/// One flattened yaml entry: a scalar, or a list of scalars (a block sequence
+/// or a `[a, b]` flow list) kept as their text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum YamlEntry {
+    Value(Value),
+    List(Vec<String>),
+}
+
+/// Read a yaml dictionary as `(flattened.key, entry)` pairs, in file order. A
+/// deliberately small subset — block mappings (nested by indentation, keys
+/// joined with `.`), scalars, comments, quoted strings, block and flow lists —
+/// which is all a per-image record or `proprietary.yaml` needs, without a YAML
+/// dependency. A key with nothing under it is an empty value.
+pub fn yaml_entries(text: &str) -> Result<Vec<(String, YamlEntry)>, String> {
+    let mut out: Vec<(String, YamlEntry)> = Vec::new();
+    // (indent, key) of the open parent mappings.
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    // The entry a block sequence may follow: (index in `out`, items, indent).
+    let mut list: Option<(usize, Vec<String>, usize)> = None;
+    let flush = |list: &mut Option<(usize, Vec<String>, usize)>,
+                 out: &mut Vec<(String, YamlEntry)>| {
+        // An item-less "list" was a nested mapping's parent: it stays empty.
+        if let Some((c, items, _)) = list.take().filter(|(_, items, _)| !items.is_empty()) {
+            out[c].1 = YamlEntry::List(items);
+        }
+    };
+    for (n, raw) in text.lines().enumerate() {
+        let line = strip_yaml_comment(raw);
+        let body = line.trim_start();
+        let trimmed = body.trim_end();
+        if trimmed.is_empty() || trimmed == "---" || trimmed == "..." || trimmed.starts_with('%') {
+            continue;
+        }
+        let indent = line.len() - body.len();
+        if let Some(item) = trimmed
+            .strip_prefix('-')
+            .filter(|r| r.is_empty() || r.starts_with(' '))
+        {
+            match &mut list {
+                Some((_, items, li)) if indent >= *li => {
+                    items.push(unquote(item.trim()).to_string());
+                    continue;
+                }
+                _ => return Err(format!("line {}: unexpected list item", n + 1)),
+            }
+        }
+        flush(&mut list, &mut out);
+        let Some((key, value)) = split_yaml_key(trimmed) else {
+            return Err(format!("line {}: expected 'key: value'", n + 1));
+        };
+        while stack.last().is_some_and(|(i, _)| *i >= indent) {
+            stack.pop();
+        }
+        let full = stack
+            .iter()
+            .map(|(_, k)| k.as_str())
+            .chain(std::iter::once(key.as_str()))
+            .collect::<Vec<_>>()
+            .join(".");
+        if value.is_empty() {
+            // A nested mapping or a block sequence follows (or nothing).
+            out.push((full, YamlEntry::Value(Value::Empty)));
+            list = Some((out.len() - 1, Vec::new(), indent));
+            stack.push((indent, key));
+            continue;
+        }
+        let entry = if is_quoted(value) {
+            YamlEntry::Value(Value::Text(unquote(value).to_string()))
+        } else if let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            YamlEntry::List(
+                inner
+                    .split(',')
+                    .map(|i| unquote(i.trim()).to_string())
+                    .filter(|i| !i.is_empty())
+                    .collect(),
+            )
+        } else if matches!(value, "~" | "null" | "Null" | "NULL") {
+            YamlEntry::Value(Value::Empty)
+        } else {
+            YamlEntry::Value(Value::parse(value, false))
+        };
+        out.push((full, entry));
+    }
+    flush(&mut list, &mut out);
+    Ok(out)
+}
+
+/// The csv's header line and its index (see [`Table::parse_csv`]).
+pub fn csv_header(text: &str) -> Option<(usize, &str)> {
+    let width = |l: &str| {
+        let cells = split_csv_line(l);
+        cells.len()
+            - cells
+                .iter()
+                .rev()
+                .take_while(|c| c.trim().is_empty())
+                .count()
+    };
+    let semi: Vec<(usize, &str, usize)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.contains(';'))
+        .map(|(i, l)| (i, l, width(l)))
+        .collect();
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for &(_, _, w) in &semi {
+        *counts.entry(w).or_default() += 1;
+    }
+    // The most common width; a tie goes to the wider one.
+    let data = counts.into_iter().max_by_key(|&(w, n)| (n, w))?.0;
+    semi.iter()
+        .find(|&&(_, _, w)| w >= data)
+        .or(semi.first())
+        .map(|&(i, l, _)| (i, l))
+}
+
+/// Text of a DAI file whatever its encoding: UTF-16 (with a byte-order mark, or
+/// detected from its NUL bytes — what Windows tools write for "Unicode"), UTF-8
+/// (BOM dropped), else Latin-1, the usual 8-bit encoding of older exports —
+/// rather than mangling every accented byte.
+pub fn decode_text(b: &[u8]) -> String {
+    let utf16 = |b: &[u8], le: bool| {
+        let units: Vec<u16> = b
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| {
+                if le {
+                    u16::from_le_bytes(c)
+                } else {
+                    u16::from_be_bytes(c)
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match b {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [a, 0, c, 0, ..] if *a != 0 && *c != 0 => utf16(b, true),
+        [0, a, 0, c, ..] if *a != 0 && *c != 0 => utf16(b, false),
+        _ => match std::str::from_utf8(b) {
+            Ok(s) => s.strip_prefix('\u{feff}').unwrap_or(s).to_string(),
+            Err(_) => b.iter().map(|&c| c as char).collect(),
+        },
     }
 }
 
@@ -590,11 +685,10 @@ fn list_dai(dir: &Path) -> Vec<PathBuf> {
 
 fn read_table(path: &Path) -> Result<Table, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&bytes);
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let text = decode_text(&bytes);
     match Kind::of(path) {
-        Some(Kind::Csv) => Table::parse_csv(path.to_path_buf(), text),
-        Some(Kind::Yaml) => Table::parse_yaml(path.to_path_buf(), text),
+        Some(Kind::Csv) => Table::parse_csv(path.to_path_buf(), &text),
+        Some(Kind::Yaml) => Table::parse_yaml(path.to_path_buf(), &text),
         None => Err("not a DAI file".into()),
     }
 }
@@ -735,19 +829,169 @@ pub fn fuzzy_score(query: &str, name: &str) -> Option<i32> {
             if lower[i] != qc {
                 continue;
             }
-            let run = best[i - 1].saturating_add(8);
+            // Only from a position the query so far really matched at: `NO`
+            // plus a bonus is still no match.
+            let run = (best[i - 1] > NO).then(|| best[i - 1] + 8);
             let gap = (0..i - 1)
-                .map(|j| best[j].saturating_sub((i - j - 1).min(5) as i32))
-                .max()
-                .unwrap_or(NO);
-            let prev = run.max(gap);
-            if prev > NO {
+                .filter(|&j| best[j] > NO)
+                .map(|j| best[j] - (i - j - 1).min(5) as i32)
+                .max();
+            if let Some(prev) = run.max(gap) {
                 next[i] = prev + bonus(i);
             }
         }
         best = next;
     }
     best.into_iter().max().filter(|&b| b > NO)
+}
+
+/// A human-readable account of how `path`'s DAI is (or isn't) found and read —
+/// every step [`load`] takes, with what it saw — for `cim --dai-check FILE`.
+/// DAI is silent by design, so this is the way to find out why a file isn't
+/// picked up: the rotation names in effect, each candidate file and its
+/// affinity, the encoding and header line chosen, the columns, and whether a
+/// rotation column was found (with the nearest names when not).
+pub fn diagnose(path: &Path) -> String {
+    let mut out = Vec::new();
+    let mut say = |s: String| out.push(s);
+    let names = crate::proprietary::get();
+    say(t!("daicheck.media", path = path.display()).into_owned());
+    match crate::proprietary::source() {
+        Some(src) => say(t!("daicheck.names_from", path = src).into_owned()),
+        None => say(t!("daicheck.names_none", file = crate::proprietary::FILE).into_owned()),
+    }
+    if let Some(e) = crate::proprietary::load_error() {
+        say(t!("daicheck.names_error", err = e).into_owned());
+    }
+    say(format!("  csv:  {:?}", names.csv_rotation));
+    say(format!("  yaml: {:?}", names.yaml_rotation));
+    let sequence = crate::media::load(path)
+        .map(|m| m.is_sequence())
+        .unwrap_or(true);
+    say(t!(
+        "daicheck.kind",
+        kind = if sequence { "csv" } else { "yaml" }
+    )
+    .into_owned());
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let candidates = list_dai(dir);
+    say(t!(
+        "daicheck.candidates",
+        n = candidates.len(),
+        dir = dir.display()
+    )
+    .into_owned());
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    for c in &candidates {
+        let score = c
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|d| affinity(stem, d));
+        let name = c
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match score {
+            Some(sc) => say(format!("  + {name}  {sc:?}")),
+            None => say(format!("  - {name}  {}", t!("daicheck.no_match"))),
+        }
+    }
+    let Some(found) = best_match(path, &candidates, sequence) else {
+        say(t!("daicheck.none_chosen").into_owned());
+        return out.join("\n") + "\n";
+    };
+    say(t!("daicheck.chosen", path = found.display()).into_owned());
+    let bytes = match std::fs::read(&found) {
+        Ok(b) => b,
+        Err(e) => {
+            say(t!("daicheck.read_error", err = e).into_owned());
+            return out.join("\n") + "\n";
+        }
+    };
+    let encoding = match bytes.as_slice() {
+        [0xFF, 0xFE, ..] | [_, 0, _, 0, ..] => "UTF-16 LE",
+        [0xFE, 0xFF, ..] | [0, _, 0, _, ..] => "UTF-16 BE",
+        b if std::str::from_utf8(b).is_ok() => "UTF-8",
+        _ => "Latin-1",
+    };
+    say(t!("daicheck.encoding", bytes = bytes.len(), enc = encoding).into_owned());
+    let text = decode_text(&bytes);
+    if Kind::of(&found) == Some(Kind::Csv) {
+        match csv_header(&text) {
+            Some((at, line)) => say(t!(
+                "daicheck.header",
+                line = at + 1,
+                text = ellipsize(line, 160)
+            )
+            .into_owned()),
+            None => say(t!("daicheck.no_header").into_owned()),
+        }
+    }
+    let table = match Kind::of(&found) {
+        Some(Kind::Csv) => Table::parse_csv(found.clone(), &text),
+        _ => Table::parse_yaml(found.clone(), &text),
+    };
+    let table = match table {
+        Ok(t) => t,
+        Err(e) => {
+            say(t!("daicheck.parse_error", err = e).into_owned());
+            return out.join("\n") + "\n";
+        }
+    };
+    say(t!(
+        "daicheck.table",
+        cols = table.columns.len(),
+        rows = table.rows.len()
+    )
+    .into_owned());
+    say(format!("  {}", ellipsize(&table.columns.join(" | "), 400)));
+    match table.rotation_col {
+        Some(c) => {
+            let first: Vec<String> = table
+                .rows
+                .iter()
+                .take(5)
+                .map(|r| r.get(c).map_or_else(|| "—".into(), Value::display))
+                .collect();
+            say(t!(
+                "daicheck.rotation",
+                name = table.columns[c],
+                values = first.join(", ")
+            )
+            .into_owned());
+        }
+        None => {
+            say(t!("daicheck.no_rotation").into_owned());
+            // The nearest column names, so a renamed or differently cased
+            // column stands out.
+            let wanted = match table.kind {
+                Kind::Csv => &names.csv_rotation,
+                Kind::Yaml => &names.yaml_rotation,
+            };
+            for w in wanted {
+                let mut near: Vec<(i32, &String)> = table
+                    .columns
+                    .iter()
+                    .filter_map(|c| Some((fuzzy_score(w, c)?, c)))
+                    .collect();
+                near.sort_by_key(|&(sc, _)| std::cmp::Reverse(sc));
+                let near: Vec<&str> = near.iter().take(3).map(|(_, c)| c.as_str()).collect();
+                say(format!("  {w}: {}", near.join(", ")));
+            }
+        }
+    }
+    out.join("\n") + "\n"
+}
+
+fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
+    }
 }
 
 struct LoadJob {
@@ -817,12 +1061,12 @@ mod tests {
     #[test]
     fn csv_skips_the_free_form_header() {
         let text = "Acquisition report\nOperator: someone\n\n\
-                    frame;cameraRotation;label;ok\n\
+                    frame;camRotation;label;ok\n\
                     0;0,5;\"a;b\";true\n\
                     1;NaN;;false\n\
                     2;1.25\n";
         let t = Table::parse_csv("x.csv".into(), text).unwrap();
-        assert_eq!(t.columns, ["frame", "cameraRotation", "label", "ok"]);
+        assert_eq!(t.columns, ["frame", "camRotation", "label", "ok"]);
         assert_eq!(t.rows.len(), 3);
         assert_eq!(t.rows[0][1], Value::Float(0.5)); // decimal comma
         assert_eq!(t.rows[0][2], Value::Text("a;b".into())); // quoted separator
@@ -833,29 +1077,62 @@ mod tests {
         assert_eq!(t.rows[2][3], Value::Empty); // short row padded
         assert_eq!(t.rotation_col, Some(1));
         assert!(Table::parse_csv("x.csv".into(), "no separators\nhere").is_err());
-        // Older files name the column `cameraRotationOld`; the current
-        // name wins when a file has both.
-        let old = Table::parse_csv("x.csv".into(), "a;cameraRotationOld\n1;2\n").unwrap();
+        // The names come from `proprietary.yaml` (test stand-ins here), tried
+        // in order, case-insensitively.
+        let old = Table::parse_csv("x.csv".into(), "a;camRotationOld\n1;2\n").unwrap();
         assert_eq!(old.rotation_col, Some(1));
-        let both = Table::parse_csv(
-            "x.csv".into(),
-            "cameraRotationOld;cameraRotation\n1;2\n",
-        )
-        .unwrap();
+        let both = Table::parse_csv("x.csv".into(), "camRotationOld;camRotation\n1;2\n").unwrap();
         assert_eq!(both.rotation_col, Some(1));
+    }
+
+    /// A preamble line holding a `;` isn't taken for the column names: the
+    /// header is the first line as wide as the data.
+    #[test]
+    fn csv_header_skips_a_preamble_with_semicolons() {
+        let text =
+            "Date;2024-05-01\nOperator;someone;x\na;camRotation;c;d\n1;0,5;3;9\n2;0,25;;\n3;1;4;9\n";
+        let t = Table::parse_csv("x.csv".into(), text).unwrap();
+        assert_eq!(t.columns, ["a", "camRotation", "c", "d"]);
+        assert_eq!(t.rows.len(), 3);
+        assert_eq!(t.rotation_col, Some(1));
+        let case = Table::parse_csv("x.csv".into(), "x; CAMROTATION \n1;2\n").unwrap();
+        assert_eq!(case.rotation_col, Some(1));
+    }
+
+    #[test]
+    fn text_decodes_whatever_the_encoding() {
+        let s = "a;é\n";
+        let utf16le: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(s.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(decode_text(&utf16le), s);
+        let no_bom: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_text(&no_bom), s);
+        let be: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(s.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        assert_eq!(decode_text(&be), s);
+        assert_eq!(decode_text(b"\xEF\xBB\xBFa;b"), "a;b");
+        assert_eq!(decode_text(b"a;\xE9"), "a;é"); // Latin-1
     }
 
     #[test]
     fn yaml_flattens_a_nested_record() {
         let text = "# per-image record\n---\n\
-                    camera_roll: -0.25  # radians\n\
+                    cam:\n  roll: -0.25  # radians\n\
                     name: \"img #1\"\n\
                     camera:\n  model: X1\n  gain: 3\n\
                     tags:\n  - a\n  - b\n\
                     missing: ~\n";
         let t = Table::parse_yaml("x.yaml".into(), text).unwrap();
         let get = |k: &str| &t.rows[0][t.columns.iter().position(|c| c == k).unwrap()];
-        assert_eq!(get("camera_roll"), &Value::Float(-0.25));
+        assert_eq!(get("cam.roll"), &Value::Float(-0.25));
+        assert_eq!(
+            t.rotation_col,
+            t.columns.iter().position(|c| c == "cam.roll")
+        );
         assert_eq!(get("name"), &Value::Text("img #1".into()));
         assert_eq!(get("camera.model"), &Value::Text("X1".into()));
         assert_eq!(get("camera.gain"), &Value::Int(3));
@@ -895,17 +1172,19 @@ mod tests {
 
     #[test]
     fn fuzzy_search_ranks_word_starts_and_runs() {
-        assert!(fuzzy_score("cdr", "cameraRotation").is_some());
-        assert!(fuzzy_score("xyz", "cameraRotation").is_none());
+        assert!(fuzzy_score("crt", "camRotation").is_some());
+        assert!(fuzzy_score("xyz", "camRotation").is_none());
+        assert!(fuzzy_score("rq", "camRotation").is_none()); // `r` matches, `q` never does
+        assert!(fuzzy_score("ab", "ba").is_none()); // order matters
         assert_eq!(fuzzy_score("", "anything"), Some(0));
         // Contiguous / word-start hits beat scattered ones.
-        let a = fuzzy_score("roll", "camera_roll").unwrap();
+        let a = fuzzy_score("roll", "cam_absolute_orient_roll").unwrap();
         let b = fuzzy_score("roll", "rate_of_lateral_lift").unwrap();
         assert!(a > b, "{a} vs {b}");
-        let c = fuzzy_score("dero", "cameraRotation").unwrap();
-        let d = fuzzy_score("dero", "dummy_error_offset").unwrap();
+        let c = fuzzy_score("rot", "camRotation").unwrap();
+        let d = fuzzy_score("rot", "dummy_error_offset").unwrap();
         assert!(c > d, "{c} vs {d}");
-        assert!(fuzzy_score("ROLL", "camera_roll").is_some());
+        assert!(fuzzy_score("ROLL", "cam_absolute_orient_roll").is_some());
     }
 
     #[test]
@@ -992,7 +1271,7 @@ mod tests {
         write_multipage_tiff_u16(&tif, &[[4, 4]; 3]);
         std::fs::write(
             dir.join("seqA.csv"),
-            "header\ncameraRotation;x\n0;a\n1,5;b\n;c\n",
+            "header\ncamRotation;x\n0;a\n1,5;b\n;c\n",
         )
         .unwrap();
         let media = crate::media::load(&tif).unwrap();
@@ -1017,7 +1296,7 @@ mod tests {
         let prefix = components(&stem)[0].clone();
         std::fs::write(
             dir.join(format!("{prefix}.csv")),
-            "cameraRotation\n0\n0.1\n0.2\n".replace('\n', ";\n"),
+            "camRotation\n0\n0.1\n0.2\n".replace('\n', ";\n"),
         )
         .unwrap();
         let media = crate::media::load_sequence(&files, "run".into()).unwrap();
@@ -1026,11 +1305,7 @@ mod tests {
             let want = (f as f64 * 0.1).to_degrees() as f32;
             assert_eq!(dai.rotation_deg(&media, f), Some(want), "frame {f}");
         }
-        std::fs::write(
-            dir.join(format!("{stem}.yaml")),
-            "camera_roll: 1\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join(format!("{stem}.yaml")), "cam:\n  roll: 1\n").unwrap();
         let dai = load(&files, true).dai.unwrap();
         assert_eq!(dai.rotation_deg(&media, 0), Some(1f64.to_degrees() as f32));
         assert_eq!(
@@ -1051,7 +1326,7 @@ mod tests {
         // A `.dai2` file is yaml inside.
         let still = dir.join("pic.tif");
         write_multipage_tiff_u16(&still, &[[4, 4]]);
-        std::fs::write(dir.join("pic.dai2"), "camera_roll: 0.5\n").unwrap();
+        std::fs::write(dir.join("pic.dai2"), "cam:\n  roll: 0.5\n").unwrap();
         let media = crate::media::load(&still).unwrap();
         let dai = load(std::slice::from_ref(&still), false).dai.unwrap();
         assert_eq!(

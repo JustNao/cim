@@ -1,0 +1,33 @@
+# Template for proprietary.yaml — the names cim must not carry in its source.
+# Copy it to `proprietary.yaml` and fill in the real names. Either
+#  - at the repository root (or point CIM_PROPRIETARY at it) when building:
+#    it is embedded in the executable, nothing to ship beside it; or
+#  - beside the cim executable (or in the working directory): read at startup,
+#    overriding the embedded one — to change names without a rebuild.
+# proprietary.yaml itself is ignored by git. Every entry is optional.
+
+dai:
+  # csv columns holding the camera rotation (radians), in order of preference.
+  csv_rotation:
+    - cameraRotation
+    - cameraRotationOld
+  # yaml keys holding the camera rotation (radians); nested keys as `a.b`.
+  yaml_rotation:
+    - camera_roll
+
+operators:
+  # Each operator: the name shown in the UI, the library's file name (looked up
+  # in Settings > Library folder), and the C symbol prefix it exports
+  # (`<symbol>_create`, `<symbol>_apply`, `<symbol>_destroy`).
+  lut_alpha:
+    name: LUT_ALPHA
+    library: libcim_lut_alpha.so
+    symbol: cim_lut_alpha
+  boost:
+    name: Boost
+    library: libcim_boost.so
+    symbol: cim_boost
+  details:
+    name: Details
+    library: libcim_details_enhanced.so
+    symbol: cim_details_enhanced

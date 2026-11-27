@@ -4,8 +4,8 @@
 //! The operators live in **separately built** shared libraries, one each:
 //! LUT_ALPHA and Boost (two alternative auto-contrast tones) and DETAILS_ENHANCED
 //! (detail enhancement). cim does **not** link them at build time: each is loaded
-//! on demand at startup by its hard-coded file name (see `LUT_ALPHA_LIB` /
-//! `BOOST_LIB` / `DETAILS_LIB`). The **directory**
+//! on demand at startup by its file name — taken from `proprietary.yaml`
+//! ([`crate::proprietary`]), else the placeholder in [`OPS`]. The **directory**
 //! that holds them is configured in Settings (`Config::cpp_lib_dir`) and passed
 //! to [`init`]; when it's left empty the bare name is used and the system loader
 //! resolves it via its search path (`LD_LIBRARY_PATH`, Linux-only), preserving
@@ -74,15 +74,77 @@ type ApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, usize);
 type DetailsApplyFn = unsafe extern "C" fn(*mut c_void, *mut u16, *const u8, usize);
 type DestroyFn = unsafe extern "C" fn(*mut c_void);
 
-// Hard-coded shared-library file names, one operator each. Resolved inside the
-// configured library directory (`Config::cpp_lib_dir`) — which defaults to the
-// `LIBS` folder next to the cim executable when unset (see `cpp_lib_dir`) — or,
-// only when no directory resolves, via the system loader's search path
-// (`LD_LIBRARY_PATH`) by bare name.
-// TODO: replace these placeholders with the real distributed file names.
-const LUT_ALPHA_LIB: &str = "libcim_lut_alpha.so"; // placeholder
-const BOOST_LIB: &str = "libcim_boost.so"; // placeholder
-const DETAILS_LIB: &str = "libcim_details_enhanced.so"; // placeholder
+/// Which operator — an index into [`OPS`] and `proprietary.yaml`'s `operators`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Op {
+    LutAlpha,
+    Boost,
+    Details,
+}
+
+/// The placeholder names an operator goes by when `proprietary.yaml` doesn't
+/// give its real ones: display name, library file name, C symbol prefix.
+struct Placeholder {
+    name: &'static str,
+    library: &'static str,
+    symbol: &'static str,
+}
+
+const OPS: [Placeholder; 3] = [
+    Placeholder {
+        name: "LUT_ALPHA",
+        library: "libcim_lut_alpha.so",
+        symbol: "cim_lut_alpha",
+    },
+    Placeholder {
+        name: "Boost",
+        library: "libcim_boost.so",
+        symbol: "cim_boost",
+    },
+    Placeholder {
+        name: "Details",
+        library: "libcim_details_enhanced.so",
+        symbol: "cim_details_enhanced",
+    },
+];
+
+impl Op {
+    fn names(self) -> (&'static crate::proprietary::Operator, &'static Placeholder) {
+        let p = crate::proprietary::get();
+        match self {
+            Op::LutAlpha => (&p.lut_alpha, &OPS[0]),
+            Op::Boost => (&p.boost, &OPS[1]),
+            Op::Details => (&p.details, &OPS[2]),
+        }
+    }
+
+    /// The name the UI shows for this operator.
+    pub fn name(self) -> &'static str {
+        let (real, ph) = self.names();
+        real.name.as_deref().unwrap_or(ph.name)
+    }
+
+    /// Whether `proprietary.yaml` names it (the Details toggle otherwise keeps
+    /// its own short label).
+    pub fn named(self) -> bool {
+        self.names().0.name.is_some()
+    }
+
+    /// The library's file name. Resolved inside the configured library
+    /// directory (`Config::cpp_lib_dir`) — which defaults to the `LIBS` folder
+    /// next to the cim executable when unset (see `cpp_lib_dir`) — or, only when
+    /// no directory resolves, via the system loader's search path
+    /// (`LD_LIBRARY_PATH`) by bare name.
+    fn library(self) -> &'static str {
+        let (real, ph) = self.names();
+        real.library.as_deref().unwrap_or(ph.library)
+    }
+
+    fn symbol(self) -> &'static str {
+        let (real, ph) = self.names();
+        real.symbol.as_deref().unwrap_or(ph.symbol)
+    }
+}
 
 /// Resolve a library file name against the optional configured directory. With a
 /// directory, load exactly `<dir>/<name>`; without one, pass the bare name so the
@@ -212,11 +274,12 @@ pub fn init(dir: Option<&Path>) {
 /// operators that failed to load at startup (empty/wrong folder then); repointing
 /// an *already-loaded* operator at a different folder still needs a restart.
 pub fn load_missing(dir: Option<&Path>) -> Libs {
-    for (slot, lib, stem) in [
-        (&LUT_ALPHA, LUT_ALPHA_LIB, "cim_lut_alpha"),
-        (&BOOST, BOOST_LIB, "cim_boost"),
-        (&DETAILS, DETAILS_LIB, "cim_details_enhanced"),
+    for (slot, op) in [
+        (&LUT_ALPHA, Op::LutAlpha),
+        (&BOOST, Op::Boost),
+        (&DETAILS, Op::Details),
     ] {
+        let (lib, stem) = (op.library(), op.symbol());
         // Hold each slot's write lock only while (re)loading it, so the
         // `loaded()` read below takes fresh read locks.
         let mut slot = slot.write().unwrap();
@@ -240,9 +303,6 @@ pub struct Libs {
 }
 
 impl Libs {
-    /// The operators' own (untranslated) names, in a fixed order.
-    const NAMES: [&'static str; 3] = ["LUT_ALPHA", "Boost", "Details"];
-
     fn flags(self) -> [bool; 3] {
         [self.lut_alpha, self.boost, self.details]
     }
@@ -260,10 +320,10 @@ impl Libs {
     /// The set operators' names, comma-separated (`"LUT_ALPHA, Details"`), for
     /// the Settings indicators and the toolbar note.
     pub fn names(self) -> String {
-        Self::NAMES
+        [Op::LutAlpha, Op::Boost, Op::Details]
             .iter()
             .zip(self.flags())
-            .filter_map(|(n, f)| f.then_some(*n))
+            .filter_map(|(op, f)| f.then_some(op.name()))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -276,9 +336,9 @@ impl Libs {
 /// edits the path.
 pub fn libs_present(dir: Option<&Path>) -> Libs {
     Libs {
-        lut_alpha: resolve(dir, LUT_ALPHA_LIB).is_file(),
-        boost: resolve(dir, BOOST_LIB).is_file(),
-        details: resolve(dir, DETAILS_LIB).is_file(),
+        lut_alpha: resolve(dir, Op::LutAlpha.library()).is_file(),
+        boost: resolve(dir, Op::Boost.library()).is_file(),
+        details: resolve(dir, Op::Details.library()).is_file(),
     }
 }
 

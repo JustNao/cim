@@ -24,6 +24,9 @@
   `ffmpeg` is absent. The **JPEG 2000** fixtures (`src/testdata/*.jp2`, a few
   hundred bytes) are the one exception to "generated": the tree has a decoder
   only, so there is nothing to write them with — see `src/testdata/README.md`.
+- **Proprietary names:** put a `proprietary.yaml` at the crate root (or point
+  `CIM_PROPRIETARY` at one) and the build embeds it (§12.2); without one the build is
+  generic. CI has none, so its artifacts are generic.
 - **CI:** `.github/workflows/build.yml` builds Windows + Linux (glibc 2.28 via
   Debian buster) release artifacts on `v*` tags.
 - **Deps (`Cargo.toml`):** `eframe` 0.29, `image` 0.25 (only the `png`/`jpeg`/`bmp`/`webp`
@@ -91,7 +94,8 @@ src/
                  shared by whole-image auto-contrast and region tone.
   imageproc.rs   Runtime loader (libloading) for the proprietary C++ operators
                  (LUT_ALPHA, Boost, DETAILS_ENHANCED); C++ in cpp/ is built
-                 separately into three .so, loaded by hard-coded name. PaneOps owns a pane's
+                 separately into three .so, loaded by name (proprietary.yaml's, else
+                 the placeholders in imageproc::OPS — imageproc::Op). PaneOps owns a pane's
                  per-operator instances (create/apply/destroy; 16-bit buffers) and
                  the shared render tail render_display; ops_active gates them.
   cpu.rs         The instance's CPU thread budget (§5.1): splits config.cpu_budget
@@ -109,6 +113,9 @@ src/
     tone.wgsl      The u8 / u16 / f32 tone-map kernels.
   thumbs.rs      Off-UI-thread thumbnail renderer for the timeline hover preview
                  (§8.1): one shared worker + the capacity-LRU ThumbCache.
+  proprietary.rs Names kept out of the source (§12.2): DAI rotation columns and
+                 the operators' names / libraries / symbols, from a git-ignored
+                 proprietary.yaml — embedded at build, or read beside the exe.
   dai.rs         Auxiliary per-image information (DAI, §9.1): the csv / yaml found
                  beside a media's files — name matching, the typed Table/Value model,
                  file→row Binding, and the DaiLoader worker thread.
@@ -1049,7 +1056,8 @@ so an exported frame matches the live view's tone exactly.
 
 The operators are **loaded at runtime** (`libloading`, Linux-only) at startup
 (`imageproc::init(dir)`) from **three separate libraries**, one per operator, by
-their hard-coded file names (`imageproc::LUT_ALPHA_LIB` / `BOOST_LIB` / `DETAILS_LIB`). The
+their file names — `proprietary.yaml`'s (§12.2), else the placeholders in `imageproc::OPS`,
+with the display names and C symbol prefixes resolved the same way (`imageproc::Op`). The
 directory is the **Library folder** Setting (`config.cpp_lib_dir`): when set,
 each lib is loaded as `<dir>/<name>`; when empty, it defaults to a **`LIBS`
 folder next to the cim executable** (`<cim location>/LIBS`), and only if the
@@ -1937,7 +1945,7 @@ flags makes `apply_view_state` *unsync* the panes it sets, so an all-synced sess
 ### 9.1 DAI — auxiliary per-image information (`dai.rs`, `app/dai.rs`)
 
 Some media carry metadata beside the pixels: a **`.csv`** for a sequence (a free-form header
-of any length, then the first line holding `;` names the columns, then one row per image),
+of any length, then the column names, then one row per image),
 or a **`.yaml`/`.yml`** dictionary for a single image (also **`.dai`/`.dai2`**: the same
 yaml under its own extension). **It is an opportunity, never an
 error:** a media without one says nothing; a file that *matched* but couldn't be read sets
@@ -1989,10 +1997,19 @@ the transient `status` note (`status.dai_read_failed`), nothing more.
   `work.dai_gen`), requested by `add_pane` and `reload` (a re-listed folder may bring new
   files). A reload keeps the old DAI until the new one lands, so the rotation doesn't flick.
   Headless export waits for every lookup (`headless_settled`).
-- **Used for:** the camera rotation — `cameraRotation` (csv; `cameraRotationOld` in
-  older files, the current name winning when both exist, `CSV_ROTATION`) / `camera_roll`
-  (yaml), **radians**, applied as given (§9, *DAI camera rotation*). A missing, empty or
-  non-finite cell adds 0 for that frame.
+- **Reading:** bytes are decoded by `decode_text` — UTF-16 (BOM, or detected from its NUL
+  bytes: Windows "Unicode" exports), UTF-8, else Latin-1. The csv header (`csv_header`) is
+  the first `;` line **as wide as the data** (field count without trailing empties, the
+  data's being the most common width) — a preamble line can hold a `;` too
+  (`Date;2024-…`), which "the first `;` line" took for the column names.
+- **Used for:** the camera rotation, **radians**, applied as given (§9, *DAI camera
+  rotation*). The column's *name* is not in the source: `proprietary.yaml` lists the csv
+  columns / yaml keys to try, in order, matched trimmed and case-insensitively; without it
+  no column is a rotation. A missing, empty or non-finite cell adds 0 for that frame.
+- **Debugging:** DAI is silent by design, so `cim --dai-check FILE...` (`dai::diagnose`)
+  prints every step — the names in effect and where from, each candidate file and its
+  affinity, the one chosen, encoding, header line, columns, and the rotation column or the
+  nearest names to each one looked for.
 
 ---
 
@@ -2276,7 +2293,8 @@ If the command line named media and **none** of them opened (every input failed)
 quits once the error popup is dismissed (`startup_open` → `quit_on_dismiss`, set by
 `poll_opening` for the first open to land); a bare `cim` with no inputs still starts empty.
 
-- `-h/--help`, `-V/--version`.
+- `-h/--help`, `-V/--version`, `--dai-check FILE...` (explain each file's DAI lookup and
+  exit, §9.1).
 - **Export flags** (`ExportArgs`, in `ViewState.export`; §10): `--export OUT` runs the
   export windowless and exits (`--open` launches the window instead, Export panel
   open on those settings); the rest (`--export-*`, `--fps`, `--crf`, `--label-*`,
@@ -2376,6 +2394,26 @@ frame, and the comparisons need `PartialEq`. It requests a repaint at the deadli
 otherwise-idle app still writes. Settings' footer offers only **Reset shortcuts**
 (`Keybindings::default()` — the keybindings alone; every other setting is left as is),
 which is then saved the same way.
+
+### 12.2 Proprietary names (`proprietary.rs`, `proprietary.yaml`)
+
+Names that must not be in the repository — the DAI rotation columns / keys and each
+operator's display **name**, **library** file and C **symbol** prefix — come from a
+**`proprietary.yaml`** that git ignores; `proprietary.example.yaml` documents the format
+(with placeholders) and is parsed by a test. The first found wins:
+
+1. a file **beside the executable**, else in the working directory (like `help.md`) — to
+   change names without a rebuild;
+2. the one **embedded at build**: `build.rs` copies the crate root's `proprietary.yaml`
+   (or `$CIM_PROPRIETARY`) to `OUT_DIR`, `include_str!`ed — so a build made with it is a
+   single file to ship. A build without it embeds an empty text: the generic build.
+
+The names are then in the binary (as any literal is) — out of the *source*, not hidden.
+Read once in `main` (`proprietary::init`, before the CLI, the libraries and the first DAI
+lookup); a file that fails to parse gives a status note and the placeholders. Every entry
+is optional: an operator falls back to its placeholder (`imageproc::OPS`; the Details
+toggle keeps its `RC` label unless named), the rotation to *none*. Tests never see the real
+names: `proprietary::get` returns stand-ins under `cfg(test)`.
 
 ### 12.1 Localisation (`locales/*.yml`, `rust-i18n`)
 
@@ -2697,7 +2735,8 @@ a tiny budget stops at the thumbnail floor rather than reducing forever, a reduc
 says so in its name, and a re-level decodes **from the kept codestream** — changing the
 frame's size and no-oping when the level is unchanged);
 **DAI** (`dai` — csv header skipping / decimal comma / quoted `;` / padding, the yaml
-subset, column typing (0/1 stays int) and merging across files, fuzzy ranking, float
+subset, the preamble-proof csv header, UTF-16 / Latin-1 decoding, `proprietary.yaml`
+parsing (and the committed example), column typing (0/1 stays int) and merging across files, fuzzy ranking, float
 display, name affinity and csv-vs-yaml preference, the graph's range clamp, a TIFF's rows per page, a still run binding
 per-file yamls or one run-wide csv, an unreadable match reported but not fatal; and
 `dai_rotation_follows_the_exported_frame` — the export's per-frame rotation adds to the

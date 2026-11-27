@@ -14,7 +14,13 @@
 //!      high-quality (Lanczos3) resized down.
 //!
 //! We hand the assembled `.ico` to the SDK resource compiler via `winresource`.
-//! On non-Windows targets this whole file is a no-op.
+//! On non-Windows targets the icon step is a no-op.
+//!
+//! It also **embeds `proprietary.yaml`** (see `src/proprietary.rs`) when one is
+//! present at build time — at the crate root, or wherever `CIM_PROPRIETARY`
+//! points — so a build made with it needs no file shipped beside it. Without
+//! one the embedded text is empty and the build is the generic one. The file is
+//! git-ignored, so the names it holds never reach the repository.
 
 /// Sizes Windows actually renders an icon at, largest first (largest is also the
 /// resize source when a dedicated per-size export is absent).
@@ -29,8 +35,29 @@ fn main() {
         println!("cargo:rerun-if-changed=assets/icon-{n}.png");
     }
 
+    embed_proprietary();
+
     #[cfg(windows)]
     embed_windows_icon();
+}
+
+/// Copy the build's `proprietary.yaml` (or nothing) to `OUT_DIR`, where
+/// `src/proprietary.rs` `include_str!`s it.
+fn embed_proprietary() {
+    use std::path::PathBuf;
+    println!("cargo:rerun-if-env-changed=CIM_PROPRIETARY");
+    let src = std::env::var_os("CIM_PROPRIETARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("proprietary.yaml"));
+    println!("cargo:rerun-if-changed={}", src.display());
+    let text = std::fs::read_to_string(&src).unwrap_or_default();
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"))
+        .join("proprietary.yaml");
+    // Rewrite only on a change: the crate rebuilds whenever this file's mtime
+    // moves, and a build without the file re-runs this script every time.
+    if std::fs::read_to_string(&out).ok().as_deref() != Some(text.as_str()) {
+        std::fs::write(&out, text).expect("write embedded proprietary.yaml");
+    }
 }
 
 #[cfg(windows)]

@@ -1,2 +1,4 @@
 examples/
 target/
+# The real proprietary names (see proprietary.example.yaml); never committed.
+proprietary.yaml

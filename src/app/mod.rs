@@ -1470,6 +1470,9 @@ impl CimApp {
         app.startup_open = preload.inputs > 0;
         preload.set_waker(ctx);
         app.opening.push_back(preload);
+        if let Some(err) = crate::proprietary::load_error() {
+            app.status.set(t!("status.proprietary_failed", err = err));
+        }
         app
     }
     /// What the acceleration toggle means on *this* machine, for the readout

@@ -376,12 +376,13 @@ impl ContrastMode {
     ];
 
     /// Short label for the media-manager dropdown. LUT_ALPHA and Boost are the
-    /// operators' own names, so they read the same in every language.
+    /// operators' own names (`proprietary.yaml`'s, else the placeholders), so
+    /// they read the same in every language.
     pub fn label(self) -> String {
         match self {
             ContrastMode::Linear => t!("tone.linear").into_owned(),
-            ContrastMode::LutAlpha => "LUT_ALPHA".to_owned(),
-            ContrastMode::Boost => "Boost".to_owned(),
+            ContrastMode::LutAlpha => crate::imageproc::Op::LutAlpha.name().to_owned(),
+            ContrastMode::Boost => crate::imageproc::Op::Boost.name().to_owned(),
             ContrastMode::Colormap => t!("tone.colormap").into_owned(),
             ContrastMode::Raw => t!("tone.raw").into_owned(),
         }

@@ -9,9 +9,10 @@ cim's own build — `cargo build` compiles no C++ at all.
 Because the libraries are loaded dynamically:
 
 - cim builds and runs with **no** proprietary code present.
-- cim loads each library at startup by its **hard-coded file name**
-  (`LUT_ALPHA_LIB` / `BOOST_LIB` / `DETAILS_LIB` in `src/imageproc.rs` — currently
-  placeholders), resolved through the OS loader's search path. Put the libraries
+- cim loads each library at startup by its **file name** — the one given in
+  `proprietary.yaml` (`operators.<op>.library`, with `name` and `symbol` beside it;
+  see `proprietary.example.yaml`), else the placeholder in `imageproc::OPS` — resolved
+  in the Library folder, else through the OS loader's search path. Put the libraries
   on that path with `LD_LIBRARY_PATH` when launching cim. A missing library is
   **silently** ignored (no startup log).
 - Each operator is **independent**: if its library is missing or a symbol doesn't
