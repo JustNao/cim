@@ -107,6 +107,53 @@ it in `src/imageproc.rs`. cim passes a raw `uint16_t*` (plus, for
 DETAILS_ENHANCED, a read-only `const uint8_t*` companion), so most format/type
 handling stays entirely inside the shim.
 
+## Optional: tunable parameters and presets
+
+An operator whose construction takes parameters — typically read from a preset
+file next to the library, of which one preset is used — can expose them to cim.
+cim then shows a **⚙** button beside the LUT_ALPHA tone in the Transformations
+panel, opening a panel docked to its right: a dropdown of the library's presets
+(plus the user's own, saved by cim) as starting points, and every parameter below
+it to edit. The chosen values reach the operator through `create_with`, in the
+live view and in the export alike.
+
+```cpp
+typedef struct {
+    const char* key;   // stable name, shown in the UI and saved in user presets
+    int kind;          // CIM_PARAM_FLOAT or CIM_PARAM_INT
+    size_t len;        // 1 = scalar, n = a list "[x1 ... xn]"
+    double min, max;   // NaN = unbounded
+} cim_param_info;
+
+extern "C" size_t      cim_lut_alpha_param_count(void);
+extern "C" int         cim_lut_alpha_param_info(size_t i, cim_param_info* out);
+extern "C" size_t      cim_lut_alpha_preset_count(void);
+extern "C" const char* cim_lut_alpha_preset_name(size_t preset);
+extern "C" size_t      cim_lut_alpha_preset_default(void);
+extern "C" int         cim_lut_alpha_preset_values(size_t preset, double* out, size_t n);
+extern "C" void*       cim_lut_alpha_create_with(size_t w, size_t h,
+                                                 const double* values, size_t n);
+```
+
+- **All seven or none.** A library missing any of them loads exactly as before
+  (plain `create`, no ⚙ panel). Boost may export the same set under `cim_boost_`.
+- **One flat array of doubles** crosses the boundary: the parameters in index
+  order, each contributing its `len` values, so `n` is the sum of the `len`s. An
+  int parameter's values are whole doubles. cim never parses the preset file — the
+  shim does, and serves it through these calls.
+- `preset_default` is the preset plain `create` uses (the one used today); cim
+  calls plain `create` until the user picks something else, so an untouched pane
+  behaves exactly as before.
+- **Every parameter is a construction parameter.** cim builds a fresh instance
+  (`create_with`) whenever the values change — it commits an edit when the user
+  releases the slider, not on every drag step — and keeps instances keyed on
+  `(size, values)` like it keys them on size.
+- Strings (`key`, preset names) are copied once at load, so they need only stay
+  valid while the library is loaded. The `info` / `values` calls return 0 on
+  success and non-zero on a bad index or size.
+- `cpp/lut_alpha.cpp` implements all of this for its placeholder class (a
+  `gamma` float and an `output` int list, three presets) as a worked example.
+
 ## Building the library — cim and the shim build separately
 
 Yes: since the C++ build was removed from cim, **you build the shim yourself**,

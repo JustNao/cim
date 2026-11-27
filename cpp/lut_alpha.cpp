@@ -44,6 +44,7 @@
 #include "imageproc.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -54,11 +55,41 @@ namespace {
 // stretch, so the library builds and cim's whole pipeline — the create/apply/
 // destroy lifecycle, per-pane instance reuse, the off-thread render — can be
 // exercised end-to-end before the proprietary code is available. Swap it out.
+//
+// It also demonstrates the OPTIONAL parameter ABI (imageproc.h): two parameters —
+// a float `gamma` and an int list `output` = [lo hi], the output range of the
+// stretch — and three presets standing in for the vendor's preset file. A real
+// shim would parse that file once (a function-local static, say) and serve its
+// presets and parameter list from it.
+struct Params {
+    double gamma;
+    double out_lo;
+    double out_hi;
+};
+
+constexpr std::size_t N_VALUES = 3; // gamma (1) + output (2)
+
+struct Preset {
+    const char* name;
+    double values[N_VALUES];
+};
+
+const Preset PRESETS[] = {
+    {"Standard", {1.0, 0.0, 65535.0}},
+    {"Bright", {0.6, 0.0, 65535.0}},
+    {"Soft", {1.0, 4096.0, 61439.0}},
+};
+constexpr std::size_t N_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
+constexpr std::size_t DEFAULT_PRESET = 0;
+
+Params params_from(const double* v) { return Params{v[0], v[1], v[2]}; }
+
 struct LutAlpha {
     std::size_t width;
     std::size_t height;
+    Params params;
 
-    LutAlpha(std::size_t w, std::size_t h) : width(w), height(h) {}
+    LutAlpha(std::size_t w, std::size_t h, Params p) : width(w), height(h), params(p) {}
 
     void apply(std::uint16_t* data, std::size_t len) const {
         const std::size_t px = width * height;
@@ -73,9 +104,15 @@ struct LutAlpha {
         if (hi <= lo) {
             return; // flat image, nothing to stretch
         }
+        const bool plain = params.gamma == 1.0 && params.out_lo == 0.0 && params.out_hi == 65535.0;
         const float scale = 65535.0f / static_cast<float>(hi - lo);
         for (std::size_t i = 0; i < px; ++i) {
-            const float v = (static_cast<float>(data[i]) - lo) * scale;
+            float v = (static_cast<float>(data[i]) - lo) * scale;
+            if (!plain) {
+                // Normalise, bend by gamma, then map into the output range.
+                const double t = std::pow(std::clamp(v / 65535.0f, 0.0f, 1.0f), params.gamma);
+                v = static_cast<float>(params.out_lo + t * (params.out_hi - params.out_lo));
+            }
             data[i] = static_cast<std::uint16_t>(std::clamp(v, 0.0f, 65535.0f));
         }
     }
@@ -84,7 +121,7 @@ struct LutAlpha {
 } // namespace
 
 extern "C" void* cim_lut_alpha_create(std::size_t width, std::size_t height) {
-    return new LutAlpha(width, height);
+    return new LutAlpha(width, height, params_from(PRESETS[DEFAULT_PRESET].values));
 }
 
 extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len) {
@@ -93,4 +130,45 @@ extern "C" void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size
 
 extern "C" void cim_lut_alpha_destroy(void* handle) {
     delete static_cast<LutAlpha*>(handle);
+}
+
+// ---- Optional parameter ABI (see imageproc.h) -------------------------------
+
+extern "C" std::size_t cim_lut_alpha_param_count(void) { return 2; }
+
+extern "C" int cim_lut_alpha_param_info(std::size_t i, cim_param_info* out) {
+    switch (i) {
+    case 0:
+        *out = cim_param_info{"gamma", CIM_PARAM_FLOAT, 1, 0.1, 10.0};
+        return 0;
+    case 1:
+        *out = cim_param_info{"output", CIM_PARAM_INT, 2, 0.0, 65535.0};
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+extern "C" std::size_t cim_lut_alpha_preset_count(void) { return N_PRESETS; }
+
+extern "C" const char* cim_lut_alpha_preset_name(std::size_t preset) {
+    return preset < N_PRESETS ? PRESETS[preset].name : nullptr;
+}
+
+extern "C" std::size_t cim_lut_alpha_preset_default(void) { return DEFAULT_PRESET; }
+
+extern "C" int cim_lut_alpha_preset_values(std::size_t preset, double* out, std::size_t n) {
+    if (preset >= N_PRESETS || n != N_VALUES) {
+        return 1;
+    }
+    std::copy(PRESETS[preset].values, PRESETS[preset].values + N_VALUES, out);
+    return 0;
+}
+
+extern "C" void* cim_lut_alpha_create_with(std::size_t width, std::size_t height,
+                                           const double* values, std::size_t n) {
+    if (n != N_VALUES) {
+        return nullptr;
+    }
+    return new LutAlpha(width, height, params_from(values));
 }

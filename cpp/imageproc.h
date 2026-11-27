@@ -38,6 +38,26 @@
 //   * Only plain C crosses this boundary. Vendor C++ types (image classes, pixel
 //     formats, …) stay inside the .cpp; if a vendor value must reach cim, add a
 //     plain C enum/struct here and mirror it in src/imageproc.rs.
+//
+// ---------- Optional: tunable construction parameters + presets ---------------
+// An operator whose construction takes parameters (read from a preset file next
+// to the library, say) may ALSO export the seven `cim_<op>_param_*` /
+// `cim_<op>_preset_*` / `cim_<op>_create_with` symbols below. cim then offers the
+// library's presets as starting points and every parameter for editing (the ⚙
+// button beside the tone, in the Transformations panel). All seven or none: a
+// library missing any of them loads exactly as before, with no parameter UI.
+//
+//   * A parameter is a `len`-long list of numbers (`len == 1` for a scalar),
+//     float or int (`kind`). `min`/`max` bound the editor; NaN = unbounded.
+//   * Values cross as ONE flat `double` array: the parameters in index order,
+//     each contributing its `len` values (`n == sum of len`). Ints are whole
+//     doubles.
+//   * `preset_default` is the preset plain `create` uses; `create_with` builds
+//     the instance from explicit values instead. All parameters are construction
+//     parameters: cim builds a fresh instance whenever they change.
+//   * Strings (`key`, preset names) must stay valid while the library is loaded;
+//     cim copies them once, at load.
+//   * The info / values calls return 0 on success, non-zero on a bad index.
 #pragma once
 
 #include <cstddef>
@@ -51,10 +71,31 @@
 
 extern "C" {
 
+// One tunable parameter (see "Optional: tunable construction parameters").
+typedef struct {
+    const char* key;  // stable name, shown in the UI and saved in presets
+    int kind;         // CIM_PARAM_FLOAT or CIM_PARAM_INT
+    std::size_t len;  // number of values (1 = scalar, n = a list "[x1 ... xn]")
+    double min;       // NaN = unbounded
+    double max;       // NaN = unbounded
+} cim_param_info;
+
+enum { CIM_PARAM_FLOAT = 0, CIM_PARAM_INT = 1 };
+
 // ---- LUT_ALPHA: auto-contrast tone mapping (libcim_lut_alpha.so) -----------
 CIM_EXPORT void* cim_lut_alpha_create(std::size_t width, std::size_t height);
 CIM_EXPORT void cim_lut_alpha_apply(void* handle, std::uint16_t* data, std::size_t len);
 CIM_EXPORT void cim_lut_alpha_destroy(void* handle);
+// Optional (all or none) — LUT_ALPHA's tunable parameters and presets. Boost may
+// export the same set under its own `cim_boost_` prefix.
+CIM_EXPORT std::size_t cim_lut_alpha_param_count(void);
+CIM_EXPORT int cim_lut_alpha_param_info(std::size_t i, cim_param_info* out);
+CIM_EXPORT std::size_t cim_lut_alpha_preset_count(void);
+CIM_EXPORT const char* cim_lut_alpha_preset_name(std::size_t preset);
+CIM_EXPORT std::size_t cim_lut_alpha_preset_default(void);
+CIM_EXPORT int cim_lut_alpha_preset_values(std::size_t preset, double* out, std::size_t n);
+CIM_EXPORT void* cim_lut_alpha_create_with(std::size_t width, std::size_t height,
+                                           const double* values, std::size_t n);
 
 // ---- Boost: alternative auto-contrast tone mapping (libcim_boost.so) --------
 // Same contract as LUT_ALPHA (full native range in, its own contrast out); a
